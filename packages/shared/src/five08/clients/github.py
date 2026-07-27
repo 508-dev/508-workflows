@@ -81,13 +81,13 @@ class GitHubAppTokenProvider:
     def __init__(
         self,
         *,
-        app_id: str | int,
+        client_id: str | int,
         installation_id: str | int,
         private_key: str,
         base_url: str = "https://api.github.com",
         timeout_seconds: float = 20.0,
     ) -> None:
-        self.app_id = str(app_id).strip()
+        self.client_id = str(client_id).strip()
         self.installation_id = str(installation_id).strip()
         self.private_key = private_key
         self.base_url = base_url.rstrip("/")
@@ -95,8 +95,8 @@ class GitHubAppTokenProvider:
         self._cache: dict[_TokenCacheKey, _CachedInstallationToken] = {}
         self._lock = threading.RLock()
 
-        if not self.app_id:
-            raise ValueError("GitHub App id is required")
+        if not self.client_id:
+            raise ValueError("GitHub App client ID is required")
         if not self.installation_id:
             raise ValueError("GitHub App installation id is required")
         if not self.private_key.strip():
@@ -181,7 +181,7 @@ class GitHubAppTokenProvider:
             {
                 "iat": int(issued_at.timestamp()),
                 "exp": int((now + _APP_JWT_LIFETIME).timestamp()),
-                "iss": self.app_id,
+                "iss": self.client_id,
             },
             self.private_key,
             algorithm="RS256",

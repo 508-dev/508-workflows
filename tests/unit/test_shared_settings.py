@@ -101,7 +101,7 @@ def test_langfuse_client_uses_configured_base_url(
 def test_shared_settings_expose_agent_external_tool_credentials() -> None:
     """Backend agent tools should receive external tool credentials from env."""
     settings = SharedSettings(
-        github_app_id="123",
+        github_app_client_id="Iv1.client-id",
         github_app_installation_id="456",
         github_app_private_key="private-key",
         github_member_extra_repos="508-dev/member-work",
@@ -123,7 +123,7 @@ def test_shared_settings_expose_agent_external_tool_credentials() -> None:
 
     assert runtime_config.github_default_repo == "508-dev/todos"
     assert runtime_config.github_organization == "508-dev"
-    assert runtime_config.github_app_id == "123"
+    assert runtime_config.github_app_client_id == "Iv1.client-id"
     assert runtime_config.github_app_installation_id == "456"
     assert runtime_config.github_app_private_key == "private-key"
     assert runtime_config.github_member_extra_repos == "508-dev/member-work"
@@ -142,6 +142,12 @@ def test_shared_settings_expose_agent_external_tool_credentials() -> None:
         runtime_config.postgres_url
         == "postgresql://postgres:postgres@db.example/workflows"
     )
+
+
+def test_shared_settings_accepts_legacy_github_app_id_alias() -> None:
+    settings = SharedSettings(**{"GITHUB_APP_ID": "123"})
+
+    assert settings.github_app_client_id == "123"
 
 
 def test_shared_settings_accept_newsletter_sync_env_aliases() -> None:

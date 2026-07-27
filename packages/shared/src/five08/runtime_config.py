@@ -21,7 +21,15 @@ from psycopg.rows import dict_row
 
 logger = logging.getLogger(__name__)
 
-RuntimeConfigValueType = Literal["string", "bool", "int", "float", "url", "csv"]
+RuntimeConfigValueType = Literal[
+    "string",
+    "bool",
+    "int",
+    "float",
+    "url",
+    "csv",
+    "multiline",
+]
 
 
 @dataclass(frozen=True)
@@ -547,6 +555,32 @@ _DEFINITIONS: tuple[RuntimeConfigDefinition, ...] = (
         description="Comma-separated repo allowlist for agent workflows.",
         value_type="csv",
         env_names=("GITHUB_ALLOWED_REPOS",),
+    ),
+    RuntimeConfigDefinition(
+        key="GITHUB_APP_CLIENT_ID",
+        attr="github_app_client_id",
+        label="GitHub App client ID",
+        category="Operations",
+        description="GitHub App Client ID used as the issuer for installation-token JWTs.",
+        env_names=("GITHUB_APP_CLIENT_ID", "GITHUB_APP_ID"),
+    ),
+    RuntimeConfigDefinition(
+        key="GITHUB_APP_INSTALLATION_ID",
+        attr="github_app_installation_id",
+        label="GitHub App installation ID",
+        category="Operations",
+        description="Installation ID for the 508-dev GitHub App installation.",
+        env_names=("GITHUB_APP_INSTALLATION_ID",),
+    ),
+    RuntimeConfigDefinition(
+        key="GITHUB_APP_PRIVATE_KEY",
+        attr="github_app_private_key",
+        label="GitHub App private key",
+        category="Operations",
+        description="PEM private key used to sign GitHub App installation-token JWTs.",
+        value_type="multiline",
+        is_secret=True,
+        env_names=("GITHUB_APP_PRIVATE_KEY",),
     ),
     RuntimeConfigDefinition(
         key="DISCORD_LOGS_WEBHOOK_URL",

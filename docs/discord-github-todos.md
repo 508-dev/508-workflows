@@ -31,9 +31,11 @@ Request the minimum permissions:
 - Organization **Projects: Read and write**
 
 Do not grant Contents, Actions, administration, member, or webhook permissions
-for this feature. Store the App ID, installation ID, and private key in the
-deployment secret store as `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, and
-`GITHUB_APP_PRIVATE_KEY`.
+for this feature. In **Dashboard → Configuration → Operations**, set the
+GitHub App **Client ID**, installation ID, and private key. The private key is
+encrypted in the runtime configuration database, so `CONFIG_SECRET_KEY` must
+remain configured in the deployment. Environment variables are optional and
+override dashboard values when set.
 
 The service creates short-lived installation tokens. Issue tokens are narrowed
 to the target repository and requested permission; Project tokens request only
@@ -42,13 +44,20 @@ one hour and the backend refreshes them before expiry.
 
 ## Configuration
 
-Only the App credentials are required for the normal deployment:
+Only the App credentials are required. Prefer configuring them through the
+dashboard; the equivalent environment variables are:
 
 ```dotenv
-GITHUB_APP_ID=...
+GITHUB_APP_CLIENT_ID=Iv1.0123456789abcdef
 GITHUB_APP_INSTALLATION_ID=...
 GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n..."
 ```
+
+`GITHUB_APP_ID` is accepted as a temporary compatibility alias, but GitHub
+recommends the Client ID as the JWT issuer. Dashboard-managed values take
+effect across services within the short runtime-config cache window (about five
+seconds); a non-empty environment value locks and overrides its dashboard
+setting.
 
 These secure defaults are already present in code:
 

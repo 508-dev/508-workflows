@@ -1383,7 +1383,7 @@ def test_member_can_look_up_open_default_github_todos(
 def test_member_cannot_use_app_selected_nondefault_repo() -> None:
     registry = ToolRegistry(
         runtime_config=ToolRuntimeConfig(
-            github_app_id="123",
+            github_app_client_id="Iv1.client-id",
             github_app_installation_id="456",
             github_app_private_key="private-key",
         )
@@ -1404,7 +1404,7 @@ def test_engineer_cannot_use_app_selected_nondefault_repo_without_member_grant()
 ):
     registry = ToolRegistry(
         runtime_config=ToolRuntimeConfig(
-            github_app_id="123",
+            github_app_client_id="Iv1.client-id",
             github_app_installation_id="456",
             github_app_private_key="private-key",
             github_allowed_repos="508-dev/infra",
@@ -1442,7 +1442,7 @@ def test_steering_committee_can_list_github_projects(
     orchestrator = AgentOrchestrator(
         registry=ToolRegistry(
             runtime_config=ToolRuntimeConfig(
-                github_app_id="123",
+                github_app_client_id="Iv1.client-id",
                 github_app_installation_id="456",
                 github_app_private_key="private-key",
             )
@@ -1466,7 +1466,7 @@ def test_steering_can_plan_github_project_item_update() -> None:
     orchestrator = AgentOrchestrator(
         registry=ToolRegistry(
             runtime_config=ToolRuntimeConfig(
-                github_app_id="123",
+                github_app_client_id="Iv1.client-id",
                 github_app_installation_id="456",
                 github_app_private_key="private-key",
             )

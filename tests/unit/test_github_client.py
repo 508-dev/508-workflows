@@ -56,12 +56,18 @@ def test_github_app_provider_mints_and_caches_narrow_installation_token(
             },
         )
 
-    monkeypatch.setattr(
-        "five08.clients.github.jwt.encode", lambda *_args, **_kwargs: "app-jwt"
-    )
+    jwt_payloads: list[dict[str, object]] = []
+
+    def fake_encode(
+        payload: dict[str, object], *_args: object, **_kwargs: object
+    ) -> str:
+        jwt_payloads.append(payload)
+        return "app-jwt"
+
+    monkeypatch.setattr("five08.clients.github.jwt.encode", fake_encode)
     monkeypatch.setattr("five08.clients.github.requests.request", fake_request)
     provider = GitHubAppTokenProvider(
-        app_id="123",
+        client_id="Iv1.client-id",
         installation_id="456",
         private_key="private-key",
     )
@@ -85,6 +91,7 @@ def test_github_app_provider_mints_and_caches_narrow_installation_token(
     headers = requests[0]["headers"]
     assert isinstance(headers, dict)
     assert headers["Authorization"] == "Bearer app-jwt"
+    assert jwt_payloads[0]["iss"] == "Iv1.client-id"
 
 
 def test_github_client_refreshes_provider_once_after_unauthorized_response(

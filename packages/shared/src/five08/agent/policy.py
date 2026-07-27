@@ -152,7 +152,7 @@ class PolicyEngine:
             github_app_configured=all(
                 bool(str(value or "").strip())
                 for value in (
-                    config.github_app_id,
+                    config.github_app_client_id,
                     config.github_app_installation_id,
                     config.github_app_private_key,
                 )

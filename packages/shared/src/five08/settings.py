@@ -73,10 +73,19 @@ class SharedSettings(BaseSettings):
     github_steering_all_installed_repos: bool = True
     github_steering_extra_repos: str = ""
 
-    # GitHub App credentials are preferred.  GITHUB_API_TOKEN and
-    # GITHUB_ALLOWED_REPOS remain as a compatibility path while deployments are
-    # migrated to the App installation.
-    github_app_id: str | None = None
+    # GitHub App credentials are preferred. GitHub recommends the Client ID as
+    # the JWT issuer. GITHUB_APP_ID remains an input-only compatibility alias
+    # while deployments migrate. GITHUB_API_TOKEN and GITHUB_ALLOWED_REPOS also
+    # remain as a temporary compatibility path.
+    github_app_client_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "GITHUB_APP_CLIENT_ID",
+            "GITHUB_APP_ID",
+            "github_app_client_id",
+            "github_app_id",
+        ),
+    )
     github_app_installation_id: str | None = None
     github_app_private_key: str | None = None
     github_api_token: str | None = None

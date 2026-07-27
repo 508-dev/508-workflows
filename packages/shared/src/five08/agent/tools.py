@@ -122,7 +122,7 @@ class ToolRuntimeConfig:
     github_member_extra_repos: str = ""
     github_steering_all_installed_repos: bool = True
     github_steering_extra_repos: str = ""
-    github_app_id: str | None = None
+    github_app_client_id: str | None = None
     github_app_installation_id: str | None = None
     github_app_private_key: str | None = None
     github_api_token: str | None = None
@@ -170,7 +170,7 @@ class ToolRuntimeConfig:
             github_steering_extra_repos=getattr(
                 settings, "github_steering_extra_repos", ""
             ),
-            github_app_id=getattr(settings, "github_app_id", None),
+            github_app_client_id=getattr(settings, "github_app_client_id", None),
             github_app_installation_id=getattr(
                 settings, "github_app_installation_id", None
             ),
@@ -1103,27 +1103,27 @@ class ToolRegistry:
     def _github_client(self) -> GitHubClient:
         config = self.runtime_config
         app_values = (
-            _optional_str(config.github_app_id),
+            _optional_str(config.github_app_client_id),
             _optional_str(config.github_app_installation_id),
             _optional_str(config.github_app_private_key),
         )
         if any(app_values):
             if not all(app_values):
                 raise RuntimeError(
-                    "GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID, and "
+                    "GITHUB_APP_CLIENT_ID, GITHUB_APP_INSTALLATION_ID, and "
                     "GITHUB_APP_PRIVATE_KEY must be configured together"
                 )
-            app_id, installation_id, private_key = app_values
-            assert app_id is not None
+            client_id, installation_id, private_key = app_values
+            assert client_id is not None
             assert installation_id is not None
             assert private_key is not None
-            provider_config = (app_id, installation_id, private_key)
+            provider_config = (client_id, installation_id, private_key)
             if (
                 self._github_app_provider is None
                 or self._github_app_provider_config != provider_config
             ):
                 self._github_app_provider = GitHubAppTokenProvider(
-                    app_id=app_id,
+                    client_id=client_id,
                     installation_id=installation_id,
                     private_key=private_key.replace("\\n", "\n"),
                 )
@@ -1240,7 +1240,7 @@ class ToolRegistry:
         return all(
             _optional_str(value) is not None
             for value in (
-                config.github_app_id,
+                config.github_app_client_id,
                 config.github_app_installation_id,
                 config.github_app_private_key,
             )
@@ -1252,12 +1252,15 @@ class ToolRegistry:
     ) -> frozenset[str]:
         """Return GitHub App-selected repositories with a short local cache."""
 
-        app_id = _required_config(config.github_app_id, "GITHUB_APP_ID")
+        client_id = _required_config(
+            config.github_app_client_id,
+            "GITHUB_APP_CLIENT_ID",
+        )
         installation_id = _required_config(
             config.github_app_installation_id,
             "GITHUB_APP_INSTALLATION_ID",
         )
-        cache_key = (app_id, installation_id)
+        cache_key = (client_id, installation_id)
         now = datetime.now(timezone.utc)
         cached = self._github_installation_repository_cache
         if (
