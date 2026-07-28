@@ -66,7 +66,7 @@ export type DiscordDiagnosticsResponse = {
     resolved_role_count: number
     missing_role_count: number
     unconfigured_binding_count: number
-    agent_shared_secret_status: string
+    api_shared_secret_status: string
     role_bindings: DiscordDiagnosticBinding[]
   }
   roles: DiscordDiagnosticRole[]
@@ -77,9 +77,7 @@ function snapshotSourceLabel(source: string) {
 }
 
 function secretStatusLabel(status: string) {
-  if (status === "separate") return "Configured separately"
   if (status === "configured") return "Configured"
-  if (status === "matches_api_shared_secret") return "Matches API credential"
   return "Missing"
 }
 
@@ -233,13 +231,13 @@ export function DiscordDiagnosticsView({
           <div className="md:col-span-2 xl:col-span-4">
             <Badge
               variant={
-                diagnostics.agent.agent_shared_secret_status === "separate" ||
-                diagnostics.agent.agent_shared_secret_status === "configured"
+                diagnostics.agent.api_shared_secret_status === "configured"
                   ? "succeeded"
                   : "missing"
               }
             >
-              Agent credential: {secretStatusLabel(diagnostics.agent.agent_shared_secret_status)}
+              Internal API credential:{" "}
+              {secretStatusLabel(diagnostics.agent.api_shared_secret_status)}
             </Badge>
             <span className="ml-2 text-xs text-muted-foreground">
               Secret values are never displayed.

@@ -430,42 +430,6 @@ def _is_authorized(request: Request) -> bool:
     )
 
 
-def _is_agent_authorized(request: Request) -> bool:
-    """Validate the dedicated credential for role-bearing agent requests.
-
-    Agent callers supply a Discord role context, so sharing this credential
-    with broader internal API clients would let those clients claim a role they
-    do not hold. Local/dev/test retain the existing API-secret fallback to make
-    single-process development practical; every other environment fails closed.
-    """
-
-    agent_secret = (settings.agent_shared_secret or "").strip()
-    api_secret = (settings.api_shared_secret or "").strip()
-    environment = (settings.environment or "").strip().casefold()
-    local_environments = {"local", "development", "dev", "test", "testing"}
-    allow_legacy_fallback = bool(settings.agent_allow_legacy_api_secret)
-    if not agent_secret:
-        if allow_legacy_fallback and environment in local_environments:
-            return _is_authorized(request)
-        logger.error(
-            "Rejecting agent request: AGENT_SHARED_SECRET is not configured "
-            "(the legacy fallback requires explicit local/test opt-in)"
-        )
-        return False
-    if api_secret and secrets.compare_digest(agent_secret, api_secret):
-        logger.error(
-            "Rejecting agent request: AGENT_SHARED_SECRET must differ from "
-            "API_SHARED_SECRET outside local development"
-        )
-        if not (allow_legacy_fallback and environment in local_environments):
-            return False
-    return _is_authorized_with_secret(
-        request,
-        configured_secret=agent_secret,
-        setting_name="AGENT_SHARED_SECRET",
-    )
-
-
 def _is_webhook_authorized(request: Request) -> bool:
     """Validate the external webhook secret, with legacy API secret fallback."""
     webhook_secret = (settings.webhook_shared_secret or "").strip()
@@ -9178,7 +9142,7 @@ async def _claim_pending_agent_plan(
 
 async def agent_request_handler(request: Request) -> JSONResponse:
     """Plan and execute supported English agent commands."""
-    if not _is_agent_authorized(request):
+    if not _is_authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     try:
@@ -9338,7 +9302,7 @@ async def agent_confirmation_handler(
     plan_id: str,
 ) -> JSONResponse:
     """Execute or cancel a frozen agent plan after user confirmation."""
-    if not _is_agent_authorized(request):
+    if not _is_authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     try:

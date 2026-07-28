@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import io
 import logging
-import secrets
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
@@ -110,18 +109,9 @@ def _role_payload(
     }
 
 
-def _agent_shared_secret_status() -> str:
+def _api_shared_secret_status() -> str:
     """Return a safe status marker without revealing a credential value."""
-    agent_secret = str(settings.agent_shared_secret or "").strip()
-    if not agent_secret:
-        return "missing"
-
-    api_secret = str(settings.api_shared_secret or "").strip()
-    if api_secret and secrets.compare_digest(agent_secret, api_secret):
-        return "matches_api_shared_secret"
-    if api_secret:
-        return "separate"
-    return "configured"
+    return "configured" if str(settings.api_shared_secret or "").strip() else "missing"
 
 
 def build_diagnostics_snapshot(
@@ -242,7 +232,7 @@ def build_diagnostics_snapshot(
             "resolved_role_count": resolved_role_count,
             "missing_role_count": missing_role_count,
             "unconfigured_binding_count": unconfigured_binding_count,
-            "agent_shared_secret_status": _agent_shared_secret_status(),
+            "api_shared_secret_status": _api_shared_secret_status(),
             "role_bindings": bindings,
         },
         "roles": role_payloads,
@@ -321,11 +311,9 @@ def _overview_embed(snapshot: dict[str, Any]) -> discord.Embed:
     agent = snapshot["agent"]
     bot = snapshot["bot"]
     snapshot_metadata = snapshot["snapshot"]
-    secret_status = str(agent["agent_shared_secret_status"])
+    secret_status = str(agent["api_shared_secret_status"])
     secret_label = {
-        "separate": "Configured and separate from API credential",
-        "configured": "Configured (API credential status unavailable)",
-        "matches_api_shared_secret": "Needs attention: matches API credential",
+        "configured": "Configured",
         "missing": "Needs attention: not configured",
     }.get(secret_status, "Unknown")
     refresh_error = snapshot_metadata.get("refresh_error")
@@ -360,7 +348,7 @@ def _overview_embed(snapshot: dict[str, Any]) -> discord.Embed:
         inline=False,
     )
     embed.add_field(
-        name="Agent credential",
+        name="Internal API credential",
         value=secret_label,
         inline=False,
     )

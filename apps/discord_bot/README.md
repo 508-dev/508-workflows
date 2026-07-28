@@ -32,11 +32,9 @@ Discord slash command
   -> cog emits best-effort audit event when appropriate
 ```
 
-The bot uses `API_SHARED_SECRET` for protected backend/internal calls. Agent
-routes use a separate `AGENT_SHARED_SECRET`, because they carry role context;
-in deployed environments it must differ from `API_SHARED_SECRET` and be shared
-only with the backend API. Command authorization still belongs in role checks,
-backend policy checks, and resource-level checks.
+The bot uses `API_SHARED_SECRET` for protected backend/internal calls, including
+agent routes. Command authorization still belongs in role checks, backend policy
+checks, and resource-level checks.
 
 In deployed environments, agent permissions are bound to the configured
 `DISCORD_SERVER_ID` and immutable role IDs, not mutable role names. Configure
@@ -125,11 +123,8 @@ agent behavior.
 Relevant configuration:
 
 - `BACKEND_API_BASE_URL`: backend API used by the bot.
-- `API_SHARED_SECRET`: shared service secret for non-agent protected backend calls.
-- `AGENT_SHARED_SECRET`: dedicated credential for `/agent/*`; required outside
-  explicit local/test migration mode and must differ from `API_SHARED_SECRET`.
-- `AGENT_ALLOW_LEGACY_API_SECRET`: local/test-only opt-in to the old agent
-  credential fallback; leave `false` for deployed environments.
+- `API_SHARED_SECRET`: shared service secret for protected backend calls,
+  including `/agent/*`.
 - `DISCORD_SERVER_ID`: the single guild allowlist for agent requests and
   confirmations; production blocks an unset or mismatched guild before planning.
 - `AGENT_DISCORD_ADMIN_ROLE_IDS`, `AGENT_DISCORD_STEERING_COMMITTEE_ROLE_IDS`,

@@ -84,9 +84,6 @@ def _configure_role_diagnostics(monkeypatch: pytest.MonkeyPatch) -> None:
         "agent_discord_engineer_role_ids",
         "",
     )
-    monkeypatch.setattr(
-        diagnostics_module.settings, "agent_shared_secret", "agent-secret"
-    )
     monkeypatch.setattr(diagnostics_module.settings, "api_shared_secret", "api-secret")
 
 
@@ -101,7 +98,7 @@ def test_snapshot_resolves_role_bindings_and_never_returns_secret_values() -> No
     assert [role["id"] for role in snapshot["roles"]] == ["200", "300", "400", "100"]
     assert snapshot["agent"]["resolved_role_count"] == 2
     assert snapshot["agent"]["missing_role_count"] == 1
-    assert snapshot["agent"]["agent_shared_secret_status"] == "separate"
+    assert snapshot["agent"]["api_shared_secret_status"] == "configured"
 
     bindings = {
         binding["bundle"]: binding for binding in snapshot["agent"]["role_bindings"]
@@ -121,7 +118,6 @@ def test_snapshot_resolves_role_bindings_and_never_returns_secret_values() -> No
     exported = diagnostics_export_text(snapshot)
     assert "AGENT_DISCORD_BILLING_ROLE_IDS=300,999" in exported
     assert "Admin\t200" in exported
-    assert "agent-secret" not in exported
     assert "api-secret" not in exported
 
 

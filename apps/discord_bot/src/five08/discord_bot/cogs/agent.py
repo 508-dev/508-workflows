@@ -1090,27 +1090,9 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
 
     def _post_backend_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         base_url = settings.backend_api_base_url.rstrip("/")
-        secret = str(settings.agent_shared_secret or "").strip()
-        environment = str(settings.environment or "").strip().casefold()
-        local_environments = {"local", "development", "dev", "test", "testing"}
-        allow_legacy_fallback = bool(
-            getattr(settings, "agent_allow_legacy_api_secret", False)
-        )
-        if not secret and allow_legacy_fallback and environment in local_environments:
-            secret = str(settings.api_shared_secret or "").strip()
+        secret = str(settings.api_shared_secret or "").strip()
         if not base_url or not secret:
-            raise RuntimeError(
-                "Backend API URL or AGENT_SHARED_SECRET is not configured"
-            )
-        if (
-            not (allow_legacy_fallback and environment in local_environments)
-            and settings.api_shared_secret
-            and secret == settings.api_shared_secret
-        ):
-            raise RuntimeError(
-                "AGENT_SHARED_SECRET must differ from API_SHARED_SECRET outside "
-                "local development"
-            )
+            raise RuntimeError("Backend API URL or API_SHARED_SECRET is not configured")
 
         response = requests.post(
             f"{base_url}{path}",

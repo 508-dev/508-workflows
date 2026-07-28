@@ -11,14 +11,8 @@ that most often matter in local development and deployment.
   Missing runtime dependencies are reported through health/runtime failures
   where possible instead of eager settings-construction errors.
 - `LOG_LEVEL`: defaults to `INFO`.
-- `API_SHARED_SECRET`: required for protected non-dashboard API routes and for
-  `./scripts/dev.sh login`.
-- `AGENT_SHARED_SECRET`: required for `/agent/*` in deployed environments and
-  must differ from `API_SHARED_SECRET`. Inject it only into the Discord bot and
-  backend API; it authenticates requests that carry role context.
-- `AGENT_ALLOW_LEGACY_API_SECRET`: defaults to `false`. Set it only for an
-  explicit local/test migration when the bot still uses `API_SHARED_SECRET` for
-  `/agent/*`; it is never a production fallback.
+- `API_SHARED_SECRET`: required for protected non-dashboard API routes,
+  including `/agent/*`, and for `./scripts/dev.sh login`.
 - `DISCORD_SERVER_ID`: the single Discord guild allowlist used before agent
   planning or execution.
 - `AGENT_DISCORD_ADMIN_ROLE_IDS`, `AGENT_DISCORD_STEERING_COMMITTEE_ROLE_IDS`,

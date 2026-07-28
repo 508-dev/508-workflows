@@ -209,8 +209,6 @@ def auth_headers(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     """Configure API secret and return matching auth headers."""
     monkeypatch.setattr(api.settings, "environment", "test")
     monkeypatch.setattr(api.settings, "api_shared_secret", "test-secret")
-    monkeypatch.setattr(api.settings, "agent_shared_secret", None)
-    monkeypatch.setattr(api.settings, "agent_allow_legacy_api_secret", True)
     monkeypatch.setattr(api.settings, "agent_allow_role_name_fallback", True)
     monkeypatch.setattr(api, "_AGENT_REQUEST_TIMESTAMPS", {})
     return {"X-API-Secret": "test-secret"}
@@ -977,52 +975,18 @@ def test_audit_event_handler_persists_human_event(
 
 
 @pytest.mark.parametrize("path", ["/agent/requests", "/agent/confirmations/x"])
-def test_agent_routes_require_dedicated_secret_in_production(
+def test_agent_routes_use_api_shared_secret(
     monkeypatch: pytest.MonkeyPatch,
     path: str,
 ) -> None:
-    """A general internal API secret cannot submit role-bearing agent calls."""
-    monkeypatch.setattr(api.settings, "environment", "production")
+    """Agent routes use the same shared credential as protected API routes."""
     monkeypatch.setattr(api.settings, "api_shared_secret", "api-secret")
-    monkeypatch.setattr(api.settings, "agent_shared_secret", "agent-secret")
-    monkeypatch.setattr(api.settings, "agent_allow_legacy_api_secret", True)
 
-    api_secret_response = asyncio.run(_call_agent_handler(path, "api-secret"))
-    agent_secret_response = asyncio.run(_call_agent_handler(path, "agent-secret"))
+    authorized_response = asyncio.run(_call_agent_handler(path, "api-secret"))
+    unauthorized_response = asyncio.run(_call_agent_handler(path, "wrong-secret"))
 
-    assert api_secret_response.status_code == 401
-    assert agent_secret_response.status_code == 400
-
-
-@pytest.mark.parametrize("path", ["/agent/requests", "/agent/confirmations/x"])
-def test_agent_routes_allow_api_secret_fallback_in_local_environment(
-    monkeypatch: pytest.MonkeyPatch,
-    path: str,
-) -> None:
-    """Local/test environments remain usable before a dedicated secret is set."""
-    monkeypatch.setattr(api.settings, "environment", "test")
-    monkeypatch.setattr(api.settings, "api_shared_secret", "api-secret")
-    monkeypatch.setattr(api.settings, "agent_shared_secret", None)
-    monkeypatch.setattr(api.settings, "agent_allow_legacy_api_secret", True)
-
-    response = asyncio.run(_call_agent_handler(path, "api-secret"))
-
-    assert response.status_code == 400
-
-
-@pytest.mark.parametrize("path", ["/agent/requests", "/agent/confirmations/x"])
-def test_agent_routes_reject_api_secret_without_local_legacy_opt_in(
-    monkeypatch: pytest.MonkeyPatch,
-    path: str,
-) -> None:
-    monkeypatch.setattr(api.settings, "environment", "test")
-    monkeypatch.setattr(api.settings, "api_shared_secret", "api-secret")
-    monkeypatch.setattr(api.settings, "agent_shared_secret", None)
-    monkeypatch.setattr(api.settings, "agent_allow_legacy_api_secret", False)
-
-    response = asyncio.run(_call_agent_handler(path, "api-secret"))
-
-    assert response.status_code == 401
+    assert authorized_response.status_code == 400
+    assert unauthorized_response.status_code == 401
 
 
 async def test_agent_request_returns_within_its_response_budget(
@@ -1032,12 +996,11 @@ async def test_agent_request_returns_within_its_response_budget(
         await asyncio.Event().wait()
 
     monkeypatch.setattr(api.settings, "environment", "test")
-    monkeypatch.setattr(api.settings, "agent_shared_secret", "agent-secret")
     monkeypatch.setattr(api.settings, "api_shared_secret", "api-secret")
     monkeypatch.setattr(api.settings, "agent_request_response_budget_seconds", 0.01)
     monkeypatch.setattr(api, "_AGENT_ORCHESTRATOR", Mock())
     request = _agent_request_with_secret(
-        "agent-secret",
+        "api-secret",
         body=json.dumps(
             {
                 "message": "Search the web for current grants",

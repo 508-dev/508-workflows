@@ -27,7 +27,7 @@ const diagnostics: DiscordDiagnosticsResponse = {
     resolved_role_count: 1,
     missing_role_count: 1,
     unconfigured_binding_count: 5,
-    agent_shared_secret_status: "separate",
+    api_shared_secret_status: "configured",
     role_bindings: [
       {
         bundle: "admin",

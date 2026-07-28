@@ -65,14 +65,6 @@ class SharedSettings(BaseSettings):
     # The single Discord guild used by the dashboard, bot, and agent gateway.
     discord_server_id: str | None = None
     api_shared_secret: str | None = None
-    # The Discord agent gateway accepts role-bearing requests. Keep its
-    # credential separate from general internal API callers so a holder of the
-    # latter cannot fabricate privileged agent context.
-    agent_shared_secret: str | None = None
-    # The legacy API-secret fallback is deliberately opt-in and only honored
-    # in explicit local/test environments. It exists solely to ease developer
-    # migration to AGENT_SHARED_SECRET.
-    agent_allow_legacy_api_secret: bool = False
     # Agent authorization is bound to immutable Discord role snowflake IDs in
     # deployed environments. A combined role (for example Billing / ERP Dev)
     # is intentionally listed in every applicable bundle.

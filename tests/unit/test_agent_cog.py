@@ -1576,9 +1576,6 @@ def test_post_backend_json_returns_structured_failed_response(
         SimpleNamespace(
             backend_api_base_url="http://api.test",
             api_shared_secret="secret",
-            agent_shared_secret=None,
-            agent_allow_legacy_api_secret=True,
-            environment="test",
             agent_api_timeout_seconds=8.0,
         ),
     )
@@ -1605,9 +1602,6 @@ def test_post_backend_json_returns_detail_error_response(
         SimpleNamespace(
             backend_api_base_url="http://api.test",
             api_shared_secret="secret",
-            agent_shared_secret=None,
-            agent_allow_legacy_api_secret=True,
-            environment="test",
             agent_api_timeout_seconds=8.0,
         ),
     )
@@ -1624,7 +1618,7 @@ def test_post_backend_json_returns_detail_error_response(
     assert payload["http_status"] == 500
 
 
-def test_post_backend_json_uses_dedicated_agent_secret_in_production(
+def test_post_backend_json_uses_api_shared_secret(
     monkeypatch,
 ) -> None:
     cog = AgentCog.__new__(AgentCog)
@@ -1633,8 +1627,6 @@ def test_post_backend_json_uses_dedicated_agent_secret_in_production(
         SimpleNamespace(
             backend_api_base_url="http://api.test",
             api_shared_secret="general-api-secret",
-            agent_shared_secret="agent-secret",
-            environment="production",
             agent_api_timeout_seconds=8.0,
         ),
     )
@@ -1644,4 +1636,6 @@ def test_post_backend_json_uses_dedicated_agent_secret_in_production(
 
         cog._post_backend_json("/agent/requests", {})
 
-    assert mock_post.call_args.kwargs["headers"] == {"X-API-Secret": "agent-secret"}
+    assert mock_post.call_args.kwargs["headers"] == {
+        "X-API-Secret": "general-api-secret"
+    }
