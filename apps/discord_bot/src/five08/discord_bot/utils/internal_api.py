@@ -48,6 +48,23 @@ class PostJobLeadRequest(BaseModel):
     engagement_status: str = EngagementStatus.LEAD.value
 
 
+class AgentScheduleMemberSnapshotRequest(BaseModel):
+    """Fresh member role snapshot requested before a scheduled run."""
+
+    guild_id: str
+    discord_user_id: str
+
+
+class PostAgentScheduleReportRequest(BaseModel):
+    """Bounded schedule report delivery request from the API-owned runner."""
+
+    guild_id: str
+    channel_id: str
+    schedule_id: str
+    run_id: str
+    content: str
+
+
 class StageJobLeadRequest(BaseModel):
     """Internal payload for posting a sourced lead to the holding forum."""
 
@@ -88,6 +105,14 @@ class InternalAPIRoutes:
         app.router.add_get(
             "/internal/diagnostics/discord",
             self.discord_diagnostics_handler,
+        )
+        app.router.add_post(
+            "/internal/agent-schedules/member-snapshot",
+            self.agent_schedule_member_snapshot_handler,
+        )
+        app.router.add_post(
+            "/internal/agent-schedules/report",
+            self.agent_schedule_report_handler,
         )
 
     @staticmethod
@@ -556,6 +581,186 @@ class InternalAPIRoutes:
             "yes",
         }
         result, status_code = await self._get_discord_diagnostics(refresh=refresh)
+        return web.json_response(result, status=status_code)
+
+    async def _agent_schedule_member_snapshot(
+        self,
+        payload: AgentScheduleMemberSnapshotRequest,
+    ) -> tuple[dict[str, Any], int]:
+        """Refresh a schedule owner's role IDs directly from the configured guild."""
+
+        guild = self._resolve_target_guild()
+        if guild is None:
+            return {"error": "guild_not_found"}, 404
+        if str(guild.id) != str(payload.guild_id).strip():
+            return {"error": "guild_mismatch"}, 403
+        try:
+            discord_user_id = int(payload.discord_user_id)
+        except (TypeError, ValueError):
+            return {"error": "invalid_discord_user_id"}, 400
+        if discord_user_id <= 0:
+            return {"error": "invalid_discord_user_id"}, 400
+
+        try:
+            member = await guild.fetch_member(discord_user_id)
+        except discord.NotFound:
+            return {
+                "error": "member_not_in_guild",
+                "guild_id": str(guild.id),
+                "discord_user_id": str(discord_user_id),
+            }, 404
+        except discord.Forbidden:
+            logger.warning(
+                "Cannot refresh schedule owner guild_id=%s user_id=%s: forbidden",
+                guild.id,
+                discord_user_id,
+            )
+            return {"error": "member_lookup_forbidden"}, 403
+        except discord.HTTPException as exc:
+            logger.warning(
+                "Cannot refresh schedule owner guild_id=%s user_id=%s: %s",
+                guild.id,
+                discord_user_id,
+                exc,
+            )
+            return {"error": "member_lookup_failed"}, 502
+
+        role_ids: list[str] = []
+        role_names: list[str] = []
+        for role in member.roles:
+            role_id = str(getattr(role, "id", "")).strip()
+            role_name = str(getattr(role, "name", "")).strip()
+            if role_id.isdecimal() and int(role_id) > 0 and role_id not in role_ids:
+                role_ids.append(role_id)
+            if role_name and role_name not in role_names:
+                role_names.append(role_name)
+        return {
+            "guild_id": str(guild.id),
+            "discord_user_id": str(discord_user_id),
+            "role_ids": role_ids,
+            "roles": role_names,
+        }, 200
+
+    async def agent_schedule_member_snapshot_handler(
+        self,
+        request: web.Request,
+    ) -> web.Response:
+        """Return a fresh role snapshot used to fail closed on revocation."""
+
+        if not self._is_authorized(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        try:
+            payload_data = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid_json"}, status=400)
+        if not isinstance(payload_data, dict):
+            return web.json_response({"error": "payload_must_be_object"}, status=400)
+        try:
+            payload = AgentScheduleMemberSnapshotRequest.model_validate(payload_data)
+        except (ValidationError, TypeError) as exc:
+            return web.json_response(
+                {"error": "invalid_payload", "detail": str(exc)},
+                status=400,
+            )
+        result, status_code = await self._agent_schedule_member_snapshot(payload)
+        return web.json_response(result, status=status_code)
+
+    async def _post_agent_schedule_report(
+        self,
+        payload: PostAgentScheduleReportRequest,
+    ) -> tuple[dict[str, Any], int]:
+        """Post one report only to a channel in the configured guild."""
+
+        guild = self._resolve_target_guild()
+        if guild is None:
+            return {"error": "guild_not_found"}, 404
+        if str(guild.id) != str(payload.guild_id).strip():
+            return {"error": "guild_mismatch"}, 403
+        try:
+            channel_id = int(payload.channel_id)
+        except (TypeError, ValueError):
+            return {"error": "invalid_channel_id"}, 400
+        if channel_id <= 0:
+            return {"error": "invalid_channel_id"}, 400
+        content = str(payload.content or "").strip()
+        if not content:
+            return {"error": "report_content_required"}, 400
+        if len(content) > 1_900:
+            return {"error": "report_content_too_long"}, 400
+
+        channel = self.bot.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(channel_id)
+            except discord.NotFound:
+                return {"error": "channel_not_found"}, 404
+            except discord.Forbidden:
+                return {"error": "channel_lookup_forbidden"}, 403
+            except discord.HTTPException as exc:
+                logger.warning(
+                    "Cannot fetch schedule report channel %s: %s", channel_id, exc
+                )
+                return {"error": "channel_lookup_failed"}, 502
+
+        channel_guild = getattr(channel, "guild", None)
+        if channel_guild is None or getattr(channel_guild, "id", None) != guild.id:
+            return {"error": "channel_guild_mismatch"}, 403
+        if not isinstance(channel, discord.abc.Messageable):
+            return {"error": "channel_not_messageable"}, 400
+
+        bot_member = guild.me
+        if bot_member is None:
+            return {"error": "bot_member_unresolved"}, 503
+        permissions_for = getattr(channel, "permissions_for", None)
+        if callable(permissions_for):
+            permissions = permissions_for(bot_member)
+            if not bool(getattr(permissions, "view_channel", False)) or not bool(
+                getattr(permissions, "send_messages", False)
+            ):
+                return {"error": "missing_channel_send_permission"}, 403
+
+        try:
+            message = await channel.send(
+                content,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.Forbidden:
+            return {"error": "report_send_forbidden"}, 403
+        except discord.HTTPException as exc:
+            logger.warning(
+                "Failed posting schedule report schedule_id=%s run_id=%s: %s",
+                payload.schedule_id,
+                payload.run_id,
+                exc,
+            )
+            return {"error": "report_send_failed"}, 502
+
+        return {
+            "status": "posted",
+            "guild_id": str(guild.id),
+            "channel_id": str(channel_id),
+            "message_id": str(message.id),
+        }, 200
+
+    async def agent_schedule_report_handler(self, request: web.Request) -> web.Response:
+        """Deliver a bounded recurring report without allowing mentions."""
+
+        if not self._is_authorized(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        try:
+            payload_data = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid_json"}, status=400)
+        if not isinstance(payload_data, dict):
+            return web.json_response({"error": "payload_must_be_object"}, status=400)
+        try:
+            payload = PostAgentScheduleReportRequest.model_validate(payload_data)
+        except (ValidationError, TypeError) as exc:
+            return web.json_response(
+                {"error": "invalid_payload", "detail": str(exc)},
+                status=400,
+            )
+        result, status_code = await self._post_agent_schedule_report(payload)
         return web.json_response(result, status=status_code)
 
     async def post_job_lead_handler(self, request: web.Request) -> web.Response:

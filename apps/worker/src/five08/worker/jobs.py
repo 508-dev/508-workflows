@@ -8,6 +8,9 @@ from collections.abc import Callable
 from typing import Any
 from urllib.parse import unquote
 
+import requests
+
+from five08.agent.postgres_memory import PostgresMemoryStore
 from five08.redaction import (
     EMAIL_ADDRESS_PATTERN,
     PERCENT_ENCODED_EMAIL_ADDRESS_PATTERN,
@@ -23,11 +26,16 @@ from five08.worker.mailbox_resume_ingest import ResumeMailboxProcessor
 from five08.worker.masking import mask_email
 from five08.newsletter_sync import NewsletterSyncProcessor
 from five08.job_lead_sources import scrape_job_leads
+from five08.tls import default_ca_bundle_path
 
 logger = logging.getLogger(__name__)
 
 
 DOCUSEAL_COMPLETED_AT_UTC_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
+class AgentScheduleRunNonRetryableError(RuntimeError):
+    """Raised when the API rejects a malformed or unauthorized schedule run."""
 
 
 def process_contact_skills_job(contact_id: str) -> dict[str, Any]:
@@ -217,6 +225,15 @@ def sync_508_members_newsletters_job() -> dict[str, Any]:
     return _mask_newsletter_sync_result(processor.sync_508_members())
 
 
+def purge_expired_agent_memory_facts_job() -> dict[str, Any]:
+    """Remove expired durable agent-memory facts while the system is idle."""
+
+    logger.info("Processing expired agent memory cleanup job")
+    memory_store = PostgresMemoryStore(settings.postgres_url)
+    purged_count = memory_store.purge_expired_all_organizations()
+    return {"purged_count": purged_count}
+
+
 def scrape_job_leads_job(
     source: str = "hackernews_who_is_hiring",
     story_id: int | None = None,
@@ -230,6 +247,61 @@ def scrape_job_leads_job(
     return scrape_job_leads(settings, source=source, story_id=story_id)
 
 
+def run_agent_schedule_job(run_id: str) -> dict[str, Any]:
+    """Ask the API-owned agent runtime to execute one durable schedule run.
+
+    The worker intentionally holds no agent provider credentials. It owns the
+    durable retry lifecycle, while the API rechecks Discord roles, executes the
+    frozen read-only envelope, and delivers the report through the bot.
+    """
+
+    normalized_run_id = str(run_id or "").strip()
+    if not normalized_run_id:
+        raise AgentScheduleRunNonRetryableError("schedule_run_id_required")
+
+    base_url = settings.agent_schedule_api_base_url.strip().rstrip("/")
+    api_secret = str(settings.api_shared_secret or "").strip()
+    if not base_url:
+        raise AgentScheduleRunNonRetryableError("agent_schedule_api_url_missing")
+    if not api_secret:
+        raise AgentScheduleRunNonRetryableError("api_shared_secret_missing")
+
+    logger.info(
+        "Executing agent schedule run_id=%s through backend API", normalized_run_id
+    )
+    try:
+        response = requests.post(
+            f"{base_url}/internal/agent-schedules/runs/{normalized_run_id}",
+            headers={"X-API-Secret": api_secret},
+            timeout=settings.agent_schedule_api_timeout_seconds,
+            verify=default_ca_bundle_path(),
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(f"agent_schedule_api_request_failed: {exc}") from exc
+
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+
+    if 200 <= response.status_code < 300:
+        return {
+            "run_id": normalized_run_id,
+            "status": str(payload.get("status") or "completed"),
+            "schedule_id": str(payload.get("schedule_id") or ""),
+            "delivery_status": str(payload.get("delivery_status") or ""),
+        }
+
+    error_code = str(payload.get("error") or "agent_schedule_api_rejected")
+    if response.status_code in {400, 401, 403, 404, 422}:
+        raise AgentScheduleRunNonRetryableError(
+            f"agent_schedule_api_rejected:{response.status_code}:{error_code}"
+        )
+    raise RuntimeError(f"agent_schedule_api_failed:{response.status_code}:{error_code}")
+
+
 JOB_FUNCTIONS: dict[str, Callable[..., dict[str, Any]]] = {
     process_webhook_event.__name__: process_webhook_event,
     process_contact_skills_job.__name__: process_contact_skills_job,
@@ -241,6 +313,8 @@ JOB_FUNCTIONS: dict[str, Callable[..., dict[str, Any]]] = {
     sync_person_from_crm_job.__name__: sync_person_from_crm_job,
     sync_projects_from_erpnext_job.__name__: sync_projects_from_erpnext_job,
     sync_508_members_newsletters_job.__name__: sync_508_members_newsletters_job,
+    purge_expired_agent_memory_facts_job.__name__: purge_expired_agent_memory_facts_job,
     process_docuseal_agreement_job.__name__: process_docuseal_agreement_job,
     scrape_job_leads_job.__name__: scrape_job_leads_job,
+    run_agent_schedule_job.__name__: run_agent_schedule_job,
 }

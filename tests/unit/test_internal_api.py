@@ -10,6 +10,7 @@ import pytest
 
 from five08.engagements import EngagementStatus
 from five08.discord_bot.utils.internal_api import (
+    AgentScheduleMemberSnapshotRequest,
     GigThreadStatusRequest,
     InternalAPIRoutes,
     MemberAgreementRoleRequest,
@@ -270,6 +271,68 @@ class TestInternalAPIRoutes:
 
         assert status_code == 503
         assert result == {"error": "diagnostics_cog_unavailable"}
+
+    @pytest.mark.asyncio
+    async def test_agent_schedule_member_snapshot_fetches_current_role_ids(
+        self,
+        internal_api_routes,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Recurring work must refresh roles instead of trusting a saved grant."""
+
+        monkeypatch.setattr(
+            "five08.discord_bot.utils.internal_api.settings.discord_server_id",
+            "1000",
+        )
+        member = SimpleNamespace(
+            roles=[
+                SimpleNamespace(id=1000, name="@everyone"),
+                SimpleNamespace(id=1001, name="Admin"),
+            ]
+        )
+        guild = Mock()
+        guild.id = 1000
+        guild.fetch_member = AsyncMock(return_value=member)
+        internal_api_routes.bot.get_guild.return_value = guild
+
+        result, status_code = await internal_api_routes._agent_schedule_member_snapshot(
+            AgentScheduleMemberSnapshotRequest(
+                guild_id="1000",
+                discord_user_id="2000",
+            )
+        )
+
+        assert status_code == 200
+        assert result["role_ids"] == ["1000", "1001"]
+        assert result["roles"] == ["@everyone", "Admin"]
+        guild.fetch_member.assert_awaited_once_with(2000)
+
+    @pytest.mark.asyncio
+    async def test_agent_schedule_member_snapshot_rejects_cross_guild_request(
+        self,
+        internal_api_routes,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A bot-internal caller cannot use the role lookup across guilds."""
+
+        monkeypatch.setattr(
+            "five08.discord_bot.utils.internal_api.settings.discord_server_id",
+            "1000",
+        )
+        guild = Mock()
+        guild.id = 1000
+        internal_api_routes.bot.get_guild.return_value = guild
+
+        result, status_code = await internal_api_routes._agent_schedule_member_snapshot(
+            AgentScheduleMemberSnapshotRequest(
+                guild_id="other-guild",
+                discord_user_id="2000",
+            )
+        )
+
+        assert status_code == 403
+        assert result == {"error": "guild_mismatch"}
+        guild.fetch_member.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_update_gig_thread_status_rewrites_title_marker(

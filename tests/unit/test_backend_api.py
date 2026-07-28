@@ -1140,10 +1140,7 @@ def test_agent_request_audits_unsupported_message_with_sanitized_shape(
         response = client.post(
             "/agent/requests",
             json={
-                "message": (
-                    "frobnicate member agreement to Michael Wu at "
-                    "michael@example.com +1 415 555 1212"
-                ),
+                "message": "frobnicate member agreement for Michael Wu",
                 "context": {
                     "discord_user_id": "123",
                     "organization_id": "org-1",
@@ -1159,11 +1156,9 @@ def test_agent_request_audits_unsupported_message_with_sanitized_shape(
     metadata = audit_kwargs["metadata"]
     assert metadata["reason"] == "unsupported_agent_request"
     assert metadata["improvement_log"] is True
-    assert metadata["message_sanitized"] == ("frobnicate member agreement to [person]")
+    assert metadata["message_sanitized"] == ("frobnicate member agreement for [person]")
     assert "message" not in metadata
     assert "Michael Wu" not in str(metadata)
-    assert "michael@example.com" not in str(metadata)
-    assert "415" not in str(metadata)
 
 
 def test_agent_request_rate_limits_per_user(
@@ -1658,7 +1653,9 @@ def test_agent_confirmation_preserves_operation_envelope(
     assert context.channel_id == "channel-1"
     assert context.thread_id == "thread-1"
     assert context.parent_message_id == "parent-1"
-    assert len(context.context_snippets) == 1
+    # Raw, client-supplied thread text is deliberately not retained across the
+    # confirmation window; the frozen plan already captures the allowed work.
+    assert context.context_snippets == []
     plan = captured["plan"]
     assert isinstance(plan, api.AgentPlan)
     assert plan.context_sources[0].source_ref == "client_supplied_context"

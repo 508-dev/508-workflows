@@ -390,6 +390,19 @@ def test_purge_expired_is_tenant_scoped() -> None:
     assert params == ("org-1", now)
 
 
+def test_global_expiry_cleanup_does_not_accept_or_return_tenant_data() -> None:
+    now = datetime(2026, 7, 28, 10, 0, tzinfo=timezone.utc)
+    cursor = FakeCursor(rowcount=7)
+    store = PostgresMemoryStore(connection_factory=lambda: FakeConnection(cursor))
+
+    assert store.purge_expired_all_organizations(now=now) == 7
+    query, params = cursor.calls[0]
+    assert "DELETE FROM agent_memory_facts" in query
+    assert "organization_id = %s" not in query
+    assert "expires_at <= %s" in query
+    assert params == (now,)
+
+
 def test_postgres_url_is_required_without_injected_connection_factory() -> None:
     with pytest.raises(ValueError, match="postgres_url is required"):
         PostgresMemoryStore()

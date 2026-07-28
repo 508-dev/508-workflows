@@ -49,6 +49,12 @@ curl -X GET "http://localhost:8090/jobs/<job_id>" \
 - `GET /dashboard/api/jobs`: Session-authenticated recent jobs list for the dashboard.
 - `GET /dashboard/api/jobs/{job_id}`: Session-authenticated dashboard job detail with sensitive payload keys redacted.
 - `POST /dashboard/api/jobs/{job_id}/rerun`: Session-authenticated dashboard job rerun.
+- `GET /dashboard/api/agent-schedules`: Admin configuration-read list of
+  retained recurring agent schedules and dispatcher state.
+- `POST /dashboard/api/agent-schedules`,
+  `PUT /dashboard/api/agent-schedules/{schedule_id}`, and
+  `POST /dashboard/api/agent-schedules/{schedule_id}/run`: create, control,
+  and manually queue a schedule from a Discord-linked Admin dashboard session.
 - `GET /dashboard/api/gigs`: Session-authenticated Discord gig list with candidate/application summaries.
 - `GET /dashboard/api/notifications`: Session-authenticated dashboard notifications, including stale recruiting gigs.
 - `POST /dashboard/api/gigs/{engagement_id}/status`: Session-authenticated gig status update for visible pending gigs.
@@ -81,6 +87,27 @@ curl -X GET "http://localhost:8090/jobs/<job_id>" \
 - `GET /auth/discord/link/{token}`: Show a no-store confirmation page for a Discord dashboard deep link without consuming the token.
 - `POST /auth/discord/link/{token}/consume`: Consume the one-time Discord dashboard deep link and redirect to the authenticated dashboard session.
 - Auth flows emit best-effort human audit events (`auth.login`, `auth.logout`) under source `admin_dashboard`.
+
+### Recurring agent schedules
+
+Recurring schedules are durable worker jobs, not long-lived Discord requests.
+The initial supported envelope is GitHub issue search → one explicit Discord
+channel report. A human prompt is retained and, when an operator explicitly
+opts into a public-data model summary, can guide that summary. The stored
+actions, repository, scopes, runtime cap, and delivery destination are frozen
+at creation. Prompts cannot select new tools or write data.
+
+Schedule management requires `agent:schedule:manage`, which is Admin-only. On
+every create, control, manual run, and background execution, the API retrieves
+a fresh Discord member-role snapshot from the bot. A run requires the owner to
+still hold the manager scope and every saved read scope; a role revocation
+therefore skips it before a tool call or Discord post. Public-data model
+summaries are opt-in and send only minimized GitHub issue metadata; the default
+report is deterministic and sends no issue data to a model.
+
+The internal bot-facing management routes live under `/agent/schedules*`; the
+worker calls `POST /internal/agent-schedules/runs/{run_id}` using the existing
+`API_SHARED_SECRET`. Neither route is a browser-facing authorization surface.
 
 Discord deep-link identity policy:
 

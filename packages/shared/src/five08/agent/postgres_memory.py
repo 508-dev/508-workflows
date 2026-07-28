@@ -363,6 +363,33 @@ class PostgresMemoryStore:
                     now=comparison_time,
                 )
 
+    def purge_expired_all_organizations(
+        self,
+        *,
+        now: datetime | None = None,
+    ) -> int:
+        """Physically delete expired records across tenants for worker maintenance.
+
+        This is intentionally not part of the request-facing ``MemoryStore``
+        contract: callers serving a user always operate inside one organization.
+        The only intended caller is the trusted, scheduled worker maintenance
+        job, which receives no tenant or fact data in return.
+        """
+
+        comparison_time = _normalized_time(now)
+        with self._connection_factory() as conn:
+            with conn.cursor(row_factory=dict_row) as cursor:
+                cursor.execute(
+                    """
+                    DELETE FROM agent_memory_facts
+                    WHERE deleted_at IS NOT NULL
+                       OR (expires_at IS NOT NULL AND expires_at <= %s)
+                    """,
+                    (comparison_time,),
+                )
+                row_count = getattr(cursor, "rowcount", 0)
+        return max(int(row_count or 0), 0)
+
     @staticmethod
     def _purge_expired_with_cursor(
         cursor: Any,

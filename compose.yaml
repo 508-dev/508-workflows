@@ -181,6 +181,7 @@ services:
       # allowing startup while /health reports degraded in non-local runtimes.
       INTAKE_RESUME_VIRUS_SCAN_COMMAND: ${INTAKE_RESUME_VIRUS_SCAN_COMMAND-clamdscan --stream --no-summary --config-file=/etc/clamav/clamdscan.conf}
       DISCORD_BOT_INTERNAL_BASE_URL: http://discord_bot:3000
+      AGENT_SCHEDULE_API_BASE_URL: http://web:8090
       # The worker does not plan agent requests or call public-web providers.
       AGENT_FAST_API_KEY: ""
       AGENT_STRONG_API_KEY: ""

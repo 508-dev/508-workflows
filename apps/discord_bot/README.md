@@ -166,6 +166,8 @@ Relevant configuration:
   agent chat/public-web research. ERP writes, billing, CRM, provisioning, and
   Admin authority are not exposed through the agent.
 - **Admin / Owner**: receives the full administrative and specialist scope set.
+  This includes `agent:schedule:manage`, which is required for persistent
+  recurring agent reports.
 
 ## Wiki Search
 
@@ -203,6 +205,24 @@ and result snippets are not audit logged.
     - Replies in the same channel or thread.
     - Supports the same confirmation buttons for writes.
   - Example: `@508.dev Bot show tasks for project Atlas`
+
+- `/schedule-github-issues`
+  - Description: Create a durable GitHub issue report with a five-field cron
+    schedule and an explicit Discord destination channel.
+  - Required role: Admin / Owner.
+  - Guardrails: with the explicit public-data model-summary option, the saved
+    prompt can shape the report but cannot add tools, change the repository,
+    grant permissions, or change the delivery channel.
+    The initial envelope is read-only GitHub issue search only. Model summaries
+    require the explicit `public_sources:true` acknowledgement; otherwise the
+    delivery is a deterministic issue list.
+
+- `/schedules`, `/schedule-control`, `/schedule-run`
+  - Description: List, pause/resume/archive, or queue a manual run of retained
+    recurring reports.
+  - Required role: Admin / Owner. Every operation and background execution
+    refreshes the owner's current Discord roles; removing Admin stops future
+    executions before they read GitHub or post to Discord.
 
 - `/dashboard-login`
   - Description: Generate a one-time operations dashboard login link.

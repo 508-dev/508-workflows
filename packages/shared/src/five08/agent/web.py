@@ -10,6 +10,7 @@ such before being added to an LLM context.
 from __future__ import annotations
 
 import ipaddress
+import json
 import socket
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
@@ -33,6 +34,11 @@ MAX_WEB_RESULT_SNIPPET_CHARS = 2_000
 MAX_WEB_EXTRACT_CONTENT_CHARS = 20_000
 MAX_WEB_EXTRACT_METADATA_CHARS = 1_000
 MAX_WEB_URL_CHARS = 2_048
+# Provider responses are untrusted. Keep the transport-level cap comfortably
+# above our parsed-result bounds while preventing an upstream server from
+# forcing Requests to materialize an arbitrary response in process memory.
+MAX_WEB_RESPONSE_BYTES = 1_048_576
+WEB_RESPONSE_CHUNK_BYTES = 64 * 1_024
 DEFAULT_WEB_TIMEOUT_SECONDS = 15.0
 MAX_WEB_TIMEOUT_SECONDS = 60.0
 
@@ -205,6 +211,23 @@ def validate_public_https_url(url: str) -> str:
             "Web extraction URL must not include a query string."
         )
     _require_public_host(host, port)
+    return normalized
+
+
+def validate_public_https_url_shape(url: str) -> str:
+    """Validate an extraction URL without resolving its hostname.
+
+    Planner-shape validation must not cause external DNS traffic before policy
+    has authorized the requester. The full resolver-backed check remains in
+    :func:`validate_public_https_url` immediately before Firecrawl is called.
+    """
+
+    normalized, host, _port = _normalize_public_web_url(url, require_https=True)
+    if urlsplit(normalized).query:
+        raise WebResearchValidationError(
+            "Web extraction URL must not include a query string."
+        )
+    _reject_obviously_non_public_host(host)
     return normalized
 
 
@@ -642,6 +665,7 @@ def _get_json(
             timeout=_effective_request_timeout(timeout_seconds),
             verify=default_ca_bundle_path(),
             allow_redirects=False,
+            stream=True,
         )
     except requests.RequestException as exc:
         raise WebResearchTransportError(f"{provider} request failed: {exc}") from exc
@@ -664,6 +688,7 @@ def _post_json(
             timeout=_effective_request_timeout(timeout_seconds),
             verify=default_ca_bundle_path(),
             allow_redirects=False,
+            stream=True,
         )
     except requests.RequestException as exc:
         raise WebResearchTransportError(f"{provider} request failed: {exc}") from exc
@@ -671,26 +696,78 @@ def _post_json(
 
 
 def _response_json(provider: str, response: requests.Response) -> dict[str, Any]:
-    status_code = getattr(response, "status_code", None)
-    if not isinstance(status_code, int) or not 200 <= status_code < 300:
-        if not isinstance(status_code, int):
-            raise WebResearchResponseError(
-                f"{provider} response did not include a status code."
-            )
-        raise WebResearchUpstreamError(provider, status_code)
     try:
-        payload = response.json()
-    except ValueError as exc:
+        status_code = getattr(response, "status_code", None)
+        if not isinstance(status_code, int) or not 200 <= status_code < 300:
+            if not isinstance(status_code, int):
+                raise WebResearchResponseError(
+                    f"{provider} response did not include a status code."
+                )
+            raise WebResearchUpstreamError(provider, status_code)
+        payload = _read_bounded_json_response(provider, response)
+        if not isinstance(payload, dict):
+            raise WebResearchResponseError(
+                f"{provider} response payload must be a JSON object."
+            )
+        if payload.get("success") is False:
+            raise WebResearchResponseError(
+                f"{provider} reported an unsuccessful response."
+            )
+        return payload
+    finally:
+        _close_response(response)
+
+
+def _read_bounded_json_response(provider: str, response: requests.Response) -> Any:
+    """Read one streamed JSON response without exceeding the byte budget."""
+
+    headers = getattr(response, "headers", None)
+    raw_content_length = (
+        headers.get("Content-Length") if isinstance(headers, Mapping) else None
+    )
+    try:
+        content_length = int(raw_content_length) if raw_content_length else None
+    except (TypeError, ValueError):
+        content_length = None
+    if content_length is not None and content_length > MAX_WEB_RESPONSE_BYTES:
+        raise WebResearchResponseError(f"{provider} response payload is too large.")
+
+    chunks: list[bytes] = []
+    total_bytes = 0
+    try:
+        for chunk in response.iter_content(chunk_size=WEB_RESPONSE_CHUNK_BYTES):
+            if not chunk:
+                continue
+            if not isinstance(chunk, bytes):
+                raise WebResearchResponseError(
+                    f"{provider} response payload contained non-binary data."
+                )
+            total_bytes += len(chunk)
+            if total_bytes > MAX_WEB_RESPONSE_BYTES:
+                raise WebResearchResponseError(
+                    f"{provider} response payload is too large."
+                )
+            chunks.append(chunk)
+    except requests.RequestException as exc:
+        raise WebResearchTransportError(
+            f"{provider} response read failed: {exc}"
+        ) from exc
+
+    try:
+        return json.loads(b"".join(chunks).decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise WebResearchResponseError(
             f"{provider} response payload must be valid JSON."
         ) from exc
-    if not isinstance(payload, dict):
-        raise WebResearchResponseError(
-            f"{provider} response payload must be a JSON object."
-        )
-    if payload.get("success") is False:
-        raise WebResearchResponseError(f"{provider} reported an unsuccessful response.")
-    return payload
+
+
+def _close_response(response: requests.Response) -> None:
+    """Release a streamed Requests connection without masking parse errors."""
+
+    try:
+        response.close()
+    except requests.RequestException:
+        return
 
 
 def _firecrawl_data(payload: Mapping[str, Any]) -> Mapping[str, Any]:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import socket
 from unittest.mock import Mock, patch
 
@@ -10,6 +11,7 @@ import requests
 
 from five08.agent.web import (
     MAX_WEB_EXTRACT_CONTENT_CHARS,
+    MAX_WEB_RESPONSE_BYTES,
     BraveWebSearch,
     FirecrawlWebResearch,
     SearxngWebSearch,
@@ -24,13 +26,16 @@ from five08.agent.web import (
     normalize_provider_base_url,
     validate_public_https_url,
 )
+from five08.agent.tools import ToolRegistry
 from five08.tls import default_ca_bundle_path
 
 
 def _response(payload: object, *, status_code: int = 200) -> Mock:
     response = Mock()
     response.status_code = status_code
-    response.json.return_value = payload
+    encoded = json.dumps(payload).encode("utf-8")
+    response.headers = {"Content-Length": str(len(encoded))}
+    response.iter_content.return_value = [encoded]
     return response
 
 
@@ -96,6 +101,7 @@ def test_searxng_search_parses_bounded_deduplicated_results() -> None:
         timeout=15.0,
         verify=default_ca_bundle_path(),
         allow_redirects=False,
+        stream=True,
     )
 
 
@@ -142,6 +148,7 @@ def test_brave_search_uses_subscription_header_and_parses_profile() -> None:
         timeout=15.0,
         verify=default_ca_bundle_path(),
         allow_redirects=False,
+        stream=True,
     )
 
 
@@ -188,6 +195,7 @@ def test_firecrawl_search_parses_metadata_source_url() -> None:
         timeout=15.0,
         verify=default_ca_bundle_path(),
         allow_redirects=False,
+        stream=True,
     )
 
 
@@ -328,6 +336,20 @@ def test_validate_public_https_url_accepts_public_dns_answer(monkeypatch) -> Non
     )
 
 
+def test_planner_url_validation_does_not_resolve_before_policy(monkeypatch) -> None:
+    """An unauthorized model action must not trigger a DNS lookup in validation."""
+
+    def fail_dns(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("planner validation must not resolve hostnames")
+
+    monkeypatch.setattr("five08.agent.web.socket.getaddrinfo", fail_dns)
+
+    ToolRegistry().validate_planner_action(
+        "web_read.extract",
+        {"url": "https://example.com/article"},
+    )
+
+
 def test_provider_base_urls_require_https_except_explicit_searxng_style_http() -> None:
     assert (
         normalize_provider_base_url(
@@ -415,10 +437,22 @@ def test_provider_transport_and_response_errors_are_typed() -> None:
             BraveWebSearch(api_key="token").search("query")
 
     invalid_json = _response({})
-    invalid_json.json.side_effect = ValueError("not json")
+    invalid_json.headers = {}
+    invalid_json.iter_content.return_value = [b"not json"]
     with patch("five08.agent.web.requests.get", return_value=invalid_json):
         with pytest.raises(WebResearchResponseError, match="valid JSON"):
             BraveWebSearch(api_key="token").search("query")
+
+
+def test_provider_response_body_is_capped_before_json_parsing() -> None:
+    response = _response({"web": {"results": []}})
+    response.headers = {"Content-Length": str(MAX_WEB_RESPONSE_BYTES + 1)}
+
+    with patch("five08.agent.web.requests.get", return_value=response):
+        with pytest.raises(WebResearchResponseError, match="too large"):
+            BraveWebSearch(api_key="token").search("query")
+
+    response.iter_content.assert_not_called()
 
 
 def test_web_search_query_and_limit_are_bounded() -> None:

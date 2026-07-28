@@ -133,6 +133,26 @@ class SharedSettings(BaseSettings):
         ge=5.0,
         le=55.0,
     )
+    # Expired memory is also swept while idle, rather than relying solely on
+    # request-path opportunistic cleanup for each tenant.
+    agent_memory_cleanup_enabled: bool = True
+    agent_memory_cleanup_interval_seconds: int = Field(
+        default=86_400,
+        ge=3_600,
+        le=604_800,
+    )
+    # Durable recurring agent work is dispatched by the API and executed by a
+    # worker job. Definitions remain intentionally low-frequency and bounded
+    # so an accidental cron expression cannot create unbounded provider cost.
+    agent_schedule_enabled: bool = True
+    agent_schedule_dispatch_interval_seconds: int = Field(default=30, ge=5, le=300)
+    agent_schedule_dispatch_batch_size: int = Field(default=25, ge=1, le=100)
+    agent_schedule_min_interval_seconds: int = Field(default=300, ge=60, le=86_400)
+    agent_schedule_execution_timeout_seconds: float = Field(
+        default=120.0,
+        ge=10.0,
+        le=300.0,
+    )
     searxng_base_url: str | None = None
     searxng_search_language: str | None = None
     brave_search_api_key: str | None = None

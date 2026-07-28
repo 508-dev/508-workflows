@@ -22,9 +22,7 @@ from five08.queue import (
 )
 from five08.worker.config import settings
 from five08.worker.crm.docuseal_processor import DocusealAgreementNonRetryableError
-from five08.worker.jobs import (
-    JOB_FUNCTIONS,
-)
+from five08.worker.jobs import AgentScheduleRunNonRetryableError, JOB_FUNCTIONS
 
 from five08.logging import configure_observability
 
@@ -272,7 +270,10 @@ def _run_job(job_id: str) -> None:
                 worker_name=settings.worker_name,
                 result=result,
             )
-    except DocusealAgreementNonRetryableError as exc:
+    except (
+        DocusealAgreementNonRetryableError,
+        AgentScheduleRunNonRetryableError,
+    ) as exc:
         next_attempt = job.attempts + 1
         error = f"{type(exc).__name__}: {exc}"
         logger.error(

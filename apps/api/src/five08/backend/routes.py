@@ -20,6 +20,10 @@ class BackendRouteSurface(Protocol):
     dashboard_assets_dir: Callable[[], Path]
     agent_confirmation_handler: RouteHandler
     agent_request_handler: RouteHandler
+    agent_schedule_control_handler: RouteHandler
+    agent_schedule_create_handler: RouteHandler
+    agent_schedule_list_handler: RouteHandler
+    agent_schedule_run_handler: RouteHandler
     audit_event_handler: RouteHandler
     auth_callback_handler: RouteHandler
     auth_discord_link_consume_handler: RouteHandler
@@ -32,12 +36,15 @@ class BackendRouteSurface(Protocol):
     dashboard_add_project_historical_member_handler: RouteHandler
     dashboard_add_project_user_handler: RouteHandler
     dashboard_agent_report_handler: RouteHandler
+    dashboard_agent_schedules_handler: RouteHandler
     dashboard_assign_onboarder_handler: RouteHandler
     dashboard_audit_events_handler: RouteHandler
     dashboard_bulk_update_projects_handler: RouteHandler
     dashboard_clear_job_lead_staging_recovery_handler: RouteHandler
     dashboard_configuration_handler: RouteHandler
     dashboard_create_project_handler: RouteHandler
+    dashboard_create_agent_schedule_handler: RouteHandler
+    dashboard_control_agent_schedule_handler: RouteHandler
     dashboard_discord_diagnostics_handler: RouteHandler
     dashboard_erpnext_account_managers_handler: RouteHandler
     dashboard_erpnext_contacts_handler: RouteHandler
@@ -72,6 +79,7 @@ class BackendRouteSurface(Protocol):
     dashboard_remove_project_historical_member_handler: RouteHandler
     dashboard_remove_project_user_handler: RouteHandler
     dashboard_rerun_job_handler: RouteHandler
+    dashboard_run_agent_schedule_handler: RouteHandler
     dashboard_setup_engineer_handler: RouteHandler
     dashboard_sync_newsletters_handler: RouteHandler
     dashboard_sync_people_handler: RouteHandler
@@ -90,6 +98,7 @@ class BackendRouteSurface(Protocol):
     google_forms_intake_webhook_handler: RouteHandler
     health_handler: RouteHandler
     ingest_handler: RouteHandler
+    internal_agent_schedule_run_handler: RouteHandler
     job_status_handler: RouteHandler
     jobs_handler: RouteHandler
     process_contact_handler: RouteHandler
@@ -105,6 +114,10 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
     _OptionalDirectoryStaticFiles = api._OptionalDirectoryStaticFiles
     agent_confirmation_handler = api.agent_confirmation_handler
     agent_request_handler = api.agent_request_handler
+    agent_schedule_control_handler = api.agent_schedule_control_handler
+    agent_schedule_create_handler = api.agent_schedule_create_handler
+    agent_schedule_list_handler = api.agent_schedule_list_handler
+    agent_schedule_run_handler = api.agent_schedule_run_handler
     audit_event_handler = api.audit_event_handler
     auth_callback_handler = api.auth_callback_handler
     auth_discord_link_consume_handler = api.auth_discord_link_consume_handler
@@ -119,6 +132,7 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
     )
     dashboard_add_project_user_handler = api.dashboard_add_project_user_handler
     dashboard_agent_report_handler = api.dashboard_agent_report_handler
+    dashboard_agent_schedules_handler = api.dashboard_agent_schedules_handler
     dashboard_assets_dir = api.dashboard_assets_dir
     dashboard_assign_onboarder_handler = api.dashboard_assign_onboarder_handler
     dashboard_audit_events_handler = api.dashboard_audit_events_handler
@@ -128,6 +142,12 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
     )
     dashboard_configuration_handler = api.dashboard_configuration_handler
     dashboard_create_project_handler = api.dashboard_create_project_handler
+    dashboard_create_agent_schedule_handler = (
+        api.dashboard_create_agent_schedule_handler
+    )
+    dashboard_control_agent_schedule_handler = (
+        api.dashboard_control_agent_schedule_handler
+    )
     dashboard_discord_diagnostics_handler = api.dashboard_discord_diagnostics_handler
     dashboard_erpnext_account_managers_handler = (
         api.dashboard_erpnext_account_managers_handler
@@ -180,6 +200,7 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
     )
     dashboard_remove_project_user_handler = api.dashboard_remove_project_user_handler
     dashboard_rerun_job_handler = api.dashboard_rerun_job_handler
+    dashboard_run_agent_schedule_handler = api.dashboard_run_agent_schedule_handler
     dashboard_setup_engineer_handler = api.dashboard_setup_engineer_handler
     dashboard_sync_newsletters_handler = api.dashboard_sync_newsletters_handler
     dashboard_sync_people_handler = api.dashboard_sync_people_handler
@@ -206,6 +227,7 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
     google_forms_intake_webhook_handler = api.google_forms_intake_webhook_handler
     health_handler = api.health_handler
     ingest_handler = api.ingest_handler
+    internal_agent_schedule_run_handler = api.internal_agent_schedule_run_handler
     job_status_handler = api.job_status_handler
     jobs_handler = api.jobs_handler
     process_contact_handler = api.process_contact_handler
@@ -246,6 +268,26 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
     app.add_api_route(
         "/dashboard/api/jobs/{job_id}/rerun",
         dashboard_rerun_job_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/dashboard/api/agent-schedules",
+        dashboard_agent_schedules_handler,
+        methods=["GET"],
+    )
+    app.add_api_route(
+        "/dashboard/api/agent-schedules",
+        dashboard_create_agent_schedule_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/dashboard/api/agent-schedules/{schedule_id}",
+        dashboard_control_agent_schedule_handler,
+        methods=["PUT"],
+    )
+    app.add_api_route(
+        "/dashboard/api/agent-schedules/{schedule_id}/run",
+        dashboard_run_agent_schedule_handler,
         methods=["POST"],
     )
     app.add_api_route(
@@ -559,8 +601,31 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
     app.add_api_route("/audit/events", audit_event_handler, methods=["POST"])
     app.add_api_route("/agent/requests", agent_request_handler, methods=["POST"])
     app.add_api_route(
+        "/agent/schedules", agent_schedule_create_handler, methods=["POST"]
+    )
+    app.add_api_route(
+        "/agent/schedules/list",
+        agent_schedule_list_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/agent/schedules/{schedule_id}/control",
+        agent_schedule_control_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/agent/schedules/{schedule_id}/run",
+        agent_schedule_run_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
         "/agent/confirmations/{plan_id}",
         agent_confirmation_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/internal/agent-schedules/runs/{run_id}",
+        internal_agent_schedule_run_handler,
         methods=["POST"],
     )
 

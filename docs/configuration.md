@@ -318,6 +318,38 @@ Agent gateway:
   those ERP credentials. The agent fails closed when it is unset or the request
   comes from another organization; configure a separate deployment/credential
   boundary before supporting more than one ERP tenant.
+- `AGENT_SCHEDULE_ENABLED`: enables the API dispatcher for durable recurring
+  agent reports. It defaults to `true`, but does not create work until an Admin
+  creates a schedule.
+- `AGENT_SCHEDULE_DISPATCH_INTERVAL_SECONDS`,
+  `AGENT_SCHEDULE_DISPATCH_BATCH_SIZE`,
+  `AGENT_SCHEDULE_MIN_INTERVAL_SECONDS`, and
+  `AGENT_SCHEDULE_EXECUTION_TIMEOUT_SECONDS`: dispatcher/runtime bounds. The
+  minimum supported cadence defaults to five minutes.
+- `AGENT_SCHEDULE_API_BASE_URL`, `AGENT_SCHEDULE_API_TIMEOUT_SECONDS`: worker
+  handoff to the API-owned agent runtime. The worker uses `API_SHARED_SECRET`
+  for this internal call and intentionally does not need model-provider keys.
+- `AGENT_MEMORY_CLEANUP_ENABLED`, `AGENT_MEMORY_CLEANUP_INTERVAL_SECONDS`:
+  enqueue a daily-by-default worker sweep of expired durable memory facts. The
+  job deletes only expired/deleted rows and reports a count; it never reads or
+  exposes memory content through a user-facing endpoint.
+
+### Recurring Agent Reports
+
+Only the configured **Admin / Owner** role receives `agent:schedule:manage`.
+The first supported schedule type is a frozen GitHub issue search that posts a
+report to one explicit channel in `DISCORD_SERVER_ID`. Creation is available in
+Discord (`/schedule-github-issues`) and the **Agent schedules** dashboard page;
+the dashboard requires a Discord-linked Admin session for writes.
+
+Each schedule stores a prompt alongside a bounded tool envelope. When an
+operator explicitly opts into a public-data model summary, the prompt can shape
+that summary; it cannot add tools, change the repository or destination, or
+grant scopes. Every execution fetches the owner's current Discord roles and
+requires both the saved read scope and `agent:schedule:manage`; removing the
+Admin role skips later runs. Model summaries are off by default. They can only
+receive minimized GitHub issue metadata after the schedule owner explicitly
+marks every source as public; otherwise reports use a deterministic issue list.
 
 See [Discord GitHub Todos and Projects](./discord-github-todos.md) for the
 role model, required App permissions, and installation procedure.

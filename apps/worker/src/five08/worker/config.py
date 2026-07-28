@@ -20,6 +20,10 @@ class WorkerSettings(SharedSettings):
     worker_queue_names: str = "jobs.default"
     worker_burst: bool = False
     discord_bot_internal_base_url: str = "http://127.0.0.1:3000"
+    # The worker delegates schedule execution to the API because that service
+    # owns agent model credentials and the bot-internal Discord client.
+    agent_schedule_api_base_url: str = "http://127.0.0.1:8090"
+    agent_schedule_api_timeout_seconds: float = Field(default=150.0, gt=0, le=360.0)
 
     espo_base_url: str = ""
     espo_api_key: str = ""

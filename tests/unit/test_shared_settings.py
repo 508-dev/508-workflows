@@ -229,6 +229,16 @@ def test_shared_settings_newsletter_sync_defaults_disabled() -> None:
     assert settings.newsletter_sync_enabled is False
 
 
+def test_shared_settings_agent_memory_cleanup_requires_at_least_one_hour() -> None:
+    with pytest.raises(ValidationError):
+        SharedSettings(agent_memory_cleanup_interval_seconds=3_599)
+
+    settings = SharedSettings(agent_memory_cleanup_interval_seconds=3_600)
+
+    assert settings.agent_memory_cleanup_enabled is True
+    assert settings.agent_memory_cleanup_interval_seconds == 3_600
+
+
 def test_local_service_defaults_target_host_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

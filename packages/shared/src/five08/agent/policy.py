@@ -103,6 +103,9 @@ _ADMIN_SCOPES = frozenset(
         "deploy:request",
         "user:manage",
         "integration:manage",
+        # Persistent prompts can repeatedly invoke otherwise safe reads and
+        # publish to a channel, so they require a distinct admin-only scope.
+        "agent:schedule:manage",
         "context:read_user_recent_self",
         "context:read_user_recent_any",
         "memory:admin",

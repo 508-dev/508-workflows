@@ -59,6 +59,15 @@ def test_production_policy_grants_only_matching_role_ids_in_an_allowed_guild() -
 
     assert "agent:chat" in scopes
     assert "user:manage" in scopes
+    assert "agent:schedule:manage" in scopes
+
+
+def test_persistent_schedule_management_remains_admin_only() -> None:
+    policy = _production_policy()
+
+    steering_scopes = policy.scopes_for_context(_context(role_ids=["1002"]))
+
+    assert "agent:schedule:manage" not in steering_scopes
 
 
 def test_production_policy_uses_discord_server_id_for_agent_guild_binding() -> None:

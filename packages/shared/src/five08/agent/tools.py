@@ -26,6 +26,7 @@ from five08.agent.web import (
     WebResearchValidationError,
     WebSearchProvider,
     validate_public_https_url,
+    validate_public_https_url_shape,
 )
 from five08.clients.authentik import AuthentikAPIError, AuthentikClient
 from five08.clients.docuseal import create_member_agreement_submission
@@ -862,7 +863,7 @@ class ToolRegistry:
             _validate_public_web_query(str(arguments.get("query") or ""))
         if tool_name == "web_read.extract":
             try:
-                validate_public_https_url(str(arguments.get("url") or ""))
+                validate_public_https_url_shape(str(arguments.get("url") or ""))
             except WebResearchValidationError as exc:
                 raise ValueError(str(exc)) from exc
         _validate_planner_argument_value(arguments)

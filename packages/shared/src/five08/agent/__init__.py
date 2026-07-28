@@ -44,6 +44,17 @@ from five08.agent.planner import (
 )
 from five08.agent.orchestrator import AgentOrchestrator
 from five08.agent.policy import PolicyDecision, PolicyEngine
+from five08.agent.schedules import (
+    AGENT_SCHEDULE_ALLOWED_TOOL_NAMES,
+    AgentScheduleAction,
+    AgentScheduleDefinition,
+    AgentScheduleDiscordDelivery,
+    AgentScheduleRecord,
+    AgentScheduleRunRecord,
+    AgentScheduleRunStatus,
+    AgentScheduleRunTrigger,
+    AgentScheduleStatus,
+)
 from five08.agent.tools import (
     InMemoryTaskStore,
     ToolManifest,
@@ -67,6 +78,15 @@ __all__ = [
     "AgentRequest",
     "AgentTierModelConfig",
     "AgentResponse",
+    "AgentScheduleAction",
+    "AgentScheduleDefinition",
+    "AgentScheduleDiscordDelivery",
+    "AgentScheduleRecord",
+    "AgentScheduleRunRecord",
+    "AgentScheduleRunStatus",
+    "AgentScheduleRunTrigger",
+    "AgentScheduleStatus",
+    "AGENT_SCHEDULE_ALLOWED_TOOL_NAMES",
     "AgentToolAction",
     "ContextLoadBounds",
     "DEFAULT_AGENT_MODEL",
