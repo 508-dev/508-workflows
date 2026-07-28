@@ -114,7 +114,7 @@ class ToolRuntimeConfig:
     authentik_recovery_email_stage_id: str | None = None
     authentik_recovery_email_stage_name: str = "default-recovery-email"
     outline_base_url: str = "https://app.getoutline.com"
-    outline_api_key: str | None = None
+    outline_admin_api_key: str | None = None
     outline_api_timeout_seconds: float = 20.0
     brevo_api_key: str | None = None
     brevo_api_base_url: str = "https://api.brevo.com/v3"
@@ -171,7 +171,10 @@ class ToolRuntimeConfig:
                 "outline_base_url",
                 "https://app.getoutline.com",
             ),
-            outline_api_key=getattr(settings, "outline_api_key", None),
+            outline_admin_api_key=(
+                getattr(settings, "outline_admin_api_key", None)
+                or getattr(settings, "outline_api_key", None)
+            ),
             outline_api_timeout_seconds=getattr(
                 settings,
                 "outline_api_timeout_seconds",
@@ -901,8 +904,8 @@ class ToolRegistry:
     def _outline_client(self) -> OutlineClient:
         return OutlineClient(
             api_key=_required_config(
-                self.runtime_config.outline_api_key,
-                "OUTLINE_API_KEY",
+                self.runtime_config.outline_admin_api_key,
+                "OUTLINE_ADMIN_API_KEY",
             ),
             base_url=self.runtime_config.outline_base_url
             or "https://app.getoutline.com",

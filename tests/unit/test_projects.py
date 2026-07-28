@@ -132,7 +132,7 @@ def test_mark_missing_erpnext_open_projects_skips_empty_seen_ids() -> None:
 
 
 def test_fetch_outline_document_wraps_transport_errors() -> None:
-    settings = SharedSettings(outline_api_key="outline-key")
+    settings = SharedSettings(outline_admin_api_key="outline-key")
     with patch(
         "five08.projects.requests.post",
         side_effect=requests.Timeout("timed out"),

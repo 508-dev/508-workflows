@@ -184,15 +184,51 @@ class TestBot508:
 
         assert config.backend_api_base_url == "http://127.0.0.1:8090"
 
-    def test_outline_wiki_api_key_uses_its_own_bot_setting(
+    def test_outline_admin_api_key_prefers_new_name_and_supports_legacy_alias(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ):
-        monkeypatch.setenv("OUTLINE_WIKI_API_KEY", "wiki-read-only-key")
+        monkeypatch.setenv("OUTLINE_API_KEY", "legacy-admin-key")
+
+        legacy_config = Settings()
+
+        assert legacy_config.outline_admin_api_key == "legacy-admin-key"
+        assert legacy_config.outline_api_key == "legacy-admin-key"
+
+        monkeypatch.setenv("OUTLINE_ADMIN_API_KEY", " ")
+
+        blank_new_config = Settings()
+
+        assert blank_new_config.outline_admin_api_key == "legacy-admin-key"
+
+        monkeypatch.setenv("OUTLINE_ADMIN_API_KEY", "preferred-admin-key")
 
         config = Settings()
 
-        assert config.outline_wiki_api_key == "wiki-read-only-key"
+        assert config.outline_admin_api_key == "preferred-admin-key"
+
+    def test_outline_discord_member_api_key_prefers_new_name_and_supports_legacy_alias(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.setenv("OUTLINE_WIKI_API_KEY", "legacy-member-key")
+
+        legacy_config = Settings()
+
+        assert legacy_config.outline_discord_member_api_key == "legacy-member-key"
+        assert legacy_config.outline_wiki_api_key == "legacy-member-key"
+
+        monkeypatch.setenv("OUTLINE_DISCORD_MEMBER_API_KEY", " ")
+
+        blank_new_config = Settings()
+
+        assert blank_new_config.outline_discord_member_api_key == "legacy-member-key"
+
+        monkeypatch.setenv("OUTLINE_DISCORD_MEMBER_API_KEY", "preferred-member-key")
+
+        config = Settings()
+
+        assert config.outline_discord_member_api_key == "preferred-member-key"
 
     def test_onboarding_email_smtp_settings_fall_back_to_generic_smtp_env(
         self,

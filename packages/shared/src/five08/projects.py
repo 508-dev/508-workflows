@@ -898,9 +898,9 @@ def fetch_outline_document(
     document_id: str,
 ) -> dict[str, Any]:
     """Fetch one Outline document via the configured API key."""
-    api_key = (settings.outline_api_key or "").strip()
+    api_key = (settings.outline_admin_api_key or "").strip()
     if not api_key:
-        raise ValueError("OUTLINE_API_KEY is not configured")
+        raise ValueError("OUTLINE_ADMIN_API_KEY is not configured")
     base_url = settings.outline_base_url.rstrip("/")
     try:
         response = requests.post(

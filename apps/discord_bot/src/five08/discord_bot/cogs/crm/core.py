@@ -3644,9 +3644,9 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
 
     def _outline_client(self) -> OutlineClient:
         """Build an Outline API client from shared settings."""
-        api_key = self._contact_text_value(settings.outline_api_key)
+        api_key = self._contact_text_value(settings.outline_admin_api_key)
         if not api_key:
-            raise ValueError("OUTLINE_API_KEY is not configured.")
+            raise ValueError("OUTLINE_ADMIN_API_KEY is not configured.")
 
         base_url = (
             self._contact_text_value(settings.outline_base_url)

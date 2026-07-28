@@ -36,6 +36,7 @@ class RuntimeConfigDefinition:
     value_type: RuntimeConfigValueType = "string"
     is_secret: bool = False
     env_names: tuple[str, ...] = ()
+    legacy_keys: tuple[str, ...] = ()
     restart_required: bool = False
     min_value: float | None = None
     max_value: float | None = None
@@ -43,6 +44,11 @@ class RuntimeConfigDefinition:
     @property
     def primary_env_name(self) -> str:
         return self.env_names[0] if self.env_names else self.key
+
+    @property
+    def all_keys(self) -> tuple[str, ...]:
+        """Return the canonical dashboard key followed by compatible legacy keys."""
+        return (self.key, *self.legacy_keys)
 
 
 @dataclass(frozen=True)
@@ -82,13 +88,14 @@ _DEFINITIONS: tuple[RuntimeConfigDefinition, ...] = (
         env_names=("OUTLINE_BASE_URL",),
     ),
     RuntimeConfigDefinition(
-        key="OUTLINE_API_KEY",
-        attr="outline_api_key",
-        label="Outline API key",
+        key="OUTLINE_ADMIN_API_KEY",
+        attr="outline_admin_api_key",
+        label="Outline admin API key",
         category="Onboarding",
-        description="API key used to add users and read project wiki pages.",
+        description="Privileged Outline key used for invitations and project wiki pages.",
         is_secret=True,
-        env_names=("OUTLINE_API_KEY",),
+        env_names=("OUTLINE_ADMIN_API_KEY", "OUTLINE_API_KEY"),
+        legacy_keys=("OUTLINE_API_KEY",),
     ),
     RuntimeConfigDefinition(
         key="MIGADU_API_USER",
@@ -704,7 +711,9 @@ _DEFINITIONS: tuple[RuntimeConfigDefinition, ...] = (
     ),
 )
 
-_DEFINITIONS_BY_KEY = {definition.key: definition for definition in _DEFINITIONS}
+_DEFINITIONS_BY_KEY = {
+    key: definition for definition in _DEFINITIONS for key in definition.all_keys
+}
 _DEFINITIONS_BY_ATTR = {definition.attr: definition for definition in _DEFINITIONS}
 _CACHE_TTL_SECONDS = 5.0
 _CACHE: dict[str, tuple[float, RuntimeConfigDBSnapshot]] = {}
@@ -885,23 +894,30 @@ def _load_db_snapshot(settings: Any) -> RuntimeConfigDBSnapshot:
 
     values: dict[str, str] = {}
     present_keys: set[str] = set()
+    candidates: dict[str, tuple[RuntimeConfigDefinition, str]] = {}
     try:
         with psycopg.connect(key) as conn:
             with conn.cursor(row_factory=dict_row) as cursor:
                 cursor.execute("SELECT key, value FROM runtime_config_values")
                 for row in cursor.fetchall():
-                    row_key = str(row["key"])
+                    row_key = str(row["key"]).strip().upper()
                     definition = _DEFINITIONS_BY_KEY.get(row_key)
                     if definition is None:
                         continue
-                    present_keys.add(row_key)
-                    row_value = str(row["value"])
-                    if definition.is_secret:
-                        decrypted_value = _decrypt_secret_value(row_value)
-                        if decrypted_value is None:
-                            continue
-                        row_value = decrypted_value
-                    values[row_key] = row_value
+
+                    canonical_key = definition.key
+                    if row_key != canonical_key and canonical_key in candidates:
+                        continue
+                    candidates[canonical_key] = (definition, str(row["value"]))
+
+        for canonical_key, (definition, row_value) in candidates.items():
+            present_keys.add(canonical_key)
+            if definition.is_secret:
+                decrypted_value = _decrypt_secret_value(row_value)
+                if decrypted_value is None:
+                    continue
+                row_value = decrypted_value
+            values[canonical_key] = row_value
     except Exception:
         logger.debug("Runtime configuration DB overlay is unavailable", exc_info=True)
         with _CACHE_LOCK:
@@ -1129,6 +1145,11 @@ def set_runtime_config_value(
                     updated_by_subject,
                 ),
             )
+            for legacy_key in definition.legacy_keys:
+                cursor.execute(
+                    "DELETE FROM runtime_config_values WHERE key = %s",
+                    (legacy_key,),
+                )
     invalidate_runtime_config_cache(settings)
 
 
@@ -1141,8 +1162,9 @@ def delete_runtime_config_value(
         raise ValueError(f"{definition.key} is configured by environment")
     with psycopg.connect(_cache_key(settings)) as conn:
         with conn.cursor() as cursor:
-            cursor.execute(
-                "DELETE FROM runtime_config_values WHERE key = %s",
-                (definition.key,),
-            )
+            for key in definition.all_keys:
+                cursor.execute(
+                    "DELETE FROM runtime_config_values WHERE key = %s",
+                    (key,),
+                )
     invalidate_runtime_config_cache(settings)

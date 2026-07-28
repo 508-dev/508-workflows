@@ -3,7 +3,7 @@
 import os
 import sys
 
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -93,7 +93,19 @@ class SharedSettings(BaseSettings):
     authentik_recovery_email_stage_id: str | None = None
     authentik_recovery_email_stage_name: str = "default-recovery-email"
     outline_base_url: str = "https://app.getoutline.com"
-    outline_api_key: str | None = None
+    outline_admin_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "OUTLINE_ADMIN_API_KEY",
+            "outline_admin_api_key",
+        ),
+    )
+    legacy_outline_admin_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("OUTLINE_API_KEY", "outline_api_key"),
+        exclude=True,
+        repr=False,
+    )
     outline_api_timeout_seconds: float = 20.0
     brevo_api_key: str | None = None
     brevo_api_base_url: str = "https://api.brevo.com/v3"
@@ -239,6 +251,25 @@ class SharedSettings(BaseSettings):
                 ) from exc
         raise TypeError("BREVO_508_MEMBERS_NEWSLETTER_LIST_ID must be an integer")
 
+    @model_validator(mode="after")
+    def _resolve_outline_admin_api_key_alias(self) -> "SharedSettings":
+        """Prefer a non-empty canonical Outline key, then its legacy alias."""
+        canonical_value = object.__getattribute__(self, "outline_admin_api_key")
+        legacy_value = object.__getattribute__(
+            self,
+            "legacy_outline_admin_api_key",
+        )
+        canonical_key = (canonical_value or "").strip()
+        legacy_key = (legacy_value or "").strip()
+        object.__setattr__(
+            self,
+            "outline_admin_api_key",
+            canonical_value
+            if canonical_key
+            else (legacy_value if legacy_key else None),
+        )
+        return self
+
     @classmethod
     def _skip_dotenv(cls) -> bool:
         if os.getenv("ENVIRONMENT", "").strip().lower() == "test":
@@ -262,6 +293,11 @@ class SharedSettings(BaseSettings):
     def sentry_environment_name(self) -> str:
         """Sentry environment always follows the app runtime environment."""
         return self.environment
+
+    @property
+    def outline_api_key(self) -> str | None:
+        """Return the deprecated compatibility alias for the admin Outline key."""
+        return self.outline_admin_api_key
 
     @property
     def sentry_release(self) -> str | None:

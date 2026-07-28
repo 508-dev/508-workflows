@@ -7,7 +7,7 @@ and configuration with type validation and default values.
 
 from urllib.parse import urlparse
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, model_validator
 
 from five08.openai_fallback import (
     OpenAICompatibleProvider,
@@ -29,9 +29,21 @@ class Settings(SharedSettings):
 
     discord_admin_roles: str = "Admin,Owner"
     discord_default_job_forum_channels: str = "gigs:part_time,fulltime-roles:full_time"
-    # Dedicated, read-only Outline token for the /wiki Discord command. This must
-    # not reuse OUTLINE_API_KEY, which is used for user invitations.
-    outline_wiki_api_key: str | None = None
+    # Dedicated member-safe Outline token for Discord commands. This must not
+    # reuse OUTLINE_ADMIN_API_KEY, which is used for privileged integrations.
+    outline_discord_member_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "OUTLINE_DISCORD_MEMBER_API_KEY",
+            "outline_discord_member_api_key",
+        ),
+    )
+    legacy_outline_discord_member_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("OUTLINE_WIKI_API_KEY", "outline_wiki_api_key"),
+        exclude=True,
+        repr=False,
+    )
     # Healthcheck Configuration
     healthcheck_port: int = 3000
 
@@ -75,6 +87,33 @@ class Settings(SharedSettings):
         """Lower-cased configured Discord admin role names."""
         values = [item.strip() for item in self.discord_admin_roles.split(",")]
         return {value.casefold() for value in values if value}
+
+    @model_validator(mode="after")
+    def _resolve_outline_discord_member_api_key_alias(self) -> "Settings":
+        """Prefer a non-empty member key, then its legacy wiki-key alias."""
+        canonical_value = object.__getattribute__(
+            self,
+            "outline_discord_member_api_key",
+        )
+        legacy_value = object.__getattribute__(
+            self,
+            "legacy_outline_discord_member_api_key",
+        )
+        canonical_key = (canonical_value or "").strip()
+        legacy_key = (legacy_value or "").strip()
+        object.__setattr__(
+            self,
+            "outline_discord_member_api_key",
+            canonical_value
+            if canonical_key
+            else (legacy_value if legacy_key else None),
+        )
+        return self
+
+    @property
+    def outline_wiki_api_key(self) -> str | None:
+        """Return the deprecated compatibility alias for the Discord member key."""
+        return self.outline_discord_member_api_key
 
     @property
     def resolved_resume_ai_api_key(self) -> str | None:
