@@ -68,7 +68,9 @@ def test_claim_job_for_execution_uses_one_conditional_update() -> None:
     cursor = MagicMock()
     cursor.fetchone.return_value = None
     connection = MagicMock()
-    connection.__enter__.return_value.cursor.return_value.__enter__.return_value = cursor
+    connection.__enter__.return_value.cursor.return_value.__enter__.return_value = (
+        cursor
+    )
     settings = SharedSettings(job_max_attempts=5)
 
     with patch("five08.queue.get_postgres_connection", return_value=connection):
