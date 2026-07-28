@@ -670,6 +670,8 @@ class AgentOrchestrator:
                     message=clarification,
                     clarification_question=clarification,
                 )
+            if action.tool_name == "agent_schedule.create":
+                action.summary = self._agent_schedule_creation_summary(action.arguments)
         return self._response_for_actions(
             actions=actions,
             context=context,
@@ -769,6 +771,20 @@ class AgentOrchestrator:
                 status="needs_clarification",
                 message="What should I do next?",
                 clarification_question="What should I do next?",
+            )
+
+        if any(action.tool_name == "agent_schedule.create" for action in actions) and (
+            len(actions) != 1
+        ):
+            return AgentResponse(
+                status="needs_clarification",
+                message=(
+                    "A recurring schedule must be proposed on its own so you can "
+                    "review its timing and destination before confirmation."
+                ),
+                clarification_question=(
+                    "What single recurring report should I schedule in this channel?"
+                ),
             )
 
         for action in actions:
@@ -2932,6 +2948,8 @@ class AgentOrchestrator:
             return "What should I search for on the public web?"
         if tool_name == "web_read.extract" and not _non_empty_arg(args, "url"):
             return "Which public web page should I read?"
+        if tool_name == "agent_schedule.create" and not context.channel_id:
+            return "I need a Discord channel before I can create a recurring report."
         return None
 
     @staticmethod
@@ -2964,6 +2982,7 @@ class AgentOrchestrator:
             "sso_write.create_user": "create_sso_user",
             "outline_write.invite_user": "invite_outline_user",
             "account_write.create_user_accounts": "create_user_accounts",
+            "agent_schedule.create": "create_agent_schedule",
             "memory_read.get_user_facts": "read_user_memory",
             "memory_read.get_project_facts": "read_project_memory",
             "memory_read.search_context": "search_context",
@@ -2980,6 +2999,21 @@ class AgentOrchestrator:
         return "\n".join(
             f"{index}. {action.summary}"
             for index, action in enumerate(actions, start=1)
+        )
+
+    @staticmethod
+    def _agent_schedule_creation_summary(arguments: dict[str, object]) -> str:
+        """Render the schedule fields the user must explicitly confirm."""
+
+        name = str(arguments.get("name") or "recurring report").strip()
+        cron_expression = str(arguments.get("cron_expression") or "").strip()
+        timezone_name = str(arguments.get("timezone") or "").strip()
+        prompt = " ".join(str(arguments.get("prompt") or "").split())
+        if len(prompt) > 280:
+            prompt = f"{prompt[:279].rstrip()}…"
+        return (
+            f'Create recurring report "{name}" in this channel: '
+            f"`{cron_expression}` ({timezone_name}). Objective: {prompt}"
         )
 
     @staticmethod

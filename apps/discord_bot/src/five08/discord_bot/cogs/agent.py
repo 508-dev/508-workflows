@@ -683,6 +683,10 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             capabilities.append(
                 "- Ops: create 508 accounts, Authentik SSO users, Outline invites, and mailboxes."
             )
+        if "agent:schedule:manage" in scopes:
+            capabilities.append(
+                "- Recurring reports: ask me to schedule a read-only report in this channel; I will show the exact timing before creating it."
+            )
         if not capabilities:
             lines = [
                 "I do not see any agent workflows available for your current Discord roles."
@@ -1221,6 +1225,16 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                 elif isinstance(result_payload, dict) and "facts" in result_payload:
                     lines.extend(
                         self._format_memory_fact_result_lines(tool_name, result_payload)
+                    )
+                elif (
+                    tool_name == "agent_schedule.create"
+                    and isinstance(result_payload, dict)
+                    and result_payload.get("schedule_id")
+                ):
+                    schedule_id = str(result_payload["schedule_id"])
+                    next_run = str(result_payload.get("next_run_at") or "unknown")
+                    lines.append(
+                        f"- agent_schedule.create: created `{schedule_id}` (next: {next_run})"
                     )
                 elif (
                     tool_name == "web_read.search"

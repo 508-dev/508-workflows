@@ -54,6 +54,7 @@ from five08.agent import (
     AgentScheduleDefinition,
     AgentScheduleDiscordDelivery,
     AgentScheduleExecutionMode,
+    AgentScheduleProposal,
     AgentScheduleRunStatus,
     AgentToolAction,
     InMemoryTaskStore,
@@ -156,6 +157,7 @@ from five08.backend.schemas import (
     AgentConfirmationRequest,
     AgentScheduleContextRequest,
     AgentScheduleControlRequest,
+    AgentScheduleCreateFields,
     AgentScheduleCreateRequest,
     DashboardAssignOnboarderRequest,
     DashboardAgentScheduleControlRequest,
@@ -11191,6 +11193,108 @@ def _confirmation_execution_scopes(
     return original_scopes & confirmation_scopes
 
 
+def _has_agent_schedule_creation_action(plan: AgentPlan) -> bool:
+    """Return whether a frozen plan contains the API-owned schedule write."""
+
+    return any(action.tool_name == "agent_schedule.create" for action in plan.actions)
+
+
+def _is_agent_schedule_creation_plan(plan: AgentPlan) -> bool:
+    """Keep the schedule write isolated from unrelated agent actions."""
+
+    return (
+        len(plan.actions) == 1 and plan.actions[0].tool_name == "agent_schedule.create"
+    )
+
+
+async def _execute_confirmed_agent_schedule_creation_plan(
+    request: Request,
+    *,
+    plan: AgentPlan,
+    context: AgentIdentityContext,
+) -> AgentResponse:
+    """Persist one confirmed agent-proposed schedule through the normal API gate.
+
+    The generic agent registry intentionally never executes this action itself.
+    Routing it here preserves the schedule API's fresh Discord role snapshot,
+    exact capability catalog, validation, and audit event.
+    """
+
+    action = plan.actions[0]
+    try:
+        proposal = AgentScheduleProposal.model_validate(action.arguments)
+        payload = AgentScheduleCreateFields(
+            name=proposal.name,
+            cron_expression=proposal.cron_expression,
+            timezone=proposal.timezone,
+            prompt=proposal.prompt,
+            execution_mode="agent_loop",
+            channel_id=str(context.channel_id or ""),
+        )
+    except (TypeError, ValidationError, ValueError):
+        return AgentResponse(
+            status="failed",
+            plan=plan,
+            results=[
+                AgentExecutionResult(
+                    tool_name=action.tool_name,
+                    status="failed",
+                    error="Invalid confirmed recurring schedule proposal",
+                )
+            ],
+            message="The recurring schedule proposal was invalid. Please ask again.",
+        )
+
+    created, status_code = await _create_agent_schedule_for_context(
+        request,
+        payload=payload,
+        context=context,
+    )
+    schedule_payload = created.get("schedule")
+    if status_code == 201 and isinstance(schedule_payload, dict):
+        schedule_id = str(schedule_payload.get("id") or "")
+        next_run_at = schedule_payload.get("next_run_at")
+        channel_id = str(context.channel_id or "")
+        return AgentResponse(
+            status="executed",
+            plan=plan,
+            results=[
+                AgentExecutionResult(
+                    tool_name=action.tool_name,
+                    status="succeeded",
+                    result={
+                        "schedule_id": schedule_id,
+                        "next_run_at": str(next_run_at) if next_run_at else None,
+                        "channel_id": channel_id,
+                    },
+                )
+            ],
+            message=(
+                f"Created recurring report `{schedule_id}` for <#{channel_id}>. "
+                f"Next run: {next_run_at or 'unknown'}."
+            ),
+        )
+
+    detail = str(created.get("detail") or created.get("error") or "").strip()
+    denied = status_code in {401, 403}
+    return AgentResponse(
+        status="denied" if denied else "failed",
+        plan=plan,
+        results=[
+            AgentExecutionResult(
+                tool_name=action.tool_name,
+                status="denied" if denied else "failed",
+                error=detail or "recurring_schedule_create_failed",
+            )
+        ],
+        message=(
+            "The recurring schedule was denied by policy."
+            if denied
+            else "The recurring schedule could not be created."
+        ),
+    )
+
+
 def _pending_agent_plans_lock() -> asyncio.Lock:
     global _PENDING_AGENT_PLANS_LOCK, _PENDING_AGENT_PLANS_LOCK_LOOP
     loop = asyncio.get_running_loop()
@@ -11491,49 +11595,70 @@ async def agent_confirmation_handler(
         original_context=original_context,
         confirmation_context=payload.context,
     )
-    assert orchestrator is not None
-    results = await asyncio.to_thread(
-        orchestrator.execute_plan,
-        plan,
-        execution_context,
-        confirmed=True,
-        effective_scopes=_confirmation_execution_scopes(
-            original_context=original_context,
-            confirmation_context=payload.context,
-        ),
-    )
-    if any(result.status == "denied" for result in results):
-        status = "denied"
-    elif all(result.status == "succeeded" for result in results):
-        status = "executed"
+    if _has_agent_schedule_creation_action(plan):
+        if _is_agent_schedule_creation_plan(plan):
+            response = await _execute_confirmed_agent_schedule_creation_plan(
+                request,
+                plan=plan,
+                context=execution_context,
+            )
+        else:
+            response = AgentResponse(
+                status="denied",
+                plan=plan,
+                results=[
+                    AgentExecutionResult(
+                        tool_name="agent_schedule.create",
+                        status="denied",
+                        error="Recurring schedule creation cannot be combined with other actions",
+                    )
+                ],
+                message="The confirmed agent plan was denied by policy.",
+            )
     else:
-        status = "failed"
-    if status == "executed":
-        response = AgentResponse(
-            status="executed",
-            plan=plan,
-            results=results,
-            message="Executed the confirmed agent plan.",
+        assert orchestrator is not None
+        results = await asyncio.to_thread(
+            orchestrator.execute_plan,
+            plan,
+            execution_context,
+            confirmed=True,
+            effective_scopes=_confirmation_execution_scopes(
+                original_context=original_context,
+                confirmation_context=payload.context,
+            ),
         )
-    elif status == "denied":
-        response = AgentResponse(
-            status="denied",
-            plan=plan,
-            results=results,
-            message="The confirmed agent plan was denied by policy.",
-        )
-    else:
-        response = AgentResponse(
-            status="failed",
-            plan=plan,
-            results=results,
-            message="One or more confirmed agent actions failed.",
-        )
+        if any(result.status == "denied" for result in results):
+            status = "denied"
+        elif all(result.status == "succeeded" for result in results):
+            status = "executed"
+        else:
+            status = "failed"
+        if status == "executed":
+            response = AgentResponse(
+                status="executed",
+                plan=plan,
+                results=results,
+                message="Executed the confirmed agent plan.",
+            )
+        elif status == "denied":
+            response = AgentResponse(
+                status="denied",
+                plan=plan,
+                results=results,
+                message="The confirmed agent plan was denied by policy.",
+            )
+        else:
+            response = AgentResponse(
+                status="failed",
+                plan=plan,
+                results=results,
+                message="One or more confirmed agent actions failed.",
+            )
     audit_result = {
         "executed": AuditResult.SUCCESS,
         "denied": AuditResult.DENIED,
         "failed": AuditResult.ERROR,
-    }[status]
+    }[response.status]
     _schedule_agent_audit_event(
         context=execution_context,
         action="agent.confirmation",
@@ -11552,13 +11677,13 @@ async def agent_confirmation_handler(
             # the returned payloads themselves.
             "tool_outcomes": [
                 {"tool_name": result.tool_name, "status": result.status}
-                for result in results
+                for result in response.results
             ],
         },
     )
     return JSONResponse(
         response.model_dump(mode="json"),
-        status_code={"executed": 200, "denied": 403, "failed": 500}[status],
+        status_code={"executed": 200, "denied": 403, "failed": 500}[response.status],
     )
 
 

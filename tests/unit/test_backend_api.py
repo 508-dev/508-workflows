@@ -17,7 +17,11 @@ from fastapi.testclient import TestClient
 from five08.agent import (
     AgentExecutionResult,
     AgentIdentityContext,
+    AgentModelConfig,
     AgentOrchestrator,
+    AgentPlan,
+    AgentResponse,
+    AgentToolAction,
     InMemoryTaskStore,
     ToolRegistry,
 )
@@ -1378,6 +1382,103 @@ def test_agent_confirmation_executes_frozen_plan_inline(
     assert payload["status"] == "executed"
     assert payload["results"][0]["result"]["task_id"] == "TASK-001"
     assert plan_id not in api._PENDING_AGENT_PLANS
+
+
+def test_agent_confirmation_routes_schedule_creation_through_schedule_gate(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A schedule plan never reaches the generic tool-registry executor."""
+
+    plan = AgentPlan(
+        plan_id="schedule-plan-1",
+        intent="create_agent_schedule",
+        planner="live_model",
+        model_tier="fast",
+        model=AgentModelConfig().resolve("fast"),
+        actions=[
+            AgentToolAction(
+                tool_name="agent_schedule.create",
+                arguments={
+                    "name": "Weekly onboarding health",
+                    "cron_expression": "0 9 * * 1",
+                    "timezone": "Asia/Tokyo",
+                    "prompt": "Inspect onboarding health and report blockers.",
+                },
+                summary="Create recurring report",
+                requires_confirmation=True,
+            )
+        ],
+        human_summary="Create recurring report",
+        requires_confirmation=True,
+    )
+    original_context = AgentIdentityContext(
+        discord_user_id="123",
+        organization_id="org-1",
+        guild_id="org-1",
+        channel_id="2000",
+        roles=["Admin"],
+    )
+    captured: dict[str, object] = {}
+
+    async def create_schedule(
+        _request: api.Request,
+        *,
+        plan: AgentPlan,
+        context: AgentIdentityContext,
+    ) -> AgentResponse:
+        captured["plan"] = plan
+        captured["context"] = context
+        return AgentResponse(
+            status="executed",
+            plan=plan,
+            results=[
+                AgentExecutionResult(
+                    tool_name="agent_schedule.create",
+                    status="succeeded",
+                    result={"schedule_id": "schedule-2"},
+                )
+            ],
+            message="Created recurring report `schedule-2`.",
+        )
+
+    generic_executor = Mock()
+    monkeypatch.setattr(api, "_AGENT_ORCHESTRATOR", generic_executor)
+    monkeypatch.setattr(
+        api,
+        "_PENDING_AGENT_PLANS",
+        {plan.plan_id: (plan, original_context)},
+    )
+    monkeypatch.setattr(
+        api,
+        "_execute_confirmed_agent_schedule_creation_plan",
+        create_schedule,
+    )
+
+    with patch("five08.backend.api.insert_audit_event"):
+        response = client.post(
+            f"/agent/confirmations/{plan.plan_id}",
+            json={
+                "confirm": True,
+                "context": {
+                    "discord_user_id": "123",
+                    "organization_id": "org-1",
+                    "guild_id": "org-1",
+                    "channel_id": "attacker-selected-channel",
+                    "roles": ["Admin"],
+                },
+            },
+            headers=auth_headers,
+        )
+
+    assert response.status_code == 200
+    assert response.json()["results"][0]["result"]["schedule_id"] == "schedule-2"
+    assert captured["plan"] is plan
+    confirmation_context = captured["context"]
+    assert isinstance(confirmation_context, AgentIdentityContext)
+    assert confirmation_context.channel_id == "2000"
+    generic_executor.execute_plan.assert_not_called()
 
 
 def test_agent_confirmation_cancel_returns_canceled_status(

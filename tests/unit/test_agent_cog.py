@@ -149,6 +149,18 @@ def test_agent_capabilities_advertise_bounded_billing_and_erp_reads() -> None:
     assert "Billing:" not in erp_message
 
 
+def test_agent_capabilities_advertise_confirmed_recurring_reports_for_admins() -> None:
+    message = AgentCog._agent_capabilities_message(
+        roles=["Admin"],
+        role_ids=[],
+        guild_id="test-guild",
+        transport="slash",
+    )
+
+    assert "Recurring reports:" in message
+    assert "before creating it" in message
+
+
 def test_format_agent_response_renders_github_issue_results() -> None:
     cog = AgentCog.__new__(AgentCog)
 
@@ -199,6 +211,29 @@ def test_format_agent_response_renders_created_github_issue() -> None:
 
     assert "- github_issue.create_issue: 1 issues" in message
     assert "#43 Fix task sync https://github.example/issues/43" in message
+
+
+def test_format_agent_response_renders_created_agent_schedule() -> None:
+    cog = AgentCog.__new__(AgentCog)
+
+    message = cog._format_agent_response(
+        {
+            "status": "executed",
+            "results": [
+                {
+                    "tool_name": "agent_schedule.create",
+                    "status": "succeeded",
+                    "result": {
+                        "schedule_id": "schedule-123",
+                        "next_run_at": "2026-08-03T00:00:00+00:00",
+                    },
+                }
+            ],
+        }
+    )
+
+    assert "created `schedule-123`" in message
+    assert "2026-08-03T00:00:00+00:00" in message
 
 
 def test_format_agent_response_renders_contact_results() -> None:

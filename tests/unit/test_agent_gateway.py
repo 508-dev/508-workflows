@@ -2151,6 +2151,99 @@ def test_agent_uses_structured_planner_for_multi_action_confirmation() -> None:
     ]
 
 
+def test_admin_can_propose_a_confirmed_recurring_agent_report() -> None:
+    """The normal agent path freezes a schedule before the durable write."""
+
+    class FakePlanner:
+        def plan(self, **_kwargs: object) -> AgentPlannerResult:
+            return AgentPlannerResult(
+                draft=PlannerDraft(
+                    status="planned",
+                    actions=[
+                        {
+                            "tool_name": "agent_schedule.create",
+                            "arguments": {
+                                "name": "Weekly onboarding health",
+                                "cron_expression": "0 9 * * 1",
+                                "timezone": "Asia/Tokyo",
+                                "prompt": "Inspect onboarding health and report blockers.",
+                            },
+                            "summary": "Ignore this untrusted summary",
+                        }
+                    ],
+                ),
+                model=AgentModelConfig().resolve("fast"),
+                latency_ms=1,
+            )
+
+    context = _context(roles=["Admin"])
+    context.channel_id = "2000"
+    response = AgentOrchestrator(planner=FakePlanner()).plan(
+        "Every Monday at 9 AM Tokyo time, schedule an onboarding health report.",
+        context,
+    )
+
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    action = response.plan.actions[0]
+    assert action.tool_name == "agent_schedule.create"
+    assert action.requires_confirmation is True
+    assert action.required_scopes == ["agent:schedule:manage"]
+    assert "0 9 * * 1" in response.plan.human_summary
+    assert "Ignore this untrusted summary" not in response.plan.human_summary
+
+    non_admin_context = _context(roles=["Steering Committee"])
+    non_admin_context.channel_id = "2000"
+    denied = AgentOrchestrator(planner=FakePlanner()).plan(
+        "Every Monday at 9 AM Tokyo time, schedule an onboarding health report.",
+        non_admin_context,
+    )
+    assert denied.status == "denied"
+    assert "agent:schedule:manage" in denied.message
+
+
+def test_agent_schedule_proposal_cannot_be_combined_with_other_actions() -> None:
+    """One confirmation covers exactly one durable recurring schedule write."""
+
+    class FakePlanner:
+        def plan(self, **_kwargs: object) -> AgentPlannerResult:
+            return AgentPlannerResult(
+                draft=PlannerDraft(
+                    status="planned",
+                    actions=[
+                        {
+                            "tool_name": "agent_schedule.create",
+                            "arguments": {
+                                "name": "Weekly onboarding health",
+                                "cron_expression": "0 9 * * 1",
+                                "timezone": "Asia/Tokyo",
+                                "prompt": "Inspect onboarding health and report blockers.",
+                            },
+                            "summary": "Create schedule",
+                        },
+                        {
+                            "tool_name": "crm_read.search_contacts",
+                            "arguments": {"query": "onboarding", "limit": 5},
+                            "summary": "Read CRM",
+                        },
+                    ],
+                ),
+                model=AgentModelConfig().resolve("fast"),
+                latency_ms=1,
+            )
+
+    context = _context(roles=["Admin"])
+    context.channel_id = "2000"
+    response = AgentOrchestrator(planner=FakePlanner()).plan(
+        "Schedule a weekly onboarding health report.",
+        context,
+    )
+
+    assert response.status == "needs_clarification"
+    assert response.plan is None
+    assert "must be proposed on its own" in response.message
+
+
 def test_steering_can_run_bounded_public_web_search() -> None:
     class FakeWebClient:
         def __init__(self) -> None:
@@ -2638,6 +2731,18 @@ def test_planner_argument_gate_rejects_undeclared_control_fields() -> None:
         registry.validate_planner_action(
             "task_write.create_task",
             {"title": "Refresh docs", "skip_confirmation": True},
+        )
+
+    with pytest.raises(ValueError, match="unknown_arguments"):
+        registry.validate_planner_action(
+            "agent_schedule.create",
+            {
+                "name": "Weekly onboarding health",
+                "cron_expression": "0 9 * * 1",
+                "timezone": "Asia/Tokyo",
+                "prompt": "Inspect onboarding health.",
+                "channel_id": "attacker-chosen-channel",
+            },
         )
 
 

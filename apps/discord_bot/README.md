@@ -76,7 +76,8 @@ Agent command flow:
   -> public web reads may return bounded observations to the planner for up to 3 turns
   -> write actions return a frozen confirmation plan
   -> Discord confirmation button calls POST /agent/confirmations/{plan_id}
-  -> backend executes the exact frozen plan inline and returns the result
+  -> backend executes the exact frozen plan inline, or creates a confirmed
+     recurring report through the schedule API, and returns the result
 ```
 
 The backend agent package keeps read and write tools separate, applies
@@ -84,9 +85,10 @@ capability checks before every tool call, requires confirmation for writes, and
 audits request/confirmation attempts. The model only drafts bounded tool calls;
 it cannot authorize users or execute integrations. Supported workflows include
 tasks, GitHub issues, CRM contacts, member agreements, account provisioning,
-private memory, and bounded public-web research according to the requester's
-roles. Only public web tool output can enter the bounded planner follow-up loop;
-CRM, ERP, task, and private-memory results are never passed to it. Public web
+recurring reports, private memory, and bounded public-web research according to
+the requester's roles. Only public web tool output can enter the bounded planner
+follow-up loop; CRM, ERP, task, and private-memory results are never passed to
+it. Public web
 queries reject obvious private identifiers before a provider is contacted.
 Long-running service changes should be implemented as PR-based workflows rather
 than direct production mutations. Task reads require an explicit project filter
@@ -187,11 +189,13 @@ and result snippets are not audit logged.
 ## Slash Commands
 
 - `/agent`
-  - Description: Send a natural-language task request through the backend agent gateway.
+  - Description: Send a natural-language task or recurring-report request through the backend agent gateway.
   - Behavior:
     - Sends Discord user, guild, channel, role, and interaction context to the backend.
     - Executes allowed read-only task lookups synchronously.
     - Shows a frozen confirmation plan for task writes before execution.
+    - Admins can ask for a recurring report in the current channel; the plan
+      shows the exact five-field cron and IANA timezone before it is created.
     - Confirms or cancels writes through backend confirmation endpoints.
   - Guardrails:
     - The bot does not authorize agent tool calls itself.

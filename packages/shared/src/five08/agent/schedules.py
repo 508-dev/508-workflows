@@ -79,6 +79,43 @@ class AgentScheduleExecutionMode(StrEnum):
     AGENT_LOOP = "agent_loop"
 
 
+class AgentScheduleProposal(BaseModel):
+    """Model-proposed fields for creating a generic recurring report.
+
+    The delivery channel, owner, permission snapshot, and tool catalog are
+    deliberately not model-controlled fields. The API binds those values from
+    the confirmed Discord interaction before persisting a schedule.
+    """
+
+    name: str = Field(min_length=1, max_length=140)
+    cron_expression: str = Field(min_length=1, max_length=128)
+    timezone: str = Field(min_length=1, max_length=128)
+    prompt: str = Field(min_length=1, max_length=4_000)
+
+    @field_validator("name")
+    @classmethod
+    def _normalize_name(cls, value: str) -> str:
+        return _normalize_schedule_name(value)
+
+    @field_validator("cron_expression")
+    @classmethod
+    def _normalize_cron(cls, value: str) -> str:
+        return _normalize_cron_expression(value)
+
+    @field_validator("timezone")
+    @classmethod
+    def _normalize_timezone(cls, value: str) -> str:
+        return str(_timezone(value))
+
+    @field_validator("prompt")
+    @classmethod
+    def _normalize_prompt(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("schedule prompt is required")
+        return normalized
+
+
 class AgentScheduleAction(BaseModel):
     """One frozen, read-only tool call permitted for a recurring schedule."""
 

@@ -21,6 +21,7 @@ from five08.agent.models import (
     MemoryVisibility,
     RiskLevel,
 )
+from five08.agent.schedules import AgentScheduleProposal
 from five08.agent.web import (
     BraveWebSearch,
     FirecrawlWebResearch,
@@ -53,6 +54,9 @@ SSO_ID_FIELD = "cSsoID"
 logger = logging.getLogger(__name__)
 
 _PLANNER_TOOL_ARGUMENTS: dict[str, frozenset[str]] = {
+    "agent_schedule.create": frozenset(
+        {"name", "cron_expression", "timezone", "prompt"}
+    ),
     "task_read.search_tasks": frozenset({"query", "project"}),
     "task_write.create_task": frozenset({"title", "project", "assignee", "due_date"}),
     "task_write.update_task": frozenset(
@@ -532,6 +536,19 @@ class ToolRegistry:
             tuple[datetime, tuple[str, str], frozenset[str]] | None
         ) = None
         self._manifests = {
+            # This action is intentionally API-owned. The registry gives the
+            # planner a typed, policy-controlled proposal surface, while the
+            # backend binds the current Discord channel and persists the
+            # schedule only after confirmation and a fresh member snapshot.
+            "agent_schedule.create": ToolManifest(
+                name="agent_schedule.create",
+                risk="high",
+                required_scopes=("agent:schedule:manage",),
+                requires_confirmation=True,
+                tenant_scoped=True,
+                idempotent=False,
+                write=True,
+            ),
             "task_read.search_tasks": ToolManifest(
                 name="task_read.search_tasks",
                 risk="low",
@@ -895,6 +912,11 @@ class ToolRegistry:
             updates = arguments.get("updates")
             if not isinstance(updates, dict) or set(updates) != {"cOnboardingState"}:
                 raise ValueError("unsupported_crm_update_fields")
+        if tool_name == "agent_schedule.create":
+            try:
+                AgentScheduleProposal.model_validate(arguments)
+            except ValueError as exc:
+                raise ValueError("invalid_agent_schedule_proposal") from exc
         if tool_name in _ERP_READ_TOOL_NAMES:
             _validate_erp_read_arguments(tool_name, arguments)
         if tool_name == "web_read.search":
@@ -946,6 +968,12 @@ class ToolRegistry:
         actor_scopes: set[str] | None = None,
         deadline_monotonic: float | None = None,
     ) -> dict[str, Any]:
+        if tool_name == "agent_schedule.create":
+            # The FastAPI confirmation handler owns this durable write so it
+            # can refresh Discord roles, bind the current channel, and audit
+            # the persisted schedule. Do not let a generic registry caller
+            # bypass those boundaries.
+            raise PermissionError("Agent schedule creation must use confirmation")
         if tool_name == "task_read.search_tasks":
             return self.task_store.search_tasks(
                 query=str(arguments.get("query") or ""),

@@ -337,13 +337,20 @@ Agent gateway:
 ### Recurring Agent Reports
 
 Only the configured **Admin / Owner** role receives `agent:schedule:manage`.
-New schedules created through `/schedule-agent` or the **Agent schedules**
-dashboard page store a natural-language objective and an exact catalog of
+New schedules created through `/schedule-agent`, a confirmed natural-language
+`/agent` request, or the **Agent schedules** dashboard page store a
+natural-language objective and an exact catalog of
 schedule-safe read-only tools. Today that catalog covers GitHub issues, CRM
 contact search, Billing/ERP reads, onboarding queue health, and public-web
 research. Adding a new source means registering one bounded tool; it does not
 require another scheduler feature. `/schedule-github-issues` remains available
 for the older fixed GitHub-report envelope.
+
+For `/agent`, ask for a recurring report with a clear recurrence and IANA
+timezone (for example, "every Monday at 9 AM Asia/Tokyo"). The confirmation
+view shows the proposed objective and generated five-field cron timing, then
+binds delivery to the channel where `/agent` was invoked. Use `/schedule-agent`
+when the destination channel needs to be chosen explicitly.
 
 The runtime lets the configured planner make at most three short planning steps
 and two read-only calls per step. Every proposal is validated against the

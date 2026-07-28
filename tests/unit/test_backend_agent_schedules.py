@@ -17,7 +17,9 @@ from five08.agent import (
     AgentIdentityContext,
     AgentModelConfig,
     AgentOrchestrator,
+    AgentPlan,
     AgentPlannerResult,
+    AgentToolAction,
     PlannerDraft,
     PlannerDraftAction,
     PolicyEngine,
@@ -276,6 +278,80 @@ def test_agent_loop_rejects_a_write_before_any_tool_executes() -> None:
     assert outcome.error == "scheduled_planner_proposed_unallowed_tool"
     assert outcome.results == []
     assert orchestrator.plans == []
+
+
+@pytest.mark.asyncio
+async def test_confirmed_agent_schedule_creation_binds_current_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The agent cannot select a channel or loosen the generic schedule mode."""
+
+    captured: dict[str, object] = {}
+
+    async def create_schedule(
+        _request: Request,
+        *,
+        payload: object,
+        context: AgentIdentityContext,
+    ) -> tuple[dict[str, object], int]:
+        captured["payload"] = payload
+        captured["context"] = context
+        return {
+            "status": "created",
+            "schedule": {
+                "id": "schedule-2",
+                "next_run_at": "2026-08-03T00:00:00+00:00",
+            },
+        }, 201
+
+    monkeypatch.setattr(api, "_create_agent_schedule_for_context", create_schedule)
+    plan = AgentPlan(
+        plan_id="schedule-plan-1",
+        intent="create_agent_schedule",
+        planner="live_model",
+        model_tier="fast",
+        model=AgentModelConfig().resolve("fast"),
+        actions=[
+            AgentToolAction(
+                tool_name="agent_schedule.create",
+                arguments={
+                    "name": "Weekly onboarding health",
+                    "cron_expression": "0 9 * * 1",
+                    "timezone": "Asia/Tokyo",
+                    "prompt": "Inspect onboarding health and report blockers.",
+                },
+                summary="Create recurring report",
+                requires_confirmation=True,
+            )
+        ],
+        human_summary="Create recurring report",
+        requires_confirmation=True,
+    )
+    context = AgentIdentityContext(
+        discord_user_id="1001",
+        organization_id="1000",
+        guild_id="1000",
+        channel_id="2000",
+        roles=["Admin"],
+    )
+
+    response = await api._execute_confirmed_agent_schedule_creation_plan(
+        cast(Request, SimpleNamespace()),
+        plan=plan,
+        context=context,
+    )
+
+    assert response.status == "executed"
+    assert response.results[0].result == {
+        "schedule_id": "schedule-2",
+        "next_run_at": "2026-08-03T00:00:00+00:00",
+        "channel_id": "2000",
+    }
+    fields = captured["payload"]
+    assert getattr(fields, "channel_id") == "2000"
+    assert getattr(fields, "execution_mode") == "agent_loop"
+    assert getattr(fields, "tool_allowlist") == []
+    assert captured["context"] == context
 
 
 @pytest.mark.asyncio

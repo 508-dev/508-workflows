@@ -14,6 +14,7 @@ from five08.agent.schedules import (
     AgentScheduleDefinition,
     AgentScheduleDiscordDelivery,
     AgentScheduleExecutionMode,
+    AgentScheduleProposal,
     AgentScheduleRunStatus,
     claim_agent_schedule_run,
     create_due_agent_schedule_runs,
@@ -97,6 +98,35 @@ def test_agent_loop_definition_requires_a_saved_read_only_catalog() -> None:
             actions=[_github_action()],
             tool_allowlist=["onboarding_read.get_summary"],
             delivery=_delivery(),
+        )
+
+
+def test_agent_schedule_proposal_excludes_delivery_and_capability_controls() -> None:
+    """A model can describe a report, but cannot choose its authority boundary."""
+
+    proposal = AgentScheduleProposal.model_validate(
+        {
+            "name": "  Weekly onboarding health  ",
+            "cron_expression": " 0 9 * * 1 ",
+            "timezone": "Asia/Tokyo",
+            "prompt": "  Inspect onboarding health and report blockers.  ",
+        }
+    )
+
+    assert proposal.model_dump() == {
+        "name": "Weekly onboarding health",
+        "cron_expression": "0 9 * * 1",
+        "timezone": "Asia/Tokyo",
+        "prompt": "Inspect onboarding health and report blockers.",
+    }
+    with pytest.raises(ValidationError, match="cron expression"):
+        AgentScheduleProposal.model_validate(
+            {
+                "name": "Hourly report",
+                "cron_expression": "not cron",
+                "timezone": "UTC",
+                "prompt": "Inspect onboarding health.",
+            }
         )
 
 
