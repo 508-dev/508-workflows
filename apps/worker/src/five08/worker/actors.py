@@ -12,12 +12,9 @@ from five08.discord_webhook import DiscordWebhookLogger
 
 from five08.queue import (
     JobRecord,
-    JobStatus,
-    get_job,
-    job_is_terminal,
+    claim_job_for_execution,
     mark_job_dead,
     mark_job_retry,
-    mark_job_running,
     mark_job_succeeded,
 )
 from five08.worker.config import settings
@@ -208,19 +205,13 @@ def _schedule_retry(job: JobRecord, attempts: int, *, error: str) -> None:
 
 
 def _run_job(job_id: str) -> None:
-    job = get_job(settings, job_id)
+    job = claim_job_for_execution(
+        settings,
+        job_id,
+        worker_name=settings.worker_name,
+    )
     if job is None:
-        logger.warning("Skipping job_id=%s (not found)", job_id)
-        return
-    if job_is_terminal(job.status):
-        logger.info("Skipping job_id=%s already terminal (%s)", job_id, job.status)
-        return
-    if job.status == JobStatus.RUNNING and job.locked_by != settings.worker_name:
-        logger.warning(
-            "Skipping job_id=%s locked by worker=%s",
-            job_id,
-            job.locked_by,
-        )
+        logger.info("Skipping job_id=%s because it is no longer claimable", job_id)
         return
 
     handler = _HANDLERS.get(job.type)
@@ -239,7 +230,6 @@ def _run_job(job_id: str) -> None:
         )
         return
 
-    mark_job_running(settings, job_id, worker_name=settings.worker_name)
     if _should_log_job_event(event_type="started", job_type=job.type):
         _log_job_event(
             event_type="started",

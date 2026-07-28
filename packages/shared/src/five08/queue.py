@@ -303,6 +303,49 @@ def _mark_job(
             cursor.execute(trusted_sql(query), params)
 
 
+def claim_job_for_execution(
+    settings: SharedSettings,
+    job_id: str,
+    *,
+    worker_name: str,
+) -> JobRecord | None:
+    """Atomically claim a due queued or retryable job for one worker.
+
+    Queue adapters provide at-least-once delivery, so duplicate broker messages
+    are expected. The conditional update is the execution boundary: only the
+    caller that transitions the persisted job to ``running`` may invoke its
+    side-effectful handler.
+    """
+
+    query = """
+        UPDATE jobs
+        SET status = %s,
+            locked_at = NOW(),
+            locked_by = %s,
+            run_after = NULL,
+            last_error = NULL,
+            updated_at = NOW()
+        WHERE id = %s
+          AND status IN (%s, %s)
+          AND (run_after IS NULL OR run_after <= NOW())
+        RETURNING *;
+    """
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                query,
+                (
+                    JobStatus.RUNNING.value,
+                    worker_name,
+                    job_id,
+                    JobStatus.QUEUED.value,
+                    JobStatus.FAILED.value,
+                ),
+            )
+            row = cursor.fetchone()
+    return _as_record(row) if row is not None else None
+
+
 def mark_job_running(
     settings: SharedSettings, job_id: str, *, worker_name: str
 ) -> None:

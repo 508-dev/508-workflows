@@ -1,7 +1,7 @@
 """Unit tests for worker actor job state transitions."""
 
 from datetime import datetime, timezone
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from five08.queue import JobRecord, JobStatus
 from five08.worker import actors
@@ -37,8 +37,9 @@ def test_run_job_schedules_retry_for_docuseal_processing_error() -> None:
         raise DocusealAgreementProcessingError("CRM unavailable")
 
     with (
-        patch("five08.worker.actors.get_job", return_value=job),
-        patch("five08.worker.actors.mark_job_running") as mock_mark_running,
+        patch(
+            "five08.worker.actors.claim_job_for_execution", return_value=job
+        ) as mock_claim,
         patch("five08.worker.actors.mark_job_succeeded") as mock_mark_succeeded,
         patch("five08.worker.actors.mark_job_dead") as mock_mark_dead,
         patch("five08.worker.actors._schedule_retry") as mock_schedule_retry,
@@ -50,7 +51,7 @@ def test_run_job_schedules_retry_for_docuseal_processing_error() -> None:
     ):
         actors._run_job("job-123")
 
-    mock_mark_running.assert_called_once()
+    mock_claim.assert_called_once()
     mock_mark_succeeded.assert_not_called()
     mock_mark_dead.assert_not_called()
     mock_schedule_retry.assert_called_once()
@@ -91,8 +92,9 @@ def test_run_job_marks_dead_for_non_retryable_docuseal_error() -> None:
         )
 
     with (
-        patch("five08.worker.actors.get_job", return_value=job),
-        patch("five08.worker.actors.mark_job_running") as mock_mark_running,
+        patch(
+            "five08.worker.actors.claim_job_for_execution", return_value=job
+        ) as mock_claim,
         patch("five08.worker.actors.mark_job_succeeded") as mock_mark_succeeded,
         patch("five08.worker.actors.mark_job_dead") as mock_mark_dead,
         patch("five08.worker.actors._schedule_retry") as mock_schedule_retry,
@@ -104,7 +106,7 @@ def test_run_job_marks_dead_for_non_retryable_docuseal_error() -> None:
     ):
         actors._run_job("job-124")
 
-    mock_mark_running.assert_called_once()
+    mock_claim.assert_called_once()
     mock_mark_succeeded.assert_not_called()
     mock_schedule_retry.assert_not_called()
     mock_mark_dead.assert_called_once()
@@ -115,3 +117,44 @@ def test_run_job_marks_dead_for_non_retryable_docuseal_error() -> None:
         call_args.kwargs["last_error"]
         == "DocusealAgreementNonRetryableError: invalid_completed_at for contact_id=c-1"
     )
+
+
+def test_run_job_executes_only_one_duplicate_broker_delivery() -> None:
+    """A second message cannot bypass the persisted execution claim."""
+
+    now = datetime.now(timezone.utc)
+    job = JobRecord(
+        id="job-125",
+        type="process_docuseal_agreement_job",
+        status=JobStatus.RUNNING,
+        payload={"args": ["member@508.dev", "2026-02-25 12:00:00", 42], "kwargs": {}},
+        idempotency_key="docuseal:125",
+        attempts=0,
+        max_attempts=8,
+        run_after=None,
+        locked_at=now,
+        locked_by="worker-1",
+        last_error=None,
+        created_at=now,
+        updated_at=now,
+    )
+    handler = Mock(return_value={"ok": True})
+
+    with (
+        patch(
+            "five08.worker.actors.claim_job_for_execution",
+            side_effect=[job, None],
+        ) as mock_claim,
+        patch("five08.worker.actors.mark_job_succeeded") as mock_mark_succeeded,
+        patch.dict(
+            actors._HANDLERS,
+            {"process_docuseal_agreement_job": handler},
+            clear=False,
+        ),
+    ):
+        actors._run_job("job-125")
+        actors._run_job("job-125")
+
+    assert mock_claim.call_count == 2
+    handler.assert_called_once_with("member@508.dev", "2026-02-25 12:00:00", 42)
+    mock_mark_succeeded.assert_called_once()

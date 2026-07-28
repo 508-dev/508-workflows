@@ -9575,7 +9575,8 @@ def _agent_schedule_loop_prompt(schedule: AgentScheduleRecord) -> str:
         "You are running a bounded recurring operations report. This is a "
         "read-only schedule: never draft a write, an approval, a confirmation, "
         "or a tool outside the exact allowed-tool list below. You may make at "
-        "most two independent tool calls in one planning step. After safe tool "
+        "most two independent tool calls in one planning step. A public web "
+        "search is allowed only once, in the first planning step. After safe tool "
         "observations are provided, either make the next allowed read-only call "
         "or return a concise answer with no tool actions.\n\n"
         f"Allowed tool IDs: {allowed_tools}\n\n"
@@ -9608,6 +9609,11 @@ def _agent_schedule_loop_actions(
             return None, "scheduled_planner_proposed_unallowed_tool"
         if not isinstance(arguments, dict) or not summary:
             return None, "scheduled_planner_action_invalid"
+        if tool_name == "web_read.search":
+            if any(result.tool_name == "web_read.search" for result in prior_results):
+                return None, "scheduled_planner_follow_up_search_not_allowed"
+            if any(action.tool_name == "web_read.search" for action in actions):
+                return None, "scheduled_planner_multiple_searches_not_allowed"
         if tool_name == "web_read.extract" and not _schedule_extract_from_prior_search(
             arguments,
             prior_results,
@@ -10336,6 +10342,9 @@ def _agent_schedule_loop_error_is_non_retryable(error: str) -> bool:
         "scheduled_planner_action_denied",
         "scheduled_planner_action_invalid",
         "scheduled_planner_extract_not_from_search",
+        "scheduled_planner_follow_up_search_not_allowed",
+        "scheduled_planner_multiple_searches_not_allowed",
+        "scheduled_planner_answer_without_observation",
         "scheduled_planner_needs_clarification",
         "scheduled_prompt_contains_internal_identifier",
         "scheduled_planner_proposed_unallowed_tool",
