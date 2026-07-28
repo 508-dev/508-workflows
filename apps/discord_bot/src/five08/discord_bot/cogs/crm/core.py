@@ -8294,12 +8294,17 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 ephemeral=True,
             )
         except OutlineAPIError as exc:
+            logger.exception("Outline invite failed for CRM contact")
             message = self._sanitize_error_message_for_discord(exc)
             self._audit_command_safe(
                 interaction=interaction,
                 action="crm.invite_outline_user",
                 result="error",
-                metadata={"search_term": search_term, "error": message},
+                metadata={
+                    "search_term": search_term,
+                    "stage": "outline",
+                    "error": message,
+                },
             )
             await interaction.followup.send(
                 f"❌ Outline invite failed: {message}",
@@ -8345,6 +8350,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 ephemeral=True,
             )
         except OutlineAPIError as exc:
+            logger.exception("Outline invite failed for direct email")
             message = self._sanitize_error_message_for_discord(exc)
             self._audit_command_safe(
                 interaction=interaction,
@@ -8354,6 +8360,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     "search_term": search_term,
                     "email": email,
                     "direct_email": True,
+                    "stage": "outline",
                     "error": message,
                 },
             )
@@ -8553,6 +8560,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 ephemeral=True,
             )
         except OutlineAPIError as exc:
+            logger.exception("Outline invite failed during user account provisioning")
             message = self._sanitize_error_message_for_discord(exc)
             self._audit_command_safe(
                 interaction=interaction,

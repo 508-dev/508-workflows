@@ -11,6 +11,7 @@ from five08.runtime_config import (
     _load_db_values,
     coerce_runtime_config_value,
     definition_is_env_locked,
+    delete_runtime_config_value,
     invalidate_runtime_config_cache,
     list_runtime_config,
     mask_runtime_secret,
@@ -318,7 +319,17 @@ def test_saving_outline_admin_runtime_config_removes_legacy_key(
         for query, params in calls
     )
     assert any(
-        "DELETE FROM runtime_config_values" in query and params == ("OUTLINE_API_KEY",)
+        "UPPER(BTRIM(key)) = ANY(%s)" in query and params == (["OUTLINE_API_KEY"],)
+        for query, params in calls
+    )
+
+    calls.clear()
+
+    delete_runtime_config_value(settings, definition)
+
+    assert any(
+        "UPPER(BTRIM(key)) = ANY(%s)" in query
+        and params == (["OUTLINE_ADMIN_API_KEY", "OUTLINE_API_KEY"],)
         for query, params in calls
     )
 

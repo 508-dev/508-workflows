@@ -188,6 +188,7 @@ class TestBot508:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ):
+        monkeypatch.delenv("OUTLINE_ADMIN_API_KEY", raising=False)
         monkeypatch.setenv("OUTLINE_API_KEY", "legacy-admin-key")
 
         legacy_config = Settings()
@@ -211,6 +212,7 @@ class TestBot508:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ):
+        monkeypatch.delenv("OUTLINE_CONTENTS_API_KEY", raising=False)
         monkeypatch.setenv("OUTLINE_DISCORD_MEMBER_API_KEY", "unused-key")
         monkeypatch.setenv("OUTLINE_WIKI_API_KEY", "unused-key")
 

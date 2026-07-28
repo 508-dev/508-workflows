@@ -1218,6 +1218,7 @@ async def test_invite_outline_user_reports_outline_api_error(
     assert "outline unavailable" in message
     audit_metadata = mock_audit.call_args.kwargs["metadata"]
     assert audit_metadata["search_term"] == "jane"
+    assert audit_metadata["stage"] == "outline"
     assert audit_metadata["error"] == "outline unavailable"
 
 

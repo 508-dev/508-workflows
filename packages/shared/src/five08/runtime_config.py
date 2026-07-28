@@ -1118,6 +1118,23 @@ def list_runtime_config(settings: Any) -> list[dict[str, object]]:
     return items
 
 
+def _delete_runtime_config_key_variants(
+    cursor: Any,
+    keys: tuple[str, ...],
+) -> None:
+    """Delete DB entries whose normalized keys match one of ``keys``."""
+    normalized_keys = [key.strip().upper() for key in keys if key.strip()]
+    if not normalized_keys:
+        return
+    cursor.execute(
+        """
+        DELETE FROM runtime_config_values
+        WHERE UPPER(BTRIM(key)) = ANY(%s)
+        """,
+        (normalized_keys,),
+    )
+
+
 def set_runtime_config_value(
     settings: Any,
     definition: RuntimeConfigDefinition,
@@ -1157,11 +1174,7 @@ def set_runtime_config_value(
                     updated_by_subject,
                 ),
             )
-            for legacy_key in definition.legacy_keys:
-                cursor.execute(
-                    "DELETE FROM runtime_config_values WHERE key = %s",
-                    (legacy_key,),
-                )
+            _delete_runtime_config_key_variants(cursor, definition.legacy_keys)
     invalidate_runtime_config_cache(settings)
 
 
@@ -1174,9 +1187,5 @@ def delete_runtime_config_value(
         raise ValueError(f"{definition.key} is configured by environment")
     with psycopg.connect(_cache_key(settings)) as conn:
         with conn.cursor() as cursor:
-            for key in definition.all_keys:
-                cursor.execute(
-                    "DELETE FROM runtime_config_values WHERE key = %s",
-                    (key,),
-                )
+            _delete_runtime_config_key_variants(cursor, definition.all_keys)
     invalidate_runtime_config_cache(settings)
