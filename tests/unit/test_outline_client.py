@@ -164,6 +164,36 @@ def test_search_documents_ignores_malformed_or_external_document_urls() -> None:
     assert results == []
 
 
+def test_search_documents_preserves_same_instance_absolute_urls() -> None:
+    response = Mock()
+    response.status_code = 200
+    response.json.return_value = {
+        "ok": True,
+        "data": [
+            {
+                "document": {
+                    "id": "doc-1",
+                    "title": "Member handbook",
+                    "url": (
+                        "https://outline.example.com/wiki/doc/member-handbook-abc123"
+                        "?source=search"
+                    ),
+                }
+            }
+        ],
+    }
+
+    with patch("five08.clients.outline.requests.post", return_value=response):
+        results = OutlineClient(
+            api_key="wiki-key",
+            base_url="https://outline.example.com/wiki/api",
+        ).search_documents(query="handbook")
+
+    assert results[0].document.url == (
+        "https://outline.example.com/wiki/doc/member-handbook-abc123"
+    )
+
+
 def test_list_starred_documents_keeps_outline_star_order() -> None:
     response = Mock()
     response.status_code = 200

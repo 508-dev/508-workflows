@@ -9,16 +9,26 @@ from five08.clients.outline import (
     OutlineDocumentSummary,
     OutlineSearchResult,
 )
-from five08.discord_bot.cogs.wiki import NO_MENTIONS, WikiCog
+from five08.discord_bot.cogs import wiki as wiki_module
+from five08.discord_bot.cogs.wiki import (
+    NO_MENTIONS,
+    OutlineWikiConfigurationError,
+    WikiCog,
+)
 
 
-def _make_interaction(role_names: list[str]) -> AsyncMock:
+def _make_interaction(
+    role_names: list[str],
+    *,
+    guild_id: int | None = 123,
+) -> AsyncMock:
     interaction = AsyncMock()
     interaction.response = AsyncMock()
     interaction.response.defer = AsyncMock()
     interaction.response.send_message = AsyncMock()
     interaction.followup = AsyncMock()
     interaction.followup.send = AsyncMock()
+    interaction.guild_id = guild_id
     interaction.user = Mock()
     interaction.user.roles = [Mock(name=role_name) for role_name in role_names]
     for role, role_name in zip(interaction.user.roles, role_names, strict=True):
@@ -44,6 +54,11 @@ def _document(
 @pytest.fixture
 def cog() -> WikiCog:
     return WikiCog(Mock())
+
+
+@pytest.fixture(autouse=True)
+def configure_wiki_guild(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(wiki_module.settings, "discord_server_id", "123")
 
 
 @pytest.mark.asyncio
@@ -132,18 +147,69 @@ async def test_wiki_handles_outline_failure_without_exposing_error(
 
 
 @pytest.mark.asyncio
+async def test_wiki_rejects_other_guild_before_contacting_outline(cog: WikiCog) -> None:
+    interaction = _make_interaction(["Member"], guild_id=456)
+    cog._search = Mock()
+
+    await cog.wiki.callback(cog, interaction, "invoice")
+
+    cog._search.assert_not_called()
+    interaction.response.defer.assert_not_awaited()
+    interaction.response.send_message.assert_awaited_once_with(
+        "This command is only available in the configured co-op server.",
+        allowed_mentions=NO_MENTIONS,
+        ephemeral=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_wiki_requires_a_configured_guild(
+    cog: WikiCog,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(wiki_module.settings, "discord_server_id", None)
+    interaction = _make_interaction(["Member"])
+    cog._quick_links = Mock()
+
+    await cog.wiki.callback(cog, interaction)
+
+    cog._quick_links.assert_not_called()
+    interaction.response.defer.assert_not_awaited()
+    assert (
+        "configured co-op server"
+        in interaction.response.send_message.await_args.args[0]
+    )
+
+
+@pytest.mark.asyncio
 async def test_wiki_reports_missing_configuration(cog: WikiCog) -> None:
     interaction = _make_interaction(["Member"])
     with patch.object(
         cog,
         "_quick_links",
-        side_effect=ValueError("Outline wiki search is not configured."),
+        side_effect=OutlineWikiConfigurationError(
+            "Outline wiki search is not configured."
+        ),
     ):
         await cog.wiki.callback(cog, interaction)
 
     message = interaction.followup.send.await_args.args[0]
     assert "not configured" in message
     assert interaction.followup.send.await_args.kwargs["ephemeral"] is True
+
+
+@pytest.mark.asyncio
+async def test_wiki_does_not_report_unexpected_value_error_as_configuration(
+    cog: WikiCog,
+) -> None:
+    interaction = _make_interaction(["Member"])
+    cog._search = Mock(side_effect=ValueError("unexpected client input"))
+
+    await cog.wiki.callback(cog, interaction, "invoice")
+
+    message = interaction.followup.send.await_args.args[0]
+    assert "temporarily unavailable" in message
+    assert "not configured" not in message
 
 
 @pytest.mark.asyncio

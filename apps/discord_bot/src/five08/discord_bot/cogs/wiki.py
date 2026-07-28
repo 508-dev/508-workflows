@@ -32,6 +32,10 @@ WIKI_CONTEXT_MAX_LENGTH = 300
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 
 
+class OutlineWikiConfigurationError(RuntimeError):
+    """Raised when the dedicated Outline wiki integration is not configured."""
+
+
 def _safe_display_text(value: str, *, max_length: int) -> str:
     """Collapse and escape untrusted wiki text for a Discord embed."""
     normalized = html.unescape(value)
@@ -72,11 +76,21 @@ class WikiCog(commands.Cog, name="Wiki"):
     def _outline_client(self) -> OutlineClient:
         api_key = (settings.outline_wiki_api_key or "").strip()
         if not api_key:
-            raise ValueError("Outline wiki search is not configured.")
+            raise OutlineWikiConfigurationError(
+                "Outline wiki search is not configured."
+            )
         return OutlineClient(
             api_key=api_key,
             base_url=settings.outline_base_url,
             timeout_seconds=max(1.0, float(settings.outline_api_timeout_seconds)),
+        )
+
+    @staticmethod
+    def _is_configured_guild(interaction: discord.Interaction) -> bool:
+        """Only allow the wiki credential to be used in the configured co-op guild."""
+        configured_guild_id = str(settings.discord_server_id or "").strip()
+        return bool(configured_guild_id) and (
+            str(interaction.guild_id or "") == configured_guild_id
         )
 
     def _search(self, query: str) -> list[OutlineSearchResult]:
@@ -102,6 +116,14 @@ class WikiCog(commands.Cog, name="Wiki"):
         query: str | None = None,
     ) -> None:
         """Search the wiki, or show the integration account's starred pages."""
+        if not self._is_configured_guild(interaction):
+            await interaction.response.send_message(
+                "This command is only available in the configured co-op server.",
+                allowed_mentions=NO_MENTIONS,
+                ephemeral=True,
+            )
+            return
+
         await interaction.response.defer(ephemeral=True)
         normalized_query = " ".join((query or "").split())
         if len(normalized_query) > WIKI_QUERY_MAX_LENGTH:
@@ -128,7 +150,7 @@ class WikiCog(commands.Cog, name="Wiki"):
                 allowed_mentions=NO_MENTIONS,
                 ephemeral=True,
             )
-        except ValueError:
+        except OutlineWikiConfigurationError:
             await interaction.followup.send(
                 "The co-op wiki is not configured yet. Ask an administrator for help.",
                 allowed_mentions=NO_MENTIONS,
@@ -136,6 +158,13 @@ class WikiCog(commands.Cog, name="Wiki"):
             )
         except OutlineAPIError:
             logger.warning("Outline wiki lookup failed", exc_info=True)
+            await interaction.followup.send(
+                "The co-op wiki is temporarily unavailable. Please try again later.",
+                allowed_mentions=NO_MENTIONS,
+                ephemeral=True,
+            )
+        except ValueError:
+            logger.warning("Outline wiki lookup rejected invalid client input")
             await interaction.followup.send(
                 "The co-op wiki is temporarily unavailable. Please try again later.",
                 allowed_mentions=NO_MENTIONS,

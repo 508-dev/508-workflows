@@ -215,6 +215,9 @@ Pydantic import errors.
 ## Discord Wiki Search
 
 - `Optional for /wiki`: `OUTLINE_WIKI_API_KEY`
+- `Required for /wiki`: `DISCORD_SERVER_ID`. The command refuses DMs and other
+  guilds so the dedicated Outline credential is never used outside the co-op
+  server.
 - Do not reuse `OUTLINE_API_KEY`: it can invite users and may access private
   collections. Create the wiki key for a dedicated regular Outline account with
   access only to collections that every Discord `Member` may search.

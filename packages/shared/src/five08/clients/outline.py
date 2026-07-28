@@ -273,7 +273,8 @@ class OutlineClient:
         """Build an absolute same-instance URL from Outline's document path."""
         parsed_url = urlsplit(raw_url.strip())
         web_base = urlsplit(self.web_base_url)
-        if parsed_url.scheme or parsed_url.netloc:
+        is_absolute = bool(parsed_url.scheme or parsed_url.netloc)
+        if is_absolute:
             if (
                 parsed_url.scheme != web_base.scheme
                 or parsed_url.netloc != web_base.netloc
@@ -284,9 +285,12 @@ class OutlineClient:
         if not path:
             return None
 
-        base_path = web_base.path.rstrip("/")
-        document_path = path.lstrip("/")
-        joined_path = (
-            f"{base_path}/{document_path}" if base_path else f"/{document_path}"
-        )
+        if is_absolute:
+            joined_path = path
+        else:
+            base_path = web_base.path.rstrip("/")
+            document_path = path.lstrip("/")
+            joined_path = (
+                f"{base_path}/{document_path}" if base_path else f"/{document_path}"
+            )
         return urlunsplit((web_base.scheme, web_base.netloc, joined_path, "", ""))

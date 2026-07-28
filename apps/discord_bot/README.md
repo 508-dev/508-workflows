@@ -123,7 +123,8 @@ documents and returns short excerpts plus Outline links.
 Configure `OUTLINE_WIKI_API_KEY` separately from `OUTLINE_API_KEY`. The wiki
 key must belong to a regular account that has access only to collections safe
 for every Discord `Member`, and should be scoped to `documents.search` and
-`stars.list`. Search queries and result snippets are not audit logged.
+`stars.list`. `DISCORD_SERVER_ID` is required: `/wiki` refuses DMs and other
+guilds. Search queries and result snippets are not audit logged.
 
 ## Slash Commands
 
