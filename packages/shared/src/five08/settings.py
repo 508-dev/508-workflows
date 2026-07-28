@@ -63,6 +63,29 @@ class SharedSettings(BaseSettings):
         validation_alias=AliasChoices("WEB_PORT", "WEBHOOK_INGEST_PORT"),
     )
     api_shared_secret: str | None = None
+    # The Discord agent gateway accepts role-bearing requests. Keep its
+    # credential separate from general internal API callers so a holder of the
+    # latter cannot fabricate privileged agent context.
+    agent_shared_secret: str | None = None
+    # The legacy API-secret fallback is deliberately opt-in and only honored
+    # in explicit local/test environments. It exists solely to ease developer
+    # migration to AGENT_SHARED_SECRET.
+    agent_allow_legacy_api_secret: bool = False
+    # Agent authorization is bound to immutable Discord snowflake IDs in
+    # deployed environments. A combined role (for example Billing / ERP Dev)
+    # is intentionally listed in every applicable bundle.
+    agent_discord_guild_ids: str = ""
+    agent_discord_admin_role_ids: str = ""
+    agent_discord_steering_committee_role_ids: str = ""
+    agent_discord_billing_role_ids: str = ""
+    agent_discord_erp_developer_role_ids: str = ""
+    # These preserve established project-manager and engineer capability
+    # bundles without relying on mutable role names in production.
+    agent_discord_project_manager_role_ids: str = ""
+    agent_discord_engineer_role_ids: str = ""
+    # Role-name matching is a local/test-only migration convenience. It is
+    # never effective in deployed environments, even if set accidentally.
+    agent_allow_role_name_fallback: bool = False
     webhook_shared_secret: str | None = None
     discord_logs_webhook_url: str | None = None
     discord_logs_webhook_wait: bool = True
@@ -95,9 +118,42 @@ class SharedSettings(BaseSettings):
     github_app_private_key: str | None = None
     github_api_token: str | None = None
     github_allowed_repos: str = ""
+    # Public-web research is deliberately configured separately from internal
+    # integrations. The registry only uses providers with usable credentials or
+    # an explicitly configured SearXNG endpoint.
+    agent_web_search_provider_order: str = "searxng,brave,firecrawl"
+    agent_web_search_timeout_seconds: float = Field(default=5.0, ge=1.0, le=60.0)
+    agent_web_default_result_limit: int = Field(default=5, ge=1, le=10)
+    agent_planning_max_steps: int = Field(default=3, ge=1, le=5)
+    # A caller-visible bound for planning/read requests. It protects Discord
+    # interaction handling even if a DNS lookup or an upstream stream ignores
+    # a lower-level request timeout.
+    agent_request_response_budget_seconds: float = Field(
+        default=55.0,
+        ge=1.0,
+        le=55.0,
+    )
+    # Keep one synchronous Discord-facing public-web loop inside the response
+    # budget even when all configured providers fail over.
+    agent_public_web_deadline_seconds: float = Field(
+        default=50.0,
+        ge=5.0,
+        le=55.0,
+    )
+    searxng_base_url: str | None = None
+    searxng_search_language: str | None = None
+    brave_search_api_key: str | None = None
+    brave_search_base_url: str = "https://api.search.brave.com"
+    brave_search_country: str | None = None
+    brave_search_language: str | None = None
+    firecrawl_api_key: str | None = None
+    firecrawl_base_url: str = "https://api.firecrawl.dev"
     erpnext_base_url: str | None = None
     erpnext_api_key: str | None = None
     erpnext_api_timeout_seconds: float = 20.0
+    # The ERPNext credentials used by the agent are bound to one resolved
+    # Discord organization. Leave this unset to fail closed for ERP reads.
+    agent_erp_organization_id: str | None = None
     migadu_api_user: str | None = Field(
         default=None,
         validation_alias=AliasChoices(
@@ -282,6 +338,56 @@ class SharedSettings(BaseSettings):
                 ) from exc
         raise TypeError("BREVO_508_MEMBERS_NEWSLETTER_LIST_ID must be an integer")
 
+    @field_validator(
+        "agent_discord_guild_ids",
+        "agent_discord_admin_role_ids",
+        "agent_discord_steering_committee_role_ids",
+        "agent_discord_billing_role_ids",
+        "agent_discord_erp_developer_role_ids",
+        "agent_discord_project_manager_role_ids",
+        "agent_discord_engineer_role_ids",
+        mode="before",
+    )
+    @classmethod
+    def _normalize_discord_id_list(cls, value: object) -> str:
+        """Normalize comma-separated positive Discord IDs at config load time."""
+
+        if value is None:
+            return ""
+        if not isinstance(value, str):
+            raise TypeError("Discord ID mappings must be comma-separated strings")
+        normalized: list[str] = []
+        for raw_id in value.split(","):
+            discord_id = raw_id.strip()
+            if not discord_id:
+                continue
+            if not discord_id.isdecimal() or int(discord_id) <= 0:
+                raise ValueError(
+                    "Discord ID mappings must contain positive decimal IDs"
+                )
+            if discord_id not in normalized:
+                normalized.append(discord_id)
+        return ",".join(normalized)
+
+    @model_validator(mode="after")
+    def _reject_everyone_agent_role_bindings(self) -> "SharedSettings":
+        """Reject a guild's ``@everyone`` role as an agent capability grant.
+
+        Discord assigns the guild's own snowflake to its ``@everyone`` role.
+        Allowing an agent role bundle to contain any allowed guild ID would
+        grant that bundle to every member of that guild.
+        """
+
+        guild_ids = self._discord_ids(self.agent_discord_guild_ids)
+        configured_role_ids = set().union(*self.agent_discord_role_id_bindings.values())
+        overlapping_ids = sorted(guild_ids & configured_role_ids)
+        if overlapping_ids:
+            raise ValueError(
+                "Agent Discord role IDs must not include an allowed guild ID "
+                "because that is the @everyone role"
+            )
+        return self
+
     @model_validator(mode="after")
     def _resolve_outline_admin_api_key_alias(self) -> "SharedSettings":
         """Prefer a non-empty canonical Outline key, then its legacy alias."""
@@ -359,3 +465,42 @@ class SharedSettings(BaseSettings):
     def minio_secret_key(self) -> str:
         """Secret key alias for MinIO clients using the old naming."""
         return self.minio_root_password
+
+    @staticmethod
+    def _discord_ids(value: str) -> frozenset[str]:
+        return frozenset(item for item in value.split(",") if item)
+
+    @property
+    def agent_discord_role_id_bindings(self) -> dict[str, frozenset[str]]:
+        """Return the configured Discord role-ID grants by policy bundle."""
+
+        return {
+            "admin": self._discord_ids(self.agent_discord_admin_role_ids),
+            "steering_committee": self._discord_ids(
+                self.agent_discord_steering_committee_role_ids
+            ),
+            "billing": self._discord_ids(self.agent_discord_billing_role_ids),
+            "erp_developer": self._discord_ids(
+                self.agent_discord_erp_developer_role_ids
+            ),
+            "project_manager": self._discord_ids(
+                self.agent_discord_project_manager_role_ids
+            ),
+            "engineer": self._discord_ids(self.agent_discord_engineer_role_ids),
+        }
+
+    @property
+    def agent_discord_guild_id_set(self) -> frozenset[str]:
+        """Return configured Discord guilds allowed to use the agent."""
+
+        return self._discord_ids(self.agent_discord_guild_ids)
+
+    @property
+    def agent_role_name_fallback_enabled(self) -> bool:
+        """Allow role names only after an explicit local/test opt-in."""
+
+        local_environments = {"local", "development", "dev", "test", "testing"}
+        return (
+            bool(self.agent_allow_role_name_fallback)
+            and self.environment.strip().casefold() in local_environments
+        )

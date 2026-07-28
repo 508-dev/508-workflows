@@ -330,6 +330,7 @@ class _EvalToolRegistry(ToolRegistry):
         actor_id: str | None,
         project_id: str | None = None,
         actor_scopes: set[str] | None = None,
+        deadline_monotonic: float | None = None,
     ) -> dict[str, Any]:
         if tool_name in self._stub_results:
             return deepcopy(self._stub_results[tool_name])
@@ -340,6 +341,7 @@ class _EvalToolRegistry(ToolRegistry):
             actor_id=actor_id,
             project_id=project_id,
             actor_scopes=actor_scopes,
+            deadline_monotonic=deadline_monotonic,
         )
 
 

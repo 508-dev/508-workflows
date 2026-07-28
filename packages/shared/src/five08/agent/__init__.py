@@ -27,6 +27,7 @@ from five08.agent.memory import (
     InMemoryMemoryStore,
     MemoryStore,
 )
+from five08.agent.postgres_memory import PostgresMemoryStore
 from five08.agent.model_routing import (
     AgentModelConfig,
     AgentTierModelConfig,
@@ -73,6 +74,7 @@ __all__ = [
     "MemoryFact",
     "MemoryStore",
     "InMemoryMemoryStore",
+    "PostgresMemoryStore",
     "InMemoryTaskStore",
     "ModelTier",
     "OpenAICompatibleIntentNormalizer",

@@ -207,7 +207,11 @@ class _FakeAuthStore(api.RedisAuthStore):
 @pytest.fixture
 def auth_headers(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     """Configure API secret and return matching auth headers."""
+    monkeypatch.setattr(api.settings, "environment", "test")
     monkeypatch.setattr(api.settings, "api_shared_secret", "test-secret")
+    monkeypatch.setattr(api.settings, "agent_shared_secret", None)
+    monkeypatch.setattr(api.settings, "agent_allow_legacy_api_secret", True)
+    monkeypatch.setattr(api.settings, "agent_allow_role_name_fallback", True)
     monkeypatch.setattr(api, "_AGENT_REQUEST_TIMESTAMPS", {})
     return {"X-API-Secret": "test-secret"}
 
@@ -223,6 +227,46 @@ def app() -> api.FastAPI:
 @pytest.fixture
 def client(app: api.FastAPI) -> TestClient:
     return TestClient(app)
+
+
+def _agent_request_with_secret(
+    secret: str,
+    *,
+    body: bytes = b"{}",
+) -> api.Request:
+    """Build an agent request with a controlled JSON body for handler tests."""
+    delivered = False
+
+    async def receive() -> dict[str, object]:
+        nonlocal delivered
+        if delivered:
+            return {"type": "http.disconnect"}
+        delivered = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    return api.Request(
+        {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/agent/requests",
+            "raw_path": b"/agent/requests",
+            "query_string": b"",
+            "headers": [(b"x-api-secret", secret.encode("ascii"))],
+            "client": ("testclient", 50000),
+            "server": ("testserver", 80),
+        },
+        receive,
+    )
+
+
+async def _call_agent_handler(path: str, secret: str) -> api.JSONResponse:
+    request = _agent_request_with_secret(secret)
+    if path == "/agent/requests":
+        return await api.agent_request_handler(request)
+    return await api.agent_confirmation_handler(request, "x")
 
 
 def _dashboard_write_session() -> api.AuthSession:
@@ -932,6 +976,105 @@ def test_audit_event_handler_persists_human_event(
     assert payload["person_id"] == "person-1"
 
 
+@pytest.mark.parametrize("path", ["/agent/requests", "/agent/confirmations/x"])
+def test_agent_routes_require_dedicated_secret_in_production(
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+) -> None:
+    """A general internal API secret cannot submit role-bearing agent calls."""
+    monkeypatch.setattr(api.settings, "environment", "production")
+    monkeypatch.setattr(api.settings, "api_shared_secret", "api-secret")
+    monkeypatch.setattr(api.settings, "agent_shared_secret", "agent-secret")
+    monkeypatch.setattr(api.settings, "agent_allow_legacy_api_secret", True)
+
+    api_secret_response = asyncio.run(_call_agent_handler(path, "api-secret"))
+    agent_secret_response = asyncio.run(_call_agent_handler(path, "agent-secret"))
+
+    assert api_secret_response.status_code == 401
+    assert agent_secret_response.status_code == 400
+
+
+@pytest.mark.parametrize("path", ["/agent/requests", "/agent/confirmations/x"])
+def test_agent_routes_allow_api_secret_fallback_in_local_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+) -> None:
+    """Local/test environments remain usable before a dedicated secret is set."""
+    monkeypatch.setattr(api.settings, "environment", "test")
+    monkeypatch.setattr(api.settings, "api_shared_secret", "api-secret")
+    monkeypatch.setattr(api.settings, "agent_shared_secret", None)
+    monkeypatch.setattr(api.settings, "agent_allow_legacy_api_secret", True)
+
+    response = asyncio.run(_call_agent_handler(path, "api-secret"))
+
+    assert response.status_code == 400
+
+
+@pytest.mark.parametrize("path", ["/agent/requests", "/agent/confirmations/x"])
+def test_agent_routes_reject_api_secret_without_local_legacy_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+) -> None:
+    monkeypatch.setattr(api.settings, "environment", "test")
+    monkeypatch.setattr(api.settings, "api_shared_secret", "api-secret")
+    monkeypatch.setattr(api.settings, "agent_shared_secret", None)
+    monkeypatch.setattr(api.settings, "agent_allow_legacy_api_secret", False)
+
+    response = asyncio.run(_call_agent_handler(path, "api-secret"))
+
+    assert response.status_code == 401
+
+
+async def test_agent_request_returns_within_its_response_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def blocked_to_thread(*_args: object, **_kwargs: object) -> object:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(api.settings, "environment", "test")
+    monkeypatch.setattr(api.settings, "agent_shared_secret", "agent-secret")
+    monkeypatch.setattr(api.settings, "api_shared_secret", "api-secret")
+    monkeypatch.setattr(api.settings, "agent_request_response_budget_seconds", 0.01)
+    monkeypatch.setattr(api, "_AGENT_ORCHESTRATOR", Mock())
+    request = _agent_request_with_secret(
+        "agent-secret",
+        body=json.dumps(
+            {
+                "message": "Search the web for current grants",
+                "context": {
+                    "discord_user_id": "123",
+                    "organization_id": "org-1",
+                    "guild_id": "org-1",
+                    "roles": ["Steering Committee"],
+                },
+            }
+        ).encode(),
+    )
+
+    with (
+        patch("five08.backend.api._schedule_agent_audit_event") as schedule_audit,
+        patch(
+            "five08.backend.api.asyncio.to_thread",
+            new=blocked_to_thread,
+        ),
+    ):
+        response = await api.agent_request_handler(request)
+
+    assert response.status_code == 504
+    assert json.loads(response.body) == {
+        "status": "failed",
+        "message": (
+            "The agent request took too long to complete. Please narrow the "
+            "request and try again."
+        ),
+    }
+    assert schedule_audit.call_args.kwargs["metadata"] == {
+        "status": "failed",
+        "reason": "agent_response_budget_exceeded",
+        "message_sanitized": "Search the web for current grants",
+    }
+
+
 def test_agent_request_for_write_returns_confirmation_plan(
     client: TestClient,
     auth_headers: dict[str, str],
@@ -971,7 +1114,7 @@ def test_agent_request_for_write_returns_confirmation_plan(
                             "message_id": "1",
                         }
                     ],
-                    "roles": ["Member"],
+                    "roles": ["Steering Committee"],
                 },
             },
             headers=auth_headers,
@@ -984,6 +1127,8 @@ def test_agent_request_for_write_returns_confirmation_plan(
     assert payload["plan"]["operation_id"] == "op-123"
     assert payload["plan"]["actions"][0]["tool_name"] == "task_write.create_task"
     assert payload["plan"]["plan_id"] in api._PENDING_AGENT_PLANS
+    stored_context = api._PENDING_AGENT_PLANS[payload["plan"]["plan_id"]][1]
+    assert stored_context.context_snippets == []
     assert audit_kwargs["context"].operation_id == "op-123"
     assert audit_kwargs["context"].interaction_id == "interaction-1"
     assert audit_kwargs["metadata"]["operation_id"] == "op-123"
@@ -992,7 +1137,7 @@ def test_agent_request_for_write_returns_confirmation_plan(
         "client_supplied_context"
     )
     assert "Ignore previous instructions" not in str(audit_kwargs["metadata"])
-    assert audit_kwargs["metadata"]["message"] == (
+    assert audit_kwargs["metadata"]["message_sanitized"] == (
         "Create a task for Sarah to update onboarding docs by Friday"
     )
 
@@ -1071,7 +1216,7 @@ def test_agent_request_rate_limits_per_user(
             "discord_user_id": "123",
             "organization_id": "org-1",
             "guild_id": "org-1",
-            "roles": ["Member"],
+            "roles": ["Steering Committee"],
         },
     }
 
@@ -1113,7 +1258,7 @@ def test_agent_request_rejects_when_pending_plan_capacity_is_full(
             "discord_user_id": "123",
             "organization_id": "org-1",
             "guild_id": "org-1",
-            "roles": ["Member"],
+            "roles": ["Steering Committee"],
         },
     }
 
@@ -1194,7 +1339,7 @@ async def test_agent_confirmation_claim_pops_before_expired_cleanup(
             discord_user_id="123",
             organization_id="org-1",
             guild_id="org-1",
-            roles=["Member"],
+            roles=["Steering Committee"],
         ),
     )
     assert plan_response.plan is not None
@@ -1202,7 +1347,7 @@ async def test_agent_confirmation_claim_pops_before_expired_cleanup(
         discord_user_id="123",
         organization_id="org-1",
         guild_id="org-1",
-        roles=["Member"],
+        roles=["Steering Committee"],
     )
     monkeypatch.setattr(
         api,
@@ -1250,7 +1395,7 @@ def test_agent_confirmation_executes_frozen_plan_inline(
                     "discord_user_id": "123",
                     "organization_id": "org-1",
                     "guild_id": "org-1",
-                    "roles": ["Member"],
+                    "roles": ["Steering Committee"],
                 },
             },
             headers=auth_headers,
@@ -1264,7 +1409,7 @@ def test_agent_confirmation_executes_frozen_plan_inline(
                     "discord_user_id": "123",
                     "organization_id": "org-1",
                     "guild_id": "org-1",
-                    "roles": ["Member"],
+                    "roles": ["Steering Committee"],
                 },
             },
             headers=auth_headers,
@@ -1300,7 +1445,7 @@ def test_agent_confirmation_cancel_returns_canceled_status(
                     "discord_user_id": "123",
                     "organization_id": "org-1",
                     "guild_id": "org-1",
-                    "roles": ["Member"],
+                    "roles": ["Steering Committee"],
                 },
             },
             headers=auth_headers,
@@ -1314,7 +1459,7 @@ def test_agent_confirmation_cancel_returns_canceled_status(
                     "discord_user_id": "123",
                     "organization_id": "org-1",
                     "guild_id": "org-1",
-                    "roles": ["Member"],
+                    "roles": ["Steering Committee"],
                 },
             },
             headers=auth_headers,
@@ -1329,21 +1474,13 @@ def test_agent_confirmation_cancel_returns_canceled_status(
     assert plan_id not in api._PENDING_AGENT_PLANS
 
 
-def test_agent_confirmation_uses_original_context_for_execution(
+def test_agent_confirmation_does_not_accept_supplied_scopes_after_role_revocation(
     client: TestClient,
     auth_headers: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Confirmation should ignore spoofed roles/scopes/context from the client."""
+    """A Member cannot restore a revoked task permission through `scopes`."""
     task_store = InMemoryTaskStore()
-    task_store.create_task(
-        title="Existing task",
-        project="Atlas",
-        assignee="Sarah",
-        due_date=None,
-        organization_id="org-1",
-        created_by="456",
-    )
     monkeypatch.setattr(
         api,
         "_AGENT_ORCHESTRATOR",
@@ -1360,7 +1497,7 @@ def test_agent_confirmation_uses_original_context_for_execution(
                     "discord_user_id": "123",
                     "organization_id": "org-1",
                     "guild_id": "org-1",
-                    "roles": ["Member"],
+                    "roles": ["Steering Committee"],
                 },
             },
             headers=auth_headers,
@@ -1375,7 +1512,7 @@ def test_agent_confirmation_uses_original_context_for_execution(
                     "internal_user_id": "456",
                     "organization_id": "org-1",
                     "guild_id": "org-1",
-                    "roles": ["Member", "Admin"],
+                    "roles": ["Member"],
                     "scopes": ["task:update_own"],
                 },
             },
@@ -1385,7 +1522,7 @@ def test_agent_confirmation_uses_original_context_for_execution(
     payload = confirm_response.json()
     assert confirm_response.status_code == 403
     assert payload["status"] == "denied"
-    assert "creator" in payload["results"][0]["error"]
+    assert "Missing required scopes" in payload["results"][0]["error"]
 
 
 def test_agent_confirmation_uses_fresh_non_escalating_roles(
@@ -1464,16 +1601,7 @@ def test_agent_confirmation_uses_fresh_non_escalating_roles(
     assert context.guild_id == "org-1"
     assert context.roles == ["Member"]
     assert context.scopes == []
-    assert captured["effective_scopes"] == {
-        "context:read_current_thread",
-        "github:repository:member:read",
-        "github:repository:member:write",
-        "memory:read_self",
-        "memory:write_self",
-        "project:read",
-        "task:create",
-        "task:update_own",
-    }
+    assert captured["effective_scopes"] == set()
 
 
 def test_agent_confirmation_preserves_operation_envelope(
@@ -1525,7 +1653,7 @@ def test_agent_confirmation_preserves_operation_envelope(
                     "thread_id": "thread-1",
                     "parent_message_id": "parent-1",
                     "response_destination_visibility": "private",
-                    "roles": ["Member"],
+                    "roles": ["Steering Committee"],
                     "context_snippets": [
                         {
                             "source_type": "discord_message",
@@ -1574,14 +1702,18 @@ def test_agent_confirmation_preserves_operation_envelope(
     confirmation_audit_call = mock_write_audit.call_args_list[-1].kwargs
     assert confirmation_audit_call["action"] == "agent.confirmation"
     assert confirmation_audit_call["context"].operation_id == "op-confirm-1"
+    assert confirmation_audit_call["metadata"]["tool_outcomes"] == [
+        {"tool_name": "task_write.create_task", "status": "succeeded"}
+    ]
+    assert "results" not in confirmation_audit_call["metadata"]
 
 
-def test_agent_confirmation_executes_with_confirm_time_member_role(
+def test_agent_confirmation_executes_with_confirm_time_steering_role(
     client: TestClient,
     auth_headers: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A retained member role should keep member-scoped writes executable."""
+    """A retained Steering Committee role should keep task writes executable."""
     task_store = InMemoryTaskStore()
     monkeypatch.setattr(
         api,
@@ -1599,7 +1731,7 @@ def test_agent_confirmation_executes_with_confirm_time_member_role(
                     "discord_user_id": "123",
                     "organization_id": "org-1",
                     "guild_id": "org-1",
-                    "roles": ["Admin", "Member"],
+                    "roles": ["Admin", "Steering Committee"],
                 },
             },
             headers=auth_headers,
@@ -1613,7 +1745,7 @@ def test_agent_confirmation_executes_with_confirm_time_member_role(
                     "discord_user_id": "123",
                     "organization_id": "org-1",
                     "guild_id": "org-1",
-                    "roles": ["Member"],
+                    "roles": ["Steering Committee"],
                 },
             },
             headers=auth_headers,
@@ -1647,7 +1779,7 @@ def test_agent_confirmation_claims_plan_once(
                     "discord_user_id": "123",
                     "organization_id": "org-1",
                     "guild_id": "org-1",
-                    "roles": ["Member"],
+                    "roles": ["Steering Committee"],
                 },
             },
             headers=auth_headers,
@@ -1661,7 +1793,7 @@ def test_agent_confirmation_claims_plan_once(
                     "discord_user_id": "123",
                     "organization_id": "org-1",
                     "guild_id": "org-1",
-                    "roles": ["Member"],
+                    "roles": ["Steering Committee"],
                 },
             },
             headers=auth_headers,
@@ -1674,7 +1806,7 @@ def test_agent_confirmation_claims_plan_once(
                     "discord_user_id": "123",
                     "organization_id": "org-1",
                     "guild_id": "org-1",
-                    "roles": ["Member"],
+                    "roles": ["Steering Committee"],
                 },
             },
             headers=auth_headers,
@@ -1740,7 +1872,7 @@ def test_agent_confirmation_expired_plan_is_audited(
                     "organization_id": "org-1",
                     "guild_id": "org-1",
                     "interaction_id": "interaction-1",
-                    "roles": ["Member"],
+                    "roles": ["Steering Committee"],
                 },
             },
             headers=auth_headers,

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import re
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from time import monotonic
 from typing import Literal, Protocol, cast
 from uuid import uuid4
 
@@ -22,6 +25,10 @@ from five08.agent.context import (
     ContextLoadBounds,
     RequestContextLoader,
     context_sources_for_snippets,
+)
+from five08.agent.memory import (
+    contains_sensitive_memory_text,
+    validate_memory_value_for_persistence,
 )
 from five08.agent.model_routing import AgentModelConfig
 from five08.agent.planner import AgentPlanner, AgentPlannerResult
@@ -80,6 +87,25 @@ _MONTHS = {
     "december": 12,
 }
 LiteralPlanner = Literal["deterministic_regex", "live_model"]
+_WEB_READ_TOOL_PREFIX = "web_read."
+_MAX_PLANNER_OBSERVATION_CHARS = 12_000
+_MODEL_INPUT_EMAIL_RE = re.compile(
+    r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
+    re.IGNORECASE,
+)
+_MODEL_INPUT_UUID_RE = re.compile(
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+    re.IGNORECASE,
+)
+
+
+@dataclass
+class _PlanningLoopState:
+    """Bounded, public-only observation state for one planner request."""
+
+    remaining_steps: int
+    observations: list[dict[str, object]]
+    results: list[AgentExecutionResult]
 
 
 class AgentIntentNormalizer(Protocol):
@@ -103,6 +129,8 @@ class AgentOrchestrator:
         context_loader: AgentContextLoader | None = None,
         context_bounds: ContextLoadBounds | None = None,
         today: date | None = None,
+        max_planning_steps: int = 3,
+        max_public_web_seconds: float = 50.0,
     ) -> None:
         self.registry = registry or ToolRegistry()
         self._explicit_policy = policy
@@ -112,6 +140,8 @@ class AgentOrchestrator:
         self.context_loader = context_loader or RequestContextLoader()
         self.context_bounds = context_bounds or ContextLoadBounds()
         self.today = today
+        self.max_planning_steps = max(1, min(int(max_planning_steps), 5))
+        self.max_public_web_seconds = max(5.0, min(float(max_public_web_seconds), 55.0))
 
     @property
     def policy(self) -> PolicyEngine:
@@ -123,25 +153,211 @@ class AgentOrchestrator:
 
     def plan(self, message: str, context: AgentIdentityContext) -> AgentResponse:
         text = message.strip()
-        context = self._load_request_context(context)
         if not text:
             return AgentResponse(
                 status="needs_clarification",
                 message="I need a task request to work from.",
                 clarification_question="What task or project action should I take?",
             )
+        # Never give secrets, payment data, or government identifiers to an
+        # optional model planner. This precedes every deterministic handler as
+        # well, so a credential-like value cannot be logged by an integration
+        # through an accidental parse path.
+        if contains_sensitive_memory_text(text):
+            return AgentResponse(
+                status="denied",
+                message=(
+                    "For privacy and safety, remove secrets, credentials, payment "
+                    "data, or government identifiers before using the agent."
+                ),
+            )
+
+        context = self._load_request_context(context)
+
+        if not self.policy.scopes_for_context(context):
+            return AgentResponse(
+                status="denied",
+                message=(
+                    "Your current Discord roles do not grant access to agent workflows."
+                ),
+            )
+        if context.impersonation:
+            return AgentResponse(
+                status="denied",
+                message="Impersonated Discord requests cannot use agent tools",
+            )
 
         deterministic_response = self._plan_deterministic_workflow(text, context)
         if deterministic_response is not None:
             return deterministic_response
 
-        planner: LiteralPlanner = "deterministic_regex"
-        planning_text = text
-        action: AgentToolAction | None = None
-        planned_response = self._plan_with_model(text, context)
+        explicit_memory_action = self._parse_memory_action(text)
+        if explicit_memory_action is not None:
+            if explicit_memory_action.tool_name == "memory_write.remember_fact":
+                try:
+                    validate_memory_value_for_persistence(
+                        explicit_memory_action.arguments["value_json"]
+                    )
+                except ValueError:
+                    return AgentResponse(
+                        status="denied",
+                        message=(
+                            "I cannot retain secrets, credentials, payment data, "
+                            "or government identifiers in memory."
+                        ),
+                    )
+            # Memory requests are deterministic and privacy-sensitive. Keep
+            # their user-provided fact text out of the optional planner.
+            return self._response_for_action(
+                action=explicit_memory_action,
+                context=context,
+                planning_text=text,
+                planner="deterministic_regex",
+            )
+
+        explicit_erp_action = self._parse_erp_read_action(text)
+        if explicit_erp_action is not None:
+            # Financial and ERP identifiers are internal data. Resolve this
+            # explicit, bounded read locally instead of sending the request to
+            # an optional external planner.
+            clarification = self._planner_action_clarification(
+                explicit_erp_action,
+                context=context,
+            )
+            if clarification is not None:
+                return AgentResponse(
+                    status="needs_clarification",
+                    message=clarification,
+                    clarification_question=clarification,
+                )
+            try:
+                self.registry.validate_planner_action(
+                    explicit_erp_action.tool_name,
+                    explicit_erp_action.arguments,
+                )
+            except ValueError:
+                question = "Please provide a specific, non-wildcard ERP lookup."
+                return AgentResponse(
+                    status="needs_clarification",
+                    message="I need a more specific ERP lookup before I can continue.",
+                    clarification_question=question,
+                )
+            return self._response_for_action(
+                action=explicit_erp_action,
+                context=context,
+                planning_text=text,
+                planner="deterministic_regex",
+            )
+        if self._mentions_erp_read_data(text):
+            question = (
+                "Try `search Sales Invoice for INV-123`, `find supplier Acme`, "
+                "or `show ERP project PROJ-001`."
+            )
+            return AgentResponse(
+                status="needs_clarification",
+                message="I need an explicit, read-only Billing or ERP lookup.",
+                clarification_question=question,
+            )
+
+        explicit_public_web_action = self._parse_public_web_action(text)
+        if explicit_public_web_action is not None:
+            # Do not send an explicit web query or URL to a model before the
+            # deterministic outbound-data boundary has approved it. This also
+            # prevents thread context from influencing the first web action.
+            # Authorize before URL validation: extraction validation resolves
+            # the supplied hostname to defend Firecrawl against SSRF, and a
+            # role without web access must not be able to trigger even that
+            # outbound DNS lookup.
+            web_manifest = self.registry.get(explicit_public_web_action.tool_name)
+            web_decision = self.policy.authorize(
+                context=context,
+                manifest=web_manifest,
+                action=explicit_public_web_action,
+            )
+            if not web_decision.allowed:
+                return AgentResponse(status="denied", message=web_decision.reason)
+            try:
+                self.registry.validate_planner_action(
+                    explicit_public_web_action.tool_name,
+                    explicit_public_web_action.arguments,
+                )
+            except (PermissionError, ValueError):
+                question = (
+                    "Please provide a public, non-sensitive web search topic or "
+                    "a public HTTPS URL without a query string."
+                )
+                return AgentResponse(
+                    status="needs_clarification",
+                    message=(
+                        "For privacy and safety, I cannot send private identifiers "
+                        "or unsafe URLs to public web research."
+                    ),
+                    clarification_question=question,
+                )
+
+            follow_up = getattr(self.planner, "plan_with_observations", None)
+            can_continue_with_model = callable(follow_up)
+            return self._response_for_actions(
+                actions=[explicit_public_web_action],
+                context=context,
+                planning_text=text,
+                planner=(
+                    "live_model" if can_continue_with_model else "deterministic_regex"
+                ),
+                model=(
+                    self._resolve_model(self._choose_model_tier_for_request(text))
+                    if can_continue_with_model
+                    else None
+                ),
+                deadline_monotonic=monotonic() + self.max_public_web_seconds,
+            )
+
+        if self._has_private_model_identifier(text):
+            # Direct email/contact-ID workflows are parsed locally so they can
+            # retain their existing confirmation and policy controls without
+            # disclosing the identifier to the external planner. Ambiguous
+            # requests fail closed and ask for a supported explicit workflow.
+            action = self._parse_action(text)
+            if action is None:
+                question = (
+                    "Use a supported explicit workflow, or remove email addresses "
+                    "and internal identifiers before asking a general question."
+                )
+                return AgentResponse(
+                    status="needs_clarification",
+                    message=(
+                        "I cannot send email addresses or internal identifiers to "
+                        "the model planner."
+                    ),
+                    clarification_question=question,
+                )
+            if (
+                action.tool_name == "task_read.search_tasks"
+                and not action.arguments.get("project")
+            ):
+                return AgentResponse(
+                    status="needs_clarification",
+                    message="Task search requires a project filter.",
+                    clarification_question="Which project should I search?",
+                )
+            return self._response_for_action(
+                action=action,
+                context=context,
+                planning_text=text,
+                planner="deterministic_regex",
+            )
+
+        planner_context = self._planner_context_with_authorized_snippets(context)
+        planned_response = self._plan_with_model(
+            text,
+            planner_context,
+        )
         if planned_response is not None:
             return planned_response
 
+        planner: LiteralPlanner = "deterministic_regex"
+        planning_text = text
+        action = self._parse_action(text)
         if action is None and not re.search(
             r"\bcreate\s+(?:a\s+)?task\b", text, re.IGNORECASE
         ):
@@ -281,6 +497,8 @@ class AgentOrchestrator:
         self,
         text: str,
         context: AgentIdentityContext,
+        *,
+        explicit_public_web_action: AgentToolAction | None = None,
     ) -> AgentResponse | None:
         """Use the structured planner when configured, preserving safe fallback."""
 
@@ -298,12 +516,76 @@ class AgentOrchestrator:
             # Provider errors fall through to deterministic parsing. Do not expose
             # provider internals in a Discord response.
             return None
-        if result is None:
+        if not isinstance(result, AgentPlannerResult):
+            return None
+        if explicit_public_web_action is not None:
+            proposed_actions = [
+                AgentToolAction(
+                    tool_name=draft_action.tool_name,
+                    arguments=draft_action.arguments,
+                    summary=draft_action.summary,
+                )
+                for draft_action in result.draft.actions
+            ]
+            if (
+                result.draft.status != "planned"
+                or len(proposed_actions) != 1
+                or not self._model_web_action_matches_explicit_request(
+                    proposed_actions[0],
+                    explicit_public_web_action,
+                )
+            ):
+                # An explicit research request must execute exactly the bounded
+                # web action derived from the current user message. Fall back to
+                # that deterministic action if a model proposes anything else.
+                return None
+        if result.draft.status == "answer" and not self._is_direct_chat_request(text):
+            # Tool-shaped requests must use deterministic parsing/confirmation
+            # rather than letting a model claim that an operation is complete.
             return None
         return self._response_for_planner_result(
             result=result,
             context=context,
             planning_text=text,
+            explicit_public_web_action=explicit_public_web_action,
+        )
+
+    def _planner_context_with_authorized_snippets(
+        self,
+        context: AgentIdentityContext,
+    ) -> AgentIdentityContext:
+        """Only pass thread context to a model when the role can read it.
+
+        Request snippets are always untrusted data, but they may still contain
+        channel text. Treat them as a public-source read for the capability
+        check; more restrictive backend-loaded sources must be filtered before
+        they are attached to this request context.
+        """
+
+        if not context.context_snippets:
+            return context
+        decision = self.policy.authorize_context_read(
+            context=context,
+            source_visibility="public",
+        )
+        if decision.allowed:
+            return context
+        return context.model_copy(update={"context_snippets": []})
+
+    @staticmethod
+    def _has_private_model_identifier(text: str) -> bool:
+        """Return whether raw request text must stay out of model planning.
+
+        Explicit supported operations are handled by deterministic parsing. A
+        general question carrying an email address or an internal UUID cannot
+        safely be routed by a model because the identifier would leave the
+        service boundary.
+        """
+
+        return bool(
+            _MODEL_INPUT_EMAIL_RE.search(text)
+            or _MODEL_INPUT_UUID_RE.search(text)
+            or _CONTACT_ID_REFERENCE_RE.search(text)
         )
 
     def _response_for_planner_result(
@@ -312,6 +594,7 @@ class AgentOrchestrator:
         result: AgentPlannerResult,
         context: AgentIdentityContext,
         planning_text: str,
+        explicit_public_web_action: AgentToolAction | None = None,
     ) -> AgentResponse:
         draft = result.draft
         if draft.status == "needs_clarification":
@@ -320,6 +603,26 @@ class AgentOrchestrator:
                 status="needs_clarification",
                 message=question,
                 clarification_question=question,
+            )
+        if draft.status == "answer":
+            chat_decision = self.policy.authorize_chat(context=context)
+            if not chat_decision.allowed:
+                return AgentResponse(
+                    status="denied",
+                    message=chat_decision.reason,
+                )
+            if not self._is_direct_chat_request(planning_text):
+                return AgentResponse(
+                    status="needs_clarification",
+                    message=(
+                        "I need a tool plan for that request rather than a "
+                        "model-only answer."
+                    ),
+                    clarification_question="What read-only question or workflow should I run?",
+                )
+            return AgentResponse(
+                status="executed",
+                message=draft.answer or "",
             )
 
         actions = [
@@ -331,12 +634,28 @@ class AgentOrchestrator:
             for draft_action in draft.actions
         ]
         for action in actions:
+            if action.tool_name.startswith(
+                _WEB_READ_TOOL_PREFIX
+            ) and not self._model_web_action_matches_explicit_request(
+                action,
+                explicit_public_web_action,
+            ):
+                return AgentResponse(
+                    status="needs_clarification",
+                    message=(
+                        "For safety, explicitly ask me to search the public web "
+                        "or read a public URL in your current message."
+                    ),
+                    clarification_question=(
+                        "What public web information should I search for or read?"
+                    ),
+                )
             try:
                 self.registry.validate_planner_action(
                     action.tool_name,
                     action.arguments,
                 )
-            except ValueError:
+            except (PermissionError, ValueError):
                 return AgentResponse(
                     status="needs_clarification",
                     message="I need a clearer request before I can safely continue.",
@@ -357,6 +676,62 @@ class AgentOrchestrator:
             planning_text=planning_text,
             planner="live_model",
             model=result.model,
+        )
+
+    @staticmethod
+    def _model_web_action_matches_explicit_request(
+        action: AgentToolAction,
+        expected_action: AgentToolAction | None,
+    ) -> bool:
+        """Keep initial outbound web intent tied to the current user message."""
+
+        if expected_action is None or action.tool_name != expected_action.tool_name:
+            return False
+        if action.tool_name == "web_read.search":
+            proposed = _clean_text(str(action.arguments.get("query") or ""))
+            expected = _clean_text(str(expected_action.arguments.get("query") or ""))
+            return proposed is not None and proposed == expected
+        if action.tool_name == "web_read.extract":
+            proposed_url = str(action.arguments.get("url") or "").strip()
+            expected_url = str(expected_action.arguments.get("url") or "").strip()
+            return bool(proposed_url) and proposed_url == expected_url
+        return False
+
+    @staticmethod
+    def _is_direct_chat_request(text: str) -> bool:
+        """Allow no-tool answers only for clearly conversational questions."""
+
+        normalized = text.casefold().strip()
+        if not re.match(
+            r"^(?:what|why|how|when|where|who|explain|compare|tell me|help)\b",
+            normalized,
+        ):
+            return False
+        operation_markers = (
+            "create",
+            "update",
+            "delete",
+            "send",
+            "invite",
+            "provision",
+            "remember",
+            "forget",
+            "approve",
+            "reject",
+            "assign",
+            "close",
+            "search",
+            "look up",
+            "lookup",
+            "find",
+            "read",
+            "fetch",
+            "open",
+            "extract",
+        )
+        return not any(
+            re.search(rf"\b{re.escape(marker)}\b", normalized)
+            for marker in operation_markers
         )
 
     def _response_for_action(
@@ -384,6 +759,8 @@ class AgentOrchestrator:
         planning_text: str,
         planner: LiteralPlanner,
         model: AgentModelSelection | None = None,
+        loop_state: _PlanningLoopState | None = None,
+        deadline_monotonic: float | None = None,
     ) -> AgentResponse:
         """Authorize and execute a complete, schema-validated action proposal."""
 
@@ -460,23 +837,314 @@ class AgentOrchestrator:
             return AgentResponse(
                 status="requires_confirmation",
                 plan=plan,
+                results=list(loop_state.results) if loop_state is not None else [],
                 message="This action needs confirmation before execution.",
             )
 
-        results = self.execute_plan(plan, context)
+        results = self.execute_plan(
+            plan,
+            context,
+            deadline_monotonic=deadline_monotonic,
+        )
+        all_results = [
+            *(loop_state.results if loop_state is not None else []),
+            *results,
+        ]
         if all(result.status == "succeeded" for result in results):
+            continued = self._continue_public_web_planning_loop(
+                actions=actions,
+                results=all_results,
+                context=context,
+                planning_text=planning_text,
+                planner=planner,
+                model=model,
+                loop_state=loop_state,
+                deadline_monotonic=deadline_monotonic,
+            )
+            if continued is not None:
+                return continued
             return AgentResponse(
                 status="executed",
                 plan=plan,
-                results=results,
-                message=self._execution_message(results),
+                results=all_results,
+                message=self._execution_message(all_results),
             )
         return AgentResponse(
             status="failed",
             plan=plan,
-            results=results,
-            message=self._execution_message(results),
+            results=all_results,
+            message=self._execution_message(all_results),
         )
+
+    def _continue_public_web_planning_loop(
+        self,
+        *,
+        actions: list[AgentToolAction],
+        results: list[AgentExecutionResult],
+        context: AgentIdentityContext,
+        planning_text: str,
+        planner: LiteralPlanner,
+        model: AgentModelSelection | None,
+        loop_state: _PlanningLoopState | None,
+        deadline_monotonic: float | None,
+    ) -> AgentResponse | None:
+        """Give a live planner bounded feedback from public web tools only.
+
+        Internal CRM, task, and memory data is deliberately never made a model
+        observation here.  That prevents an otherwise useful planning loop from
+        becoming a path that retransmits private operational data to a model or
+        an outbound search provider.
+        """
+
+        if (
+            planner != "live_model"
+            or model is None
+            or not actions
+            or not all(
+                action.tool_name.startswith(_WEB_READ_TOOL_PREFIX) for action in actions
+            )
+        ):
+            return None
+
+        follow_up = getattr(self.planner, "plan_with_observations", None)
+        if not callable(follow_up):
+            return None
+
+        remaining_steps = (
+            self.max_planning_steps - 1
+            if loop_state is None
+            else loop_state.remaining_steps
+        )
+        if remaining_steps <= 0:
+            return None
+        if (
+            deadline_monotonic is not None
+            and deadline_monotonic - monotonic()
+            < self._planner_follow_up_budget_seconds()
+        ):
+            # A structured planner can retry once without response_format. Do
+            # not begin it unless that bounded retry budget fits in the
+            # Discord-facing public-web deadline.
+            return None
+
+        observations = [
+            *(loop_state.observations if loop_state is not None else []),
+            *self._planner_observations_for_web_results(results[-len(actions) :]),
+        ]
+        observations = self._bounded_web_observations(observations)
+        try:
+            result = follow_up(
+                message=planning_text,
+                # The original request text remains available, but arbitrary
+                # thread/context snippets are not needed to interpret public
+                # web observations and are intentionally withheld here.
+                context=context.model_copy(update={"context_snippets": []}),
+                runtime_config=self.registry.runtime_config,
+                model_tier=model.tier,
+                tool_observations=observations,
+            )
+        except Exception:
+            # The successfully executed web result remains useful even if the
+            # optional summarization/replanning call is unavailable.
+            return None
+        if not isinstance(result, AgentPlannerResult):
+            return None
+
+        draft = result.draft
+        if draft.status == "needs_clarification":
+            question = draft.clarification_question or "What should I do next?"
+            return AgentResponse(
+                status="needs_clarification",
+                results=results,
+                message=question,
+                clarification_question=question,
+            )
+        if draft.status == "answer":
+            return AgentResponse(
+                status="executed",
+                results=results,
+                message=draft.answer or self._execution_message(results),
+            )
+
+        next_actions = [
+            AgentToolAction(
+                tool_name=draft_action.tool_name,
+                arguments=draft_action.arguments,
+                summary=draft_action.summary,
+            )
+            for draft_action in draft.actions
+        ]
+        if len(next_actions) != 1:
+            return AgentResponse(
+                status="needs_clarification",
+                results=results,
+                message=("I can run one bounded public-web research action at a time."),
+                clarification_question="What single public web page or search should I use next?",
+            )
+        for action in next_actions:
+            if not action.tool_name.startswith(_WEB_READ_TOOL_PREFIX):
+                return AgentResponse(
+                    status="needs_clarification",
+                    results=results,
+                    message=(
+                        "I completed the public research. Please make any internal "
+                        "or write workflow as a separate request."
+                    ),
+                    clarification_question=(
+                        "What separate internal or write action should I plan?"
+                    ),
+                )
+            if (
+                action.tool_name == "web_read.extract"
+                and not self._is_extract_from_prior_search_result(action, results)
+            ):
+                return AgentResponse(
+                    status="needs_clarification",
+                    results=results,
+                    message=(
+                        "I can only read a public page returned by this research "
+                        "search."
+                    ),
+                    clarification_question=(
+                        "Which result from the completed public search should I read?"
+                    ),
+                )
+            try:
+                self.registry.validate_planner_action(
+                    action.tool_name,
+                    action.arguments,
+                )
+            except (PermissionError, ValueError):
+                return AgentResponse(
+                    status="needs_clarification",
+                    results=results,
+                    message="I need a clearer public web research request.",
+                    clarification_question="What should I search for or read on the web?",
+                )
+            clarification = self._planner_action_clarification(action, context=context)
+            if clarification is not None:
+                return AgentResponse(
+                    status="needs_clarification",
+                    results=results,
+                    message=clarification,
+                    clarification_question=clarification,
+                )
+
+        return self._response_for_actions(
+            actions=next_actions,
+            context=context,
+            planning_text=planning_text,
+            planner="live_model",
+            model=result.model,
+            loop_state=_PlanningLoopState(
+                remaining_steps=remaining_steps - 1,
+                observations=observations,
+                results=results,
+            ),
+            deadline_monotonic=deadline_monotonic,
+        )
+
+    def _planner_follow_up_budget_seconds(self) -> float:
+        """Reserve room for the planner's at-most-one protocol fallback."""
+
+        configured_timeout = getattr(self.planner, "timeout_seconds", 8.0)
+        try:
+            timeout_seconds = float(configured_timeout)
+        except (TypeError, ValueError):
+            timeout_seconds = 8.0
+        return max(1.0, min(timeout_seconds, 30.0) * 2)
+
+    @staticmethod
+    def _is_extract_from_prior_search_result(
+        action: AgentToolAction,
+        results: list[AgentExecutionResult],
+    ) -> bool:
+        """Allow follow-up page reads only for URLs observed in this loop.
+
+        Public search snippets are untrusted data. Constraining a model-selected
+        extraction to a URL already returned by the configured search provider
+        prevents prompt injection from steering Firecrawl to unrelated public
+        targets while preserving the ordinary search-then-read workflow.
+        """
+
+        requested_url = str(action.arguments.get("url") or "").strip()
+        if not requested_url:
+            return False
+        result_urls: set[str] = set()
+        for result in results:
+            if result.tool_name != "web_read.search" or not isinstance(
+                result.result, dict
+            ):
+                continue
+            candidates = result.result.get("results")
+            if not isinstance(candidates, list):
+                continue
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                url = candidate.get("url")
+                if isinstance(url, str) and url.strip():
+                    result_urls.add(url.strip())
+        return requested_url in result_urls
+
+    @staticmethod
+    def _planner_observations_for_web_results(
+        results: list[AgentExecutionResult],
+    ) -> list[dict[str, object]]:
+        """Serialize bounded public tool output as data, never instructions."""
+
+        observations: list[dict[str, object]] = []
+        remaining_chars = _MAX_PLANNER_OBSERVATION_CHARS
+        for result in results:
+            if remaining_chars <= 0:
+                break
+            payload = (
+                result.result
+                if result.status == "succeeded"
+                else {"error": result.error or "web tool failed"}
+            )
+            try:
+                rendered = json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    default=str,
+                )
+            except (TypeError, ValueError):
+                rendered = str(payload)
+            if len(rendered) > remaining_chars:
+                rendered = f"{rendered[:remaining_chars]}…"
+            remaining_chars -= len(rendered)
+            observations.append(
+                {
+                    "tool_name": result.tool_name,
+                    "status": result.status,
+                    "data_json": rendered,
+                }
+            )
+        return observations
+
+    @staticmethod
+    def _bounded_web_observations(
+        observations: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        """Keep accumulated untrusted web data inside one prompt-size budget.
+
+        The most recent observations are kept first because a later extraction
+        generally contains the evidence needed to answer a prior search.
+        """
+
+        retained_reversed: list[dict[str, object]] = []
+        remaining_chars = _MAX_PLANNER_OBSERVATION_CHARS
+        for observation in reversed(observations):
+            if remaining_chars <= 0:
+                break
+            data = str(observation.get("data_json") or "")
+            if len(data) > remaining_chars:
+                data = f"{data[: remaining_chars - 1]}…" if remaining_chars > 1 else "…"
+            retained_reversed.append({**observation, "data_json": data})
+            remaining_chars -= len(data)
+        return list(reversed(retained_reversed))
 
     def _plan_member_agreement_from_crm(
         self,
@@ -614,6 +1282,7 @@ class AgentOrchestrator:
         *,
         confirmed: bool = False,
         effective_scopes: set[str] | None = None,
+        deadline_monotonic: float | None = None,
     ) -> list[AgentExecutionResult]:
         results: list[AgentExecutionResult] = []
         if plan.requires_confirmation and not confirmed:
@@ -628,7 +1297,11 @@ class AgentOrchestrator:
 
         organization_id = context.organization_id
         actor_id = context.discord_user_id
-        actor_scopes = effective_scopes or self.policy.scopes_for_context(context)
+        actor_scopes = (
+            effective_scopes
+            if effective_scopes is not None
+            else self.policy.scopes_for_context(context)
+        )
         for action in plan.actions:
             manifest = self.registry.get(action.tool_name)
             decision = self.policy.authorize_with_scopes(
@@ -647,14 +1320,25 @@ class AgentOrchestrator:
                 )
                 continue
             try:
-                payload = self.registry.execute(
-                    action.tool_name,
-                    action.arguments,
-                    organization_id=organization_id,
-                    actor_id=actor_id,
-                    project_id=context.project_id,
-                    actor_scopes=actor_scopes,
-                )
+                if deadline_monotonic is None:
+                    payload = self.registry.execute(
+                        action.tool_name,
+                        action.arguments,
+                        organization_id=organization_id,
+                        actor_id=actor_id,
+                        project_id=context.project_id,
+                        actor_scopes=actor_scopes,
+                    )
+                else:
+                    payload = self.registry.execute(
+                        action.tool_name,
+                        action.arguments,
+                        organization_id=organization_id,
+                        actor_id=actor_id,
+                        project_id=context.project_id,
+                        actor_scopes=actor_scopes,
+                        deadline_monotonic=deadline_monotonic,
+                    )
             except PermissionError as exc:
                 results.append(
                     AgentExecutionResult(
@@ -795,6 +1479,12 @@ class AgentOrchestrator:
                 arguments={},
                 summary="List repositories selected for the GitHub App",
             )
+        web_action = self._parse_public_web_action(text)
+        if web_action is not None:
+            return web_action
+        erp_action = self._parse_erp_read_action(text)
+        if erp_action is not None:
+            return erp_action
         if any(
             keyword in lowered
             for keyword in ["find task", "search task", "list task", "show task"]
@@ -848,6 +1538,175 @@ class AgentOrchestrator:
         ):
             return self._parse_update_task(text)
         return None
+
+    def _parse_public_web_action(self, text: str) -> AgentToolAction | None:
+        """Recognize explicit public-web requests without stealing CRM/task intent."""
+
+        url_match = re.search(r"\bhttps?://[^\s<>]+", text, re.IGNORECASE)
+        lowered = text.casefold()
+        if url_match is not None and any(
+            marker in lowered
+            for marker in ("read", "fetch", "open", "extract", "summarize")
+        ):
+            url = url_match.group(0).rstrip('.,;:!?)]}"')
+            return AgentToolAction(
+                tool_name="web_read.extract",
+                arguments={"url": url},
+                summary=f"Read public web page: {url}",
+            )
+
+        patterns = (
+            r"\b(?:search|look\s+up|lookup|research)\s+(?:the\s+)?(?:web|internet|online)"
+            r"(?:\s+(?:for|about))?\s*(.+)?$",
+            r"\b(?:google|search\s+online)\s+(.+)$",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match is None:
+                continue
+            query = _clean_text(match.group(1) or "")
+            if query:
+                return AgentToolAction(
+                    tool_name="web_read.search",
+                    arguments={"query": query},
+                    summary=f"Search the public web for: {query}",
+                )
+        return None
+
+    def _parse_erp_read_action(self, text: str) -> AgentToolAction | None:
+        """Recognize explicit, read-only Billing and ERP lookup requests."""
+
+        invoice_search_match = re.search(
+            r"\b(?:search|find|list)\s+(sales|purchase)\s+invoices?\b"
+            r"(?:\s+(?:for|matching)\s+(.+))?$",
+            text,
+            re.IGNORECASE,
+        )
+        if invoice_search_match is not None:
+            invoice_type = invoice_search_match.group(1).casefold()
+            query = _clean_text(invoice_search_match.group(2) or "")
+            arguments: dict[str, object] = {"invoice_type": invoice_type}
+            if query:
+                arguments["query"] = query
+            return AgentToolAction(
+                tool_name="billing_read.search_invoices",
+                arguments=arguments,
+                summary=(
+                    f"Search {invoice_type.title()} Invoices"
+                    + (f" matching: {query}" if query else "")
+                ),
+            )
+
+        invoice_summary_match = re.search(
+            r"\b(?:show|view|lookup|get)\s+(sales|purchase)\s+invoice\b"
+            r"(?:\s+(?:for\s+)?(.+))?$",
+            text,
+            re.IGNORECASE,
+        )
+        if invoice_summary_match is not None:
+            invoice_type = invoice_summary_match.group(1).casefold()
+            invoice_id = _clean_text(invoice_summary_match.group(2) or "")
+            arguments = {"invoice_type": invoice_type}
+            if invoice_id:
+                arguments["invoice_id"] = invoice_id
+            return AgentToolAction(
+                tool_name="billing_read.get_invoice_summary",
+                arguments=arguments,
+                summary=(
+                    f"Read {invoice_type.title()} Invoice"
+                    + (f" {invoice_id}" if invoice_id else "")
+                ),
+            )
+
+        if re.search(
+            r"\b(?:search|find|list|show|view|lookup|get)\s+(?:an?\s+)?invoices?\b",
+            text,
+            re.IGNORECASE,
+        ):
+            return AgentToolAction(
+                tool_name="billing_read.search_invoices",
+                arguments={},
+                summary="Search invoices",
+            )
+
+        supplier_match = re.search(
+            r"\b(?:search|find|lookup|show|view)\s+(?:erp(?:next)?\s+)?suppliers?\b"
+            r"(?:\s+(?:for\s+)?(.+))?$",
+            text,
+            re.IGNORECASE,
+        )
+        if supplier_match is not None:
+            query = _clean_text(supplier_match.group(1) or "")
+            arguments = {"query": query} if query else {}
+            return AgentToolAction(
+                tool_name="billing_read.search_suppliers",
+                arguments=arguments,
+                summary=(
+                    f"Search suppliers matching: {query}"
+                    if query
+                    else "Search suppliers"
+                ),
+            )
+
+        project_search_match = re.search(
+            r"\b(?:search|find|list)\s+(?:erp|erpnext)\s+projects?\b"
+            r"(?:\s+(?:for|matching)\s+(.+))?$",
+            text,
+            re.IGNORECASE,
+        )
+        if project_search_match is not None:
+            query = _clean_text(project_search_match.group(1) or "")
+            arguments = {"query": query} if query else {}
+            return AgentToolAction(
+                tool_name="erp_read.search_projects",
+                arguments=arguments,
+                summary=(
+                    f"Search ERP projects matching: {query}"
+                    if query
+                    else "Search ERP projects"
+                ),
+            )
+
+        project_summary_match = re.search(
+            r"\b(?:show|view|lookup|get)\s+(?:erp|erpnext)\s+project\b"
+            r"(?:\s+(?:for\s+)?(.+))?$",
+            text,
+            re.IGNORECASE,
+        )
+        if project_summary_match is not None:
+            project_id = _clean_text(project_summary_match.group(1) or "")
+            arguments = {"project_id": project_id} if project_id else {}
+            return AgentToolAction(
+                tool_name="erp_read.get_project_summary",
+                arguments=arguments,
+                summary=(
+                    f"Read ERP project {project_id}"
+                    if project_id
+                    else "Read ERP project summary"
+                ),
+            )
+
+        return None
+
+    @staticmethod
+    def _mentions_erp_read_data(text: str) -> bool:
+        """Keep unsupported financial lookups out of the external planner."""
+
+        has_read_verb = bool(
+            re.search(
+                r"\b(?:search|find|list|show|view|lookup|get|read|check)\b",
+                text,
+                re.IGNORECASE,
+            )
+        )
+        has_erp_reference = bool(
+            re.search(
+                r"\b(?:invoices?|suppliers?|(?:erp|erpnext)\s+projects?)\b",
+                text,
+                re.IGNORECASE,
+            )
+        )
+        return has_read_verb and has_erp_reference
 
     def _parse_memory_action(self, text: str) -> AgentToolAction | None:
         lowered = text.casefold()
@@ -2003,6 +2862,33 @@ class AgentOrchestrator:
             args, "query"
         ):
             return "Who should I look up?"
+        if tool_name == "billing_read.search_invoices":
+            invoice_type = str(args.get("invoice_type") or "").casefold()
+            if invoice_type not in {"sales", "purchase"}:
+                return (
+                    "Which invoice type (Sales or Purchase) and which identifier "
+                    "should I search?"
+                )
+            if not _non_empty_arg(args, "query"):
+                return "Which invoice identifier or search text should I use?"
+        if tool_name == "billing_read.get_invoice_summary":
+            invoice_type = str(args.get("invoice_type") or "").casefold()
+            if invoice_type not in {"sales", "purchase"}:
+                return "Which invoice type should I read: Sales or Purchase?"
+            if not _non_empty_arg(args, "invoice_id"):
+                return "Which invoice ID should I read?"
+        if tool_name == "billing_read.search_suppliers" and not _non_empty_arg(
+            args, "query"
+        ):
+            return "Which supplier should I search for?"
+        if tool_name == "erp_read.search_projects" and not _non_empty_arg(
+            args, "query"
+        ):
+            return "Which ERP project should I search for?"
+        if tool_name == "erp_read.get_project_summary" and not _non_empty_arg(
+            args, "project_id"
+        ):
+            return "Which ERP project ID should I read?"
         if tool_name == "crm_write.update_contact":
             if not _non_empty_arg(args, "contact_id"):
                 return "Which CRM contact should I update?"
@@ -2042,6 +2928,10 @@ class AgentOrchestrator:
             args, "fact_id"
         ):
             return "Which remembered fact should I forget?"
+        if tool_name == "web_read.search" and not _non_empty_arg(args, "query"):
+            return "What should I search for on the public web?"
+        if tool_name == "web_read.extract" and not _non_empty_arg(args, "url"):
+            return "Which public web page should I read?"
         return None
 
     @staticmethod
@@ -2064,6 +2954,11 @@ class AgentOrchestrator:
             "github_project.update_project_item": "update_github_project_item",
             "crm_read.search_contacts": "search_crm_contacts",
             "crm_write.update_contact": "update_crm_contact",
+            "billing_read.search_invoices": "search_invoices",
+            "billing_read.get_invoice_summary": "read_invoice_summary",
+            "billing_read.search_suppliers": "search_suppliers",
+            "erp_read.search_projects": "search_erp_projects",
+            "erp_read.get_project_summary": "read_erp_project_summary",
             "docuseal_write.create_member_agreement_submission": "send_member_agreement",
             "mail_write.create_mailbox": "create_mailbox",
             "sso_write.create_user": "create_sso_user",
@@ -2074,6 +2969,8 @@ class AgentOrchestrator:
             "memory_read.search_context": "search_context",
             "memory_write.remember_fact": "remember_fact",
             "memory_write.forget_fact": "forget_fact",
+            "web_read.search": "search_public_web",
+            "web_read.extract": "extract_public_web",
         }.get(tool_name, "unknown")
 
     @staticmethod

@@ -2,14 +2,25 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable, Protocol
 
+from five08.agent.memory import contains_sensitive_memory_text
 from five08.agent.models import (
     AgentContextSnippet,
     AgentContextSource,
     AgentIdentityContext,
+)
+
+_CONTEXT_EMAIL_RE = re.compile(
+    r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
+    re.IGNORECASE,
+)
+_CONTEXT_UUID_RE = re.compile(
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+    re.IGNORECASE,
 )
 
 
@@ -71,7 +82,17 @@ def bound_context_snippets(
             break
         if _is_too_old(snippet.created_at, bounds=bounds, now=comparison_time):
             continue
-        token_count = snippet.token_count or estimate_context_tokens(snippet.text)
+        if _contains_private_context_text(snippet.text):
+            # Request-supplied thread context is untrusted and may contain a
+            # credential or an identifier that must never cross the model
+            # boundary. Drop the entire snippet rather than attempting a
+            # lossy redaction that could change its meaning or miss a value.
+            continue
+        # The request envelope is untrusted: a caller could claim a tiny token
+        # count for a very large snippet. Count the exact text that will be
+        # sent onward after its hard character cap instead.
+        truncated_text = snippet.text[:2048]
+        token_count = estimate_context_tokens(truncated_text)
         if token_count <= 0:
             continue
         if token_count > remaining_tokens:
@@ -79,7 +100,7 @@ def bound_context_snippets(
         loaded.append(
             snippet.model_copy(
                 update={
-                    "text": snippet.text[:2048],
+                    "text": truncated_text,
                     "token_count": token_count,
                     "trusted": False,
                 }
@@ -149,6 +170,16 @@ def estimate_context_tokens(text: str) -> int:
     """Cheap deterministic token estimate used only for bounding."""
 
     return max(1, (len(text) + 3) // 4)
+
+
+def _contains_private_context_text(text: str) -> bool:
+    """Return whether a request snippet is unsafe to send to a model."""
+
+    return bool(
+        contains_sensitive_memory_text(text)
+        or _CONTEXT_EMAIL_RE.search(text)
+        or _CONTEXT_UUID_RE.search(text)
+    )
 
 
 def _is_too_old(

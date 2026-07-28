@@ -52,9 +52,11 @@ from five08.agent import (
     OpenAICompatibleAgentPlanner,
     OpenAICompatibleIntentNormalizer,
     PolicyEngine,
+    PostgresMemoryStore,
     ToolRegistry,
     ToolRuntimeConfig,
 )
+from five08.agent.memory import contains_sensitive_memory_text
 from five08.clients.espo import EspoAPIError, EspoClient
 from five08.logging import configure_observability
 from five08.job_leads import (
@@ -346,6 +348,14 @@ _AGENT_REQUEST_RATE_LIMIT_MAX_REQUESTS = 10
 _AGENT_REQUEST_TIMESTAMPS: dict[str, list[float]] = {}
 _AGENT_REQUEST_RATE_LIMIT_LOCK = threading.RLock()
 _AGENT_AUDIT_TASKS: set[asyncio.Task[None]] = set()
+# `asyncio.wait_for` cannot stop a synchronous DNS/HTTP call running in a
+# worker thread. Keep the number of such requests bounded while the API has
+# already returned its caller-visible timeout response.
+_AGENT_REQUEST_PLAN_BULKHEAD = threading.BoundedSemaphore(value=4)
+
+
+class AgentRequestPlanCapacityError(RuntimeError):
+    """Raised when timed-out synchronous agent work has filled the bulkhead."""
 
 
 def _get_agent_orchestrator() -> AgentOrchestrator:
@@ -358,6 +368,9 @@ def _get_agent_orchestrator() -> AgentOrchestrator:
             _AGENT_ORCHESTRATOR = AgentOrchestrator(
                 registry=ToolRegistry(
                     _AGENT_TASK_STORE,
+                    memory_store=PostgresMemoryStore(
+                        connection_factory=lambda: get_postgres_connection(settings)
+                    ),
                     runtime_config_factory=lambda: ToolRuntimeConfig.from_settings(
                         settings
                     ),
@@ -367,8 +380,26 @@ def _get_agent_orchestrator() -> AgentOrchestrator:
                 intent_normalizer=OpenAICompatibleIntentNormalizer.from_settings(
                     settings
                 ),
+                policy=PolicyEngine.from_settings(settings),
+                max_planning_steps=settings.agent_planning_max_steps,
+                max_public_web_seconds=settings.agent_public_web_deadline_seconds,
             )
     return _AGENT_ORCHESTRATOR
+
+
+def _run_agent_plan(
+    orchestrator: AgentOrchestrator,
+    message: str,
+    context: AgentIdentityContext,
+) -> AgentResponse:
+    """Run one sync planner call without allowing stalled workers to multiply."""
+
+    if not _AGENT_REQUEST_PLAN_BULKHEAD.acquire(blocking=False):
+        raise AgentRequestPlanCapacityError("agent planner capacity is busy")
+    try:
+        return orchestrator.plan(message, context)
+    finally:
+        _AGENT_REQUEST_PLAN_BULKHEAD.release()
 
 
 def _is_authorized_with_secret(
@@ -396,6 +427,42 @@ def _is_authorized(request: Request) -> bool:
         request,
         configured_secret=settings.api_shared_secret,
         setting_name="API_SHARED_SECRET",
+    )
+
+
+def _is_agent_authorized(request: Request) -> bool:
+    """Validate the dedicated credential for role-bearing agent requests.
+
+    Agent callers supply a Discord role context, so sharing this credential
+    with broader internal API clients would let those clients claim a role they
+    do not hold. Local/dev/test retain the existing API-secret fallback to make
+    single-process development practical; every other environment fails closed.
+    """
+
+    agent_secret = (settings.agent_shared_secret or "").strip()
+    api_secret = (settings.api_shared_secret or "").strip()
+    environment = (settings.environment or "").strip().casefold()
+    local_environments = {"local", "development", "dev", "test", "testing"}
+    allow_legacy_fallback = bool(settings.agent_allow_legacy_api_secret)
+    if not agent_secret:
+        if allow_legacy_fallback and environment in local_environments:
+            return _is_authorized(request)
+        logger.error(
+            "Rejecting agent request: AGENT_SHARED_SECRET is not configured "
+            "(the legacy fallback requires explicit local/test opt-in)"
+        )
+        return False
+    if api_secret and secrets.compare_digest(agent_secret, api_secret):
+        logger.error(
+            "Rejecting agent request: AGENT_SHARED_SECRET must differ from "
+            "API_SHARED_SECRET outside local development"
+        )
+        if not (allow_legacy_fallback and environment in local_environments):
+            return False
+    return _is_authorized_with_secret(
+        request,
+        configured_secret=agent_secret,
+        setting_name="AGENT_SHARED_SECRET",
     )
 
 
@@ -1864,6 +1931,14 @@ def _sanitize_agent_improvement_message(message: str) -> str:
     return sanitized[:256]
 
 
+def _sanitize_agent_audit_message(message: str) -> str:
+    """Keep credentials and other high-risk values out of agent audit records."""
+
+    if contains_sensitive_memory_text(message):
+        return "[sensitive agent request redacted]"
+    return _sanitize_agent_improvement_message(message)
+
+
 def _agent_request_audit_metadata(
     *,
     message: str,
@@ -1906,11 +1981,11 @@ def _agent_request_audit_metadata(
             {
                 "reason": "unsupported_agent_request",
                 "improvement_log": True,
-                "message_sanitized": _sanitize_agent_improvement_message(message),
+                "message_sanitized": _sanitize_agent_audit_message(message),
             }
         )
         return metadata
-    metadata["message"] = message[:256]
+    metadata["message_sanitized"] = _sanitize_agent_audit_message(message)
     return metadata
 
 
@@ -8944,6 +9019,7 @@ def _confirmation_execution_context(
     confirmation_context: AgentIdentityContext,
 ) -> AgentIdentityContext:
     roles = [role for role in confirmation_context.roles if role.strip()]
+    role_ids = [role_id for role_id in confirmation_context.role_ids if role_id.strip()]
     return AgentIdentityContext(
         discord_user_id=original_context.discord_user_id,
         internal_user_id=original_context.internal_user_id,
@@ -8957,6 +9033,7 @@ def _confirmation_execution_context(
         response_destination_visibility=(
             original_context.response_destination_visibility
         ),
+        role_ids=role_ids,
         roles=roles,
         scopes=[],
         impersonation=(
@@ -8976,7 +9053,7 @@ def _confirmation_execution_scopes(
     original_context: AgentIdentityContext,
     confirmation_context: AgentIdentityContext,
 ) -> set[str]:
-    policy = PolicyEngine()
+    policy = PolicyEngine.from_settings(settings)
     original_scopes = policy.scopes_for_context(original_context)
     confirmation_scopes = policy.scopes_for_context(confirmation_context)
     return original_scopes & confirmation_scopes
@@ -9036,7 +9113,7 @@ async def _claim_pending_agent_plan(
 
 async def agent_request_handler(request: Request) -> JSONResponse:
     """Plan and execute supported English agent commands."""
-    if not _is_authorized(request):
+    if not _is_agent_authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     try:
@@ -9062,7 +9139,7 @@ async def agent_request_handler(request: Request) -> JSONResponse:
             metadata={
                 "status": "denied",
                 "reason": "rate_limited",
-                "message": payload.message[:256],
+                "message_sanitized": _sanitize_agent_audit_message(payload.message),
             },
         )
         return JSONResponse(
@@ -9086,13 +9163,63 @@ async def agent_request_handler(request: Request) -> JSONResponse:
             status_code=503,
         )
 
-    response = await asyncio.to_thread(
-        orchestrator.plan,
-        payload.message,
-        payload.context,
-    )
+    try:
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                _run_agent_plan,
+                orchestrator,
+                payload.message,
+                payload.context,
+            ),
+            timeout=settings.agent_request_response_budget_seconds,
+        )
+    except AgentRequestPlanCapacityError:
+        _schedule_agent_audit_event(
+            context=payload.context,
+            action="agent.request",
+            result=AuditResult.ERROR,
+            plan=None,
+            metadata={
+                "status": "failed",
+                "reason": "agent_planner_capacity_exceeded",
+                "message_sanitized": _sanitize_agent_audit_message(payload.message),
+            },
+        )
+        return JSONResponse(
+            {
+                "status": "failed",
+                "message": "Agent capacity is busy. Please try again shortly.",
+            },
+            status_code=503,
+        )
+    except TimeoutError:
+        _schedule_agent_audit_event(
+            context=payload.context,
+            action="agent.request",
+            result=AuditResult.ERROR,
+            plan=None,
+            metadata={
+                "status": "failed",
+                "reason": "agent_response_budget_exceeded",
+                "message_sanitized": _sanitize_agent_audit_message(payload.message),
+            },
+        )
+        return JSONResponse(
+            {
+                "status": "failed",
+                "message": (
+                    "The agent request took too long to complete. Please narrow "
+                    "the request and try again."
+                ),
+            },
+            status_code=504,
+        )
     if response.plan is not None and response.status == "requires_confirmation":
-        stored = await _store_pending_agent_plan(response.plan, payload.context)
+        # Confirmation execution uses the frozen plan and fresh role snapshot;
+        # it never needs raw client-supplied thread text. Do not retain that
+        # potentially sensitive/untrusted text for the ten-minute plan window.
+        pending_context = payload.context.model_copy(update={"context_snippets": []})
+        stored = await _store_pending_agent_plan(response.plan, pending_context)
         if not stored:
             _schedule_agent_audit_event(
                 context=payload.context,
@@ -9102,7 +9229,7 @@ async def agent_request_handler(request: Request) -> JSONResponse:
                 metadata={
                     "status": "failed",
                     "reason": "pending_plan_capacity_exceeded",
-                    "message": payload.message[:256],
+                    "message_sanitized": _sanitize_agent_audit_message(payload.message),
                 },
             )
             response = AgentResponse(
@@ -9146,7 +9273,7 @@ async def agent_confirmation_handler(
     plan_id: str,
 ) -> JSONResponse:
     """Execute or cancel a frozen agent plan after user confirmation."""
-    if not _is_authorized(request):
+    if not _is_agent_authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     try:
@@ -9288,7 +9415,9 @@ async def agent_confirmation_handler(
             "model_tier": plan.model_tier,
             "model_source_tier": plan.model.source_tier,
             "action_names": [action.tool_name for action in plan.actions],
-            "results": [result.model_dump(mode="json") for result in results],
+            # Results can contain CRM, account, ERP, or private-memory data.
+            # Audit records retain outcomes for operational traceability, not
+            # the returned payloads themselves.
             "tool_outcomes": [
                 {"tool_name": result.tool_name, "status": result.status}
                 for result in results

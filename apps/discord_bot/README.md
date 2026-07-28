@@ -32,9 +32,17 @@ Discord slash command
   -> cog emits best-effort audit event when appropriate
 ```
 
-The bot uses `API_SHARED_SECRET` for protected backend/internal calls. That
-shared secret authenticates service-to-service traffic; command authorization
-still belongs in role checks, backend policy checks, and resource-level checks.
+The bot uses `API_SHARED_SECRET` for protected backend/internal calls. Agent
+routes use a separate `AGENT_SHARED_SECRET`, because they carry role context;
+in deployed environments it must differ from `API_SHARED_SECRET` and be shared
+only with the backend API. Command authorization still belongs in role checks,
+backend policy checks, and resource-level checks.
+
+In deployed environments, agent permissions are bound to configured Discord
+guild and role IDs, not mutable role names. Configure the allowed guild with
+`AGENT_DISCORD_GUILD_IDS` and each capability bundle with the corresponding
+`AGENT_DISCORD_*_ROLE_IDS` variable. If the same Billing / ERP Dev role grants
+both bundles, list its ID in both variables. Missing mappings fail closed.
 
 ## Agent Gateway
 
@@ -52,6 +60,7 @@ Agent command flow:
   -> backend validates the typed plan and authorizes every proposed tool
   -> deterministic backend policy authorizes each proposed tool
   -> read actions execute synchronously
+  -> public web reads may return bounded observations to the planner for up to 3 turns
   -> write actions return a frozen confirmation plan
   -> Discord confirmation button calls POST /agent/confirmations/{plan_id}
   -> backend executes the exact frozen plan inline and returns the result
@@ -62,7 +71,10 @@ capability checks before every tool call, requires confirmation for writes, and
 audits request/confirmation attempts. The model only drafts bounded tool calls;
 it cannot authorize users or execute integrations. Supported workflows include
 tasks, GitHub issues, CRM contacts, member agreements, account provisioning,
-and private memory according to the requester's roles.
+private memory, and bounded public-web research according to the requester's
+roles. Only public web tool output can enter the bounded planner follow-up loop;
+CRM, ERP, task, and private-memory results are never passed to it. Public web
+queries reject obvious private identifiers before a provider is contacted.
 Long-running service changes should be implemented as PR-based workflows rather
 than direct production mutations. Task reads require an explicit project filter
 to avoid guild-wide task enumeration.
@@ -98,20 +110,53 @@ agent behavior.
 Relevant configuration:
 
 - `BACKEND_API_BASE_URL`: backend API used by the bot.
-- `API_SHARED_SECRET`: shared service secret for protected backend calls.
+- `API_SHARED_SECRET`: shared service secret for non-agent protected backend calls.
+- `AGENT_SHARED_SECRET`: dedicated credential for `/agent/*`; required outside
+  explicit local/test migration mode and must differ from `API_SHARED_SECRET`.
+- `AGENT_ALLOW_LEGACY_API_SECRET`: local/test-only opt-in to the old agent
+  credential fallback; leave `false` for deployed environments.
+- `AGENT_DISCORD_GUILD_IDS`: comma-separated guild allowlist for agent
+  requests and confirmations; production blocks unconfigured guilds before
+  planning.
+- `AGENT_DISCORD_ADMIN_ROLE_IDS`, `AGENT_DISCORD_STEERING_COMMITTEE_ROLE_IDS`,
+  `AGENT_DISCORD_BILLING_ROLE_IDS`, `AGENT_DISCORD_ERP_DEVELOPER_ROLE_IDS`,
+  `AGENT_DISCORD_PROJECT_MANAGER_ROLE_IDS`, `AGENT_DISCORD_ENGINEER_ROLE_IDS`:
+  role-ID bindings for the corresponding agent capability bundles.
+- `AGENT_ALLOW_ROLE_NAME_FALLBACK`: explicit local/test-only migration aid;
+  role names never authorize deployed agent requests.
 - `AGENT_API_TIMEOUT_SECONDS`: timeout for synchronous agent gateway requests.
 - `AGENT_FAST_*`, `AGENT_STRONG_*`, `AGENT_REASONING_*`: backend model
   tier configuration for OpenAI-compatible providers. Credentials stay in the
   backend process; the bot only receives non-secret plan metadata.
+- `AGENT_PLANNING_MAX_STEPS`: cap for public-web research/answer turns.
+- `AGENT_REQUEST_RESPONSE_BUDGET_SECONDS`: backend caller-visible limit for
+  synchronous agent planning/reads; keep it below `AGENT_API_TIMEOUT_SECONDS`.
+- `AGENT_PUBLIC_WEB_DEADLINE_SECONDS`: best-effort public-web loop budget; keep
+  it below the response budget.
+- `AGENT_WEB_SEARCH_PROVIDER_ORDER`: configured fallback order for `searxng`,
+  `brave`, and `firecrawl`.
+- `SEARXNG_BASE_URL`, `BRAVE_SEARCH_API_KEY`, `FIRECRAWL_API_KEY`: configure
+  one or more web providers. Brave and Firecrawl keys stay in the backend.
+- `ERPNEXT_BASE_URL`, `ERPNEXT_API_KEY`, `AGENT_ERP_ORGANIZATION_ID`: enable
+  bounded Billing/ERP reads. The organization ID must exactly match the one
+  Discord guild/organization authorized to use the configured ERP credentials;
+  reads fail closed when it is missing or does not match.
 - `RESUME_AI_*`: optional resume-specific extraction provider for direct CRM
   resume parsing in the bot; falls back to the normal `OPENAI_*` settings.
 
 ## Permissions
 
-- **Everyone**: can see and invoke non-restricted commands.
-- **Member**: has member-only command access in addition to everyone commands.
-- **Steering Committee**: includes member permissions and adds additional moderation/admin-assist commands.
-- **Admin**: can run sensitive writes such as ID verification updates.
+- **Member**: receives no privileged agent scopes.
+- **Steering Committee**: project/task/CRM/member-agreement and scoped memory
+  workflows, plus agent chat and public-web research; it cannot provision
+  accounts, manage integrations, deploy, or inherit Admin automatically.
+- **Billing**: may read narrowly whitelisted Sales/Purchase invoice summaries
+  and supplier lookups, plus agent chat/public-web research. Billing writes,
+  CRM, provisioning, and Admin authority are not exposed through the agent.
+- **ERP Developer**: may read narrowly whitelisted ERP project summaries, plus
+  agent chat/public-web research. ERP writes, billing, CRM, provisioning, and
+  Admin authority are not exposed through the agent.
+- **Admin / Owner**: receives the full administrative and specialist scope set.
 
 ## Wiki Search
 

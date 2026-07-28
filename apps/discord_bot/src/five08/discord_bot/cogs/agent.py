@@ -90,13 +90,31 @@ class AgentConfirmationView(discord.ui.View):
         self.context = context
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id == self.requester_id:
-            return True
-        await interaction.response.send_message(
-            "Only the requester can confirm this agent plan.",
-            ephemeral=True,
-        )
-        return False
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                "Only the requester can confirm this agent plan.",
+                ephemeral=True,
+            )
+            return False
+
+        original_guild_id = str(
+            self.context.get("guild_id") or self.context.get("organization_id") or ""
+        ).strip()
+        interaction_guild_id = getattr(interaction, "guild_id", None)
+        if (
+            not original_guild_id
+            or (
+                interaction_guild_id is not None
+                and str(interaction_guild_id) != original_guild_id
+            )
+            or not self.cog._agent_guild_is_allowed(original_guild_id)
+        ):
+            await interaction.response.send_message(
+                "This agent plan is not available in this Discord server.",
+                ephemeral=True,
+            )
+            return False
+        return True
 
     def _disable(self) -> None:
         for item in self.children:
@@ -195,16 +213,27 @@ class AgentConfirmationView(discord.ui.View):
         interaction: discord.Interaction,
     ) -> dict[str, Any]:
         context = self.cog._build_agent_context(interaction)
-        original_guild_id = self.context.get("guild_id")
-        if context.get("organization_id") is None and original_guild_id:
+        original_guild_id = str(
+            self.context.get("guild_id") or self.context.get("organization_id") or ""
+        ).strip()
+        if original_guild_id:
+            # Bind the confirmation to the tenant that produced the plan.  More
+            # importantly, reload the guild member rather than trusting either
+            # the interaction object or Discord.py's member cache: a role may
+            # have been revoked during the confirmation window.
             context["organization_id"] = self.context.get("organization_id")
             context["guild_id"] = original_guild_id
             context["channel_id"] = self.context.get("channel_id")
-            fresh_roles = await self.cog._guild_role_names(
-                guild_id=str(original_guild_id),
+            fresh_roles, fresh_role_ids = await self.cog._guild_role_snapshot(
+                guild_id=original_guild_id,
                 user_id=interaction.user.id,
+                require_fresh=True,
             )
-            context["roles"] = fresh_roles or self._original_roles()
+            # A confirmation may execute a write. If Discord cannot refresh
+            # membership, fail closed rather than relying on roles captured
+            # when the plan was first proposed.
+            context["roles"] = fresh_roles
+            context["role_ids"] = fresh_role_ids
         original_message_id = self.context.get("message_id")
         if original_message_id:
             context["message_id"] = original_message_id
@@ -212,16 +241,6 @@ class AgentConfirmationView(discord.ui.View):
         if original_operation_id:
             context["operation_id"] = original_operation_id
         return context
-
-    def _original_roles(self) -> list[str]:
-        roles = self.context.get("roles")
-        if not isinstance(roles, list):
-            return []
-        return [
-            str(role).strip()
-            for role in roles
-            if isinstance(role, str) and str(role).strip()
-        ]
 
 
 class AgentCog(DiscordAuditCogMixin, commands.Cog):
@@ -245,9 +264,19 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         """Send a natural-language request to the backend agent gateway."""
         await interaction.response.defer(ephemeral=True)
 
+        guild_id = getattr(interaction, "guild_id", None)
+        if not self._agent_guild_is_allowed(guild_id):
+            await interaction.followup.send(
+                "Agent workflows are not enabled for this Discord server.",
+                ephemeral=True,
+            )
+            return
+
         local_response = self._local_agent_response(
             request=request,
             roles=self._role_names_from_user(interaction.user),
+            role_ids=self._role_ids_from_user(interaction.user),
+            guild_id=str(guild_id) if guild_id is not None else None,
             transport="slash",
         )
         if local_response is not None:
@@ -326,6 +355,18 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         agent_thread = self._is_agent_thread(message.channel, bot_user.id)
         if not bot_mentioned and not agent_thread:
             return
+        if not self._agent_guild_is_allowed(message.guild.id):
+            self._audit_message_safe(
+                message=message,
+                action="agent.mention",
+                result="denied",
+                metadata={"reason": "guild_not_allowed"},
+            )
+            await message.reply(
+                "Agent workflows are not enabled for this Discord server.",
+                mention_author=False,
+            )
+            return
 
         request = (
             self._extract_mention_request(message.content, bot_user.id)
@@ -350,6 +391,8 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         local_response = self._local_agent_response(
             request=request,
             roles=self._role_names_from_user(message.author),
+            role_ids=self._role_ids_from_user(message.author),
+            guild_id=str(message.guild.id),
             transport="mention",
         )
         if local_response is not None:
@@ -495,15 +538,31 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         normalized = request.casefold().strip(" ?!.")
         return AgentCog._matches_smalltalk(normalized, _AGENT_ACKNOWLEDGEMENTS)
 
+    @staticmethod
+    def _agent_guild_is_allowed(guild_id: object | None) -> bool:
+        """Apply the configured Discord-guild boundary before dispatch."""
+
+        normalized_guild_id = str(guild_id).strip() if guild_id is not None else None
+        return PolicyEngine.from_settings(settings).guild_is_allowed(
+            normalized_guild_id
+        )
+
     def _local_agent_response(
         self,
         *,
         request: str,
         roles: list[str],
+        role_ids: list[str],
+        guild_id: str | None,
         transport: Literal["slash", "mention"],
     ) -> str | None:
         if self._is_agent_help_request(request):
-            return self._agent_capabilities_message(roles=roles, transport=transport)
+            return self._agent_capabilities_message(
+                roles=roles,
+                role_ids=role_ids,
+                guild_id=guild_id,
+                transport=transport,
+            )
         if self._is_agent_presence_check(request):
             return (
                 "Yes, I can see this. Ask for a supported workflow, or ask "
@@ -555,16 +614,21 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
     def _agent_capabilities_message(
         *,
         roles: list[str],
+        role_ids: list[str],
+        guild_id: str | None,
         transport: Literal["slash", "mention"] = "mention",
     ) -> str:
-        policy = PolicyEngine.from_runtime_config(
-            ToolRuntimeConfig.from_settings(settings)
+        policy = PolicyEngine.from_settings(
+            settings,
+            runtime_config=ToolRuntimeConfig.from_settings(settings),
         )
         scopes = policy.scopes_for_context(
             AgentIdentityContext(
                 discord_user_id="capability-preview",
-                organization_id="capability-preview",
+                organization_id=guild_id,
+                guild_id=guild_id,
                 roles=roles,
+                role_ids=role_ids,
             )
         )
         capabilities: list[str] = []
@@ -581,8 +645,24 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             capabilities.append(
                 "- Memory: remember and review your private preferences."
             )
+        if "agent:chat" in scopes:
+            capabilities.append(
+                "- Agent chat: answer general questions and plan approved work."
+            )
+        if "web:research" in scopes:
+            capabilities.append(
+                "- Public web: research current information and read public pages."
+            )
+        if "billing:invoice:read" in scopes:
+            capabilities.append(
+                "- Billing: search Sales/Purchase invoices and suppliers (read-only)."
+            )
+        if "erp:project:read" in scopes:
+            capabilities.append(
+                "- ERP projects: search projects and view read-only summaries."
+            )
         if {
-            "github:repository:member:read",
+            "github:issue:read",
             "github:repository:configured:read",
             "github:repository:all:read",
         } & scopes:
@@ -780,6 +860,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
 
     def _build_agent_context(self, interaction: discord.Interaction) -> dict[str, Any]:
         role_names = self._role_names_from_user(interaction.user)
+        role_ids = self._role_ids_from_user(interaction.user)
 
         # Slash commands do not have a Discord message id; button interactions do.
         # Keep message_id as the visible Discord message when present and use
@@ -813,6 +894,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             ),
             "response_destination_visibility": "private",
             "roles": role_names,
+            "role_ids": role_ids,
             "scopes": [],
             "impersonation": False,
             "interaction_id": str(interaction.id),
@@ -838,6 +920,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                 self._response_destination_visibility_from_message(message)
             ),
             "roles": self._role_names_from_user(message.author),
+            "role_ids": self._role_ids_from_user(message.author),
             "scopes": [],
             "impersonation": False,
             "interaction_id": None,
@@ -875,6 +958,19 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             if str(getattr(role, "name", "")).strip()
         ]
 
+    @staticmethod
+    def _role_ids_from_user(user: discord.abc.User) -> list[str]:
+        """Return de-duplicated Discord role snowflakes from a member object."""
+
+        role_ids: list[str] = []
+        for role in getattr(user, "roles", []):
+            role_id = str(getattr(role, "id", "")).strip()
+            if not role_id or not role_id.isdecimal() or int(role_id) <= 0:
+                continue
+            if role_id not in role_ids:
+                role_ids.append(role_id)
+        return role_ids
+
     def _cached_guild_role_names(self, *, guild_id: str, user_id: int) -> list[str]:
         try:
             guild = self.bot.get_guild(int(guild_id))
@@ -888,21 +984,64 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         return self._role_names_from_user(member)
 
     async def _guild_role_names(self, *, guild_id: str, user_id: int) -> list[str]:
+        role_names, _role_ids = await self._guild_role_snapshot(
+            guild_id=guild_id,
+            user_id=user_id,
+        )
+        return role_names
+
+    async def _guild_role_snapshot(
+        self,
+        *,
+        guild_id: str,
+        user_id: int,
+        require_fresh: bool = False,
+    ) -> tuple[list[str], list[str]]:
+        """Return role names and IDs from a guild member snapshot.
+
+        Confirmation reauthorization requests a REST snapshot explicitly, so
+        revocations cannot be masked by Discord.py's member cache.
+        """
+
         try:
             guild = self.bot.get_guild(int(guild_id))
         except (TypeError, ValueError):
-            return []
+            return [], []
         if guild is None:
-            return []
-        member = guild.get_member(user_id)
-        if member is None and hasattr(guild, "fetch_member"):
+            return [], []
+        fetch_member = getattr(guild, "fetch_member", None)
+        if require_fresh:
+            if not callable(fetch_member):
+                logger.warning(
+                    "Cannot refresh Discord member roles for agent confirmation: "
+                    "guild does not support fetch_member"
+                )
+                return [], []
+            fetch_member_call = cast(
+                Callable[[int], Awaitable[discord.Member]], fetch_member
+            )
             try:
-                member = await guild.fetch_member(user_id)
+                member = await fetch_member_call(user_id)
+            except Exception:
+                logger.warning(
+                    "Failed refreshing Discord member roles for agent confirmation",
+                    exc_info=True,
+                )
+                return [], []
+            return self._role_names_from_user(member), self._role_ids_from_user(member)
+
+        member = guild.get_member(user_id)
+        if member is None and callable(fetch_member):
+            fetch_member_call = cast(
+                Callable[[int], Awaitable[discord.Member]], fetch_member
+            )
+            try:
+                member = await fetch_member_call(user_id)
             except (discord.HTTPException, discord.NotFound, discord.Forbidden):
                 member = None
         if member is None:
-            return []
-        return self._role_names_from_user(member)
+            return [], []
+        return self._role_names_from_user(member), self._role_ids_from_user(member)
 
     def _audit_message_safe(
         self,
@@ -951,9 +1090,27 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
 
     def _post_backend_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         base_url = settings.backend_api_base_url.rstrip("/")
-        secret = str(settings.api_shared_secret or "").strip()
+        secret = str(settings.agent_shared_secret or "").strip()
+        environment = str(settings.environment or "").strip().casefold()
+        local_environments = {"local", "development", "dev", "test", "testing"}
+        allow_legacy_fallback = bool(
+            getattr(settings, "agent_allow_legacy_api_secret", False)
+        )
+        if not secret and allow_legacy_fallback and environment in local_environments:
+            secret = str(settings.api_shared_secret or "").strip()
         if not base_url or not secret:
-            raise RuntimeError("Backend API URL or API_SHARED_SECRET is not configured")
+            raise RuntimeError(
+                "Backend API URL or AGENT_SHARED_SECRET is not configured"
+            )
+        if (
+            not (allow_legacy_fallback and environment in local_environments)
+            and settings.api_shared_secret
+            and secret == settings.api_shared_secret
+        ):
+            raise RuntimeError(
+                "AGENT_SHARED_SECRET must differ from API_SHARED_SECRET outside "
+                "local development"
+            )
 
         response = requests.post(
             f"{base_url}{path}",
@@ -1069,10 +1226,32 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                     lines.extend(
                         self._format_contact_result_lines(tool_name, result_payload)
                     )
+                elif tool_name in {
+                    "billing_read.search_invoices",
+                    "billing_read.get_invoice_summary",
+                    "billing_read.search_suppliers",
+                    "erp_read.search_projects",
+                    "erp_read.get_project_summary",
+                } and isinstance(result_payload, dict):
+                    lines.extend(
+                        self._format_erp_read_result_lines(tool_name, result_payload)
+                    )
                 elif isinstance(result_payload, dict) and "facts" in result_payload:
                     lines.extend(
                         self._format_memory_fact_result_lines(tool_name, result_payload)
                     )
+                elif (
+                    tool_name == "web_read.search"
+                    and isinstance(result_payload, dict)
+                    and "results" in result_payload
+                ):
+                    lines.extend(self._format_web_search_result_lines(result_payload))
+                elif (
+                    tool_name == "web_read.extract"
+                    and isinstance(result_payload, dict)
+                    and "content" in result_payload
+                ):
+                    lines.extend(self._format_web_extract_result_lines(result_payload))
                 else:
                     result_error = str(result.get("error") or "").strip()
                     if result_error:
@@ -1123,6 +1302,34 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         return ""
 
     @staticmethod
+    def _format_web_search_result_lines(payload: dict[str, Any]) -> list[str]:
+        items = payload.get("results")
+        results = items if isinstance(items, list) else []
+        provider = str(payload.get("provider") or "web").strip()
+        lines = [f"- web_read.search ({provider}): {len(results)} results"]
+        for item in results[:3]:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "Untitled result").strip()
+            url = str(item.get("url") or "").strip()
+            snippet = " ".join(str(item.get("snippet") or "").split())
+            lines.append(f"  - {title} {url}".strip())
+            if snippet:
+                lines.append(f"    {snippet[:240]}")
+        return lines
+
+    @staticmethod
+    def _format_web_extract_result_lines(payload: dict[str, Any]) -> list[str]:
+        provider = str(payload.get("provider") or "firecrawl").strip()
+        title = str(payload.get("title") or "Public web page").strip()
+        url = str(payload.get("url") or "").strip()
+        content = " ".join(str(payload.get("content") or "").split())
+        lines = [f"- web_read.extract ({provider}): {title} {url}".strip()]
+        if content:
+            lines.append(f"  {content[:600]}")
+        return lines
+
+    @staticmethod
     def _result_recovery_email_error(payload: object) -> str | None:
         if not isinstance(payload, dict):
             return None
@@ -1171,6 +1378,104 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             suffix = " ".join(part for part in [email, contact_id] if part)
             lines.append(f"  - {name} {suffix}".strip())
         return lines
+
+    @staticmethod
+    def _format_erp_read_result_lines(
+        tool_name: object,
+        payload: dict[str, Any],
+    ) -> list[str]:
+        if "invoices" in payload:
+            raw_invoices = payload.get("invoices")
+            invoices = raw_invoices if isinstance(raw_invoices, list) else []
+            lines = [f"- {tool_name}: {len(invoices)} invoices"]
+            for invoice in invoices[:5]:
+                if not isinstance(invoice, dict):
+                    continue
+                invoice_id = str(invoice.get("invoice_id") or "Unknown invoice").strip()
+                status = str(invoice.get("status") or "unknown").strip()
+                posting_date = str(invoice.get("posting_date") or "").strip()
+                lines.append(
+                    "  - "
+                    + " · ".join(
+                        part for part in [invoice_id, status, posting_date] if part
+                    )
+                )
+            return lines
+
+        if "invoice" in payload:
+            invoice = payload.get("invoice")
+            if not isinstance(invoice, dict):
+                return [f"- {tool_name}: no matching invoice"]
+            invoice_id = str(invoice.get("invoice_id") or "Unknown invoice").strip()
+            status = str(invoice.get("status") or "unknown").strip()
+            party = str(
+                invoice.get("customer") or invoice.get("supplier") or ""
+            ).strip()
+            currency = str(invoice.get("currency") or "").strip()
+            total = invoice.get("grand_total")
+            suffix = " ".join(
+                str(part).strip()
+                for part in (currency, total)
+                if part is not None and str(part).strip()
+            )
+            lines = [
+                "  - "
+                + " · ".join(
+                    part for part in [invoice_id, status, party, suffix] if part
+                )
+            ]
+            return [f"- {tool_name}: invoice summary", *lines]
+
+        if "suppliers" in payload:
+            raw_suppliers = payload.get("suppliers")
+            suppliers = raw_suppliers if isinstance(raw_suppliers, list) else []
+            lines = [f"- {tool_name}: {len(suppliers)} suppliers"]
+            for supplier in suppliers[:5]:
+                if not isinstance(supplier, dict):
+                    continue
+                supplier_id = str(supplier.get("supplier_id") or "").strip()
+                name = str(
+                    supplier.get("supplier_name") or supplier_id or "Unknown supplier"
+                ).strip()
+                email = str(supplier.get("email") or "").strip()
+                lines.append(
+                    "  - " + " · ".join(part for part in [name, email] if part)
+                )
+            return lines
+
+        if "projects" in payload:
+            raw_projects = payload.get("projects")
+            projects = raw_projects if isinstance(raw_projects, list) else []
+            lines = [f"- {tool_name}: {len(projects)} ERP projects"]
+            for project in projects[:5]:
+                if not isinstance(project, dict):
+                    continue
+                project_id = str(project.get("project_id") or "Unknown project").strip()
+                name = str(project.get("project_name") or "").strip()
+                status = str(project.get("status") or "").strip()
+                lines.append(
+                    "  - "
+                    + " · ".join(part for part in [project_id, name, status] if part)
+                )
+            return lines
+
+        if "project" in payload:
+            project = payload.get("project")
+            if not isinstance(project, dict):
+                return [f"- {tool_name}: no matching ERP project"]
+            project_id = str(project.get("project_id") or "Unknown project").strip()
+            name = str(project.get("project_name") or "").strip()
+            status = str(project.get("status") or "").strip()
+            customer = str(project.get("customer") or "").strip()
+            return [
+                f"- {tool_name}: ERP project summary",
+                "  - "
+                + " · ".join(
+                    part for part in [project_id, name, status, customer] if part
+                ),
+            ]
+
+        return [f"- {tool_name}: no read-only ERP results"]
 
 
 async def setup(bot: commands.Bot) -> None:

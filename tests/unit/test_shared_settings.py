@@ -116,6 +116,16 @@ def test_shared_settings_expose_agent_external_tool_credentials() -> None:
         brevo_508_members_newsletter_list_name="508 members",
         keila_api_key="keila-key",
         keila_api_base_url="https://keila.example",
+        agent_web_search_provider_order="searxng,brave,firecrawl",
+        agent_web_search_timeout_seconds=12.0,
+        agent_web_default_result_limit=4,
+        agent_planning_max_steps=4,
+        erpnext_base_url="https://erp.example.test",
+        erpnext_api_key="erp-key",
+        agent_erp_organization_id="org-erp",
+        searxng_base_url="http://searxng:8080",
+        brave_search_api_key="brave-key",
+        firecrawl_api_key="firecrawl-key",
         postgres_url="postgresql://postgres:postgres@db.example/workflows",
     )
 
@@ -138,6 +148,15 @@ def test_shared_settings_expose_agent_external_tool_credentials() -> None:
     assert runtime_config.brevo_508_members_newsletter_list_name == "508 members"
     assert runtime_config.keila_api_key == "keila-key"
     assert runtime_config.keila_api_base_url == "https://keila.example"
+    assert runtime_config.agent_web_search_provider_order == "searxng,brave,firecrawl"
+    assert runtime_config.agent_web_search_timeout_seconds == 12.0
+    assert runtime_config.agent_web_default_result_limit == 4
+    assert runtime_config.erpnext_base_url == "https://erp.example.test"
+    assert runtime_config.erpnext_api_key == "erp-key"
+    assert runtime_config.agent_erp_organization_id == "org-erp"
+    assert runtime_config.searxng_base_url == "http://searxng:8080"
+    assert runtime_config.brave_search_api_key == "brave-key"
+    assert runtime_config.firecrawl_api_key == "firecrawl-key"
     assert (
         runtime_config.postgres_url
         == "postgresql://postgres:postgres@db.example/workflows"

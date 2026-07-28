@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import logging
 import re
 import threading
 from collections.abc import Callable
@@ -17,9 +18,19 @@ from five08.agent.models import (
     MemoryVisibility,
     RiskLevel,
 )
+from five08.agent.web import (
+    BraveWebSearch,
+    FirecrawlWebResearch,
+    SearxngWebSearch,
+    WebResearchClient,
+    WebResearchValidationError,
+    WebSearchProvider,
+    validate_public_https_url,
+)
 from five08.clients.authentik import AuthentikAPIError, AuthentikClient
 from five08.clients.docuseal import create_member_agreement_submission
 from five08.clients.espo import EspoAPIError, EspoClient
+from five08.clients.erpnext import ERPNextAPIError, ERPNextClient
 from five08.clients.github import GitHubAppTokenProvider, GitHubClient
 from five08.clients.migadu import (
     MigaduClient,
@@ -35,6 +46,7 @@ from five08.newsletter_sync import (
 from five08.redaction import redact_email_addresses
 
 SSO_ID_FIELD = "cSsoID"
+logger = logging.getLogger(__name__)
 
 _PLANNER_TOOL_ARGUMENTS: dict[str, frozenset[str]] = {
     "task_read.search_tasks": frozenset({"query", "project"}),
@@ -89,7 +101,42 @@ _PLANNER_TOOL_ARGUMENTS: dict[str, frozenset[str]] = {
         }
     ),
     "memory_write.forget_fact": frozenset({"fact_id", "admin"}),
+    "billing_read.search_invoices": frozenset({"invoice_type", "query", "limit"}),
+    "billing_read.get_invoice_summary": frozenset({"invoice_type", "invoice_id"}),
+    "billing_read.search_suppliers": frozenset({"query", "limit"}),
+    "erp_read.search_projects": frozenset({"query", "limit"}),
+    "erp_read.get_project_summary": frozenset({"project_id"}),
+    "web_read.search": frozenset({"query", "limit"}),
+    "web_read.extract": frozenset({"url"}),
 }
+
+_ERP_INVOICE_DOCTYPES = {
+    "sales": "Sales Invoice",
+    "purchase": "Purchase Invoice",
+}
+_ERP_READ_TOOL_NAMES = frozenset(
+    {
+        "billing_read.search_invoices",
+        "billing_read.get_invoice_summary",
+        "billing_read.search_suppliers",
+        "erp_read.search_projects",
+        "erp_read.get_project_summary",
+    }
+)
+_ERP_PROJECT_FIELDS = [
+    "name",
+    "project_name",
+    "status",
+    "customer",
+    "project_type",
+    "priority",
+    "percent_complete",
+    "expected_start_date",
+    "expected_end_date",
+    "actual_start_date",
+    "actual_end_date",
+    "modified",
+]
 
 
 @dataclass(frozen=True)
@@ -152,6 +199,21 @@ class ToolRuntimeConfig:
     keila_api_base_url: str = "https://app.keila.io"
     keila_api_timeout_seconds: float = 20.0
     postgres_url: str | None = None
+    erpnext_base_url: str | None = None
+    erpnext_api_key: str | None = None
+    erpnext_api_timeout_seconds: float = 20.0
+    agent_erp_organization_id: str | None = None
+    agent_web_search_provider_order: str = "searxng,brave,firecrawl"
+    agent_web_search_timeout_seconds: float = 5.0
+    agent_web_default_result_limit: int = 5
+    searxng_base_url: str | None = None
+    searxng_search_language: str | None = None
+    brave_search_api_key: str | None = None
+    brave_search_base_url: str = "https://api.search.brave.com"
+    brave_search_country: str | None = None
+    brave_search_language: str | None = None
+    firecrawl_api_key: str | None = None
+    firecrawl_base_url: str = "https://api.firecrawl.dev"
 
     @classmethod
     def from_settings(cls, settings: Any) -> "ToolRuntimeConfig":
@@ -249,6 +311,53 @@ class ToolRuntimeConfig:
                 settings, "keila_api_timeout_seconds", 20.0
             ),
             postgres_url=getattr(settings, "postgres_url", None),
+            erpnext_base_url=getattr(settings, "erpnext_base_url", None),
+            erpnext_api_key=getattr(settings, "erpnext_api_key", None),
+            erpnext_api_timeout_seconds=getattr(
+                settings,
+                "erpnext_api_timeout_seconds",
+                20.0,
+            ),
+            agent_erp_organization_id=getattr(
+                settings,
+                "agent_erp_organization_id",
+                None,
+            ),
+            agent_web_search_provider_order=getattr(
+                settings,
+                "agent_web_search_provider_order",
+                "searxng,brave,firecrawl",
+            ),
+            agent_web_search_timeout_seconds=getattr(
+                settings,
+                "agent_web_search_timeout_seconds",
+                5.0,
+            ),
+            agent_web_default_result_limit=getattr(
+                settings,
+                "agent_web_default_result_limit",
+                5,
+            ),
+            searxng_base_url=getattr(settings, "searxng_base_url", None),
+            searxng_search_language=getattr(
+                settings,
+                "searxng_search_language",
+                None,
+            ),
+            brave_search_api_key=getattr(settings, "brave_search_api_key", None),
+            brave_search_base_url=getattr(
+                settings,
+                "brave_search_base_url",
+                "https://api.search.brave.com",
+            ),
+            brave_search_country=getattr(settings, "brave_search_country", None),
+            brave_search_language=getattr(settings, "brave_search_language", None),
+            firecrawl_api_key=getattr(settings, "firecrawl_api_key", None),
+            firecrawl_base_url=getattr(
+                settings,
+                "firecrawl_base_url",
+                "https://api.firecrawl.dev",
+            ),
         )
 
 
@@ -395,11 +504,19 @@ class ToolRegistry:
         memory_store: MemoryStore | None = None,
         runtime_config: ToolRuntimeConfig | None = None,
         runtime_config_factory: Callable[[], ToolRuntimeConfig] | None = None,
+        web_client: WebResearchClient | None = None,
+        web_client_factory: Callable[[ToolRuntimeConfig], WebResearchClient]
+        | None = None,
+        erpnext_client_factory: Callable[[ToolRuntimeConfig], ERPNextClient]
+        | None = None,
     ) -> None:
         self.task_store = task_store or InMemoryTaskStore()
         self.memory_store = memory_store or InMemoryMemoryStore()
         self._runtime_config = runtime_config or ToolRuntimeConfig()
         self._runtime_config_factory = runtime_config_factory
+        self._web_client = web_client
+        self._web_client_factory = web_client_factory
+        self._erpnext_client_factory = erpnext_client_factory
         self._github_app_provider: GitHubAppTokenProvider | None = None
         self._github_app_provider_config: tuple[str, str, str] | None = None
         self._github_installation_repository_cache: (
@@ -541,6 +658,46 @@ class ToolRegistry:
                 idempotent=True,
                 write=False,
             ),
+            "billing_read.search_invoices": ToolManifest(
+                name="billing_read.search_invoices",
+                risk="low",
+                required_scopes=("billing:invoice:read",),
+                tenant_scoped=True,
+                idempotent=True,
+                write=False,
+            ),
+            "billing_read.get_invoice_summary": ToolManifest(
+                name="billing_read.get_invoice_summary",
+                risk="low",
+                required_scopes=("billing:invoice:read",),
+                tenant_scoped=True,
+                idempotent=True,
+                write=False,
+            ),
+            "billing_read.search_suppliers": ToolManifest(
+                name="billing_read.search_suppliers",
+                risk="low",
+                required_scopes=("billing:supplier:read",),
+                tenant_scoped=True,
+                idempotent=True,
+                write=False,
+            ),
+            "erp_read.search_projects": ToolManifest(
+                name="erp_read.search_projects",
+                risk="low",
+                required_scopes=("erp:project:read",),
+                tenant_scoped=True,
+                idempotent=True,
+                write=False,
+            ),
+            "erp_read.get_project_summary": ToolManifest(
+                name="erp_read.get_project_summary",
+                risk="low",
+                required_scopes=("erp:project:read",),
+                tenant_scoped=True,
+                idempotent=True,
+                write=False,
+            ),
             "crm_write.update_contact": ToolManifest(
                 name="crm_write.update_contact",
                 risk="high",
@@ -609,7 +766,7 @@ class ToolRegistry:
                 name="memory_read.get_user_facts",
                 risk="low",
                 required_scopes=("memory:read_self",),
-                tenant_scoped=False,
+                tenant_scoped=True,
                 idempotent=True,
                 write=False,
             ),
@@ -625,6 +782,22 @@ class ToolRegistry:
                 name="memory_read.search_context",
                 risk="low",
                 required_scopes=("context:read_current_thread",),
+                tenant_scoped=True,
+                idempotent=True,
+                write=False,
+            ),
+            "web_read.search": ToolManifest(
+                name="web_read.search",
+                risk="low",
+                required_scopes=("web:research",),
+                tenant_scoped=False,
+                idempotent=True,
+                write=False,
+            ),
+            "web_read.extract": ToolManifest(
+                name="web_read.extract",
+                risk="low",
+                required_scopes=("web:research",),
                 tenant_scoped=False,
                 idempotent=True,
                 write=False,
@@ -634,7 +807,7 @@ class ToolRegistry:
                 risk="medium",
                 required_scopes=("memory:write_self",),
                 requires_confirmation=True,
-                tenant_scoped=False,
+                tenant_scoped=True,
                 idempotent=False,
                 write=True,
             ),
@@ -643,7 +816,7 @@ class ToolRegistry:
                 risk="medium",
                 required_scopes=("memory:write_self",),
                 requires_confirmation=True,
-                tenant_scoped=False,
+                tenant_scoped=True,
                 idempotent=False,
                 write=True,
             ),
@@ -683,6 +856,15 @@ class ToolRegistry:
             updates = arguments.get("updates")
             if not isinstance(updates, dict) or set(updates) != {"cOnboardingState"}:
                 raise ValueError("unsupported_crm_update_fields")
+        if tool_name in _ERP_READ_TOOL_NAMES:
+            _validate_erp_read_arguments(tool_name, arguments)
+        if tool_name == "web_read.search":
+            _validate_public_web_query(str(arguments.get("query") or ""))
+        if tool_name == "web_read.extract":
+            try:
+                validate_public_https_url(str(arguments.get("url") or ""))
+            except WebResearchValidationError as exc:
+                raise ValueError(str(exc)) from exc
         _validate_planner_argument_value(arguments)
 
     def normalize_action_arguments(
@@ -723,6 +905,7 @@ class ToolRegistry:
         actor_id: str | None,
         project_id: str | None = None,
         actor_scopes: set[str] | None = None,
+        deadline_monotonic: float | None = None,
     ) -> dict[str, Any]:
         if tool_name == "task_read.search_tasks":
             return self.task_store.search_tasks(
@@ -943,6 +1126,31 @@ class ToolRegistry:
             )
         if tool_name == "crm_read.search_contacts":
             return self._search_crm_contacts(arguments)
+        if tool_name == "billing_read.search_invoices":
+            return self._search_erp_invoices(
+                arguments,
+                organization_id=organization_id,
+            )
+        if tool_name == "billing_read.get_invoice_summary":
+            return self._get_erp_invoice_summary(
+                arguments,
+                organization_id=organization_id,
+            )
+        if tool_name == "billing_read.search_suppliers":
+            return self._search_erp_suppliers(
+                arguments,
+                organization_id=organization_id,
+            )
+        if tool_name == "erp_read.search_projects":
+            return self._search_erp_projects(
+                arguments,
+                organization_id=organization_id,
+            )
+        if tool_name == "erp_read.get_project_summary":
+            return self._get_erp_project_summary(
+                arguments,
+                organization_id=organization_id,
+            )
         if tool_name == "crm_write.update_contact":
             return self._update_crm_contact(arguments)
         if tool_name == "docuseal_write.create_member_agreement_submission":
@@ -972,6 +1180,16 @@ class ToolRegistry:
             )
         if tool_name == "memory_read.search_context":
             return {"snippets": []}
+        if tool_name == "web_read.search":
+            return self._search_public_web(
+                arguments,
+                deadline_monotonic=deadline_monotonic,
+            )
+        if tool_name == "web_read.extract":
+            return self._extract_public_web(
+                arguments,
+                deadline_monotonic=deadline_monotonic,
+            )
         if tool_name == "memory_write.remember_fact":
             return self._remember_memory_fact(
                 arguments,
@@ -984,9 +1202,256 @@ class ToolRegistry:
             return self._forget_memory_fact(
                 arguments,
                 actor_id=actor_id,
+                organization_id=organization_id,
                 actor_scopes=actor_scopes or set(),
             )
         raise KeyError(f"Unknown tool {tool_name}")
+
+    def _erpnext_client(self) -> ERPNextClient:
+        config = self.runtime_config
+        if self._erpnext_client_factory is not None:
+            return self._erpnext_client_factory(config)
+        base_url = _optional_str(config.erpnext_base_url)
+        api_key = _optional_str(config.erpnext_api_key)
+        if base_url is None or api_key is None:
+            raise RuntimeError("ERP lookup is not configured")
+        return ERPNextClient(
+            base_url=base_url,
+            api_key=api_key,
+            timeout_seconds=max(1.0, float(config.erpnext_api_timeout_seconds)),
+        )
+
+    def _require_erp_tenant(self, organization_id: str | None) -> str:
+        """Bind ERP agent access to its explicitly configured Discord tenant."""
+
+        tenant_id = _required_organization_id(organization_id)
+        configured_tenant_id = _optional_str(
+            self.runtime_config.agent_erp_organization_id
+        )
+        if configured_tenant_id is None:
+            raise PermissionError(
+                "ERP agent access is not configured for a Discord organization"
+            )
+        if tenant_id != configured_tenant_id:
+            raise PermissionError(
+                "ERP agent access is not configured for this organization"
+            )
+        return tenant_id
+
+    def _search_erp_invoices(
+        self,
+        arguments: dict[str, Any],
+        *,
+        organization_id: str | None,
+    ) -> dict[str, Any]:
+        _validate_erp_read_arguments("billing_read.search_invoices", arguments)
+        self._require_erp_tenant(organization_id)
+        invoice_type = _erp_invoice_type(arguments["invoice_type"])
+        query = _erp_search_query(arguments["query"], field_name="Invoice query")
+        limit = _erp_result_limit(arguments.get("limit"), default=5)
+        client = self._erpnext_client()
+        try:
+            try:
+                rows = client.search_invoices(
+                    _ERP_INVOICE_DOCTYPES[invoice_type],
+                    query=query,
+                    limit=limit,
+                )
+            except ERPNextAPIError:
+                logger.warning("ERP invoice search failed", exc_info=True)
+                raise RuntimeError("ERP lookup is temporarily unavailable") from None
+        finally:
+            client.close()
+        return {
+            "invoice_type": invoice_type,
+            "invoices": [_erp_invoice_search_payload(row) for row in rows],
+        }
+
+    def _get_erp_invoice_summary(
+        self,
+        arguments: dict[str, Any],
+        *,
+        organization_id: str | None,
+    ) -> dict[str, Any]:
+        _validate_erp_read_arguments("billing_read.get_invoice_summary", arguments)
+        self._require_erp_tenant(organization_id)
+        invoice_type = _erp_invoice_type(arguments["invoice_type"])
+        invoice_id = _erp_required_text(
+            arguments["invoice_id"],
+            field_name="Invoice id",
+            maximum=140,
+        )
+        client = self._erpnext_client()
+        try:
+            try:
+                row = client.get_invoice(
+                    _ERP_INVOICE_DOCTYPES[invoice_type],
+                    invoice_id,
+                )
+            except ERPNextAPIError:
+                logger.warning("ERP invoice summary lookup failed", exc_info=True)
+                raise RuntimeError("ERP lookup is temporarily unavailable") from None
+        finally:
+            client.close()
+        return {
+            "invoice": (
+                _erp_invoice_summary_payload(row, invoice_type=invoice_type)
+                if row is not None
+                else None
+            )
+        }
+
+    def _search_erp_suppliers(
+        self,
+        arguments: dict[str, Any],
+        *,
+        organization_id: str | None,
+    ) -> dict[str, Any]:
+        _validate_erp_read_arguments("billing_read.search_suppliers", arguments)
+        self._require_erp_tenant(organization_id)
+        query = _erp_search_query(arguments["query"], field_name="Supplier query")
+        limit = _erp_result_limit(arguments.get("limit"), default=5)
+        client = self._erpnext_client()
+        try:
+            try:
+                rows = client.search_suppliers(query, limit=limit)
+            except ERPNextAPIError:
+                logger.warning("ERP supplier search failed", exc_info=True)
+                raise RuntimeError("ERP lookup is temporarily unavailable") from None
+        finally:
+            client.close()
+        return {"suppliers": [_erp_supplier_payload(row) for row in rows]}
+
+    def _search_erp_projects(
+        self,
+        arguments: dict[str, Any],
+        *,
+        organization_id: str | None,
+    ) -> dict[str, Any]:
+        _validate_erp_read_arguments("erp_read.search_projects", arguments)
+        self._require_erp_tenant(organization_id)
+        query = _erp_search_query(
+            arguments["query"],
+            field_name="ERP project query",
+        )
+        limit = _erp_result_limit(arguments.get("limit"), default=5)
+        client = self._erpnext_client()
+        try:
+            try:
+                rows = client.list_records(
+                    "Project",
+                    fields=_ERP_PROJECT_FIELDS,
+                    or_filters=[
+                        ["Project", "name", "like", f"%{query}%"],
+                        ["Project", "project_name", "like", f"%{query}%"],
+                    ],
+                    limit=limit,
+                )
+            except ERPNextAPIError:
+                logger.warning("ERP project search failed", exc_info=True)
+                raise RuntimeError("ERP lookup is temporarily unavailable") from None
+        finally:
+            client.close()
+        return {"projects": [_erp_project_summary_payload(row) for row in rows]}
+
+    def _get_erp_project_summary(
+        self,
+        arguments: dict[str, Any],
+        *,
+        organization_id: str | None,
+    ) -> dict[str, Any]:
+        _validate_erp_read_arguments("erp_read.get_project_summary", arguments)
+        self._require_erp_tenant(organization_id)
+        project_id = _erp_required_text(
+            arguments["project_id"],
+            field_name="ERP project id",
+            maximum=140,
+        )
+        client = self._erpnext_client()
+        try:
+            try:
+                row = client.get_project(project_id)
+            except ERPNextAPIError:
+                logger.warning("ERP project summary lookup failed", exc_info=True)
+                raise RuntimeError("ERP lookup is temporarily unavailable") from None
+        finally:
+            client.close()
+        return {"project": _erp_project_summary_payload(row)}
+
+    def _web_research_client(self) -> WebResearchClient:
+        if self._web_client is not None:
+            return self._web_client
+        config = self.runtime_config
+        if self._web_client_factory is not None:
+            return self._web_client_factory(config)
+        return _web_research_client_from_config(config)
+
+    def _search_public_web(
+        self,
+        arguments: dict[str, Any],
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> dict[str, Any]:
+        query = str(arguments.get("query") or "").strip()
+        _validate_public_web_query(query)
+        limit = _positive_int(
+            arguments.get("limit"),
+            default=_positive_int(
+                self.runtime_config.agent_web_default_result_limit,
+                default=5,
+                maximum=10,
+            ),
+            maximum=10,
+        )
+        client = self._web_research_client()
+        if deadline_monotonic is not None and isinstance(client, WebResearchClient):
+            response = client.search(
+                query,
+                limit=limit,
+                deadline_monotonic=deadline_monotonic,
+            )
+        else:
+            response = client.search(query, limit=limit)
+        return {
+            "provider": response.provider,
+            "results": [
+                {
+                    "provider": item.provider,
+                    "title": item.title,
+                    "url": item.url,
+                    "snippet": item.snippet,
+                    "published_at": item.published_at,
+                    "source": item.source,
+                }
+                for item in response.results
+            ],
+        }
+
+    def _extract_public_web(
+        self,
+        arguments: dict[str, Any],
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> dict[str, Any]:
+        url = str(arguments.get("url") or "").strip()
+        if not url:
+            raise ValueError("Public web URL is required")
+        try:
+            url = validate_public_https_url(url)
+        except WebResearchValidationError as exc:
+            raise ValueError(str(exc)) from exc
+        client = self._web_research_client()
+        if deadline_monotonic is not None and isinstance(client, WebResearchClient):
+            result = client.extract(url, deadline_monotonic=deadline_monotonic)
+        else:
+            result = client.extract(url)
+        return {
+            "provider": result.provider,
+            "url": result.url,
+            "title": result.title,
+            "content": result.content,
+            "metadata": result.metadata,
+        }
 
     def _get_user_memory_facts(
         self,
@@ -1001,12 +1466,14 @@ class ToolRegistry:
             raise ValueError("user_id is required")
         if user_id != actor_id and "memory:admin" not in actor_scopes:
             raise PermissionError("Cannot read another user's private memory")
+        tenant_id = _required_organization_id(organization_id)
         facts = self.memory_store.list_facts(
+            organization_id=tenant_id,
             scope_type="user",
             scope_id=user_id,
             visible_to_user_id=user_id,
             visible_to_project_id=None,
-            visible_to_org_id=organization_id,
+            visible_to_org_id=tenant_id,
         )
         return {"facts": [_memory_fact_payload(fact) for fact in facts]}
 
@@ -1024,12 +1491,14 @@ class ToolRegistry:
             requested_project_id,
             project_id=project_id,
         )
+        tenant_id = _required_organization_id(organization_id)
         facts = self.memory_store.list_facts(
+            organization_id=tenant_id,
             scope_type="project",
             scope_id=project_id,
             visible_to_user_id=actor_id or "",
             visible_to_project_id=project_id,
-            visible_to_org_id=organization_id,
+            visible_to_org_id=tenant_id,
         )
         return {"facts": [_memory_fact_payload(fact) for fact in facts]}
 
@@ -1044,12 +1513,13 @@ class ToolRegistry:
     ) -> dict[str, Any]:
         if actor_id is None:
             raise ValueError("actor_id is required")
+        tenant_id = _required_organization_id(organization_id)
         scope_type = _memory_scope_type(arguments.get("scope_type"), default="user")
         scope_id = _memory_scope_id(
             arguments.get("scope_id"),
             scope_type=scope_type,
             actor_id=actor_id,
-            organization_id=organization_id,
+            organization_id=tenant_id,
             project_id=project_id,
             actor_scopes=actor_scopes,
         )
@@ -1068,6 +1538,7 @@ class ToolRegistry:
             default="private" if scope_type == "user" else scope_type,
         )
         fact = self.memory_store.remember_fact(
+            organization_id=tenant_id,
             scope_type=scope_type,
             scope_id=scope_id,
             key=key,
@@ -1089,6 +1560,7 @@ class ToolRegistry:
         arguments: dict[str, Any],
         *,
         actor_id: str | None,
+        organization_id: str | None,
         actor_scopes: set[str],
     ) -> dict[str, Any]:
         if actor_id is None:
@@ -1096,7 +1568,9 @@ class ToolRegistry:
         fact_id = str(arguments.get("fact_id") or "").strip()
         if not fact_id:
             raise ValueError("fact_id is required")
+        tenant_id = _required_organization_id(organization_id)
         fact = self.memory_store.forget_fact(
+            organization_id=tenant_id,
             fact_id=fact_id,
             actor_id=actor_id,
             actor_is_admin="memory:admin" in actor_scopes,
@@ -2155,6 +2629,298 @@ class ToolRegistry:
         return f"{local_part}@{configured_domain}", local_part
 
 
+_WEB_QUERY_EMAIL_RE = re.compile(
+    r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
+    re.IGNORECASE,
+)
+_WEB_QUERY_ACCESS_TOKEN_RE = re.compile(
+    r"\b(?:sk|pk|rk|ghp|github_pat|xox[baprs])-?[A-Za-z0-9_-]{16,}\b",
+    re.IGNORECASE,
+)
+_WEB_QUERY_PAYMENT_CARD_RE = re.compile(r"(?<!\d)(?:\d[ -]?){13,19}(?!\d)")
+_WEB_QUERY_UUID_RE = re.compile(
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+    re.IGNORECASE,
+)
+
+
+def _web_research_client_from_config(config: ToolRuntimeConfig) -> WebResearchClient:
+    """Build only explicitly configured public-web providers.
+
+    Search-provider order is an administrator-controlled fallback order.  The
+    Firecrawl extractor is made available whenever its credentials are present,
+    even if it is not selected as a search fallback.
+    """
+
+    provider_order = _web_provider_order(config.agent_web_search_provider_order)
+    timeout_seconds = float(config.agent_web_search_timeout_seconds)
+    firecrawl: FirecrawlWebResearch | None = None
+    if _optional_str(config.firecrawl_api_key) is not None:
+        firecrawl = FirecrawlWebResearch(
+            api_key=config.firecrawl_api_key or "",
+            base_url=config.firecrawl_base_url,
+            timeout_seconds=timeout_seconds,
+        )
+
+    search_providers: list[WebSearchProvider] = []
+    for provider_name in provider_order:
+        if provider_name == "searxng":
+            base_url = _optional_str(config.searxng_base_url)
+            if base_url is not None:
+                search_providers.append(
+                    SearxngWebSearch(
+                        base_url=base_url,
+                        timeout_seconds=timeout_seconds,
+                        language=config.searxng_search_language,
+                    )
+                )
+        elif provider_name == "brave":
+            if _optional_str(config.brave_search_api_key) is not None:
+                search_providers.append(
+                    BraveWebSearch(
+                        api_key=config.brave_search_api_key or "",
+                        base_url=config.brave_search_base_url,
+                        timeout_seconds=timeout_seconds,
+                        country=config.brave_search_country,
+                        search_language=config.brave_search_language,
+                    )
+                )
+        elif provider_name == "firecrawl" and firecrawl is not None:
+            search_providers.append(firecrawl)
+
+    if not search_providers:
+        raise RuntimeError(
+            "No public web search provider is configured. Set SEARXNG_BASE_URL, "
+            "BRAVE_SEARCH_API_KEY, or FIRECRAWL_API_KEY."
+        )
+    return WebResearchClient(
+        search_providers=search_providers,
+        extract_providers=(firecrawl,) if firecrawl is not None else (),
+    )
+
+
+def _web_provider_order(value: object) -> tuple[str, ...]:
+    raw_values = str(value or "").split(",")
+    names = tuple(item.strip().casefold() for item in raw_values if item.strip())
+    if not names:
+        raise ValueError("AGENT_WEB_SEARCH_PROVIDER_ORDER must list a provider")
+    supported = {"searxng", "brave", "firecrawl"}
+    unsupported = [name for name in names if name not in supported]
+    if unsupported:
+        raise ValueError(
+            "AGENT_WEB_SEARCH_PROVIDER_ORDER contains unsupported provider: "
+            f"{unsupported[0]}"
+        )
+    if len(set(names)) != len(names):
+        raise ValueError("AGENT_WEB_SEARCH_PROVIDER_ORDER cannot repeat a provider")
+    return names
+
+
+def _validate_public_web_query(query: str) -> None:
+    """Reject clear private-data markers before any outbound web request."""
+
+    if not query:
+        raise ValueError("Public web search query is required")
+    if _WEB_QUERY_EMAIL_RE.search(query):
+        raise PermissionError(
+            "Public web search queries cannot contain email addresses"
+        )
+    if _WEB_QUERY_ACCESS_TOKEN_RE.search(query):
+        raise PermissionError("Public web search queries cannot contain access tokens")
+    if _WEB_QUERY_PAYMENT_CARD_RE.search(query):
+        raise PermissionError("Public web search queries cannot contain payment cards")
+    if _WEB_QUERY_UUID_RE.search(query):
+        raise PermissionError("Public web search queries cannot contain internal IDs")
+
+
+def _validate_erp_read_arguments(
+    tool_name: str,
+    arguments: dict[str, Any],
+) -> None:
+    """Validate the narrow ERP read contracts before a client is created."""
+
+    allowed = _PLANNER_TOOL_ARGUMENTS[tool_name]
+    unknown_arguments = set(arguments) - allowed
+    if unknown_arguments:
+        raise ValueError("Unknown ERP read arguments")
+
+    if tool_name == "billing_read.search_invoices":
+        _erp_invoice_type(arguments.get("invoice_type"))
+        _erp_search_query(arguments.get("query"), field_name="Invoice query")
+        _erp_result_limit(arguments.get("limit"), default=5)
+        return
+    if tool_name == "billing_read.get_invoice_summary":
+        _erp_invoice_type(arguments.get("invoice_type"))
+        _erp_required_text(
+            arguments.get("invoice_id"),
+            field_name="Invoice id",
+            maximum=140,
+        )
+        return
+    if tool_name == "billing_read.search_suppliers":
+        _erp_search_query(arguments.get("query"), field_name="Supplier query")
+        _erp_result_limit(arguments.get("limit"), default=5)
+        return
+    if tool_name == "erp_read.search_projects":
+        _erp_search_query(arguments.get("query"), field_name="ERP project query")
+        _erp_result_limit(arguments.get("limit"), default=5)
+        return
+    if tool_name == "erp_read.get_project_summary":
+        _erp_required_text(
+            arguments.get("project_id"),
+            field_name="ERP project id",
+            maximum=140,
+        )
+        return
+    raise ValueError("Unsupported ERP read tool")
+
+
+def _erp_invoice_type(value: Any) -> str:
+    if not isinstance(value, str):
+        raise ValueError("invoice_type must be sales or purchase")
+    normalized = value.strip().casefold()
+    if normalized not in _ERP_INVOICE_DOCTYPES:
+        raise ValueError("invoice_type must be sales or purchase")
+    return normalized
+
+
+def _erp_required_text(
+    value: Any,
+    *,
+    field_name: str,
+    maximum: int = 160,
+) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} is required")
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError(f"{field_name} is required")
+    if len(normalized) > maximum:
+        raise ValueError(f"{field_name} is too long")
+    if any(ord(character) < 32 for character in normalized):
+        raise ValueError(f"{field_name} contains unsupported control characters")
+    return normalized
+
+
+def _erp_search_query(value: Any, *, field_name: str) -> str:
+    normalized = _erp_required_text(value, field_name=field_name)
+    if "%" in normalized or "_" in normalized:
+        raise ValueError(f"{field_name} cannot contain wildcard characters")
+    return normalized
+
+
+def _erp_result_limit(value: Any, *, default: int) -> int:
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("limit must be an integer between 1 and 10")
+    if not 1 <= value <= 10:
+        raise ValueError("limit must be between 1 and 10")
+    return value
+
+
+def _erp_invoice_search_payload(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "invoice_id": _erp_payload_text(row.get("name"), maximum=140),
+        "posting_date": _erp_payload_text(row.get("posting_date"), maximum=32),
+        "status": _erp_document_status(row.get("docstatus")),
+    }
+
+
+def _erp_invoice_summary_payload(
+    row: dict[str, Any],
+    *,
+    invoice_type: str,
+) -> dict[str, Any]:
+    return {
+        "invoice_id": _erp_payload_text(row.get("name"), maximum=140),
+        "invoice_type": invoice_type,
+        "status": _erp_document_status(row.get("docstatus")),
+        "posting_date": _erp_payload_text(row.get("posting_date"), maximum=32),
+        "due_date": _erp_payload_text(row.get("due_date"), maximum=32),
+        "customer": (
+            _erp_payload_text(row.get("customer"), maximum=256)
+            if invoice_type == "sales"
+            else None
+        ),
+        "supplier": (
+            _erp_payload_text(row.get("supplier"), maximum=256)
+            if invoice_type == "purchase"
+            else None
+        ),
+        "project": _erp_payload_text(row.get("project"), maximum=140),
+        "currency": _erp_payload_text(row.get("currency"), maximum=16),
+        "grand_total": _erp_payload_amount(row.get("grand_total")),
+        "rounded_total": _erp_payload_amount(row.get("rounded_total")),
+        "outstanding_amount": _erp_payload_amount(row.get("outstanding_amount")),
+    }
+
+
+def _erp_supplier_payload(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "supplier_id": _erp_payload_text(row.get("name"), maximum=140),
+        "supplier_name": _erp_payload_text(row.get("supplier_name"), maximum=256),
+        "email": _erp_payload_text(row.get("email_id"), maximum=320),
+    }
+
+
+def _erp_project_summary_payload(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "project_id": _erp_payload_text(row.get("name"), maximum=140),
+        "project_name": _erp_payload_text(row.get("project_name"), maximum=256),
+        "status": _erp_payload_text(row.get("status"), maximum=64),
+        "customer": _erp_payload_text(row.get("customer"), maximum=256),
+        "project_type": _erp_payload_text(row.get("project_type"), maximum=128),
+        "priority": _erp_payload_text(row.get("priority"), maximum=64),
+        "percent_complete": _erp_payload_amount(row.get("percent_complete")),
+        "expected_start_date": _erp_payload_text(
+            row.get("expected_start_date"),
+            maximum=32,
+        ),
+        "expected_end_date": _erp_payload_text(
+            row.get("expected_end_date"),
+            maximum=32,
+        ),
+        "actual_start_date": _erp_payload_text(
+            row.get("actual_start_date"),
+            maximum=32,
+        ),
+        "actual_end_date": _erp_payload_text(
+            row.get("actual_end_date"),
+            maximum=32,
+        ),
+        "modified": _erp_payload_text(row.get("modified"), maximum=64),
+    }
+
+
+def _erp_document_status(value: Any) -> str:
+    if value in (0, "0"):
+        return "draft"
+    if value in (1, "1"):
+        return "submitted"
+    if value in (2, "2"):
+        return "cancelled"
+    return "unknown"
+
+
+def _erp_payload_text(value: Any, *, maximum: int) -> str | None:
+    if isinstance(value, bool) or not isinstance(value, str | int | float):
+        return None
+    normalized = " ".join(str(value).split())
+    return normalized[:maximum] or None
+
+
+def _erp_payload_amount(value: Any) -> int | float | str | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int | float):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip()
+        return normalized[:64] or None
+    return None
+
+
 def _optional_str(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
@@ -2280,6 +3046,13 @@ def _memory_scope_type(value: Any, *, default: MemoryScopeType) -> MemoryScopeTy
     if normalized not in {"user", "project", "org"}:
         raise ValueError("Memory scope_type must be user, project, or org")
     return normalized  # type: ignore[return-value]
+
+
+def _required_organization_id(value: str | None) -> str:
+    normalized = _optional_str(value)
+    if normalized is None:
+        raise ValueError("organization_id is required for tenant-scoped operations")
+    return normalized
 
 
 def _memory_visibility(value: Any, *, default: str) -> MemoryVisibility:
