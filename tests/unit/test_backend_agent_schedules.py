@@ -129,6 +129,29 @@ def test_agent_loop_creation_persists_an_exact_default_tool_catalog() -> None:
     assert "crm_write.update_contact" not in definition.tool_allowlist
 
 
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "Report Purchase Invoice PINV-123 for Acme.",
+        "Inspect CRM contact contact-123 for onboarding changes.",
+        "Inspect CRM contact jane@508.dev for onboarding changes.",
+    ],
+)
+def test_agent_loop_creation_rejects_internal_record_identifiers(prompt: str) -> None:
+    """A schedule objective cannot disclose an internal record to a planner."""
+
+    with pytest.raises(ValueError, match="internal record identifiers"):
+        api._agent_schedule_definition_from_fields(
+            SimpleNamespace(
+                prompt=prompt,
+                execution_mode="agent_loop",
+                tool_allowlist=["onboarding_read.get_summary"],
+                channel_id="2000",
+            ),
+            guild_id="1000",
+        )
+
+
 class _LoopPlanner:
     def __init__(self, first_draft: PlannerDraft, final_draft: PlannerDraft) -> None:
         self.first_draft = first_draft
@@ -236,6 +259,106 @@ def test_agent_loop_uses_safe_aggregate_observations_for_private_tools() -> None
     assert observation == {"matching_contact_count": 2}
     assert "private@example.com" not in planner.observations[0]["data_json"]
     assert "Private Person" not in planner.observations[0]["data_json"]
+
+
+def test_agent_loop_rejects_an_answer_before_any_scheduled_observation() -> None:
+    """A scheduled report cannot publish a model-only answer."""
+
+    planner = _LoopPlanner(
+        PlannerDraft(
+            status="answer",
+            answer="Everything is healthy.",
+        ),
+        PlannerDraft(status="answer", answer="unused"),
+    )
+    orchestrator = _LoopOrchestrator(planner)
+    schedule = _agent_loop_schedule(tool_allowlist=["crm_read.search_contacts"])
+    context = AgentIdentityContext(
+        discord_user_id="1001",
+        organization_id="1000",
+        guild_id="1000",
+        roles=["Admin"],
+    )
+
+    outcome = api._run_agent_schedule_loop(
+        orchestrator=cast(AgentOrchestrator, orchestrator),
+        schedule=schedule,
+        run=_run(),
+        context=context,
+        effective_scopes=orchestrator.policy.scopes_for_context(context),
+        deadline_monotonic=1_000_000_000_000.0,
+    )
+
+    assert outcome.error == "scheduled_planner_answer_without_observation"
+    assert outcome.results == []
+    assert orchestrator.plans == []
+    assert api._agent_schedule_loop_error_is_non_retryable(outcome.error)
+
+
+def test_agent_loop_never_sends_a_legacy_private_objective_to_the_planner() -> None:
+    """Runtime defense protects schedule rows that predate the creation gate."""
+
+    planner = Mock()
+    schedule = _agent_loop_schedule(tool_allowlist=["onboarding_read.get_summary"])
+    schedule = replace(
+        schedule,
+        definition=schedule.definition.model_copy(
+            update={"prompt": "Report Purchase Invoice PINV-123 for Acme."}
+        ),
+    )
+    context = AgentIdentityContext(
+        discord_user_id="1001",
+        organization_id="1000",
+        guild_id="1000",
+        roles=["Admin"],
+    )
+
+    outcome = api._run_agent_schedule_loop(
+        orchestrator=cast(AgentOrchestrator, SimpleNamespace(planner=planner)),
+        schedule=schedule,
+        run=_run(),
+        context=context,
+        effective_scopes={"agent:schedule:manage", "crm:contact:read"},
+        deadline_monotonic=1_000_000_000_000.0,
+    )
+
+    assert outcome.error == "scheduled_prompt_contains_internal_identifier"
+    assert outcome.results == []
+    assert api._agent_schedule_loop_error_is_non_retryable(outcome.error)
+    planner.plan.assert_not_called()
+
+
+def test_legacy_private_objective_never_reaches_the_public_summary_model() -> None:
+    """A pre-guard frozen schedule cannot leak its prompt to model summary."""
+
+    planner = Mock()
+    schedule = _schedule()
+    schedule = replace(
+        schedule,
+        definition=schedule.definition.model_copy(
+            update={
+                "prompt": "Report Purchase Invoice PINV-123 for Acme.",
+                "summary_mode": "model_for_public_data",
+                "sources_are_public": True,
+            }
+        ),
+    )
+    context = AgentIdentityContext(
+        discord_user_id="1001",
+        organization_id="1000",
+        guild_id="1000",
+        roles=["Admin"],
+    )
+
+    summary = api._model_agent_schedule_summary(
+        orchestrator=cast(AgentOrchestrator, SimpleNamespace(planner=planner)),
+        schedule=schedule,
+        context=context,
+        results=[],
+    )
+
+    assert summary is None
+    planner.plan_with_observations.assert_not_called()
 
 
 def test_agent_loop_rejects_a_write_before_any_tool_executes() -> None:
@@ -528,3 +651,84 @@ async def test_schedule_execution_reclaims_only_a_stale_running_run(
         claim_run.call_args.kwargs["reclaim_running_before"]
         >= stale_running_run.started_at
     )
+@pytest.mark.asyncio
+async def test_schedule_execution_never_posts_a_report_twice_after_recorded_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retry after the Discord response is persisted only completes the run."""
+
+    stale_running_run = replace(
+        _run(),
+        status=AgentScheduleRunStatus.RUNNING,
+        started_at=datetime.now(tz=timezone.utc) - timedelta(seconds=301),
+        delivery_status=AgentScheduleRunDeliveryStatus.POSTED,
+        delivery_message_id="discord-message-1",
+        delivery_claimed_at=datetime.now(tz=timezone.utc) - timedelta(seconds=302),
+    )
+    reclaimed_run = replace(
+        stale_running_run,
+        started_at=datetime.now(tz=timezone.utc),
+    )
+    completed_run = replace(
+        reclaimed_run,
+        status=AgentScheduleRunStatus.SUCCEEDED,
+        finished_at=datetime.now(tz=timezone.utc),
+    )
+    schedule = _schedule()
+    context = AgentIdentityContext(
+        discord_user_id="1001",
+        organization_id="1000",
+        guild_id="1000",
+        roles=["Admin"],
+    )
+
+    async def refreshed_context(*_args: object, **_kwargs: object):
+        return context, None, 200
+
+    post_report = AsyncMock(side_effect=AssertionError("must not post twice"))
+    complete_run = Mock(return_value=completed_run)
+    orchestrator = SimpleNamespace(
+        policy=SimpleNamespace(
+            scopes_for_context=Mock(return_value=set(schedule.allowed_scopes))
+        ),
+        execute_plan=Mock(
+            return_value=[
+                AgentExecutionResult(
+                    tool_name="github_issue.search_issues",
+                    status="succeeded",
+                    result={"issues": []},
+                )
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        api,
+        "get_agent_schedule_run",
+        Mock(side_effect=[stale_running_run, stale_running_run]),
+    )
+    monkeypatch.setattr(
+        api, "claim_agent_schedule_run", Mock(return_value=reclaimed_run)
+    )
+    monkeypatch.setattr(api, "get_agent_schedule", Mock(return_value=schedule))
+    monkeypatch.setattr(api, "_fresh_agent_schedule_context", refreshed_context)
+    monkeypatch.setattr(api, "_get_agent_orchestrator", lambda: orchestrator)
+    monkeypatch.setattr(api, "_agent_schedule_plan", Mock(return_value=object()))
+    monkeypatch.setattr(api, "_model_agent_schedule_summary", Mock(return_value=None))
+    monkeypatch.setattr(
+        api,
+        "claim_agent_schedule_run_delivery",
+        Mock(return_value=None),
+    )
+    monkeypatch.setattr(api, "complete_agent_schedule_run", complete_run)
+    monkeypatch.setattr(api, "_post_agent_schedule_report_to_bot", post_report)
+
+    response, status_code = await api._execute_agent_schedule_run(
+        cast(Request, SimpleNamespace()),
+        run_id=stale_running_run.id,
+    )
+
+    assert status_code == 200
+    assert response["status"] == "succeeded"
+    assert response["delivery_status"] == "already_posted"
+    post_report.assert_not_awaited()
+    assert complete_run.call_args.kwargs["status"] is AgentScheduleRunStatus.SUCCEEDED

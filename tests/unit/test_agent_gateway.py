@@ -2151,6 +2151,55 @@ def test_agent_uses_structured_planner_for_multi_action_confirmation() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    ("message", "roles", "tool_name", "arguments"),
+    [
+        (
+            "Create a task to follow up on GitHub issue 123 in project Atlas",
+            ["Steering Committee"],
+            "task_write.create_task",
+            {"title": "follow up on GitHub issue 123", "project": "Atlas"},
+        ),
+        (
+            "Approve CRM contact contact-123",
+            ["Admin"],
+            "crm_write.update_contact",
+            {
+                "contact_id": "contact-123",
+                "updates": {"cOnboardingState": "approved"},
+            },
+        ),
+    ],
+)
+def test_model_clarification_falls_back_to_complete_deterministic_workflow(
+    message: str,
+    roles: list[str],
+    tool_name: str,
+    arguments: dict[str, object],
+) -> None:
+    class CautiousPlanner:
+        def plan(self, **_kwargs: object) -> AgentPlannerResult:
+            return AgentPlannerResult(
+                draft=PlannerDraft(
+                    status="needs_clarification",
+                    clarification_question="Please provide more detail.",
+                ),
+                model=AgentModelConfig().resolve("strong"),
+                latency_ms=1,
+            )
+
+    response = AgentOrchestrator(planner=CautiousPlanner()).plan(
+        message,
+        _context(roles=roles),
+    )
+
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    assert response.plan.planner == "deterministic_regex"
+    assert response.plan.actions[0].tool_name == tool_name
+    assert response.plan.actions[0].arguments == arguments
+
+
 def test_admin_can_propose_a_confirmed_recurring_agent_report() -> None:
     """The normal agent path freezes a schedule before the durable write."""
 
@@ -2338,7 +2387,18 @@ def test_non_web_role_cannot_trigger_extract_url_validation(
     assert "web:research" in response.message
 
 
-def test_public_web_query_rejects_sensitive_identifiers_before_provider_call() -> None:
+@pytest.mark.parametrize(
+    ("query", "error"),
+    [
+        ("sarah@example.com current grants", "email addresses"),
+        ("CRM contact contact-123 current grants", "internal record identifiers"),
+        ("Purchase Invoice PINV-123 current grants", "internal record identifiers"),
+    ],
+)
+def test_public_web_query_rejects_sensitive_identifiers_before_provider_call(
+    query: str,
+    error: str,
+) -> None:
     class FakeWebClient:
         def __init__(self) -> None:
             self.calls = 0
@@ -2348,14 +2408,38 @@ def test_public_web_query_rejects_sensitive_identifiers_before_provider_call() -
             return WebSearchResponse(provider="test", results=())
 
     web_client = FakeWebClient()
-    with pytest.raises(PermissionError, match="email addresses"):
+    with pytest.raises(PermissionError, match=error):
         ToolRegistry(web_client=web_client).execute(
             "web_read.search",
-            {"query": "sarah@example.com current grants"},
+            {"query": query},
             organization_id="org-1",
             actor_id="123",
         )
 
+    assert web_client.calls == 0
+
+
+def test_public_web_route_rejects_crm_record_identifier_before_provider_call() -> None:
+    """Explicit web syntax cannot bypass the private-identifier boundary."""
+
+    class FakeWebClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def search(self, query: str, *, limit: int) -> WebSearchResponse:
+            self.calls += 1
+            return WebSearchResponse(provider="test", results=())
+
+    web_client = FakeWebClient()
+    response = AgentOrchestrator(
+        registry=ToolRegistry(web_client=web_client),
+    ).plan(
+        "Search the web for CRM contact contact-123",
+        _context(roles=["Steering Committee"]),
+    )
+
+    assert response.status == "needs_clarification"
+    assert "cannot send private identifiers" in response.message
     assert web_client.calls == 0
 
 

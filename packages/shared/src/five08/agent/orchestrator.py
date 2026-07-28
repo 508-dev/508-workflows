@@ -33,6 +33,7 @@ from five08.agent.memory import (
 from five08.agent.model_routing import AgentModelConfig
 from five08.agent.planner import AgentPlanner, AgentPlannerResult
 from five08.agent.policy import PolicyEngine
+from five08.agent.privacy import contains_private_agent_identifier
 from five08.agent.tools import ToolPartialSuccessError, ToolRegistry
 from five08.clients.migadu import normalize_migadu_mailbox_domain
 
@@ -89,14 +90,6 @@ _MONTHS = {
 LiteralPlanner = Literal["deterministic_regex", "live_model"]
 _WEB_READ_TOOL_PREFIX = "web_read."
 _MAX_PLANNER_OBSERVATION_CHARS = 12_000
-_MODEL_INPUT_EMAIL_RE = re.compile(
-    r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
-    re.IGNORECASE,
-)
-_MODEL_INPUT_UUID_RE = re.compile(
-    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
-    re.IGNORECASE,
-)
 
 
 @dataclass
@@ -543,12 +536,39 @@ class AgentOrchestrator:
             # Tool-shaped requests must use deterministic parsing/confirmation
             # rather than letting a model claim that an operation is complete.
             return None
+        if (
+            result.draft.status == "needs_clarification"
+            and self._deterministic_action_for_model_fallback(text, context) is not None
+        ):
+            # A fully specified workflow that the local parser recognizes must
+            # not become less capable because an optional model is overly
+            # cautious. The normal fallback still validates, authorizes, and
+            # requires confirmation before any side effect.
+            return None
         return self._response_for_planner_result(
             result=result,
             context=context,
             planning_text=text,
             explicit_public_web_action=explicit_public_web_action,
         )
+
+    def _deterministic_action_for_model_fallback(
+        self,
+        text: str,
+        context: AgentIdentityContext,
+    ) -> AgentToolAction | None:
+        """Return a complete local action that can safely supersede a model clarification."""
+
+        action = self._parse_action(text)
+        if action is None:
+            return None
+        try:
+            self.registry.validate_planner_action(action.tool_name, action.arguments)
+        except (PermissionError, ValueError):
+            return None
+        if self._planner_action_clarification(action, context=context) is not None:
+            return None
+        return action
 
     def _planner_context_with_authorized_snippets(
         self,
@@ -582,11 +602,7 @@ class AgentOrchestrator:
         service boundary.
         """
 
-        return bool(
-            _MODEL_INPUT_EMAIL_RE.search(text)
-            or _MODEL_INPUT_UUID_RE.search(text)
-            or _CONTACT_ID_REFERENCE_RE.search(text)
-        )
+        return contains_private_agent_identifier(text)
 
     def _response_for_planner_result(
         self,

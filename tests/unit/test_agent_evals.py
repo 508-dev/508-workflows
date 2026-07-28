@@ -680,8 +680,10 @@ def test_live_planner_eval_retries_one_bad_plan(monkeypatch) -> None:
             }
 
     responses = [
-        '{"status":"needs_clarification","intent":null,'
-        '"clarification_question":"Who should I look up?","actions":[]}',
+        '{"status":"planned","intent":"search_crm_contacts",'
+        '"clarification_question":null,"actions":['
+        '{"tool_name":"unknown.tool","arguments":{},'
+        '"summary":"Unknown action"}]}',
         '{"status":"planned","intent":"search_crm_contacts",'
         '"clarification_question":null,'
         '"actions":[{"tool_name":"crm_read.search_contacts",'

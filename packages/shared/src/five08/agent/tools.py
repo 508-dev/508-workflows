@@ -21,6 +21,7 @@ from five08.agent.models import (
     MemoryVisibility,
     RiskLevel,
 )
+from five08.agent.privacy import contains_private_agent_identifier
 from five08.agent.schedules import AgentScheduleProposal
 from five08.agent.web import (
     BraveWebSearch,
@@ -2878,6 +2879,10 @@ def _validate_public_web_query(query: str) -> None:
         raise PermissionError("Public web search queries cannot contain payment cards")
     if _WEB_QUERY_UUID_RE.search(query):
         raise PermissionError("Public web search queries cannot contain internal IDs")
+    if contains_private_agent_identifier(query):
+        raise PermissionError(
+            "Public web search queries cannot contain internal record identifiers"
+        )
 
 
 def _validate_erp_read_arguments(

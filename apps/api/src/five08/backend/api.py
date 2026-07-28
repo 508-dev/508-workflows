@@ -66,6 +66,7 @@ from five08.agent import (
     ToolRuntimeConfig,
 )
 from five08.agent.memory import contains_sensitive_memory_text
+from five08.agent.privacy import contains_private_agent_identifier
 from five08.agent.schedules import (
     AGENT_SCHEDULE_ALLOWED_TOOL_NAMES,
     AgentScheduleRecord,
@@ -9252,7 +9253,8 @@ def _agent_schedule_definition_from_fields(
 ) -> AgentScheduleDefinition:
     """Build either a legacy frozen action or bounded agent-loop envelope."""
 
-    if contains_sensitive_memory_text(str(payload.prompt)):
+    prompt = str(payload.prompt)
+    if contains_sensitive_memory_text(prompt):
         raise ValueError(
             "schedule prompts cannot contain secrets, credentials, payment data, "
             "or government identifiers"
@@ -9269,25 +9271,35 @@ def _agent_schedule_definition_from_fields(
         max(5, int(settings.agent_schedule_execution_timeout_seconds)),
     )
     if execution_mode is AgentScheduleExecutionMode.AGENT_LOOP:
+        if contains_private_agent_identifier(prompt):
+            raise ValueError(
+                "agent-loop schedule prompts cannot contain internal record identifiers"
+            )
         requested_tools = list(getattr(payload, "tool_allowlist", ()) or ())
         # A generic schedule is useful without a tool-picker ceremony. Its
         # persisted catalog is still exact: newly added tools do not reach an
         # existing schedule until an admin creates or replaces it deliberately.
         tool_allowlist = requested_tools or sorted(AGENT_SCHEDULE_ALLOWED_TOOL_NAMES)
         return AgentScheduleDefinition(
-            prompt=str(payload.prompt),
+            prompt=prompt,
             execution_mode=execution_mode,
             tool_allowlist=tool_allowlist,
             delivery=delivery,
             max_runtime_seconds=max_runtime_seconds,
         )
 
+    if str(
+        getattr(payload, "summary_mode", "deterministic")
+    ) == "model_for_public_data" and contains_private_agent_identifier(prompt):
+        raise ValueError(
+            "model-summarized schedule prompts cannot contain internal record identifiers"
+        )
     repository = str(payload.repository or "").strip()
     query = str(payload.query or "").strip()
     state = str(payload.state).strip().casefold()
     limit = int(payload.limit)
     return AgentScheduleDefinition(
-        prompt=str(payload.prompt),
+        prompt=prompt,
         execution_mode=execution_mode,
         actions=[
             AgentScheduleAction(
@@ -9682,6 +9694,14 @@ def _run_agent_schedule_loop(
     data store for private operational data.
     """
 
+    if contains_private_agent_identifier(schedule.definition.prompt):
+        # Protect schedules created before the creation-time guard was added,
+        # or records written outside the API. A private record reference must
+        # never become external planner input.
+        return _AgentScheduleLoopOutcome(
+            results=[],
+            error="scheduled_prompt_contains_internal_identifier",
+        )
     planner = orchestrator.planner
     if planner is None:
         return _AgentScheduleLoopOutcome(
@@ -10069,7 +10089,10 @@ def _model_agent_schedule_summary(
 ) -> str | None:
     """Use the existing structured planner only for owner-classified public data."""
 
-    if schedule.definition.summary_mode != "model_for_public_data":
+    if (
+        schedule.definition.summary_mode != "model_for_public_data"
+        or contains_private_agent_identifier(schedule.definition.prompt)
+    ):
         return None
     observations = _public_schedule_observations(results)
     if not observations:
@@ -10314,6 +10337,7 @@ def _agent_schedule_loop_error_is_non_retryable(error: str) -> bool:
         "scheduled_planner_action_invalid",
         "scheduled_planner_extract_not_from_search",
         "scheduled_planner_needs_clarification",
+        "scheduled_prompt_contains_internal_identifier",
         "scheduled_planner_proposed_unallowed_tool",
         "scheduled_planner_proposed_unsafe_tool",
         "scheduled_planner_response_invalid",
