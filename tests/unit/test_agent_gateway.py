@@ -2211,7 +2211,7 @@ def test_user_accounts_create_is_admin_only() -> None:
 
 def _account_runtime_config(
     *,
-    outline_api_key: str | None = "outline-key",
+    outline_admin_api_key: str | None = "outline-key",
     brevo_api_key: str | None = None,
     keila_api_key: str | None = None,
 ) -> ToolRuntimeConfig:
@@ -2223,7 +2223,7 @@ def _account_runtime_config(
         authentik_api_base_url="https://sso.example",
         authentik_api_token="authentik-token",
         authentik_recovery_email_stage_id="stage-1",
-        outline_api_key=outline_api_key,
+        outline_admin_api_key=outline_admin_api_key,
         brevo_api_key=brevo_api_key,
         brevo_508_members_newsletter_list_id=4,
         keila_api_key=keila_api_key,
@@ -3035,10 +3035,10 @@ def test_user_accounts_tool_preflights_before_mailbox_creation(
 ) -> None:
     fakes = _install_account_tool_fakes(monkeypatch)
     registry = ToolRegistry(
-        runtime_config=_account_runtime_config(outline_api_key=None)
+        runtime_config=_account_runtime_config(outline_admin_api_key=None)
     )
 
-    with pytest.raises(RuntimeError, match="OUTLINE_API_KEY"):
+    with pytest.raises(RuntimeError, match="OUTLINE_ADMIN_API_KEY"):
         registry.execute(
             "account_write.create_user_accounts",
             {"contact_id": "contact-1", "mailbox_username": "jane@508.dev"},

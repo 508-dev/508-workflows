@@ -184,6 +184,46 @@ class TestBot508:
 
         assert config.backend_api_base_url == "http://127.0.0.1:8090"
 
+    def test_outline_admin_api_key_prefers_new_name_and_supports_legacy_alias(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.delenv("OUTLINE_ADMIN_API_KEY", raising=False)
+        monkeypatch.setenv("OUTLINE_API_KEY", "legacy-admin-key")
+
+        legacy_config = Settings()
+
+        assert legacy_config.outline_admin_api_key == "legacy-admin-key"
+        assert legacy_config.outline_api_key == "legacy-admin-key"
+
+        monkeypatch.setenv("OUTLINE_ADMIN_API_KEY", " ")
+
+        blank_new_config = Settings()
+
+        assert blank_new_config.outline_admin_api_key == "legacy-admin-key"
+
+        monkeypatch.setenv("OUTLINE_ADMIN_API_KEY", "preferred-admin-key")
+
+        config = Settings()
+
+        assert config.outline_admin_api_key == "preferred-admin-key"
+
+    def test_outline_contents_api_key_is_shared_with_the_bot(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.delenv("OUTLINE_CONTENTS_API_KEY", raising=False)
+        monkeypatch.setenv("OUTLINE_DISCORD_MEMBER_API_KEY", "unused-key")
+        monkeypatch.setenv("OUTLINE_WIKI_API_KEY", "unused-key")
+
+        assert Settings().outline_contents_api_key is None
+
+        monkeypatch.setenv("OUTLINE_CONTENTS_API_KEY", "contents-key")
+
+        config = Settings()
+
+        assert config.outline_contents_api_key == "contents-key"
+
     def test_onboarding_email_smtp_settings_fall_back_to_generic_smtp_env(
         self,
         monkeypatch: pytest.MonkeyPatch,

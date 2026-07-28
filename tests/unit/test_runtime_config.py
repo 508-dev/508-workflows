@@ -12,6 +12,7 @@ from five08.runtime_config import (
     _load_db_values,
     coerce_runtime_config_value,
     definition_is_env_locked,
+    delete_runtime_config_value,
     invalidate_runtime_config_cache,
     list_runtime_config,
     mask_runtime_secret,
@@ -175,6 +176,163 @@ def test_env_value_locks_matching_runtime_config(
     monkeypatch.setenv("OPENAI_API_KEY_DIRECT", "legacy-direct-key")
 
     assert definition_is_env_locked(definition)
+
+
+def test_outline_admin_runtime_config_supports_legacy_dashboard_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from five08 import runtime_config
+
+    definition = runtime_config_definition_for_key("OUTLINE_ADMIN_API_KEY")
+    assert definition is not None
+    assert runtime_config_definition_for_key("OUTLINE_API_KEY") is definition
+    assert definition.primary_env_name == "OUTLINE_ADMIN_API_KEY"
+
+    monkeypatch.setenv("CONFIG_SECRET_KEY", "unit-test-runtime-secret")
+    monkeypatch.setenv("RUNTIME_CONFIG_TEST_ENABLE", "true")
+    monkeypatch.delenv("OUTLINE_ADMIN_API_KEY", raising=False)
+    monkeypatch.delenv("OUTLINE_API_KEY", raising=False)
+    monkeypatch.setattr("five08.runtime_config._parse_dotenv_keys", lambda: {})
+
+    rows = [
+        {
+            "key": "OUTLINE_API_KEY",
+            "value": _encrypt_secret_value("legacy-admin-key"),
+        }
+    ]
+
+    class FakeCursor:
+        def __enter__(self) -> "FakeCursor":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def execute(self, query: str) -> None:
+            assert "runtime_config_values" in query
+
+        def fetchall(self) -> list[dict[str, str]]:
+            return rows
+
+    class FakeConnection:
+        def __enter__(self) -> "FakeConnection":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def cursor(self, **_: object) -> FakeCursor:
+            return FakeCursor()
+
+    monkeypatch.setattr(
+        "five08.runtime_config.psycopg.connect",
+        lambda _: FakeConnection(),
+    )
+    settings = WorkerSettings(espo_base_url="", espo_api_key="")
+    invalidate_runtime_config_cache(settings)
+
+    snapshot = runtime_config._load_db_snapshot(settings)
+
+    assert snapshot.values[definition.key] == "legacy-admin-key"
+    assert definition.key in snapshot.present_keys
+
+    rows.insert(
+        0,
+        {
+            "key": "OUTLINE_ADMIN_API_KEY",
+            "value": _encrypt_secret_value("preferred-admin-key"),
+        },
+    )
+    invalidate_runtime_config_cache(settings)
+
+    snapshot = runtime_config._load_db_snapshot(settings)
+
+    assert snapshot.values[definition.key] == "preferred-admin-key"
+    assert definition.key in snapshot.present_keys
+    item = next(
+        entry
+        for entry in list_runtime_config(settings)
+        if entry["key"] == "OUTLINE_ADMIN_API_KEY"
+    )
+    assert item["source"] == "database"
+
+
+def test_outline_contents_runtime_config_has_no_legacy_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    definition = runtime_config_definition_for_key("OUTLINE_CONTENTS_API_KEY")
+
+    assert definition is not None
+    assert definition.primary_env_name == "OUTLINE_CONTENTS_API_KEY"
+    assert definition.legacy_keys == ()
+    assert runtime_config_definition_for_key("OUTLINE_DISCORD_MEMBER_API_KEY") is None
+    assert runtime_config_definition_for_key("OUTLINE_WIKI_API_KEY") is None
+
+    monkeypatch.setenv("OUTLINE_CONTENTS_API_KEY", "contents-key")
+
+    assert definition_is_env_locked(definition)
+
+
+def test_saving_outline_admin_runtime_config_removes_legacy_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    definition = runtime_config_definition_for_key("OUTLINE_ADMIN_API_KEY")
+    assert definition is not None
+    monkeypatch.setenv("CONFIG_SECRET_KEY", "unit-test-runtime-secret")
+    monkeypatch.delenv("OUTLINE_ADMIN_API_KEY", raising=False)
+    monkeypatch.delenv("OUTLINE_API_KEY", raising=False)
+    monkeypatch.setattr("five08.runtime_config._parse_dotenv_keys", lambda: {})
+
+    calls: list[tuple[str, object | None]] = []
+
+    class FakeCursor:
+        def __enter__(self) -> "FakeCursor":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def execute(self, query: str, params: object | None = None) -> None:
+            calls.append((query, params))
+
+    class FakeConnection:
+        def __enter__(self) -> "FakeConnection":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def cursor(self, **_: object) -> FakeCursor:
+            return FakeCursor()
+
+    monkeypatch.setattr(
+        "five08.runtime_config.psycopg.connect",
+        lambda _: FakeConnection(),
+    )
+    settings = WorkerSettings(espo_base_url="", espo_api_key="")
+
+    set_runtime_config_value(settings, definition, "preferred-admin-key")
+
+    assert any(
+        "INSERT INTO runtime_config_values" in query
+        and params is not None
+        and params[0] == "OUTLINE_ADMIN_API_KEY"
+        for query, params in calls
+    )
+    assert any(
+        "UPPER(BTRIM(key)) = ANY(%s)" in query and params == (["OUTLINE_API_KEY"],)
+        for query, params in calls
+    )
+
+    calls.clear()
+
+    delete_runtime_config_value(settings, definition)
+
+    assert any(
+        "UPPER(BTRIM(key)) = ANY(%s)" in query
+        and params == (["OUTLINE_ADMIN_API_KEY", "OUTLINE_API_KEY"],)
+        for query, params in calls
+    )
 
 
 def test_runtime_config_list_does_not_mask_env_secrets(

@@ -205,12 +205,44 @@ Pydantic import errors.
 - `Optional`: `AUTHENTIK_RECOVERY_EMAIL_STAGE_ID` (when unset, the bot resolves by name)
 - `Optional`: `AUTHENTIK_RECOVERY_EMAIL_STAGE_NAME` (default: `default-recovery-email`)
 
-## Outline Invitations
+## Privileged Outline Integration
 
-- `Required for /create-user-accounts and /invite-outline-user`: `OUTLINE_API_KEY`
+- `Required for /create-user-accounts and /invite-outline-user`:
+  `OUTLINE_ADMIN_API_KEY`
 - Note: `/create-user-accounts` also requires the Migadu and Authentik settings above.
 - `Optional`: `OUTLINE_BASE_URL` (default: `https://app.getoutline.com`; root and `/api` URLs are both accepted)
 - `Optional`: `OUTLINE_API_TIMEOUT_SECONDS` (default: `20.0`)
+- `OUTLINE_API_KEY` remains a compatibility fallback. A non-empty
+  `OUTLINE_ADMIN_API_KEY` wins; a blank new value continues to fall back to the
+  old value during migration. Add the new variable in the deployment dashboard,
+  redeploy, and then remove the old variable.
+- The in-app Configuration dashboard stores encrypted database overrides; it
+  does not edit deployment environment variables. It displays
+  `OUTLINE_ADMIN_API_KEY`, reads an existing `OUTLINE_API_KEY` dashboard value
+  as a fallback, and removes that old stored value when the new setting is saved.
+  Any non-empty environment value under either name locks the dashboard setting.
+
+## Member-safe Outline Content
+
+- `Required when using /wiki or project wiki matching`:
+  `OUTLINE_CONTENTS_API_KEY`
+- `Required for /wiki`: `DISCORD_SERVER_ID`. The command refuses DMs and other
+  guilds so the dedicated Outline credential is never used outside the co-op
+  server.
+- Do not reuse `OUTLINE_ADMIN_API_KEY`: it can invite users and may access private
+  collections. Create the contents key for a dedicated regular Outline account
+  with access only to collections that every Discord `Member` may search.
+- Scope the key to `documents.search`, `documents.info`, and `stars.list`.
+  `/wiki query:...` searches published documents only; `/wiki` without a query
+  shows the dedicated account's starred documents as quick links. The same key
+  reads the member-visible project-matching document for the dashboard.
+- Add only the exact document-write scopes needed when a write feature is
+  introduced; do not grant `documents.*` preemptively.
+- The in-app Configuration dashboard stores this encrypted key under
+  `OUTLINE_CONTENTS_API_KEY`; a non-empty deployment environment value locks
+  the dashboard setting.
+- The command always replies ephemerally. It does not log search queries or
+  document snippets.
 
 ## Discord CRM Audit Logging (Best Effort)
 

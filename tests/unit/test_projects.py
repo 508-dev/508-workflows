@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import five08.projects as projects_module
 import pytest
@@ -132,13 +132,32 @@ def test_mark_missing_erpnext_open_projects_skips_empty_seen_ids() -> None:
 
 
 def test_fetch_outline_document_wraps_transport_errors() -> None:
-    settings = SharedSettings(outline_api_key="outline-key")
+    settings = SharedSettings(outline_contents_api_key="outline-key")
     with patch(
         "five08.projects.requests.post",
         side_effect=requests.Timeout("timed out"),
     ):
         with pytest.raises(ValueError, match="Outline document fetch failed"):
             fetch_outline_document(settings, document_id="doc-1")
+
+
+def test_fetch_outline_document_uses_the_contents_api_key() -> None:
+    settings = SharedSettings(outline_contents_api_key="contents-key")
+    response = Mock(status_code=200)
+    response.json.return_value = {"ok": True, "data": {"id": "doc-1"}}
+
+    with patch("five08.projects.requests.post", return_value=response) as request:
+        document = fetch_outline_document(settings, document_id="doc-1")
+
+    assert document == {"id": "doc-1"}
+    assert request.call_args.kwargs["headers"]["Authorization"] == "Bearer contents-key"
+
+
+def test_fetch_outline_document_does_not_use_the_admin_api_key() -> None:
+    settings = SharedSettings(outline_admin_api_key="invite-only-key")
+
+    with pytest.raises(ValueError, match="OUTLINE_CONTENTS_API_KEY"):
+        fetch_outline_document(settings, document_id="doc-1")
 
 
 def test_list_dashboard_projects_visibility_requires_erp_roster_row() -> None:

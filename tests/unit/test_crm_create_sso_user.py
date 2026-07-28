@@ -842,7 +842,7 @@ async def test_create_user_accounts_validates_outline_before_mailbox_creation(
         patch.object(
             cog,
             "_outline_client",
-            side_effect=ValueError("OUTLINE_API_KEY is not configured."),
+            side_effect=ValueError("OUTLINE_ADMIN_API_KEY is not configured."),
         ),
         patch.object(cog, "_migadu_client") as migadu_client,
         patch.object(cog, "_audit_command_safe"),
@@ -856,7 +856,7 @@ async def test_create_user_accounts_validates_outline_before_mailbox_creation(
 
     migadu_client.assert_not_called()
     message = mock_interaction.followup.send.call_args.args[0]
-    assert "OUTLINE_API_KEY is not configured" in message
+    assert "OUTLINE_ADMIN_API_KEY is not configured" in message
 
 
 @pytest.mark.asyncio
@@ -1218,6 +1218,7 @@ async def test_invite_outline_user_reports_outline_api_error(
     assert "outline unavailable" in message
     audit_metadata = mock_audit.call_args.kwargs["metadata"]
     assert audit_metadata["search_term"] == "jane"
+    assert audit_metadata["stage"] == "outline"
     assert audit_metadata["error"] == "outline unavailable"
 
 

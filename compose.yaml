@@ -85,6 +85,7 @@ services:
     environment:
       REDIS_URL: redis://redis:6379/0
       REDIS_QUEUE_NAME: ${REDIS_QUEUE_NAME:-jobs.default}
+      POSTGRES_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-workflows}
       BACKEND_API_BASE_URL: http://web:8090
       AUDIT_API_BASE_URL: ""
     restart: unless-stopped
@@ -93,6 +94,8 @@ services:
       - infra
     depends_on:
       redis:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
 
   web:
