@@ -61,6 +61,25 @@ def test_production_policy_grants_only_matching_role_ids_in_an_allowed_guild() -
     assert "user:manage" in scopes
 
 
+def test_production_policy_uses_existing_discord_server_id_as_single_guild_fallback() -> (
+    None
+):
+    settings = cast(
+        SharedSettings,
+        SimpleNamespace(
+            environment="production",
+            agent_discord_role_id_bindings={"steering_committee": {"1002"}},
+            agent_discord_guild_id_set=frozenset(),
+            agent_role_name_fallback_enabled=False,
+            discord_server_id="1000",
+        ),
+    )
+
+    policy = PolicyEngine.from_settings(settings)
+
+    assert "agent:chat" in policy.scopes_for_context(_context(role_ids=["1002"]))
+
+
 @pytest.mark.parametrize(
     ("guild_id", "organization_id"),
     [

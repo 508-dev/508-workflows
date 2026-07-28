@@ -214,9 +214,20 @@ class PolicyEngine:
 
         environment = settings.environment.strip().casefold()
         local_environments = {"local", "development", "dev", "test", "testing"}
+        allowed_guild_ids = settings.agent_discord_guild_id_set
+        if not allowed_guild_ids:
+            # DISCORD_SERVER_ID is an established deployment setting used by
+            # the dashboard and bot. Reuse it as a single-guild migration
+            # fallback, while keeping an explicit agent allowlist authoritative
+            # when it is configured.
+            legacy_guild_id = str(
+                getattr(settings, "discord_server_id", "") or ""
+            ).strip()
+            if legacy_guild_id.isdecimal() and int(legacy_guild_id) > 0:
+                allowed_guild_ids = frozenset({legacy_guild_id})
         return cls(
             role_id_bindings=settings.agent_discord_role_id_bindings,
-            allowed_guild_ids=settings.agent_discord_guild_id_set,
+            allowed_guild_ids=allowed_guild_ids,
             # Production is intentionally unusable until an explicit guild
             # allowlist is configured alongside the role-ID bundle mappings.
             require_guild_binding=environment not in local_environments,
