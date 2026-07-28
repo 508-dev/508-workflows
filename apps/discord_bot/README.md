@@ -38,10 +38,10 @@ in deployed environments it must differ from `API_SHARED_SECRET` and be shared
 only with the backend API. Command authorization still belongs in role checks,
 backend policy checks, and resource-level checks.
 
-In deployed environments, agent permissions are bound to configured Discord
-guild and role IDs, not mutable role names. Configure the allowed guild with
-`AGENT_DISCORD_GUILD_IDS` and each capability bundle with the corresponding
-`AGENT_DISCORD_*_ROLE_IDS` variable. If the same Billing / ERP Dev role grants
+In deployed environments, agent permissions are bound to the configured
+`DISCORD_SERVER_ID` and immutable role IDs, not mutable role names. Configure
+each capability bundle with the corresponding `AGENT_DISCORD_*_ROLE_IDS`
+variable. If the same Billing / ERP Dev role grants
 both bundles, list its ID in both variables. Missing mappings fail closed.
 
 ## Agent Gateway
@@ -115,9 +115,8 @@ Relevant configuration:
   explicit local/test migration mode and must differ from `API_SHARED_SECRET`.
 - `AGENT_ALLOW_LEGACY_API_SECRET`: local/test-only opt-in to the old agent
   credential fallback; leave `false` for deployed environments.
-- `AGENT_DISCORD_GUILD_IDS`: comma-separated guild allowlist for agent
-  requests and confirmations; production blocks unconfigured guilds before
-  planning.
+- `DISCORD_SERVER_ID`: the single guild allowlist for agent requests and
+  confirmations; production blocks an unset or mismatched guild before planning.
 - `AGENT_DISCORD_ADMIN_ROLE_IDS`, `AGENT_DISCORD_STEERING_COMMITTEE_ROLE_IDS`,
   `AGENT_DISCORD_BILLING_ROLE_IDS`, `AGENT_DISCORD_ERP_DEVELOPER_ROLE_IDS`,
   `AGENT_DISCORD_PROJECT_MANAGER_ROLE_IDS`, `AGENT_DISCORD_ENGINEER_ROLE_IDS`:

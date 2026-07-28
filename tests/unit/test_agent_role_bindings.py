@@ -21,7 +21,7 @@ def _production_policy() -> PolicyEngine:
     return PolicyEngine.from_settings(
         SharedSettings(
             environment="production",
-            agent_discord_guild_ids="1000",
+            discord_server_id="1000",
             agent_discord_admin_role_ids="1001",
             agent_discord_steering_committee_role_ids="1002",
         )
@@ -61,21 +61,14 @@ def test_production_policy_grants_only_matching_role_ids_in_an_allowed_guild() -
     assert "user:manage" in scopes
 
 
-def test_production_policy_uses_existing_discord_server_id_as_single_guild_fallback() -> (
-    None
-):
-    settings = cast(
-        SharedSettings,
-        SimpleNamespace(
+def test_production_policy_uses_discord_server_id_for_agent_guild_binding() -> None:
+    policy = PolicyEngine.from_settings(
+        SharedSettings(
             environment="production",
-            agent_discord_role_id_bindings={"steering_committee": {"1002"}},
-            agent_discord_guild_id_set=frozenset(),
-            agent_role_name_fallback_enabled=False,
             discord_server_id="1000",
-        ),
+            agent_discord_steering_committee_role_ids="1002",
+        )
     )
-
-    policy = PolicyEngine.from_settings(settings)
 
     assert "agent:chat" in policy.scopes_for_context(_context(role_ids=["1002"]))
 
@@ -116,7 +109,7 @@ def test_local_role_name_fallback_requires_explicit_opt_in_and_never_works_in_pr
         SharedSettings(
             environment="production",
             agent_allow_role_name_fallback=True,
-            agent_discord_guild_ids="1000",
+            discord_server_id="1000",
         )
     )
     context = _context(role_ids=[], roles=["Admin"])
@@ -150,7 +143,7 @@ def test_guild_everyone_role_cannot_be_configured_as_an_agent_bundle() -> None:
     with pytest.raises(ValidationError, match="@everyone"):
         SharedSettings(
             environment="production",
-            agent_discord_guild_ids="1000",
+            discord_server_id="1000",
             agent_discord_admin_role_ids="1000",
         )
 
@@ -169,7 +162,7 @@ def test_confirmation_reauthorization_uses_current_role_ids(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(api.settings, "environment", "production")
-    monkeypatch.setattr(api.settings, "agent_discord_guild_ids", "1000")
+    monkeypatch.setattr(api.settings, "discord_server_id", "1000")
     monkeypatch.setattr(api.settings, "agent_discord_admin_role_ids", "1001")
     monkeypatch.setattr(api.settings, "agent_allow_role_name_fallback", True)
     original_context = _context(role_ids=["1001"], roles=["Admin"])

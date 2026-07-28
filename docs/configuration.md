@@ -19,9 +19,8 @@ that most often matter in local development and deployment.
 - `AGENT_ALLOW_LEGACY_API_SECRET`: defaults to `false`. Set it only for an
   explicit local/test migration when the bot still uses `API_SHARED_SECRET` for
   `/agent/*`; it is never a production fallback.
-- `AGENT_DISCORD_GUILD_IDS`: the comma-separated Discord guild allowlist used
-  before planning or execution. When it is blank, the existing positive
-  `DISCORD_SERVER_ID` is used as a single-guild compatibility fallback.
+- `DISCORD_SERVER_ID`: the single Discord guild allowlist used before agent
+  planning or execution.
 - `AGENT_DISCORD_ADMIN_ROLE_IDS`, `AGENT_DISCORD_STEERING_COMMITTEE_ROLE_IDS`,
   `AGENT_DISCORD_BILLING_ROLE_IDS`, `AGENT_DISCORD_ERP_DEVELOPER_ROLE_IDS`,
   `AGENT_DISCORD_PROJECT_MANAGER_ROLE_IDS`, and

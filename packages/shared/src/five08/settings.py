@@ -62,6 +62,8 @@ class SharedSettings(BaseSettings):
         default=8090,
         validation_alias=AliasChoices("WEB_PORT", "WEBHOOK_INGEST_PORT"),
     )
+    # The single Discord guild used by the dashboard, bot, and agent gateway.
+    discord_server_id: str | None = None
     api_shared_secret: str | None = None
     # The Discord agent gateway accepts role-bearing requests. Keep its
     # credential separate from general internal API callers so a holder of the
@@ -71,10 +73,9 @@ class SharedSettings(BaseSettings):
     # in explicit local/test environments. It exists solely to ease developer
     # migration to AGENT_SHARED_SECRET.
     agent_allow_legacy_api_secret: bool = False
-    # Agent authorization is bound to immutable Discord snowflake IDs in
+    # Agent authorization is bound to immutable Discord role snowflake IDs in
     # deployed environments. A combined role (for example Billing / ERP Dev)
     # is intentionally listed in every applicable bundle.
-    agent_discord_guild_ids: str = ""
     agent_discord_admin_role_ids: str = ""
     agent_discord_steering_committee_role_ids: str = ""
     agent_discord_billing_role_ids: str = ""
@@ -339,7 +340,6 @@ class SharedSettings(BaseSettings):
         raise TypeError("BREVO_508_MEMBERS_NEWSLETTER_LIST_ID must be an integer")
 
     @field_validator(
-        "agent_discord_guild_ids",
         "agent_discord_admin_role_ids",
         "agent_discord_steering_committee_role_ids",
         "agent_discord_billing_role_ids",
@@ -378,7 +378,12 @@ class SharedSettings(BaseSettings):
         grant that bundle to every member of that guild.
         """
 
-        guild_ids = self._discord_ids(self.agent_discord_guild_ids)
+        configured_guild_id = str(self.discord_server_id or "").strip()
+        guild_ids = (
+            {configured_guild_id}
+            if configured_guild_id.isdecimal() and int(configured_guild_id) > 0
+            else set()
+        )
         configured_role_ids = set().union(*self.agent_discord_role_id_bindings.values())
         overlapping_ids = sorted(guild_ids & configured_role_ids)
         if overlapping_ids:
@@ -488,12 +493,6 @@ class SharedSettings(BaseSettings):
             ),
             "engineer": self._discord_ids(self.agent_discord_engineer_role_ids),
         }
-
-    @property
-    def agent_discord_guild_id_set(self) -> frozenset[str]:
-        """Return configured Discord guilds allowed to use the agent."""
-
-        return self._discord_ids(self.agent_discord_guild_ids)
 
     @property
     def agent_role_name_fallback_enabled(self) -> bool:

@@ -131,7 +131,6 @@ class WorkerSettings(SharedSettings):
     dashboard_default_path: str = "/dashboard"
     dashboard_public_base_url: str | None = None
     discord_bot_token: str | None = None
-    discord_server_id: str | None = None
     discord_admin_roles: str = "Admin,Owner"
     discord_api_timeout_seconds: float = 8.0
     discord_link_ttl_seconds: int = 600

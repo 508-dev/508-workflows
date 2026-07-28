@@ -19,8 +19,8 @@
 - Agent routes use the same header name with `AGENT_SHARED_SECRET`; an
   `API_SHARED_SECRET` fallback is available only when
   `AGENT_ALLOW_LEGACY_API_SECRET=true` in an explicit local/test environment.
-- Agent authorization additionally requires `AGENT_DISCORD_GUILD_IDS` and
-  matching per-bundle `AGENT_DISCORD_*_ROLE_IDS` configuration in deployed
+- Agent authorization additionally requires `DISCORD_SERVER_ID` and matching
+  per-bundle `AGENT_DISCORD_*_ROLE_IDS` configuration in deployed
   environments. Discord role names are ignored there; missing or unapproved
   guild/role-ID bindings fail closed before planning and at confirmation.
 - Billing/ERP agent reads require `AGENT_ERP_ORGANIZATION_ID` to exactly match
