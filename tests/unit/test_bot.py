@@ -207,28 +207,20 @@ class TestBot508:
 
         assert config.outline_admin_api_key == "preferred-admin-key"
 
-    def test_outline_discord_member_api_key_prefers_new_name_and_supports_legacy_alias(
+    def test_outline_contents_api_key_is_shared_with_the_bot(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ):
-        monkeypatch.setenv("OUTLINE_WIKI_API_KEY", "legacy-member-key")
+        monkeypatch.setenv("OUTLINE_DISCORD_MEMBER_API_KEY", "unused-key")
+        monkeypatch.setenv("OUTLINE_WIKI_API_KEY", "unused-key")
 
-        legacy_config = Settings()
+        assert Settings().outline_contents_api_key is None
 
-        assert legacy_config.outline_discord_member_api_key == "legacy-member-key"
-        assert legacy_config.outline_wiki_api_key == "legacy-member-key"
-
-        monkeypatch.setenv("OUTLINE_DISCORD_MEMBER_API_KEY", " ")
-
-        blank_new_config = Settings()
-
-        assert blank_new_config.outline_discord_member_api_key == "legacy-member-key"
-
-        monkeypatch.setenv("OUTLINE_DISCORD_MEMBER_API_KEY", "preferred-member-key")
+        monkeypatch.setenv("OUTLINE_CONTENTS_API_KEY", "contents-key")
 
         config = Settings()
 
-        assert config.outline_discord_member_api_key == "preferred-member-key"
+        assert config.outline_contents_api_key == "contents-key"
 
     def test_onboarding_email_smtp_settings_fall_back_to_generic_smtp_env(
         self,

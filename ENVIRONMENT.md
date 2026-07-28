@@ -222,21 +222,25 @@ Pydantic import errors.
   as a fallback, and removes that old stored value when the new setting is saved.
   Any non-empty environment value under either name locks the dashboard setting.
 
-## Discord Wiki Search
+## Member-safe Outline Content
 
-- `Optional for /wiki`: `OUTLINE_DISCORD_MEMBER_API_KEY`
+- `Required when using /wiki or project wiki matching`:
+  `OUTLINE_CONTENTS_API_KEY`
 - `Required for /wiki`: `DISCORD_SERVER_ID`. The command refuses DMs and other
   guilds so the dedicated Outline credential is never used outside the co-op
   server.
 - Do not reuse `OUTLINE_ADMIN_API_KEY`: it can invite users and may access private
-  collections. Create the wiki key for a dedicated regular Outline account with
-  access only to collections that every Discord `Member` may search.
-- `OUTLINE_WIKI_API_KEY` remains a compatibility fallback. A non-empty new
-  member key wins; a blank new value continues to fall back to the old value
-  during migration.
-- Scope the key to `documents.search` and `stars.list`. `/wiki query:...`
-  searches published documents only; `/wiki` without a query shows the
-  dedicated account's starred documents as quick links.
+  collections. Create the contents key for a dedicated regular Outline account
+  with access only to collections that every Discord `Member` may search.
+- Scope the key to `documents.search`, `documents.info`, and `stars.list`.
+  `/wiki query:...` searches published documents only; `/wiki` without a query
+  shows the dedicated account's starred documents as quick links. The same key
+  reads the member-visible project-matching document for the dashboard.
+- Add only the exact document-write scopes needed when a write feature is
+  introduced; do not grant `documents.*` preemptively.
+- The in-app Configuration dashboard stores this encrypted key under
+  `OUTLINE_CONTENTS_API_KEY`; a non-empty deployment environment value locks
+  the dashboard setting.
 - The command always replies ephemerally. It does not log search queries or
   document snippets.
 

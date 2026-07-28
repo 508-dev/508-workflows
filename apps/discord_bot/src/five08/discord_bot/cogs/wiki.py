@@ -74,7 +74,7 @@ class WikiCog(commands.Cog, name="Wiki"):
         self.bot = bot
 
     def _outline_client(self) -> OutlineClient:
-        api_key = (settings.outline_discord_member_api_key or "").strip()
+        api_key = (settings.outline_contents_api_key or "").strip()
         if not api_key:
             raise OutlineWikiConfigurationError(
                 "Outline wiki search is not configured."

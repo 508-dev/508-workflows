@@ -120,12 +120,13 @@ query it shows the starred quick links from the dedicated Outline integration
 account; with `query:` it searches that account's published, member-safe
 documents and returns short excerpts plus Outline links.
 
-Configure `OUTLINE_DISCORD_MEMBER_API_KEY` separately from
-`OUTLINE_ADMIN_API_KEY`. The member key must belong to a regular account that
+Configure `OUTLINE_CONTENTS_API_KEY` separately from
+`OUTLINE_ADMIN_API_KEY`. The contents key must belong to a regular account that
 has access only to collections safe for every Discord `Member`, and should be
-scoped to `documents.search` and `stars.list`. `DISCORD_SERVER_ID` is required:
-`/wiki` refuses DMs and other guilds. `OUTLINE_WIKI_API_KEY` remains a
-compatibility fallback. Search queries and result snippets are not audit logged.
+scoped to `documents.search`, `documents.info`, and `stars.list`.
+`DISCORD_SERVER_ID` is required: `/wiki` refuses DMs and other guilds. The same
+member-safe key supports project wiki matching in the dashboard. Search queries
+and result snippets are not audit logged.
 
 ## Slash Commands
 

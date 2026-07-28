@@ -106,6 +106,9 @@ class SharedSettings(BaseSettings):
         exclude=True,
         repr=False,
     )
+    # Shared member-safe content credential used by Discord wiki search and
+    # project wiki matching. Keep it separate from the invitation-only key.
+    outline_contents_api_key: str | None = None
     outline_api_timeout_seconds: float = 20.0
     brevo_api_key: str | None = None
     brevo_api_base_url: str = "https://api.brevo.com/v3"

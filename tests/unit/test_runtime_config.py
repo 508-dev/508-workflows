@@ -255,6 +255,22 @@ def test_outline_admin_runtime_config_supports_legacy_dashboard_values(
     assert item["source"] == "database"
 
 
+def test_outline_contents_runtime_config_has_no_legacy_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    definition = runtime_config_definition_for_key("OUTLINE_CONTENTS_API_KEY")
+
+    assert definition is not None
+    assert definition.primary_env_name == "OUTLINE_CONTENTS_API_KEY"
+    assert definition.legacy_keys == ()
+    assert runtime_config_definition_for_key("OUTLINE_DISCORD_MEMBER_API_KEY") is None
+    assert runtime_config_definition_for_key("OUTLINE_WIKI_API_KEY") is None
+
+    monkeypatch.setenv("OUTLINE_CONTENTS_API_KEY", "contents-key")
+
+    assert definition_is_env_locked(definition)
+
+
 def test_saving_outline_admin_runtime_config_removes_legacy_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -92,10 +92,22 @@ _DEFINITIONS: tuple[RuntimeConfigDefinition, ...] = (
         attr="outline_admin_api_key",
         label="Outline admin API key",
         category="Onboarding",
-        description="Privileged Outline key used for invitations and project wiki pages.",
+        description="Privileged Outline key used only for member invitations.",
         is_secret=True,
         env_names=("OUTLINE_ADMIN_API_KEY", "OUTLINE_API_KEY"),
         legacy_keys=("OUTLINE_API_KEY",),
+    ),
+    RuntimeConfigDefinition(
+        key="OUTLINE_CONTENTS_API_KEY",
+        attr="outline_contents_api_key",
+        label="Outline contents API key",
+        category="Onboarding",
+        description=(
+            "Member-safe Outline content key for Discord wiki search and "
+            "project wiki matching."
+        ),
+        is_secret=True,
+        env_names=("OUTLINE_CONTENTS_API_KEY",),
     ),
     RuntimeConfigDefinition(
         key="MIGADU_API_USER",
