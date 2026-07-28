@@ -233,6 +233,45 @@ class TestInternalAPIRoutes:
         jobs_cog.list_registered_job_post_forums.assert_awaited_once_with()
 
     @pytest.mark.asyncio
+    async def test_discord_diagnostics_delegates_to_diagnostics_cog(
+        self,
+        internal_api_routes,
+    ):
+        """The dashboard role catalog must come from the read-only diagnostics cog."""
+        diagnostics_cog = Mock()
+        diagnostics_cog.get_diagnostics_snapshot = AsyncMock(
+            return_value=(
+                {
+                    "guild": {"id": "123", "name": "508.dev"},
+                    "roles": [{"id": "456", "name": "Admin"}],
+                },
+                200,
+            )
+        )
+        internal_api_routes.bot.get_cog.return_value = diagnostics_cog
+
+        result, status_code = await internal_api_routes._get_discord_diagnostics(
+            refresh=True,
+        )
+
+        assert status_code == 200
+        assert result["roles"][0]["id"] == "456"
+        diagnostics_cog.get_diagnostics_snapshot.assert_awaited_once_with(refresh=True)
+
+    @pytest.mark.asyncio
+    async def test_discord_diagnostics_reports_unavailable_without_cog(
+        self,
+        internal_api_routes,
+    ):
+        """No fallback may fabricate a role catalog when diagnostics is unavailable."""
+        internal_api_routes.bot.get_cog.return_value = None
+
+        result, status_code = await internal_api_routes._get_discord_diagnostics()
+
+        assert status_code == 503
+        assert result == {"error": "diagnostics_cog_unavailable"}
+
+    @pytest.mark.asyncio
     async def test_update_gig_thread_status_rewrites_title_marker(
         self, internal_api_routes, monkeypatch: pytest.MonkeyPatch
     ):

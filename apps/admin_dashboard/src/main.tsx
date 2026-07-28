@@ -13,6 +13,7 @@ import {
   RefreshCw,
   Search,
   Send,
+  Server,
   Settings,
   ShieldCheck,
   UserMinus,
@@ -62,6 +63,10 @@ import {
   type JobPostChannelTag,
 } from "@/views/configuration-view"
 import {
+  type DiscordDiagnosticsResponse,
+  DiscordDiagnosticsView,
+} from "@/views/discord-diagnostics-view"
+import {
   type NewsletterStatus,
   type NewsletterSuppression,
   type NewsletterSyncPreview,
@@ -80,6 +85,7 @@ type View =
   | "jobs"
   | "agent"
   | "audit"
+  | "diagnostics"
   | "configuration"
 type SortDirection = "asc" | "desc"
 type GigTab = "gigs" | "leads"
@@ -564,6 +570,7 @@ const routes: Record<View, string> = {
   jobs: "/dashboard/jobs",
   agent: "/dashboard/agent",
   audit: "/dashboard/audit",
+  diagnostics: "/dashboard/diagnostics",
   configuration: "/dashboard/configuration",
 }
 
@@ -576,6 +583,7 @@ const routePermissions: Record<View, string> = {
   jobs: "jobs:read",
   agent: "audit:read",
   audit: "audit:read",
+  diagnostics: "configuration:read",
   configuration: "configuration:read",
 }
 
@@ -977,6 +985,9 @@ function App() {
   const [onboardingVolunteers, setOnboardingVolunteers] = useState<OnboardingVolunteer[]>([])
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([])
   const [agentReport, setAgentReport] = useState<AgentReport | null>(null)
+  const [discordDiagnostics, setDiscordDiagnostics] = useState<DiscordDiagnosticsResponse | null>(
+    null,
+  )
   const [configurationItems, setConfigurationItems] = useState<ConfigurationItem[]>([])
   const [configurationFocus, setConfigurationFocus] = useState<{
     category: string
@@ -999,6 +1010,7 @@ function App() {
     people: { key: "name", direction: "asc" },
     agent: { key: "occurred_at", direction: "desc" },
     audit: { key: "occurred_at", direction: "desc" },
+    diagnostics: { key: "position", direction: "desc" },
     configuration: { key: "category", direction: "asc" },
   })
 
@@ -2300,6 +2312,20 @@ function App() {
     }
   }
 
+  async function loadDiscordDiagnostics(refresh = false) {
+    setBusy("diagnostics", true)
+    try {
+      const query = refresh ? "?refresh=true" : ""
+      setDiscordDiagnostics(
+        await requestJson<DiscordDiagnosticsResponse>(`/dashboard/api/discord-diagnostics${query}`),
+      )
+    } catch (error) {
+      showError(error, "Unable to load Discord diagnostics")
+    } finally {
+      setBusy("diagnostics", false)
+    }
+  }
+
   async function updateConfigurationValue(key: string, value: string) {
     setBusy(`configuration:${key}`, true)
     try {
@@ -2673,6 +2699,7 @@ function App() {
     if (view === "jobs") void loadJobs()
     if (view === "agent") void loadAgentReport()
     if (view === "audit") void loadAuditEvents()
+    if (view === "diagnostics") void loadDiscordDiagnostics()
     if (view === "configuration") {
       void loadConfiguration()
       void loadJobPostChannels({ includeAvailable: true })
@@ -2699,6 +2726,7 @@ function App() {
     if (view === "jobs") void loadJobs()
     if (view === "agent") void loadAgentReport()
     if (view === "audit") void loadAuditEvents()
+    if (view === "diagnostics") void loadDiscordDiagnostics()
     if (view === "configuration") {
       void loadConfiguration()
       void loadJobPostChannels({ includeAvailable: true })
@@ -2968,6 +2996,7 @@ function App() {
               ["jobs", "Background tasks", Activity],
               ["agent", "Agent", ShieldCheck],
               ["audit", "Audit", FileClock],
+              ["diagnostics", "Discord diagnostics", Server],
               ["configuration", "Configuration", Settings],
             ] as const
           )
@@ -3219,6 +3248,15 @@ function App() {
 
           {view === "agent" ? (
             <AgentView report={agentReport} loading={loading} onRefresh={loadAgentReport} />
+          ) : null}
+
+          {view === "diagnostics" ? (
+            <DiscordDiagnosticsView
+              diagnostics={discordDiagnostics}
+              loading={loading.diagnostics}
+              onRefresh={() => loadDiscordDiagnostics(true)}
+              onNotice={(message, tone = "ok") => showToast(message, tone)}
+            />
           ) : null}
 
           {view === "configuration" ? (

@@ -38,6 +38,7 @@ class BackendRouteSurface(Protocol):
     dashboard_clear_job_lead_staging_recovery_handler: RouteHandler
     dashboard_configuration_handler: RouteHandler
     dashboard_create_project_handler: RouteHandler
+    dashboard_discord_diagnostics_handler: RouteHandler
     dashboard_erpnext_account_managers_handler: RouteHandler
     dashboard_erpnext_contacts_handler: RouteHandler
     dashboard_erpnext_cost_centers_handler: RouteHandler
@@ -127,6 +128,7 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
     )
     dashboard_configuration_handler = api.dashboard_configuration_handler
     dashboard_create_project_handler = api.dashboard_create_project_handler
+    dashboard_discord_diagnostics_handler = api.dashboard_discord_diagnostics_handler
     dashboard_erpnext_account_managers_handler = (
         api.dashboard_erpnext_account_managers_handler
     )
@@ -469,6 +471,11 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
     app.add_api_route(
         "/dashboard/api/configuration",
         dashboard_configuration_handler,
+        methods=["GET"],
+    )
+    app.add_api_route(
+        "/dashboard/api/discord-diagnostics",
+        dashboard_discord_diagnostics_handler,
         methods=["GET"],
     )
     app.add_api_route(

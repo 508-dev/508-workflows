@@ -44,6 +44,21 @@ each capability bundle with the corresponding `AGENT_DISCORD_*_ROLE_IDS`
 variable. If the same Billing / ERP Dev role grants
 both bundles, list its ID in both variables. Missing mappings fail closed.
 
+## Server Diagnostics
+
+`/diagnostics` is a private, read-only role discovery panel for the one
+configured `DISCORD_SERVER_ID`. The Discord server owner and members with the
+native **Manage Server** permission can list role names and immutable IDs, view
+agent role-binding health, refresh the role snapshot, and download a copyable
+configuration export. It never grants a role, updates deployment configuration,
+or reveals secret values. Native Discord permission is intentionally used for
+this bootstrap utility so administrators can discover IDs before configuring
+`AGENT_DISCORD_ADMIN_ROLE_IDS`.
+
+The operations dashboard exposes the same snapshot at **Discord diagnostics**
+for users with `configuration:read`; it retrieves data through the bot's
+authenticated internal endpoint and remains read-only.
+
 ## Agent Gateway
 
 The `/agent` command and explicit bot mentions send natural-language requests to

@@ -85,6 +85,10 @@ class InternalAPIRoutes:
             "/internal/jobs/channels",
             self.job_channels_handler,
         )
+        app.router.add_get(
+            "/internal/diagnostics/discord",
+            self.discord_diagnostics_handler,
+        )
 
     @staticmethod
     def _is_authorized(request: web.Request) -> bool:
@@ -525,6 +529,33 @@ class InternalAPIRoutes:
         result, status_code = await self._list_job_channels(
             register_defaults=register_defaults,
         )
+        return web.json_response(result, status=status_code)
+
+    async def _get_discord_diagnostics(
+        self,
+        *,
+        refresh: bool = False,
+    ) -> tuple[dict[str, Any], int]:
+        """Delegate server role diagnostics to the read-only diagnostics cog."""
+        diagnostics_cog = self.bot.get_cog("DiagnosticsCog")
+        if diagnostics_cog is None or not hasattr(
+            diagnostics_cog,
+            "get_diagnostics_snapshot",
+        ):
+            return {"error": "diagnostics_cog_unavailable"}, 503
+        return await diagnostics_cog.get_diagnostics_snapshot(refresh=refresh)
+
+    async def discord_diagnostics_handler(self, request: web.Request) -> web.Response:
+        """Return the configured guild's read-only role catalog for the dashboard."""
+        if not self._is_authorized(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+
+        refresh = str(request.query.get("refresh", "false")).strip().casefold() in {
+            "1",
+            "true",
+            "yes",
+        }
+        result, status_code = await self._get_discord_diagnostics(refresh=refresh)
         return web.json_response(result, status=status_code)
 
     async def post_job_lead_handler(self, request: web.Request) -> web.Response:

@@ -31,6 +31,12 @@ that most often matter in local development and deployment.
   `@everyone` role, which would otherwise grant every member the bundle.
 - `AGENT_ALLOW_ROLE_NAME_FALLBACK`: defaults to `false`; it can take effect
   only after explicit opt-in in local/dev/test, never in a deployed environment.
+- Use the read-only Discord `/diagnostics` panel or the dashboard's **Discord
+  diagnostics** page to discover role names and immutable IDs. These surfaces
+  only produce copyable configuration text; they never infer or apply role
+  grants. The Discord panel requires the configured server plus native Manage
+  Server permission, avoiding a circular dependency on the role-ID mapping it
+  helps configure.
 - `CONFIG_SECRET_KEY`: environment or `.env` key used to encrypt secret values
   saved from the admin dashboard configuration page. This key is not
   dashboard-managed, and dashboard-managed secret saves are rejected when it is

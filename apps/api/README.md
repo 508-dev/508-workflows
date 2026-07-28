@@ -61,6 +61,10 @@ curl -X GET "http://localhost:8090/jobs/<job_id>" \
 - `GET /dashboard/api/onboarding`: Session-authenticated prospect onboarding queue from the CRM people cache.
 - `POST /dashboard/api/onboarding/{contact_id}/onboarder`: Session-authenticated CRM onboarder assignment for one prospect.
 - `GET /dashboard/api/audit-events`: Session-authenticated recent human audit events.
+- `GET /dashboard/api/discord-diagnostics`: Admin-only read-only snapshot of the
+  configured Discord server's roles and agent role-ID binding health. The API
+  proxies the bot's authenticated internal endpoint; it never changes Discord
+  roles or deployment configuration.
 - `POST /dashboard/api/sync/people`: Session-authenticated dashboard people-cache sync.
 - `GET /jobs/{job_id}`: Fetch queued job status/result payload.
 - `POST /jobs/{job_id}/rerun`: Enqueue a duplicate rerun of an existing job id.

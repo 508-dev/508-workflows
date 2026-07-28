@@ -1251,6 +1251,46 @@ async def _list_job_channels_from_bot(
     return payload if isinstance(payload, dict) else None
 
 
+async def _get_discord_diagnostics_from_bot(
+    request: Request,
+    *,
+    refresh: bool = False,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Get a read-only configured-guild role snapshot from the Discord bot."""
+    base_url = settings.discord_bot_internal_base_url.strip()
+    api_secret = str(settings.api_shared_secret or "").strip()
+    if not base_url:
+        return None, "bot_endpoint_not_configured"
+    if not api_secret:
+        return None, "api_secret_not_configured"
+
+    try:
+        response = await _http_client_from_app(request.app).get(
+            f"{base_url.rstrip('/')}/internal/diagnostics/discord",
+            headers={"X-API-Secret": api_secret},
+            params={"refresh": "true"} if refresh else None,
+            timeout=10.0,
+        )
+    except httpx.HTTPError as exc:
+        logger.warning("Failed loading Discord diagnostics from bot: %s", exc)
+        return None, "bot_request_failed"
+
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    if response.status_code >= 400 or not isinstance(payload, dict):
+        logger.warning(
+            "Discord diagnostics request failed status=%s payload=%s",
+            response.status_code,
+            response.text[:500],
+        )
+        if response.status_code == 401:
+            return None, "bot_auth_failed"
+        return None, "bot_diagnostics_unavailable"
+    return payload, None
+
+
 MAX_SESSION_COOKIE_CANDIDATES = 5
 
 
@@ -8124,6 +8164,31 @@ async def dashboard_configuration_handler(request: Request) -> JSONResponse:
 
     items = await asyncio.to_thread(list_runtime_config, settings)
     return JSONResponse({"items": items})
+
+
+async def dashboard_discord_diagnostics_handler(
+    request: Request,
+    refresh: bool = Query(default=False),
+) -> JSONResponse:
+    """Return an admin-only, no-write Discord role diagnostics snapshot."""
+    _, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_CONFIGURATION_READ,
+    )
+    if error_response is not None:
+        return error_response
+
+    payload, error = await _get_discord_diagnostics_from_bot(
+        request,
+        refresh=refresh,
+    )
+    if payload is None:
+        return JSONResponse(
+            {"error": error or "bot_diagnostics_unavailable"},
+            status_code=503,
+            headers={"Cache-Control": "no-store"},
+        )
+    return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
 
 async def dashboard_newsletter_suppressions_handler(

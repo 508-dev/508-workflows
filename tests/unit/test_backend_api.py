@@ -2529,6 +2529,77 @@ def test_dashboard_configuration_requires_admin_permission(
     mock_forbidden_list.assert_not_called()
 
 
+def test_dashboard_discord_diagnostics_requires_configuration_read_permission(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="validated",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    payload = {
+        "guild": {"id": "123", "name": "508.dev"},
+        "snapshot": {"created_at": "2026-07-28T00:00:00Z", "source": "discord_api"},
+        "bot": {"manage_roles": True, "top_role": None},
+        "agent": {"role_bindings": []},
+        "roles": [{"id": "456", "name": "Admin"}],
+    }
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._get_discord_diagnostics_from_bot",
+            new_callable=AsyncMock,
+            return_value=(payload, None),
+        ) as mock_diagnostics,
+    ):
+        response = client.get("/dashboard/api/discord-diagnostics?refresh=true")
+
+    assert response.status_code == 200
+    assert response.json()["roles"][0]["id"] == "456"
+    assert response.headers["cache-control"] == "no-store"
+    mock_diagnostics.assert_awaited_once()
+    diagnostics_await_args = mock_diagnostics.await_args
+    assert diagnostics_await_args is not None
+    assert diagnostics_await_args.kwargs["refresh"] is True
+
+    non_admin_session = api.AuthSession(
+        subject="viewer-1",
+        email="viewer@508.dev",
+        display_name="Viewer User",
+        groups=["Members"],
+        is_admin=False,
+        id_token="validated",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-2", non_admin_session),
+        ),
+        patch(
+            "five08.backend.api._get_discord_diagnostics_from_bot",
+            new_callable=AsyncMock,
+        ) as mock_forbidden_diagnostics,
+    ):
+        forbidden_response = client.get("/dashboard/api/discord-diagnostics")
+
+    assert forbidden_response.status_code == 403
+    assert forbidden_response.json()["error"] == "forbidden"
+    mock_forbidden_diagnostics.assert_not_awaited()
+
+
 def test_dashboard_configuration_update_audits_secret_value_required(
     client: TestClient,
 ) -> None:
@@ -4560,6 +4631,37 @@ async def test_post_job_lead_to_discord_maps_bot_auth_failure(
     assert payload == {"error": "bot_auth_failed"}
     assert "approve_before_post" not in http_client.post.await_args.kwargs["json"]
     assert http_client.post.await_args.kwargs["json"]["engagement_status"] == "lead"
+
+
+async def test_get_discord_diagnostics_from_bot_uses_internal_api_secret(
+    monkeypatch: pytest.MonkeyPatch,
+    app: api.FastAPI,
+) -> None:
+    monkeypatch.setattr(api.settings, "discord_bot_internal_base_url", "http://bot")
+    monkeypatch.setattr(api.settings, "api_shared_secret", "secret")
+    response = Mock(status_code=200, text="")
+    response.json.return_value = {
+        "guild": {"id": "123", "name": "508.dev"},
+        "roles": [],
+    }
+    http_client = Mock()
+    http_client.get = AsyncMock(return_value=response)
+    request = Mock(app=app)
+
+    with patch("five08.backend.api._http_client_from_app", return_value=http_client):
+        payload, error = await api._get_discord_diagnostics_from_bot(
+            request,
+            refresh=True,
+        )
+
+    assert error is None
+    assert payload == response.json.return_value
+    http_client.get.assert_awaited_once_with(
+        "http://bot/internal/diagnostics/discord",
+        headers={"X-API-Secret": "secret"},
+        params={"refresh": "true"},
+        timeout=10.0,
+    )
 
 
 def test_dashboard_job_channels_returns_registered_channels(
