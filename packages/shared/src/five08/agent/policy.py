@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from five08.agent.models import AgentIdentityContext, AgentToolAction, MemoryVisibility
-from five08.agent.tools import ToolManifest
+from five08.agent.tools import ToolManifest, ToolRuntimeConfig
 
 
 @dataclass(frozen=True)
@@ -26,6 +26,8 @@ _ROLE_SCOPES: dict[str, frozenset[str]] = {
             "context:read_current_thread",
             "memory:read_self",
             "memory:write_self",
+            "github:repository:member:read",
+            "github:repository:member:write",
         }
     ),
     "project_manager": frozenset(
@@ -49,6 +51,8 @@ _ROLE_SCOPES: dict[str, frozenset[str]] = {
             "project:read",
             "github:issue:read",
             "github:issue:create",
+            "github:repository:configured:read",
+            "github:repository:configured:write",
             "github:pr:create",
             "worker:job:rerun_dev",
             "context:read_current_thread",
@@ -67,6 +71,10 @@ _ROLE_SCOPES: dict[str, frozenset[str]] = {
             "task:delete",
             "github:issue:read",
             "github:issue:create",
+            "github:repository:all:read",
+            "github:repository:all:write",
+            "github:project:read",
+            "github:project:write",
             "github:pr:create",
             "crm:contact:read",
             "crm:contact:update",
@@ -102,6 +110,54 @@ _MEMBER_ROLE_NAMES = frozenset(
 
 class PolicyEngine:
     """Authorize each proposed tool call without model involvement."""
+
+    def __init__(
+        self,
+        *,
+        github_default_repo: str = "508-dev/todos",
+        github_member_extra_repos: str = "",
+        github_allowed_repos: str = "",
+        github_steering_all_installed_repos: bool = True,
+        github_steering_extra_repos: str = "",
+        github_app_configured: bool = False,
+    ) -> None:
+        self.github_default_repo = github_default_repo
+        self.github_member_repositories = _repository_set(
+            github_default_repo,
+            github_member_extra_repos,
+        )
+        self.github_configured_repositories = _repository_set(
+            github_default_repo,
+            github_allowed_repos,
+        )
+        self.github_steering_repositories = _repository_set(
+            github_default_repo,
+            github_steering_extra_repos,
+        )
+        self.github_steering_all_installed_repos = github_steering_all_installed_repos
+        self.github_app_configured = github_app_configured
+
+    @classmethod
+    def from_runtime_config(cls, config: ToolRuntimeConfig) -> "PolicyEngine":
+        """Build repository-aware authorization rules from live tool config."""
+
+        return cls(
+            github_default_repo=config.github_default_repo,
+            github_member_extra_repos=config.github_member_extra_repos,
+            github_allowed_repos=config.github_allowed_repos,
+            github_steering_all_installed_repos=(
+                config.github_steering_all_installed_repos
+            ),
+            github_steering_extra_repos=config.github_steering_extra_repos,
+            github_app_configured=all(
+                bool(str(value or "").strip())
+                for value in (
+                    config.github_app_client_id,
+                    config.github_app_installation_id,
+                    config.github_app_private_key,
+                )
+            ),
+        )
 
     def scopes_for_context(self, context: AgentIdentityContext) -> set[str]:
         scopes: set[str] = set()
@@ -176,6 +232,13 @@ class PolicyEngine:
         action: AgentToolAction,
     ) -> list[str]:
         required_scopes = list(manifest.required_scopes)
+        if action.tool_name.startswith("github_issue."):
+            required_scopes.append(
+                self._github_issue_scope(
+                    repository=action.arguments.get("repository"),
+                    write=manifest.write,
+                )
+            )
         if action.tool_name == "task_write.update_task" and action.arguments.get(
             "assignee"
         ):
@@ -191,6 +254,28 @@ class PolicyEngine:
         ):
             required_scopes.append("memory:admin")
         return required_scopes
+
+    def _github_issue_scope(self, *, repository: object, write: bool) -> str:
+        normalized_repository = _repository_key(repository) or _repository_key(
+            self.github_default_repo
+        )
+        suffix = "write" if write else "read"
+        if normalized_repository in self.github_member_repositories:
+            return f"github:repository:member:{suffix}"
+        if (
+            not self.github_app_configured
+            and normalized_repository in self.github_configured_repositories
+        ):
+            return f"github:repository:configured:{suffix}"
+        if (
+            self.github_app_configured and self.github_steering_all_installed_repos
+        ) or normalized_repository in self.github_steering_repositories:
+            return f"github:repository:all:{suffix}"
+        # During migration, preserve existing Engineer behavior for legacy
+        # token-backed installs. Execution still enforces GITHUB_ALLOWED_REPOS.
+        if not self.github_app_configured:
+            return "github:issue:create" if write else "github:issue:read"
+        return f"github:repository:steering:{suffix}"
 
     def authorize_context_read(
         self,
@@ -228,3 +313,20 @@ class PolicyEngine:
         if visibility == "project":
             return context.response_destination_visibility in {"private", "restricted"}
         return True
+
+
+def _repository_set(*values: str | None) -> set[str]:
+    repositories: set[str] = set()
+    for value in values:
+        for repository in (value or "").split(","):
+            normalized = _repository_key(repository)
+            if normalized is not None:
+                repositories.add(normalized)
+    return repositories
+
+
+def _repository_key(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().strip("/").casefold()
+    return normalized or None

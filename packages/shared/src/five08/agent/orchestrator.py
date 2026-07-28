@@ -90,13 +90,21 @@ class AgentOrchestrator:
         today: date | None = None,
     ) -> None:
         self.registry = registry or ToolRegistry()
-        self.policy = policy or PolicyEngine()
+        self._explicit_policy = policy
         self.model_config = model_config or AgentModelConfig()
         self.planner = planner
         self.intent_normalizer = intent_normalizer
         self.context_loader = context_loader or RequestContextLoader()
         self.context_bounds = context_bounds or ContextLoadBounds()
         self.today = today
+
+    @property
+    def policy(self) -> PolicyEngine:
+        """Use live GitHub repository configuration unless a test overrides it."""
+
+        return self._explicit_policy or PolicyEngine.from_runtime_config(
+            self.registry.runtime_config
+        )
 
     def plan(self, message: str, context: AgentIdentityContext) -> AgentResponse:
         text = message.strip()
@@ -294,6 +302,10 @@ class AgentOrchestrator:
                         "What task, issue, contact, or account workflow should I run?"
                     ),
                 )
+            action.arguments = self.registry.normalize_action_arguments(
+                action.tool_name,
+                action.arguments,
+            )
             action.risk = manifest.risk
             action.requires_confirmation = manifest.requires_confirmation
             action.required_scopes = self.policy.required_scopes_for_action(
@@ -658,10 +670,29 @@ class AgentOrchestrator:
         lowered = text.casefold()
         if re.search(r"\bcreate\s+(?:a\s+)?task\b", text, re.IGNORECASE):
             return self._parse_create_task(text)
-        if "github issue" in lowered or "gh issue" in lowered:
+        if (
+            "github project" in lowered
+            or "gh project" in lowered
+            or "project board" in lowered
+        ):
+            action = self._parse_github_project(text)
+            if action is not None:
+                return action
+        if (
+            "todo" in lowered
+            or "github issue" in lowered
+            or "gh issue" in lowered
+            or ("issue" in lowered and "repo" in lowered)
+        ):
             action = self._parse_github_issue(text)
             if action is not None:
                 return action
+        if re.search(r"\b(?:list|show)\s+(?:github|gh)\s+repositories\b", text, re.I):
+            return AgentToolAction(
+                tool_name="github_repository.list_repositories",
+                arguments={},
+                summary="List repositories selected for the GitHub App",
+            )
         if any(
             keyword in lowered
             for keyword in ["find task", "search task", "list task", "show task"]
@@ -781,15 +812,92 @@ class AgentOrchestrator:
 
     def _parse_github_issue(self, text: str) -> AgentToolAction | None:
         lowered = text.casefold()
+        repository = self._extract_repository(text)
+        issue_number = self._extract_github_issue_number(text)
+        if issue_number is not None and re.search(
+            r"\b(?:comment|reply)\b",
+            text,
+            re.IGNORECASE,
+        ):
+            body = self._extract_github_comment_body(text)
+            if body is None:
+                return None
+            args = {
+                "repository": repository,
+                "issue_number": issue_number,
+                "body": body,
+            }
+            return AgentToolAction(
+                tool_name="github_issue.comment_on_issue",
+                arguments={
+                    key: value for key, value in args.items() if value is not None
+                },
+                summary=f"Comment on GitHub issue #{issue_number}",
+            )
+
+        if issue_number is not None and re.search(
+            r"\b(?:close|complete|reopen|open|update|edit|rename|mark)\b",
+            text,
+            re.IGNORECASE,
+        ):
+            state: str | None = None
+            state_reason: str | None = None
+            if re.search(
+                r"\b(?:close|complete|mark(?:ed)?\s+as\s+(?:done|complete))\b",
+                text,
+                re.I,
+            ):
+                state = "closed"
+                state_reason = "completed"
+            elif re.search(r"\b(?:reopen|open)\b", text, re.I):
+                state = "open"
+            title = self._extract_github_issue_update_title(text)
+            body = self._extract_github_issue_body_update(text)
+            args: dict[str, object] = {
+                "repository": repository,
+                "issue_number": issue_number,
+                "title": title,
+                "state": state,
+                "state_reason": state_reason,
+            }
+            if body is not None:
+                args["body"] = body
+            if not any(
+                value is not None
+                for key, value in args.items()
+                if key not in {"repository", "issue_number"}
+            ):
+                return None
+            return AgentToolAction(
+                tool_name="github_issue.update_issue",
+                arguments={
+                    key: value for key, value in args.items() if value is not None
+                },
+                summary=f"Update GitHub issue #{issue_number}",
+            )
+
+        if issue_number is not None and re.search(
+            r"\b(?:show|view|get|display)\b",
+            text,
+            re.IGNORECASE,
+        ):
+            args = {"repository": repository, "issue_number": issue_number}
+            return AgentToolAction(
+                tool_name="github_issue.get_issue",
+                arguments={
+                    key: value for key, value in args.items() if value is not None
+                },
+                summary=f"Show GitHub issue #{issue_number}",
+            )
+
         if re.search(
-            r"\b(?:create|open)\s+(?:a\s+)?(?:github|gh)\s+issue\b",
+            r"\b(?:create|open)\s+(?:a\s+)?(?:(?:github|gh)\s+)?(?:issue|todo)\b",
             text,
             re.IGNORECASE,
         ):
             title = self._extract_github_issue_title(text)
             if not title:
                 return None
-            repository = self._extract_repository(text)
             body = self._extract_body(text)
             args = {"title": title, "repository": repository, "body": body}
             return AgentToolAction(
@@ -800,9 +908,28 @@ class AgentOrchestrator:
                 summary=f'Create GitHub issue: "{title}"',
             )
 
+        state_list_match = re.search(
+            r"\b(?:search|find|list|show)\s+(open|closed|all)\s+"
+            r"(?:(?:github|gh)\s+)?(?:issues?|todos?)\b",
+            text,
+            re.IGNORECASE,
+        )
+        if state_list_match is not None:
+            args = {
+                "query": "",
+                "repository": repository,
+                "state": state_list_match.group(1).casefold(),
+            }
+            return AgentToolAction(
+                tool_name="github_issue.search_issues",
+                arguments={
+                    key: value for key, value in args.items() if value is not None
+                },
+                summary=f"List {state_list_match.group(1).casefold()} GitHub issues",
+            )
+
         if any(keyword in lowered for keyword in ["search", "find", "list", "show"]):
             query = self._extract_github_issue_query(text)
-            repository = self._extract_repository(text)
             args = {"query": query, "repository": repository, "state": "open"}
             return AgentToolAction(
                 tool_name="github_issue.search_issues",
@@ -810,6 +937,94 @@ class AgentOrchestrator:
                     key: value for key, value in args.items() if value is not None
                 },
                 summary=f"Search GitHub issues matching: {query}",
+            )
+        return None
+
+    def _parse_github_project(self, text: str) -> AgentToolAction | None:
+        lowered = text.casefold()
+        project_number = self._extract_github_project_number(text)
+        if project_number is not None and re.search(
+            r"\badd\s+(?:github\s+)?(?:issue|todo)\s*#?\d+\s+to\b",
+            text,
+            re.IGNORECASE,
+        ):
+            issue_number = self._extract_github_issue_number(text)
+            if issue_number is None:
+                return None
+            repository = self._extract_repository(text)
+            args = {
+                "project_number": project_number,
+                "issue_number": issue_number,
+                "repository": repository,
+            }
+            return AgentToolAction(
+                tool_name="github_project.add_issue_to_project",
+                arguments={
+                    key: value for key, value in args.items() if value is not None
+                },
+                summary=f"Add GitHub issue #{issue_number} to project #{project_number}",
+            )
+        if project_number is not None:
+            item_number = self._extract_github_project_item_number(text)
+            field_match = re.search(
+                r"\b(?:set|update)\s+(?:github\s+)?project(?:\s+board)?\s*#?\d+"
+                r"\s+item\s*#?\d+\s+field\s*#?(\d+)\s+(?:to|as)\s+(.+)$",
+                text,
+                re.IGNORECASE,
+            )
+            if item_number is not None and field_match is not None:
+                value = _clean_text(field_match.group(2))
+                if value is not None:
+                    return AgentToolAction(
+                        tool_name="github_project.update_project_item",
+                        arguments={
+                            "project_number": project_number,
+                            "item_id": item_number,
+                            "fields": [
+                                {
+                                    "id": int(field_match.group(1)),
+                                    "value": value,
+                                }
+                            ],
+                        },
+                        summary=(
+                            f"Update field #{field_match.group(1)} on GitHub project "
+                            f"#{project_number} item #{item_number}"
+                        ),
+                    )
+        if (
+            project_number is not None
+            and "field" in lowered
+            and any(keyword in lowered for keyword in ["show", "list", "view"])
+        ):
+            return AgentToolAction(
+                tool_name="github_project.list_project_fields",
+                arguments={"project_number": project_number},
+                summary=f"List fields for GitHub project #{project_number}",
+            )
+        if (
+            project_number is not None
+            and "item" in lowered
+            and any(keyword in lowered for keyword in ["show", "list", "view"])
+        ):
+            return AgentToolAction(
+                tool_name="github_project.list_project_items",
+                arguments={"project_number": project_number},
+                summary=f"List items in GitHub project #{project_number}",
+            )
+        if project_number is not None and any(
+            keyword in lowered for keyword in ["show", "view", "get"]
+        ):
+            return AgentToolAction(
+                tool_name="github_project.get_project",
+                arguments={"project_number": project_number},
+                summary=f"Show GitHub project #{project_number}",
+            )
+        if any(keyword in lowered for keyword in ["list", "show", "view"]):
+            return AgentToolAction(
+                tool_name="github_project.list_projects",
+                arguments={},
+                summary="List GitHub Projects",
             )
         return None
 
@@ -1433,6 +1648,85 @@ class AgentOrchestrator:
         return match.group(1) if match else None
 
     @staticmethod
+    def _extract_github_issue_number(text: str) -> int | None:
+        matches = re.findall(
+            r"\b(?:(?:github|gh)\s+)?(?:issue|todo)\s*#?\s*(\d+)\b",
+            text,
+            re.IGNORECASE,
+        )
+        if not matches:
+            return None
+        try:
+            return int(matches[-1])
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _extract_github_project_number(text: str) -> int | None:
+        matches = re.findall(
+            r"\b(?:(?:github|gh)\s+)?project(?:\s+board)?\s*#?\s*(\d+)\b",
+            text,
+            re.IGNORECASE,
+        )
+        if not matches:
+            return None
+        try:
+            return int(matches[-1])
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _extract_github_project_item_number(text: str) -> int | None:
+        matches = re.findall(r"\bitem\s*#?\s*(\d+)\b", text, re.IGNORECASE)
+        if not matches:
+            return None
+        try:
+            return int(matches[-1])
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _extract_github_comment_body(text: str) -> str | None:
+        match = re.search(
+            r"\b(?:comment|reply)(?:\s+(?:on|to))?\s+"
+            r"(?:(?:github|gh)\s+)?(?:issue|todo)\s*#?\s*\d+"
+            r"(?:\s*(?::|with|saying)\s*|\s+)(.+)$",
+            text,
+            re.IGNORECASE,
+        )
+        return _clean_text(match.group(1)) if match else None
+
+    @staticmethod
+    def _extract_github_issue_update_title(text: str) -> str | None:
+        match = re.search(
+            r"\b(?:title|rename(?:\s+(?:issue|todo))?)\s+to\s+(.+)$",
+            text,
+            re.IGNORECASE,
+        )
+        if match is None:
+            return None
+        title = re.split(
+            r"\s+\b(?:in|for)\s+(?:repo|repository)\s+[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\b",
+            match.group(1),
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0]
+        return _clean_text(title)
+
+    @staticmethod
+    def _extract_github_issue_body_update(text: str) -> str | None:
+        match = re.search(r"\bbody\s+to\s+(.+)$", text, re.IGNORECASE)
+        if match is None:
+            return None
+        body = re.split(
+            r"\s+\b(?:in|for)\s+(?:repo|repository)\s+[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\b",
+            match.group(1),
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0]
+        return _clean_text(body)
+
+    @staticmethod
     def _extract_body(text: str) -> str | None:
         match = re.search(r"\bwith\s+body\s+(.+)", text, re.IGNORECASE)
         return _clean_text(match.group(1)) if match else None
@@ -1440,9 +1734,9 @@ class AgentOrchestrator:
     @staticmethod
     def _extract_github_issue_title(text: str) -> str | None:
         match = re.search(
-            r"\b(?:create|open)\s+(?:a\s+)?(?:github|gh)\s+issue"
+            r"\b(?:create|open)\s+(?:a\s+)?(?:(?:github|gh)\s+)?(?:issue|todo)"
             r"(?:\s+(?:in|for)\s+(?:repo|repository)\s+[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?"
-            r"(?:\s+(?:titled|for|to)\s+|:\s*)(.+)",
+            r"(?:\s+(?:titled|for|to)\s+|:\s*|\s+)(.+)",
             text,
             re.IGNORECASE,
         )
@@ -1465,7 +1759,7 @@ class AgentOrchestrator:
     @staticmethod
     def _extract_github_issue_query(text: str) -> str:
         match = re.search(
-            r"\b(?:search|find|list|show)\s+(?:github|gh)\s+issues?"
+            r"\b(?:search|find|list|show)\s+(?:(?:github|gh)\s+)?(?:issues?|todos?)"
             r"(?:\s+(?:in|for)\s+(?:repo|repository)\s+[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?"
             r"(?:\s+(?:for|matching|about)\s+)?(.+)?",
             text,
@@ -1547,13 +1841,15 @@ class AgentOrchestrator:
                 return "What should I change on that task?"
             return None
         if tool_name == "github_issue.search_issues":
-            if not _non_empty_arg(args, "query"):
-                return "What GitHub issues should I search for?"
             if not _non_empty_arg(args, "repository") and not _non_empty_text(
                 self.registry.runtime_config.github_default_repo
             ):
                 return "Which GitHub repository should I search?"
             return None
+        if tool_name == "github_issue.get_issue" and not _non_empty_arg(
+            args, "issue_number"
+        ):
+            return "Which GitHub issue should I show?"
         if tool_name == "github_issue.create_issue":
             if not _non_empty_arg(args, "title"):
                 return "What should be the title of the GitHub issue?"
@@ -1561,6 +1857,45 @@ class AgentOrchestrator:
                 self.registry.runtime_config.github_default_repo
             ):
                 return "Which GitHub repository should I create the issue in?"
+            return None
+        if tool_name == "github_issue.update_issue":
+            if not _non_empty_arg(args, "issue_number"):
+                return "Which GitHub issue should I update?"
+            if not any(
+                key in args and _non_empty_arg(args, key)
+                for key in ("title", "body", "state")
+            ):
+                return "What should I change on that GitHub issue?"
+            return None
+        if tool_name == "github_issue.comment_on_issue":
+            if not _non_empty_arg(args, "issue_number"):
+                return "Which GitHub issue should I comment on?"
+            if not _non_empty_arg(args, "body"):
+                return "What comment should I add to that GitHub issue?"
+            return None
+        if tool_name in {
+            "github_project.get_project",
+            "github_project.list_project_fields",
+            "github_project.list_project_items",
+        } and not _non_empty_arg(args, "project_number"):
+            return "Which GitHub Project should I use?"
+        if tool_name == "github_project.add_issue_to_project":
+            if not _non_empty_arg(args, "project_number"):
+                return "Which GitHub Project should I add the issue to?"
+            if not _non_empty_arg(args, "issue_number"):
+                return "Which GitHub issue should I add to the project?"
+            if not _non_empty_arg(args, "repository") and not _non_empty_text(
+                self.registry.runtime_config.github_default_repo
+            ):
+                return "Which GitHub repository contains that issue?"
+            return None
+        if tool_name == "github_project.update_project_item":
+            if not _non_empty_arg(args, "project_number"):
+                return "Which GitHub Project should I update?"
+            if not _non_empty_arg(args, "item_id"):
+                return "Which GitHub Project item should I update?"
+            if not isinstance(args.get("fields"), list) or not args["fields"]:
+                return "Which GitHub Project field values should I update?"
             return None
         if tool_name == "crm_read.search_contacts" and not _non_empty_arg(
             args, "query"
@@ -1614,7 +1949,17 @@ class AgentOrchestrator:
             "task_write.create_task": "create_task",
             "task_write.update_task": "update_task",
             "github_issue.search_issues": "search_github_issues",
+            "github_issue.get_issue": "get_github_issue",
             "github_issue.create_issue": "create_github_issue",
+            "github_issue.update_issue": "update_github_issue",
+            "github_issue.comment_on_issue": "comment_on_github_issue",
+            "github_repository.list_repositories": "list_github_repositories",
+            "github_project.list_projects": "list_github_projects",
+            "github_project.get_project": "get_github_project",
+            "github_project.list_project_fields": "list_github_project_fields",
+            "github_project.list_project_items": "list_github_project_items",
+            "github_project.add_issue_to_project": "add_github_issue_to_project",
+            "github_project.update_project_item": "update_github_project_item",
             "crm_read.search_contacts": "search_crm_contacts",
             "crm_write.update_contact": "update_crm_contact",
             "docuseal_write.create_member_agreement_submission": "send_member_agreement",
@@ -1674,7 +2019,10 @@ def _non_empty_text(value: object) -> bool:
 
 
 def _non_empty_arg(arguments: dict[str, object], key: str) -> bool:
-    return _non_empty_text(arguments.get(key))
+    value = arguments.get(key)
+    if _non_empty_text(value):
+        return True
+    return isinstance(value, int | float) and not isinstance(value, bool) and value > 0
 
 
 def _has_contact_reference(arguments: dict[str, object]) -> bool:

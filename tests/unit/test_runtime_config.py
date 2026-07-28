@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from five08.agent.tools import ToolRuntimeConfig
 from five08.runtime_config import (
     RuntimeConfigDBSnapshot,
     _decrypt_secret_value,
@@ -354,6 +355,53 @@ def test_migadu_runtime_config_accepts_short_env_aliases() -> None:
     assert "MIGADU_DOMAIN" in migadu_domain.env_names
     assert keila_base_url is not None
     assert "KEILA_BASE_URL" in keila_base_url.env_names
+
+
+def test_github_app_settings_are_dashboard_configurable() -> None:
+    client_id = runtime_config_definition_for_key("GITHUB_APP_CLIENT_ID")
+    installation_id = runtime_config_definition_for_key("GITHUB_APP_INSTALLATION_ID")
+    private_key = runtime_config_definition_for_key("GITHUB_APP_PRIVATE_KEY")
+
+    assert client_id is not None
+    assert client_id.category == "Operations"
+    assert client_id.env_names == ("GITHUB_APP_CLIENT_ID", "GITHUB_APP_ID")
+    assert installation_id is not None
+    assert installation_id.category == "Operations"
+    assert private_key is not None
+    assert private_key.category == "Operations"
+    assert private_key.is_secret is True
+    assert private_key.value_type == "multiline"
+
+
+def test_dashboard_github_app_credentials_flow_to_tool_runtime_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("RUNTIME_CONFIG_TEST_ENABLE", "true")
+    monkeypatch.setattr("five08.runtime_config._parse_dotenv_keys", lambda: {})
+    for env_name in (
+        "GITHUB_APP_CLIENT_ID",
+        "GITHUB_APP_ID",
+        "GITHUB_APP_INSTALLATION_ID",
+        "GITHUB_APP_PRIVATE_KEY",
+    ):
+        monkeypatch.delenv(env_name, raising=False)
+    monkeypatch.setattr(
+        "five08.runtime_config._load_db_snapshot",
+        lambda settings: _db_snapshot(
+            {
+                "GITHUB_APP_CLIENT_ID": "Iv1.client-id",
+                "GITHUB_APP_INSTALLATION_ID": "123456",
+                "GITHUB_APP_PRIVATE_KEY": "-----BEGIN RSA PRIVATE KEY-----\n...",
+            }
+        ),
+    )
+
+    settings = WorkerSettings(espo_base_url="", espo_api_key="")
+    config = ToolRuntimeConfig.from_settings(settings)
+
+    assert config.github_app_client_id == "Iv1.client-id"
+    assert config.github_app_installation_id == "123456"
+    assert config.github_app_private_key == "-----BEGIN RSA PRIVATE KEY-----\n..."
 
 
 def test_onboarding_email_smtp_settings_are_dashboard_configurable() -> None:

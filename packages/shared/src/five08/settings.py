@@ -64,8 +64,31 @@ class SharedSettings(BaseSettings):
     docuseal_base_url: str | None = None
     docuseal_api_key: str | None = None
     docuseal_member_agreement_template_id: int | None = None
+    # GitHub issues are the canonical todo backend.  The default is deliberately
+    # in code so every deployment gets the sentinel todo repository without a
+    # redundant environment setting.
+    github_default_repo: str = "508-dev/todos"
+    github_organization: str = "508-dev"
+    github_member_extra_repos: str = ""
+    github_steering_all_installed_repos: bool = True
+    github_steering_extra_repos: str = ""
+
+    # GitHub App credentials are preferred. GitHub recommends the Client ID as
+    # the JWT issuer. GITHUB_APP_ID remains an input-only compatibility alias
+    # while deployments migrate. GITHUB_API_TOKEN and GITHUB_ALLOWED_REPOS also
+    # remain as a temporary compatibility path.
+    github_app_client_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "GITHUB_APP_CLIENT_ID",
+            "GITHUB_APP_ID",
+            "github_app_client_id",
+            "github_app_id",
+        ),
+    )
+    github_app_installation_id: str | None = None
+    github_app_private_key: str | None = None
     github_api_token: str | None = None
-    github_default_repo: str | None = None
     github_allowed_repos: str = ""
     erpnext_base_url: str | None = None
     erpnext_api_key: str | None = None

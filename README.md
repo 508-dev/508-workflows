@@ -90,6 +90,7 @@ avoids printing the resolved Postgres password directly.
 - [Worker Service](./apps/worker/README.md): job CLI, worker endpoints, and queue usage examples.
 - [Discord Bot](./apps/discord_bot/README.md): bot commands and Discord-specific workflows.
 - [Discord Gig Dashboard](./docs/discord-gig-dashboard.md): gig tracking and dashboard behavior.
+- [Discord GitHub Todos and Projects](./docs/discord-github-todos.md): GitHub App setup and Discord access model.
 - [Discord Agent Eval Harness](./docs/discord-agent-eval-harness.md): Discord agent eval workflow.
 
 ## Deployment

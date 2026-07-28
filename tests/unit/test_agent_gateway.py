@@ -1296,6 +1296,200 @@ def test_member_cannot_create_github_issue() -> None:
     assert "github:issue:create" in response.message
 
 
+def test_member_can_manage_default_github_todos() -> None:
+    orchestrator = AgentOrchestrator()
+
+    response = orchestrator.plan(
+        "Create todo: Follow up with the vendor",
+        _context(roles=["Member"]),
+    )
+
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    action = response.plan.actions[0]
+    assert action.tool_name == "github_issue.create_issue"
+    assert action.arguments == {
+        "title": "Follow up with the vendor",
+        "repository": "508-dev/todos",
+    }
+    assert action.required_scopes == ["github:repository:member:write"]
+
+
+def test_member_can_plan_to_complete_default_github_todo() -> None:
+    orchestrator = AgentOrchestrator()
+
+    response = orchestrator.plan(
+        "Complete todo #42",
+        _context(roles=["Member"]),
+    )
+
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    action = response.plan.actions[0]
+    assert action.tool_name == "github_issue.update_issue"
+    assert action.arguments == {
+        "issue_number": 42,
+        "state": "closed",
+        "state_reason": "completed",
+        "repository": "508-dev/todos",
+    }
+    assert action.required_scopes == ["github:repository:member:write"]
+
+
+def test_member_can_look_up_open_default_github_todos(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, object] = {}
+
+    def fake_search_issues(
+        self: object,
+        *,
+        repository: str,
+        query: str,
+        state: str = "open",
+        limit: int = 10,
+    ) -> dict[str, object]:
+        calls.update(
+            {
+                "repository": repository,
+                "query": query,
+                "state": state,
+                "limit": limit,
+            }
+        )
+        return {"issues": [{"number": 42, "title": "Follow up"}]}
+
+    monkeypatch.setattr(
+        "five08.clients.github.GitHubClient.search_issues",
+        fake_search_issues,
+    )
+    orchestrator = AgentOrchestrator(
+        registry=ToolRegistry(
+            runtime_config=ToolRuntimeConfig(github_api_token="token"),
+        )
+    )
+
+    response = orchestrator.plan("Show open todos", _context(roles=["Member"]))
+
+    assert response.status == "executed"
+    assert calls == {
+        "repository": "508-dev/todos",
+        "query": "",
+        "state": "open",
+        "limit": 10,
+    }
+
+
+def test_member_cannot_use_app_selected_nondefault_repo() -> None:
+    registry = ToolRegistry(
+        runtime_config=ToolRuntimeConfig(
+            github_app_client_id="Iv1.client-id",
+            github_app_installation_id="456",
+            github_app_private_key="private-key",
+        )
+    )
+    orchestrator = AgentOrchestrator(registry=registry)
+
+    response = orchestrator.plan(
+        "Create GitHub issue in repo 508-dev/infra titled Rotate credentials",
+        _context(roles=["Member"]),
+    )
+
+    assert response.status == "denied"
+    assert "github:repository:all:write" in response.message
+
+
+def test_engineer_cannot_use_app_selected_nondefault_repo_without_member_grant() -> (
+    None
+):
+    registry = ToolRegistry(
+        runtime_config=ToolRuntimeConfig(
+            github_app_client_id="Iv1.client-id",
+            github_app_installation_id="456",
+            github_app_private_key="private-key",
+            github_allowed_repos="508-dev/infra",
+        )
+    )
+    orchestrator = AgentOrchestrator(registry=registry)
+
+    response = orchestrator.plan(
+        "Create GitHub issue in repo 508-dev/infra titled Rotate credentials",
+        _context(roles=["Engineer"]),
+    )
+
+    assert response.status == "denied"
+    assert "github:repository:all:write" in response.message
+
+
+def test_steering_committee_can_list_github_projects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, object] = {}
+
+    def fake_list_projects(
+        self: object,
+        *,
+        organization: str,
+        limit: int = 20,
+    ) -> dict[str, object]:
+        calls.update({"organization": organization, "limit": limit})
+        return {"projects": [{"number": 3, "title": "Operations"}]}
+
+    monkeypatch.setattr(
+        "five08.clients.github.GitHubClient.list_organization_projects",
+        fake_list_projects,
+    )
+    orchestrator = AgentOrchestrator(
+        registry=ToolRegistry(
+            runtime_config=ToolRuntimeConfig(
+                github_app_client_id="Iv1.client-id",
+                github_app_installation_id="456",
+                github_app_private_key="private-key",
+            )
+        )
+    )
+
+    response = orchestrator.plan(
+        "List GitHub Projects",
+        _context(roles=["Steering Committee"]),
+    )
+
+    assert response.status == "executed"
+    assert response.results is not None
+    assert response.results[0].result == {
+        "projects": [{"number": 3, "title": "Operations"}]
+    }
+    assert calls == {"organization": "508-dev", "limit": 20}
+
+
+def test_steering_can_plan_github_project_item_update() -> None:
+    orchestrator = AgentOrchestrator(
+        registry=ToolRegistry(
+            runtime_config=ToolRuntimeConfig(
+                github_app_client_id="Iv1.client-id",
+                github_app_installation_id="456",
+                github_app_private_key="private-key",
+            )
+        )
+    )
+
+    response = orchestrator.plan(
+        "Set GitHub project #3 item #99 field #5 to Done",
+        _context(roles=["Steering Committee"]),
+    )
+
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    action = response.plan.actions[0]
+    assert action.tool_name == "github_project.update_project_item"
+    assert action.arguments == {
+        "project_number": 3,
+        "item_id": 99,
+        "fields": [{"id": 5, "value": "Done"}],
+        "organization": "508-dev",
+    }
+
+
 def test_admin_can_draft_docuseal_member_agreement_with_confirmation() -> None:
     orchestrator = AgentOrchestrator()
 
@@ -3132,6 +3326,63 @@ def test_github_issue_repository_allows_configured_allowlist(
 
     assert result == {"issues": []}
     assert calls["repository"] == "other-owner/other-repo"
+
+
+def test_steering_can_add_default_todo_to_github_project(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, object] = {}
+
+    def fake_get_issue(
+        self: object,
+        *,
+        repository: str,
+        issue_number: int,
+    ) -> dict[str, object]:
+        calls["get_issue"] = (repository, issue_number)
+        return {"id": 909, "number": issue_number}
+
+    def fake_add_item(
+        self: object,
+        *,
+        organization: str,
+        project_number: int,
+        content_type: str,
+        content_id: int,
+    ) -> dict[str, object]:
+        calls["add_item"] = (
+            organization,
+            project_number,
+            content_type,
+            content_id,
+        )
+        return {"id": 111}
+
+    monkeypatch.setattr(
+        "five08.clients.github.GitHubClient.get_issue",
+        fake_get_issue,
+    )
+    monkeypatch.setattr(
+        "five08.clients.github.GitHubClient.add_organization_project_item",
+        fake_add_item,
+    )
+    registry = ToolRegistry(
+        runtime_config=ToolRuntimeConfig(github_api_token="token"),
+    )
+
+    result = registry.execute(
+        "github_project.add_issue_to_project",
+        {"project_number": 3, "issue_number": 42},
+        organization_id="org-1",
+        actor_id="123",
+        actor_scopes={"github:repository:all:read", "github:project:write"},
+    )
+
+    assert result == {"id": 111}
+    assert calls == {
+        "get_issue": ("508-dev/todos", 42),
+        "add_item": ("508-dev", 3, "Issue", 909),
+    }
 
 
 def test_member_cannot_assign_task_without_assign_scope() -> None:

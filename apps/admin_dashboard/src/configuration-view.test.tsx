@@ -171,6 +171,36 @@ describe("ConfigurationView", () => {
     expect(screen.queryByText("Advanced")).not.toBeInTheDocument()
   })
 
+  it("uses a multiline secret input for a GitHub App private key", () => {
+    const onSave = vi.fn()
+    renderConfigurationView({
+      onSave,
+      items: [
+        configItem({
+          key: "GITHUB_APP_PRIVATE_KEY",
+          label: "GitHub App private key",
+          category: "Operations",
+          description: "PEM private key used to sign installation-token JWTs.",
+          value_type: "multiline",
+          is_secret: true,
+          secret_encryption_configured: true,
+        }),
+      ],
+    })
+
+    const privateKey = screen.getByLabelText("GitHub App private key value")
+    expect(privateKey.tagName).toBe("TEXTAREA")
+    fireEvent.change(privateKey, {
+      target: { value: "-----BEGIN RSA PRIVATE KEY-----\n..." },
+    })
+    fireEvent.click(screen.getByRole("button", { name: "Save" }))
+
+    expect(onSave).toHaveBeenCalledWith(
+      "GITHUB_APP_PRIVATE_KEY",
+      "-----BEGIN RSA PRIVATE KEY-----\n...",
+    )
+  })
+
   it("focuses the requested configuration category", async () => {
     renderConfigurationView({
       focusCategory: "Onboarding",

@@ -22,7 +22,7 @@ type ConfigurationItem = {
   label: string
   category: string
   description: string
-  value_type: "string" | "bool" | "int" | "float" | "url" | "csv"
+  value_type: "string" | "bool" | "int" | "float" | "url" | "csv" | "multiline"
   is_secret: boolean
   env_locked: boolean
   source: "env" | "database" | "default"
@@ -158,6 +158,7 @@ function jobPostingTypeValue(value: string | undefined): JobPostingTypeValue {
 function isPrimaryConfiguration(item: ConfigurationItem) {
   return (
     item.key.startsWith("ONBOARDING_EMAIL_") ||
+    item.key.startsWith("GITHUB_APP_") ||
     item.is_secret ||
     item.value_type === "url" ||
     item.key.endsWith("_MODEL") ||
@@ -406,6 +407,22 @@ function ConfigurationView({
           <option value="true">True</option>
           <option value="false">False</option>
         </Select>
+      )
+    }
+    if (item.value_type === "multiline") {
+      return (
+        <textarea
+          aria-label={`${item.label} value`}
+          value={value}
+          className="min-h-32 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-sm text-foreground shadow-xs transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+          placeholder={item.is_secret ? "Paste private key" : ""}
+          autoComplete="off"
+          disabled={disabled}
+          spellCheck={false}
+          onChange={(event) =>
+            setDrafts((current) => ({ ...current, [item.key]: event.target.value }))
+          }
+        />
       )
     }
     return (

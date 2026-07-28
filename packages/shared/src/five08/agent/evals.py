@@ -966,7 +966,7 @@ def _live_planner_user_prompt(fixture: AgentEvalFixture, message: str) -> str:
     return build_planner_user_prompt(
         message=message,
         context=fixture.context.to_identity_context(),
-        runtime_config=fixture.runtime_config,
+        runtime_config=ToolRuntimeConfig(**fixture.runtime_config),
         thread=[item.model_dump() for item in fixture.request.thread],
     )
 
@@ -1049,13 +1049,20 @@ def _response_from_live_draft(
         manifest = orchestrator.registry.get(action.tool_name)
         if manifest is None:
             continue
+        action.arguments = orchestrator.registry.normalize_action_arguments(
+            action.tool_name,
+            action.arguments,
+        )
         action.risk = manifest.risk
         action.requires_confirmation = manifest.requires_confirmation
         action.required_scopes = orchestrator.policy.required_scopes_for_action(
             manifest=manifest,
             action=action,
         )
-        clarification = _live_action_clarification(orchestrator, action)
+        clarification = orchestrator._planner_action_clarification(
+            action,
+            context=context,
+        )
         if clarification is not None:
             return AgentResponse(
                 status="needs_clarification",

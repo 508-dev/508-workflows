@@ -249,9 +249,25 @@ Agent gateway:
 - `AGENT_STRUCTURED_PLANNER_TIMEOUT_SECONDS`
 - `AGENT_INTENT_NORMALIZER_ENABLED`
 - `AGENT_INTENT_NORMALIZER_TIMEOUT_SECONDS`
-- `GITHUB_API_TOKEN`
-- `GITHUB_DEFAULT_REPO`
-- `GITHUB_ALLOWED_REPOS`
+- `GITHUB_DEFAULT_REPO`: defaults to `508-dev/todos`.
+- `GITHUB_ORGANIZATION`: defaults to `508-dev` and scopes GitHub Projects.
+- `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_INSTALLATION_ID`,
+  `GITHUB_APP_PRIVATE_KEY`: preferred GitHub App credentials. They may be set
+  in Dashboard → Configuration → Operations instead of environment variables;
+  the private key is encrypted there with `CONFIG_SECRET_KEY`. `GITHUB_APP_ID`
+  remains a compatibility alias for the Client ID.
+- `GITHUB_MEMBER_EXTRA_REPOS`: optional additional repository access for all
+  Discord Members.
+- `GITHUB_STEERING_ALL_INSTALLED_REPOS`: defaults to `true`; grants Steering
+  Committee/Admin/Owner access to all repositories selected on the App
+  installation.
+- `GITHUB_STEERING_EXTRA_REPOS`: only used when installation-wide Steering
+  access is disabled.
+- `GITHUB_API_TOKEN`, `GITHUB_ALLOWED_REPOS`: temporary legacy fallback while
+  migrating to the GitHub App.
+
+See [Discord GitHub Todos and Projects](./discord-github-todos.md) for the
+role model, required App permissions, and installation procedure.
 
 Agent model base URLs must be HTTPS endpoints on allowed provider hosts, except
 the internal Docker-network Bifrost URL `http://bifrost:8080/openai` is allowed
