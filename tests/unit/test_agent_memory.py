@@ -98,10 +98,10 @@ def test_in_memory_list_and_admin_delete_cannot_cross_organizations() -> None:
     [
         {"password": "plain-text-password"},
         {"text": "Bearer abcdefghijklmnopqrstuv"},
-        {"text": "my password hunter2"},
-        {"text": "secret abcdefgh"},
+        {"text": "my password is hunter2"},
+        {"text": "secret: abcdefgh"},
         {"text": "api key abcdefghijklmnop"},
-        {"text": "token qwertyuiopasdfgh"},
+        {"text": "use token qwertyuiopasdfgh"},
         {"text": "SSN: 123-45-6789"},
         {"text": "4111 1111 1111 1111"},
         {"text": 4111111111111111},
@@ -129,6 +129,82 @@ def test_in_memory_rejects_sensitive_values_before_storing(
         )
 
     assert _list_user_facts(store) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "password reset instructions",
+        "token bucket limit",
+        "the secret sauce doc",
+    ],
+)
+def test_in_memory_accepts_benign_mentions_of_secret_like_words(text: str) -> None:
+    store = InMemoryMemoryStore()
+
+    fact = store.remember_fact(
+        organization_id="org-1",
+        scope_type="user",
+        scope_id="user-1",
+        key="safe",
+        value_json={"text": text},
+        visibility="private",
+        source_type="request",
+        source_ref="agent_request",
+        source_excerpt=None,
+        created_by="user-1",
+        verification_status="user_confirmed",
+    )
+
+    assert _list_user_facts(store) == [fact]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("IBAN: GB82WEST12345698765432", True),
+        ("iban de89370400440532013000", True),
+        ("reference DE89370400440532013001", False),
+        ("SKU12ABCDEFGHIJKL", False),
+    ],
+)
+def test_in_memory_iban_detection_requires_a_valid_checksum(
+    text: str,
+    expected: bool,
+) -> None:
+    store = InMemoryMemoryStore()
+
+    if expected:
+        with pytest.raises(ValueError, match="payment data"):
+            store.remember_fact(
+                organization_id="org-1",
+                scope_type="user",
+                scope_id="user-1",
+                key="unsafe",
+                value_json={"text": text},
+                visibility="private",
+                source_type="request",
+                source_ref="agent_request",
+                source_excerpt=None,
+                created_by="user-1",
+                verification_status="user_confirmed",
+            )
+        return
+
+    fact = store.remember_fact(
+        organization_id="org-1",
+        scope_type="user",
+        scope_id="user-1",
+        key="safe",
+        value_json={"text": text},
+        visibility="private",
+        source_type="request",
+        source_ref="agent_request",
+        source_excerpt=None,
+        created_by="user-1",
+        verification_status="user_confirmed",
+    )
+    assert _list_user_facts(store) == [fact]
 
 
 def test_in_memory_rejects_overlong_value_before_storing() -> None:
@@ -190,7 +266,8 @@ def test_in_memory_purge_is_tenant_scoped_and_removes_expired_or_deleted_rows() 
     store = InMemoryMemoryStore([expired_org_a, deleted_org_a, expired_org_b])
 
     assert store.purge_expired(organization_id="org-a", now=now) == 2
-    assert set(store._facts) == {"expired-org-b"}
+    assert _list_user_facts(store, organization_id="org-a", now=now) == []
+    assert store.purge_expired(organization_id="org-b", now=now) == 1
 
 
 def test_forget_returns_deletion_metadata_and_removes_the_fact_immediately() -> None:
@@ -207,5 +284,4 @@ def test_forget_returns_deletion_metadata_and_removes_the_fact_immediately() -> 
 
     assert deleted.id == fact.id
     assert deleted.deleted_at == now
-    assert fact.id not in store._facts
     assert _list_user_facts(store, now=now) == []

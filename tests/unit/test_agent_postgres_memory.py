@@ -164,7 +164,7 @@ def test_list_facts_filters_by_tenant_visibility_soft_delete_and_expiry() -> Non
     )
 
     assert [fact.key for fact in facts] == ["preference"]
-    query, params = cursor.calls[1]
+    query, params = cursor.calls[0]
     assert "WHERE organization_id = %s" in query
     assert "visibility = 'private'" in query
     assert "visibility = 'project'" in query
@@ -213,7 +213,7 @@ def test_remember_fact_validates_its_model_before_writing() -> None:
     [
         {"api_key": "not-even-a-real-key"},
         {"text": "card number: 4111 1111 1111 1111"},
-        {"text": "my password hunter2"},
+        {"text": "my password is hunter2"},
         {"text": "SSN 123-45-6789"},
     ],
 )
@@ -265,8 +265,28 @@ def test_list_facts_can_include_soft_deleted_rows_without_expired_rows() -> None
     )
 
     assert facts[0].deleted_at == now - timedelta(minutes=1)
-    assert cursor.calls[1][1] is not None
-    assert cursor.calls[1][1][6] is True
+    assert cursor.calls[0][1] is not None
+    assert cursor.calls[0][1][6] is True
+
+
+def test_remember_fact_rejects_a_returned_row_from_another_organization() -> None:
+    cursor = FakeCursor(one_rows=[_row(organization_id="org-other")])
+    store = PostgresMemoryStore(connection_factory=lambda: FakeConnection(cursor))
+
+    with pytest.raises(RuntimeError, match="violated its organization boundary"):
+        store.remember_fact(
+            organization_id="org-1",
+            scope_type="user",
+            scope_id="123",
+            key="timezone",
+            value_json={"text": "Asia/Taipei"},
+            visibility="private",
+            source_type="request",
+            source_ref="agent_request",
+            source_excerpt=None,
+            created_by="123",
+            verification_status="user_confirmed",
+        )
 
 
 def test_forget_fact_locks_then_physically_deletes_creator_fact_within_tenant() -> None:
@@ -345,8 +365,29 @@ def test_list_facts_never_returns_another_organizations_row() -> None:
     )
 
     assert facts == []
-    assert cursor.calls[1][1] is not None
-    assert cursor.calls[1][1][0] == "org-b"
+    assert cursor.calls[0][1] is not None
+    assert cursor.calls[0][1][0] == "org-b"
+
+
+def test_list_facts_does_not_delete_expired_rows_on_the_read_path() -> None:
+    cursor = FakeCursor()
+    store = PostgresMemoryStore(connection_factory=lambda: FakeConnection(cursor))
+
+    assert (
+        store.list_facts(
+            organization_id="org-1",
+            scope_type="user",
+            scope_id="123",
+            visible_to_user_id="123",
+            visible_to_project_id=None,
+            visible_to_org_id="org-1",
+        )
+        == []
+    )
+
+    assert len(cursor.calls) == 1
+    assert "SELECT" in cursor.calls[0][0]
+    assert "DELETE FROM agent_memory_facts" not in cursor.calls[0][0]
 
 
 def test_list_facts_rejects_a_visible_org_that_does_not_match_the_tenant() -> None:
@@ -406,3 +447,27 @@ def test_global_expiry_cleanup_does_not_accept_or_return_tenant_data() -> None:
 def test_postgres_url_is_required_without_injected_connection_factory() -> None:
     with pytest.raises(ValueError, match="postgres_url is required"):
         PostgresMemoryStore()
+
+
+def test_default_postgres_connection_uses_bounded_timeouts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cursor = FakeCursor()
+    captured: dict[str, object] = {}
+
+    def fake_connect(url: str, **kwargs: object) -> FakeConnection:
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        return FakeConnection(cursor)
+
+    monkeypatch.setattr("five08.agent.postgres_memory.connect", fake_connect)
+    store = PostgresMemoryStore("postgresql://postgres:postgres@db/workflows")
+
+    assert store.purge_expired_all_organizations() == 0
+    assert captured == {
+        "url": "postgresql://postgres:postgres@db/workflows",
+        "kwargs": {
+            "connect_timeout": 5,
+            "options": "-c statement_timeout=10000",
+        },
+    }

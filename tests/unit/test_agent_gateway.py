@@ -204,7 +204,6 @@ def test_context_loader_recounts_forged_small_token_metadata() -> None:
         "Bearer abcdefghijklmnopqrstuv",
         "SSN 123-45-6789",
         "Contact customer@example.com about the task.",
-        "CRM record 0e5e5302-8d36-4bc8-954d-68332b36949b",
     ],
 )
 def test_context_loader_drops_private_request_snippets_before_model(
@@ -243,6 +242,44 @@ def test_context_loader_drops_private_request_snippets_before_model(
     assert response.status == "executed"
     assert observed_context is not None
     assert observed_context.context_snippets == []
+
+
+def test_context_loader_redacts_uuid_but_retains_surrounding_request_context() -> None:
+    context = _context()
+    context.context_snippets = [
+        AgentContextSnippet(
+            source_type="discord_message",
+            source_ref="uuid-client-snippet",
+            label="untrusted context",
+            text="CRM record 0e5e5302-8d36-4bc8-954d-68332b36949b needs follow-up.",
+            token_count=1,
+            created_at=datetime.now(timezone.utc),
+        )
+    ]
+    observed_context: AgentIdentityContext | None = None
+
+    class FakePlanner:
+        def plan(self, **kwargs: object) -> AgentPlannerResult:
+            nonlocal observed_context
+            candidate = kwargs["context"]
+            assert isinstance(candidate, AgentIdentityContext)
+            observed_context = candidate
+            return AgentPlannerResult(
+                draft=PlannerDraft(status="answer", answer="Safe answer."),
+                model=AgentModelConfig().resolve("fast"),
+                latency_ms=1,
+            )
+
+    response = AgentOrchestrator(planner=FakePlanner()).plan(
+        "What needs follow-up?",
+        context,
+    )
+
+    assert response.status == "executed"
+    assert observed_context is not None
+    assert [snippet.text for snippet in observed_context.context_snippets] == [
+        "CRM record [redacted UUID] needs follow-up."
+    ]
 
 
 def test_context_sources_preserve_trusted_backend_provenance() -> None:

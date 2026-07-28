@@ -19,8 +19,8 @@ from psycopg.types.json import Jsonb
 from five08.agent.memory import (
     DEFAULT_MEMORY_RETENTION_DAYS,
     MAX_MEMORY_FACTS_PER_LIST,
-    _assert_visible_org_matches_tenant,
-    _normalized_time,
+    assert_visible_org_matches_tenant,
+    normalize_memory_time,
     normalize_organization_id,
     validate_memory_value_for_persistence,
 )
@@ -33,13 +33,16 @@ from five08.agent.models import (
 )
 
 ConnectionFactory = Callable[[], Any]
+DEFAULT_MEMORY_DATABASE_CONNECT_TIMEOUT_SECONDS = 5
+DEFAULT_MEMORY_DATABASE_STATEMENT_TIMEOUT_MILLISECONDS = 10_000
 
 
 class PostgresMemoryStore:
     """Durable ``MemoryStore`` implementation using ``agent_memory_facts``.
 
     Each method opens a short transaction so writes commit atomically and reads
-    do not retain a connection between agent operations.  ``connection_factory``
+    do not retain a connection between agent operations. Production connections
+    use bounded connect and server-side statement timeouts. ``connection_factory``
     exists for dependency injection and unit tests; production callers normally
     provide ``postgres_url``.
     """
@@ -49,7 +52,13 @@ class PostgresMemoryStore:
         postgres_url: str | None = None,
         *,
         connection_factory: ConnectionFactory | None = None,
+        connect_timeout_seconds: int = DEFAULT_MEMORY_DATABASE_CONNECT_TIMEOUT_SECONDS,
+        statement_timeout_milliseconds: int = DEFAULT_MEMORY_DATABASE_STATEMENT_TIMEOUT_MILLISECONDS,
     ) -> None:
+        if connect_timeout_seconds <= 0:
+            raise ValueError("connect_timeout_seconds must be positive")
+        if statement_timeout_milliseconds <= 0:
+            raise ValueError("statement_timeout_milliseconds must be positive")
         if connection_factory is None:
             normalized_url = (postgres_url or "").strip()
             if not normalized_url:
@@ -57,7 +66,9 @@ class PostgresMemoryStore:
                     "postgres_url is required when no connection_factory is provided"
                 )
             self._connection_factory: ConnectionFactory = lambda: connect(
-                normalized_url
+                normalized_url,
+                connect_timeout=connect_timeout_seconds,
+                options=f"-c statement_timeout={statement_timeout_milliseconds}",
             )
         else:
             self._connection_factory = connection_factory
@@ -82,7 +93,7 @@ class PostgresMemoryStore:
         """Insert one immutable memory fact and return its persisted row."""
         normalized_organization_id = normalize_organization_id(organization_id)
         validate_memory_value_for_persistence(value_json)
-        now = _normalized_time(None)
+        now = normalize_memory_time(None)
         retained_until = expires_at or now + timedelta(
             days=DEFAULT_MEMORY_RETENTION_DAYS
         )
@@ -191,11 +202,11 @@ class PostgresMemoryStore:
     ) -> list[MemoryFact]:
         """Return facts visible in the supplied user, project, or org context."""
         normalized_organization_id = normalize_organization_id(organization_id)
-        _assert_visible_org_matches_tenant(
+        assert_visible_org_matches_tenant(
             visible_to_org_id=visible_to_org_id,
             organization_id=normalized_organization_id,
         )
-        comparison_time = _normalized_time(now)
+        comparison_time = normalize_memory_time(now)
         query = """
             SELECT
                 id,
@@ -235,11 +246,6 @@ class PostgresMemoryStore:
         """
         with self._connection_factory() as conn:
             with conn.cursor(row_factory=dict_row) as cursor:
-                self._purge_expired_with_cursor(
-                    cursor,
-                    organization_id=normalized_organization_id,
-                    now=comparison_time,
-                )
                 cursor.execute(
                     query,
                     (
@@ -276,7 +282,7 @@ class PostgresMemoryStore:
     ) -> MemoryFact:
         """Immediately remove one fact after atomically checking its manager."""
         normalized_organization_id = normalize_organization_id(organization_id)
-        deleted_at = _normalized_time(now)
+        deleted_at = normalize_memory_time(now)
         select_query = """
             SELECT created_by, organization_id
             FROM agent_memory_facts
@@ -354,7 +360,7 @@ class PostgresMemoryStore:
     ) -> int:
         """Physically delete expired or soft-deleted records for one tenant."""
         normalized_organization_id = normalize_organization_id(organization_id)
-        comparison_time = _normalized_time(now)
+        comparison_time = normalize_memory_time(now)
         with self._connection_factory() as conn:
             with conn.cursor(row_factory=dict_row) as cursor:
                 return self._purge_expired_with_cursor(
@@ -376,7 +382,7 @@ class PostgresMemoryStore:
         job, which receives no tenant or fact data in return.
         """
 
-        comparison_time = _normalized_time(now)
+        comparison_time = normalize_memory_time(now)
         with self._connection_factory() as conn:
             with conn.cursor(row_factory=dict_row) as cursor:
                 cursor.execute(

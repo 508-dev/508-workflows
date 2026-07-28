@@ -403,9 +403,7 @@ def _get_agent_orchestrator() -> AgentOrchestrator:
             _AGENT_ORCHESTRATOR = AgentOrchestrator(
                 registry=ToolRegistry(
                     _AGENT_TASK_STORE,
-                    memory_store=PostgresMemoryStore(
-                        connection_factory=lambda: get_postgres_connection(settings)
-                    ),
+                    memory_store=PostgresMemoryStore(settings.postgres_url),
                     runtime_config_factory=lambda: ToolRuntimeConfig.from_settings(
                         settings
                     ),

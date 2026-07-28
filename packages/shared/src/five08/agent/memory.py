@@ -35,14 +35,26 @@ _SENSITIVE_FIELD_NAME_RE = re.compile(
     r")(?:$|[_\s.-])",
     re.IGNORECASE,
 )
-_INLINE_SECRET_RE = re.compile(
-    r"\b(?:api[_\s.-]?key|secret|password|passwd|credential(?:s)?|"
-    r"passphrase|token|(?:access|refresh|auth)[_\s.-]?token)"
-    # Users frequently phrase a memory request as "my password hunter2" or
-    # "remember secret abcdefgh", without a colon or "is". Treat a field name
-    # followed by any plausible value as sensitive rather than relying on a
-    # particular natural-language connector.
+_HIGH_SIGNAL_INLINE_SECRET_RE = re.compile(
+    r"\b(?:api[_\s.-]?key|(?:access|refresh|auth)[_\s.-]?token)"
     r"(?:\s*[:=]\s*|\s+(?:is|equals)\s+|\s+)['\"]?[^\s'\"]{4,}",
+    re.IGNORECASE,
+)
+_NAMED_INLINE_SECRET_RE = re.compile(
+    r"\b(?:secret|password|passwd|credential(?:s)?|passphrase|token)"
+    # Generic words occur in ordinary requests (for example, "token bucket"
+    # or "password reset"). Require an explicit value connector before
+    # treating them as secret material.
+    r"(?:\s*[:=]\s*|\s+(?:is|equals)\s+)['\"]?[^\s'\"]{4,}",
+    re.IGNORECASE,
+)
+_CONTEXTUAL_INLINE_SECRET_RE = re.compile(
+    # Preserve the most common natural requests that actually carry a secret
+    # without treating generic documentation terms as a credential.
+    r"\b(?:my|our)\s+(?:secret|password|passwd|credential(?:s)?|passphrase|token)"
+    r"\s+['\"]?[^\s'\"]{4,}"
+    r"|\b(?:use|using|remember|store|set)\s+(?:api[_\s.-]?key|(?:access|refresh|auth)[_\s.-]?token|token)"
+    r"\s+['\"]?[^\s'\"]{12,}",
     re.IGNORECASE,
 )
 _BEARER_TOKEN_RE = re.compile(r"\bbearer\s+[A-Za-z0-9._~+/=-]{12,}\b", re.IGNORECASE)
@@ -61,7 +73,94 @@ _CONNECTION_URI_RE = re.compile(
     re.IGNORECASE,
 )
 _SSN_RE = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
-_IBAN_RE = re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b")
+_IBAN_CANDIDATE_RE = re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b", re.IGNORECASE)
+_IBAN_COUNTRY_CODES = frozenset(
+    {
+        "AD",
+        "AE",
+        "AL",
+        "AT",
+        "AZ",
+        "BA",
+        "BE",
+        "BG",
+        "BH",
+        "BI",
+        "BR",
+        "BY",
+        "CH",
+        "CR",
+        "CY",
+        "CZ",
+        "DE",
+        "DJ",
+        "DK",
+        "DO",
+        "EE",
+        "EG",
+        "ES",
+        "FI",
+        "FO",
+        "FR",
+        "GB",
+        "GE",
+        "GI",
+        "GL",
+        "GR",
+        "GT",
+        "HR",
+        "HU",
+        "IE",
+        "IL",
+        "IQ",
+        "IS",
+        "IT",
+        "JO",
+        "KW",
+        "KZ",
+        "LB",
+        "LC",
+        "LI",
+        "LT",
+        "LU",
+        "LV",
+        "LY",
+        "MC",
+        "MD",
+        "ME",
+        "MK",
+        "MN",
+        "MR",
+        "MT",
+        "MU",
+        "NI",
+        "NL",
+        "NO",
+        "OM",
+        "PK",
+        "PL",
+        "PS",
+        "PT",
+        "QA",
+        "RO",
+        "RS",
+        "SA",
+        "SC",
+        "SE",
+        "SI",
+        "SK",
+        "SM",
+        "ST",
+        "SV",
+        "TL",
+        "TN",
+        "TR",
+        "UA",
+        "VA",
+        "VG",
+        "XK",
+    }
+)
 _PAYMENT_LABEL_RE = re.compile(
     r"\b(?:cvv|cvc|card\s*(?:number|no\.?)|routing\s*(?:number|no\.?)|"
     r"account\s*(?:number|no\.?))\s*[:#=-]?\s*\d{3,}\b",
@@ -154,7 +253,7 @@ class InMemoryMemoryStore:
     ) -> MemoryFact:
         normalized_organization_id = normalize_organization_id(organization_id)
         validate_memory_value_for_persistence(value_json)
-        now = _normalized_time(None)
+        now = normalize_memory_time(None)
         fact = MemoryFact(
             organization_id=normalized_organization_id,
             scope_type=scope_type,
@@ -194,16 +293,12 @@ class InMemoryMemoryStore:
         now: datetime | None = None,
     ) -> list[MemoryFact]:
         normalized_organization_id = normalize_organization_id(organization_id)
-        _assert_visible_org_matches_tenant(
+        assert_visible_org_matches_tenant(
             visible_to_org_id=visible_to_org_id,
             organization_id=normalized_organization_id,
         )
-        comparison_time = _normalized_time(now)
+        comparison_time = normalize_memory_time(now)
         with self._lock:
-            self._purge_expired_locked(
-                organization_id=normalized_organization_id,
-                now=comparison_time,
-            )
             facts = [
                 fact
                 for fact in self._facts.values()
@@ -233,7 +328,7 @@ class InMemoryMemoryStore:
         now: datetime | None = None,
     ) -> MemoryFact:
         normalized_organization_id = normalize_organization_id(organization_id)
-        comparison_time = _normalized_time(now)
+        comparison_time = normalize_memory_time(now)
         with self._lock:
             self._purge_expired_locked(
                 organization_id=normalized_organization_id,
@@ -264,7 +359,7 @@ class InMemoryMemoryStore:
     ) -> int:
         """Remove expired or soft-deleted records for one tenant only."""
         normalized_organization_id = normalize_organization_id(organization_id)
-        comparison_time = _normalized_time(now)
+        comparison_time = normalize_memory_time(now)
         with self._lock:
             return self._purge_expired_locked(
                 organization_id=normalized_organization_id,
@@ -305,7 +400,7 @@ def _fact_is_expired(fact: MemoryFact, *, now: datetime) -> bool:
     expires_at = fact.expires_at
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
-    return expires_at.astimezone(timezone.utc) <= _normalized_time(now)
+    return expires_at.astimezone(timezone.utc) <= normalize_memory_time(now)
 
 
 def _excerpt_hash(source_excerpt: str | None) -> str | None:
@@ -344,18 +439,22 @@ def contains_sensitive_memory_text(value: str) -> bool:
     return isinstance(value, str) and _contains_sensitive_text(value)
 
 
-def _assert_visible_org_matches_tenant(
+def assert_visible_org_matches_tenant(
     *,
     visible_to_org_id: str | None,
     organization_id: str,
 ) -> None:
+    """Reject a visibility request that crosses the durable-memory tenant."""
+
     if visible_to_org_id is None:
         return
     if normalize_organization_id(visible_to_org_id) != organization_id:
         raise PermissionError("Memory access is limited to the request organization")
 
 
-def _normalized_time(value: datetime | None) -> datetime:
+def normalize_memory_time(value: datetime | None) -> datetime:
+    """Return a UTC timestamp for memory retention and visibility comparisons."""
+
     timestamp = value or datetime.now(timezone.utc)
     if timestamp.tzinfo is None:
         return timestamp.replace(tzinfo=timezone.utc)
@@ -386,7 +485,9 @@ def _contains_sensitive_text(value: str) -> bool:
     if any(
         pattern.search(value)
         for pattern in (
-            _INLINE_SECRET_RE,
+            _HIGH_SIGNAL_INLINE_SECRET_RE,
+            _NAMED_INLINE_SECRET_RE,
+            _CONTEXTUAL_INLINE_SECRET_RE,
             _BEARER_TOKEN_RE,
             _OPENAI_KEY_RE,
             _GITHUB_TOKEN_RE,
@@ -396,15 +497,36 @@ def _contains_sensitive_text(value: str) -> bool:
             _PAYMENT_API_KEY_RE,
             _CONNECTION_URI_RE,
             _SSN_RE,
-            _IBAN_RE,
             _PAYMENT_LABEL_RE,
         )
     ):
         return True
-    return any(
+    if any(
         _is_luhn_valid(_digits_only(candidate.group()))
         for candidate in _CARD_NUMBER_CANDIDATE_RE.finditer(value)
+    ):
+        return True
+    return any(
+        _is_valid_iban(candidate.group())
+        for candidate in _IBAN_CANDIDATE_RE.finditer(value)
     )
+
+
+def _is_valid_iban(value: str) -> bool:
+    """Return whether a candidate has a supported country code and mod-97 check."""
+
+    normalized = value.upper()
+    if not 15 <= len(normalized) <= 34 or normalized[:2] not in _IBAN_COUNTRY_CODES:
+        return False
+    if not normalized[2:4].isdigit() or not normalized[4:].isalnum():
+        return False
+    remainder = 0
+    for character in normalized[4:] + normalized[:4]:
+        if character.isdigit():
+            remainder = (remainder * 10 + int(character)) % 97
+        else:
+            remainder = (remainder * 100 + ord(character) - ord("A") + 10) % 97
+    return remainder == 1
 
 
 def _digits_only(value: str) -> str:
