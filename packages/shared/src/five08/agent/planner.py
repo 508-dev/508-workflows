@@ -83,6 +83,7 @@ Available tools and arguments:
 - billing_read.search_suppliers: query string, optional limit number (1 through 10).
 - erp_read.search_projects: query string, optional limit number (1 through 10).
 - erp_read.get_project_summary: project_id string.
+- onboarding_read.get_summary: no arguments. Returns only aggregate onboarding queue health.
 - docuseal_write.create_member_agreement_submission: submitter_email, submitter_name, send_email true.
 - mail_write.create_mailbox: local_part, backup_email, name.
 - sso_write.create_user: contact_id string or contact_query string.

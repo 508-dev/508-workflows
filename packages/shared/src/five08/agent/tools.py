@@ -11,6 +11,9 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
+from psycopg import connect
+from psycopg.rows import dict_row
+
 from five08.agent.memory import InMemoryMemoryStore, MemoryStore
 from five08.agent.models import (
     MemoryFact,
@@ -107,6 +110,7 @@ _PLANNER_TOOL_ARGUMENTS: dict[str, frozenset[str]] = {
     "billing_read.search_suppliers": frozenset({"query", "limit"}),
     "erp_read.search_projects": frozenset({"query", "limit"}),
     "erp_read.get_project_summary": frozenset({"project_id"}),
+    "onboarding_read.get_summary": frozenset(),
     "web_read.search": frozenset({"query", "limit"}),
     "web_read.extract": frozenset({"url"}),
 }
@@ -151,6 +155,10 @@ class ToolManifest:
     tenant_scoped: bool = True
     idempotent: bool = False
     write: bool = False
+    # Recurring schedules may only expose tools that opt into this narrower
+    # capability surface.  Adding a normal read tool never silently gives
+    # existing schedules a new data source.
+    schedule_safe: bool = False
 
 
 class ToolPartialSuccessError(RuntimeError):
@@ -565,6 +573,7 @@ class ToolRegistry:
                 tenant_scoped=False,
                 idempotent=True,
                 write=False,
+                schedule_safe=True,
             ),
             "github_issue.create_issue": ToolManifest(
                 name="github_issue.create_issue",
@@ -658,6 +667,7 @@ class ToolRegistry:
                 tenant_scoped=True,
                 idempotent=True,
                 write=False,
+                schedule_safe=True,
             ),
             "billing_read.search_invoices": ToolManifest(
                 name="billing_read.search_invoices",
@@ -666,6 +676,7 @@ class ToolRegistry:
                 tenant_scoped=True,
                 idempotent=True,
                 write=False,
+                schedule_safe=True,
             ),
             "billing_read.get_invoice_summary": ToolManifest(
                 name="billing_read.get_invoice_summary",
@@ -674,6 +685,7 @@ class ToolRegistry:
                 tenant_scoped=True,
                 idempotent=True,
                 write=False,
+                schedule_safe=True,
             ),
             "billing_read.search_suppliers": ToolManifest(
                 name="billing_read.search_suppliers",
@@ -682,6 +694,7 @@ class ToolRegistry:
                 tenant_scoped=True,
                 idempotent=True,
                 write=False,
+                schedule_safe=True,
             ),
             "erp_read.search_projects": ToolManifest(
                 name="erp_read.search_projects",
@@ -690,6 +703,7 @@ class ToolRegistry:
                 tenant_scoped=True,
                 idempotent=True,
                 write=False,
+                schedule_safe=True,
             ),
             "erp_read.get_project_summary": ToolManifest(
                 name="erp_read.get_project_summary",
@@ -698,6 +712,16 @@ class ToolRegistry:
                 tenant_scoped=True,
                 idempotent=True,
                 write=False,
+                schedule_safe=True,
+            ),
+            "onboarding_read.get_summary": ToolManifest(
+                name="onboarding_read.get_summary",
+                risk="low",
+                required_scopes=("crm:contact:read",),
+                tenant_scoped=True,
+                idempotent=True,
+                write=False,
+                schedule_safe=True,
             ),
             "crm_write.update_contact": ToolManifest(
                 name="crm_write.update_contact",
@@ -794,6 +818,7 @@ class ToolRegistry:
                 tenant_scoped=False,
                 idempotent=True,
                 write=False,
+                schedule_safe=True,
             ),
             "web_read.extract": ToolManifest(
                 name="web_read.extract",
@@ -802,6 +827,7 @@ class ToolRegistry:
                 tenant_scoped=False,
                 idempotent=True,
                 write=False,
+                schedule_safe=True,
             ),
             "memory_write.remember_fact": ToolManifest(
                 name="memory_write.remember_fact",
@@ -832,6 +858,18 @@ class ToolRegistry:
 
     def get(self, tool_name: str) -> ToolManifest | None:
         return self._manifests.get(tool_name)
+
+    def schedule_safe_tool_names(self) -> frozenset[str]:
+        """Return the explicitly approved read-only schedule tool catalog."""
+
+        return frozenset(
+            name
+            for name, manifest in self._manifests.items()
+            if manifest.schedule_safe
+            and manifest.idempotent
+            and not manifest.write
+            and not manifest.requires_confirmation
+        )
 
     def validate_planner_action(
         self,
@@ -1152,6 +1190,11 @@ class ToolRegistry:
                 arguments,
                 organization_id=organization_id,
             )
+        if tool_name == "onboarding_read.get_summary":
+            return self._get_onboarding_summary(
+                arguments,
+                organization_id=organization_id,
+            )
         if tool_name == "crm_write.update_contact":
             return self._update_crm_contact(arguments)
         if tool_name == "docuseal_write.create_member_agreement_submission":
@@ -1378,6 +1421,81 @@ class ToolRegistry:
         finally:
             client.close()
         return {"project": _erp_project_summary_payload(row)}
+
+    def _get_onboarding_summary(
+        self,
+        arguments: dict[str, Any],
+        *,
+        organization_id: str | None,
+    ) -> dict[str, Any]:
+        """Return a non-identifying summary of the local onboarding queue.
+
+        This intentionally is not a generic database tool: schedules can ask
+        about onboarding health, but they cannot enumerate people, emails, or
+        intake payloads into a Discord channel or model prompt.
+        """
+
+        if arguments:
+            raise ValueError("Onboarding summary does not accept arguments")
+        _required_organization_id(organization_id)
+        postgres_url = _required_config(
+            self.runtime_config.postgres_url,
+            "POSTGRES_URL",
+        )
+        query = """
+            SELECT
+                COALESCE(
+                    NULLIF(
+                        replace(
+                            replace(lower(btrim(onboarding_state)), '_', ''),
+                            '-',
+                            ''
+                        ),
+                        ''
+                    ),
+                    'notstarted'
+                ) AS state,
+                count(*)::int AS count,
+                count(*) FILTER (
+                    WHERE onboarding_updated_at < NOW() - INTERVAL '14 days'
+                )::int AS stale_count
+            FROM people
+            WHERE COALESCE(is_member, false) = false
+              AND (sync_status = 'active' OR sync_status IS NULL)
+              AND (
+                    contact_type ILIKE '%prospect%'
+                    OR onboarding_state IS NOT NULL
+                  )
+            GROUP BY 1
+            ORDER BY 1
+        """
+        try:
+            with connect(
+                postgres_url,
+                connect_timeout=5,
+                options="-c statement_timeout=10000",
+            ) as conn:
+                with conn.cursor(row_factory=dict_row) as cursor:
+                    cursor.execute(query)
+                    rows = cursor.fetchall()
+        except Exception:
+            logger.warning("Onboarding summary lookup failed", exc_info=True)
+            raise RuntimeError(
+                "Onboarding summary is temporarily unavailable"
+            ) from None
+
+        by_state: dict[str, int] = {}
+        stale_count = 0
+        for row in rows:
+            state = _onboarding_state_label(row.get("state"))
+            count = _nonnegative_int(row.get("count"))
+            by_state[state] = count
+            stale_count += _nonnegative_int(row.get("stale_count"))
+        return {
+            "total": sum(by_state.values()),
+            "by_state": by_state,
+            "stale_count": stale_count,
+        }
 
     def _web_research_client(self) -> WebResearchClient:
         if self._web_client is not None:
@@ -2920,6 +3038,20 @@ def _erp_payload_amount(value: Any) -> int | float | str | None:
         normalized = value.strip()
         return normalized[:64] or None
     return None
+
+
+def _onboarding_state_label(value: Any) -> str:
+    normalized = " ".join(str(value or "").split())
+    return normalized[:64] or "notstarted"
+
+
+def _nonnegative_int(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _optional_str(value: Any) -> str | None:

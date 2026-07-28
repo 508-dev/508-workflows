@@ -28,8 +28,10 @@ export type AgentSchedule = {
   last_run_at?: string | null
   definition: {
     prompt: string
+    execution_mode?: "frozen_actions" | "agent_loop" | string
     summary_mode: "deterministic" | "model_for_public_data" | string
     sources_are_public: boolean
+    tool_allowlist?: string[]
     delivery: {
       channel_id: string
     }
@@ -50,11 +52,8 @@ export type AgentScheduleCreateValues = {
   cron_expression: string
   timezone: string
   prompt: string
-  repository: string
-  query: string
   channel_id: string
-  summary_mode: "deterministic" | "model_for_public_data"
-  sources_are_public: boolean
+  execution_mode: "agent_loop"
 }
 
 function timestamp(value?: string | null) {
@@ -69,7 +68,11 @@ function statusVariant(status: string) {
   return "missing" as const
 }
 
-function githubActionSummary(schedule: AgentSchedule) {
+function scheduleActionSummary(schedule: AgentSchedule) {
+  if (schedule.definition.execution_mode === "agent_loop") {
+    const toolCount = schedule.definition.tool_allowlist?.length || 0
+    return toolCount ? `Bounded agent loop · ${toolCount} read-only tools` : "Bounded agent loop"
+  }
   const action = schedule.definition.actions.find(
     (candidate) => candidate.tool_name === "github_issue.search_issues",
   )
@@ -103,19 +106,14 @@ export function AgentSchedulesView({
   const [name, setName] = useState("")
   const [cronExpression, setCronExpression] = useState("0 9 * * 1")
   const [timezone, setTimezone] = useState("UTC")
-  const [repository, setRepository] = useState("")
-  const [query, setQuery] = useState("")
   const [channelId, setChannelId] = useState("")
   const [prompt, setPrompt] = useState("")
-  const [sourcesArePublic, setSourcesArePublic] = useState(false)
-  const [useModelSummary, setUseModelSummary] = useState(false)
 
   const canSubmit =
     canCreate &&
     name.trim() &&
     cronExpression.trim() &&
     timezone.trim() &&
-    repository.trim() &&
     channelId.trim() &&
     prompt.trim() &&
     !loading.createAgentSchedule
@@ -126,21 +124,14 @@ export function AgentSchedulesView({
       name: name.trim(),
       cron_expression: cronExpression.trim(),
       timezone: timezone.trim(),
-      repository: repository.trim(),
-      query: query.trim(),
       channel_id: channelId.trim(),
       prompt: prompt.trim(),
-      summary_mode: useModelSummary ? "model_for_public_data" : "deterministic",
-      sources_are_public: sourcesArePublic,
+      execution_mode: "agent_loop",
     })
     if (!created) return
     setName("")
-    setRepository("")
-    setQuery("")
     setChannelId("")
     setPrompt("")
-    setSourcesArePublic(false)
-    setUseModelSummary(false)
   }
 
   return (
@@ -150,9 +141,9 @@ export function AgentSchedulesView({
           <div className="grid gap-1">
             <CardTitle>Recurring agent reports</CardTitle>
             <p className="text-sm text-muted-foreground">
-              Each report has a frozen read-only tool envelope. With the public-data model option,
-              its prompt can shape the report; it can never add tools, write access, or a new
-              delivery destination.
+              Each report saves a goal and a fixed catalog of read-only tools. At run time the agent
+              can plan a short loop over that catalog, but it can never write, add a tool, widen
+              permissions, or change its delivery destination.
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -176,10 +167,11 @@ export function AgentSchedulesView({
         <Card>
           <CardHeader>
             <div>
-              <CardTitle>New GitHub issue report</CardTitle>
+              <CardTitle>New agent report</CardTitle>
               <p className="mt-1 text-sm text-muted-foreground">
-                Runs at most once every five minutes. Use a Discord-linked admin session to create
-                or control schedules.
+                Runs at most once every five minutes. The saved catalog includes every currently
+                supported read-only GitHub, CRM, ERP, billing, onboarding, and public-web tool that
+                your Discord permissions permit.
               </p>
             </div>
           </CardHeader>
@@ -189,7 +181,7 @@ export function AgentSchedulesView({
                 Open this dashboard through the Discord admin link to create or control schedules.
               </div>
             ) : null}
-            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
               <Label>
                 Name
                 <Input
@@ -222,26 +214,6 @@ export function AgentSchedulesView({
                 />
               </Label>
               <Label>
-                Repository
-                <Input
-                  aria-label="GitHub repository"
-                  value={repository}
-                  disabled={!canCreate}
-                  placeholder="508-dev/508-workflows"
-                  onChange={(event) => setRepository(event.target.value)}
-                />
-              </Label>
-              <Label>
-                Issue query
-                <Input
-                  aria-label="GitHub issue query"
-                  value={query}
-                  disabled={!canCreate}
-                  placeholder="label:bug updated:>=2026-07-01"
-                  onChange={(event) => setQuery(event.target.value)}
-                />
-              </Label>
-              <Label>
                 Discord channel ID
                 <Input
                   aria-label="Discord channel ID"
@@ -261,40 +233,14 @@ export function AgentSchedulesView({
                 value={prompt}
                 maxLength={4000}
                 disabled={!canCreate}
-                placeholder="Analyze open issues updated since the previous report. Group related work and recommend priorities."
+                placeholder="Inspect the onboarding queue and ERP projects at risk. Summarize trends, blockers, and the next sensible follow-up."
                 onChange={(event) => setPrompt(event.target.value)}
               />
             </Label>
-            <div className="grid gap-2 text-sm">
-              <label className="flex items-start gap-2">
-                <input
-                  aria-label="Sources are public"
-                  type="checkbox"
-                  checked={sourcesArePublic}
-                  disabled={!canCreate}
-                  onChange={(event) => {
-                    setSourcesArePublic(event.target.checked)
-                    if (!event.target.checked) setUseModelSummary(false)
-                  }}
-                />
-                <span>
-                  The issue metadata queried by this schedule is public and may be sent to the
-                  configured model for summarization.
-                </span>
-              </label>
-              <label className="flex items-start gap-2">
-                <input
-                  aria-label="Use model summary"
-                  type="checkbox"
-                  checked={useModelSummary}
-                  disabled={!canCreate || !sourcesArePublic}
-                  onChange={(event) => setUseModelSummary(event.target.checked)}
-                />
-                <span>
-                  Use the prompt to generate a model summary. Otherwise, delivery uses a
-                  deterministic issue list and never sends issue metadata to a model.
-                </span>
-              </label>
+            <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
+              The planner receives only safe aggregate observations from CRM, ERP, billing, and
+              onboarding tools. Raw contact and financial records are never fed back into the model
+              or posted by this generic report.
             </div>
             <div>
               <Button type="button" onClick={() => void submit()} disabled={!canSubmit}>
@@ -319,7 +265,7 @@ export function AgentSchedulesView({
                 <TableHeader>
                   <TableRow>
                     <TableHead>Schedule</TableHead>
-                    <TableHead>Frozen action</TableHead>
+                    <TableHead>Capability envelope</TableHead>
                     <TableHead>Delivery</TableHead>
                     <TableHead>Next run</TableHead>
                     <TableHead>Last run</TableHead>
@@ -344,11 +290,13 @@ export function AgentSchedulesView({
                           </div>
                         </TableCell>
                         <TableCell className="max-w-60 text-sm">
-                          <div>{githubActionSummary(schedule)}</div>
+                          <div>{scheduleActionSummary(schedule)}</div>
                           <div className="mt-1 text-xs text-muted-foreground">
-                            {schedule.definition.summary_mode === "model_for_public_data"
-                              ? "Model summary of public metadata"
-                              : "Deterministic report"}
+                            {schedule.definition.execution_mode === "agent_loop"
+                              ? "Model-planned, bounded read-only loop"
+                              : schedule.definition.summary_mode === "model_for_public_data"
+                                ? "Model summary of public metadata"
+                                : "Deterministic report"}
                           </div>
                         </TableCell>
                         <TableCell>

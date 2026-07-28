@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 class AgentSchedulesCog(commands.Cog):
-    """Create and control policy-bound recurring GitHub issue reports."""
+    """Create and control policy-bound recurring agent reports."""
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
@@ -72,6 +72,7 @@ class AgentSchedulesCog(commands.Cog):
             "cron_expression": cron,
             "timezone": timezone,
             "prompt": prompt,
+            "execution_mode": "frozen_actions",
             "repository": repository,
             "query": query,
             "state": "open",
@@ -99,6 +100,72 @@ class AgentSchedulesCog(commands.Cog):
         next_run = str(schedule.get("next_run_at") or "unknown")
         await interaction.followup.send(
             "Created scheduled report "
+            f"`{schedule.get('id')}` for <#{channel.id}>. Next run: {next_run}",
+            ephemeral=True,
+        )
+
+    @app_commands.command(
+        name="schedule-agent",
+        description="Schedule a bounded read-only agent report to a Discord channel",
+    )
+    @app_commands.describe(
+        name="A short name for this recurring report",
+        cron="Five-field cron, for example 0 9 * * 1",
+        channel="Channel where each report is posted",
+        prompt="What to inspect and report on each run",
+        timezone="IANA timezone, for example Asia/Tokyo",
+    )
+    async def schedule_agent_command(
+        self,
+        interaction: discord.Interaction,
+        name: str,
+        cron: str,
+        channel: discord.TextChannel,
+        prompt: str,
+        timezone: str = "UTC",
+    ) -> None:
+        """Create a generic loop over the creator's saved read-only catalog."""
+
+        await interaction.response.defer(ephemeral=True)
+        context = self._context(interaction)
+        if context is None:
+            await interaction.followup.send(
+                "Recurring agent schedules are only available in the configured Discord server.",
+                ephemeral=True,
+            )
+            return
+        if channel.guild.id != interaction.guild_id:
+            await interaction.followup.send(
+                "Choose a channel in this Discord server.",
+                ephemeral=True,
+            )
+            return
+        payload = {
+            "context": context,
+            "name": name,
+            "cron_expression": cron,
+            "timezone": timezone,
+            "prompt": prompt,
+            "execution_mode": "agent_loop",
+            "channel_id": str(channel.id),
+        }
+        response = await self._post_backend("/agent/schedules", payload)
+        if response.get("http_status", 500) >= 400:
+            await interaction.followup.send(
+                self._error_message(response, "Unable to create the schedule."),
+                ephemeral=True,
+            )
+            return
+        schedule = response.get("schedule")
+        if not isinstance(schedule, dict):
+            await interaction.followup.send(
+                "The schedule was created, but the backend returned an incomplete response.",
+                ephemeral=True,
+            )
+            return
+        next_run = str(schedule.get("next_run_at") or "unknown")
+        await interaction.followup.send(
+            "Created bounded agent schedule "
             f"`{schedule.get('id')}` for <#{channel.id}>. Next run: {next_run}",
             ephemeral=True,
         )

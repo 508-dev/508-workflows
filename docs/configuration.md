@@ -337,19 +337,26 @@ Agent gateway:
 ### Recurring Agent Reports
 
 Only the configured **Admin / Owner** role receives `agent:schedule:manage`.
-The first supported schedule type is a frozen GitHub issue search that posts a
-report to one explicit channel in `DISCORD_SERVER_ID`. Creation is available in
-Discord (`/schedule-github-issues`) and the **Agent schedules** dashboard page;
-the dashboard requires a Discord-linked Admin session for writes.
+New schedules created through `/schedule-agent` or the **Agent schedules**
+dashboard page store a natural-language objective and an exact catalog of
+schedule-safe read-only tools. Today that catalog covers GitHub issues, CRM
+contact search, Billing/ERP reads, onboarding queue health, and public-web
+research. Adding a new source means registering one bounded tool; it does not
+require another scheduler feature. `/schedule-github-issues` remains available
+for the older fixed GitHub-report envelope.
 
-Each schedule stores a prompt alongside a bounded tool envelope. When an
-operator explicitly opts into a public-data model summary, the prompt can shape
-that summary; it cannot add tools, change the repository or destination, or
-grant scopes. Every execution fetches the owner's current Discord roles and
-requires both the saved read scope and `agent:schedule:manage`; removing the
-Admin role skips later runs. Model summaries are off by default. They can only
-receive minimized GitHub issue metadata after the schedule owner explicitly
-marks every source as public; otherwise reports use a deterministic issue list.
+The runtime lets the configured planner make at most three short planning steps
+and two read-only calls per step. Every proposal is validated against the
+saved tool catalog and the owner's freshly fetched Discord roles before it
+runs. It cannot write, request confirmation, add a tool, change a destination,
+or inherit a later-added capability. Removing the Admin role or any saved read
+scope skips later runs.
+
+Raw CRM, ERP, billing, and onboarding rows are never sent back to the model.
+The loop receives only bounded aggregate observations (counts/statuses), and
+generic reports post the same safe aggregate form to Discord. Legacy GitHub
+reports retain their explicit public-data summary option and deterministic
+fallback behavior.
 
 See [Discord GitHub Todos and Projects](./discord-github-todos.md) for the
 role model, required App permissions, and installation procedure.

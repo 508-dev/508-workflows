@@ -1,9 +1,9 @@
 """Durable, policy-bounded recurring agent schedule primitives.
 
-Schedules deliberately persist a frozen execution envelope: a human-written
-prompt, a short list of approved read-only tool calls, a delivery destination,
-and a capped runtime.  The prompt may shape a report, but it can never add a
-tool, widen a repository, or grant a permission at run time.
+Schedules can retain a legacy frozen tool plan or a bounded agent-loop
+capability envelope.  The latter stores an objective and an explicit catalog
+of read-only tool IDs; it never grants a permission, unlocks a write, or lets a
+future tool silently join an existing schedule.
 """
 
 from __future__ import annotations
@@ -26,8 +26,23 @@ from five08.settings import SharedSettings
 
 
 AGENT_SCHEDULE_DEFINITION_VERSION = 1
-AGENT_SCHEDULE_ALLOWED_TOOL_NAMES = frozenset({"github_issue.search_issues"})
+AGENT_SCHEDULE_ALLOWED_TOOL_NAMES = frozenset(
+    {
+        "github_issue.search_issues",
+        "crm_read.search_contacts",
+        "billing_read.search_invoices",
+        "billing_read.get_invoice_summary",
+        "billing_read.search_suppliers",
+        "erp_read.search_projects",
+        "erp_read.get_project_summary",
+        "onboarding_read.get_summary",
+        "web_read.search",
+        "web_read.extract",
+    }
+)
 MAX_AGENT_SCHEDULE_ACTIONS = 3
+MAX_AGENT_SCHEDULE_TOOL_ALLOWLIST = 16
+MAX_AGENT_SCHEDULE_PLANNING_STEPS = 3
 MAX_AGENT_SCHEDULE_OUTPUT_CHARS = 8_000
 MAX_AGENT_SCHEDULE_ERROR_CHARS = 2_000
 
@@ -55,6 +70,13 @@ class AgentScheduleRunTrigger(StrEnum):
 
     SCHEDULE = "schedule"
     MANUAL = "manual"
+
+
+class AgentScheduleExecutionMode(StrEnum):
+    """How a recurring schedule selects its read-only tool calls."""
+
+    FROZEN_ACTIONS = "frozen_actions"
+    AGENT_LOOP = "agent_loop"
 
 
 class AgentScheduleAction(BaseModel):
@@ -87,13 +109,27 @@ class AgentScheduleDiscordDelivery(BaseModel):
 
 
 class AgentScheduleDefinition(BaseModel):
-    """Frozen task and delivery policy stored with a schedule."""
+    """Task, capability, and delivery policy stored with a schedule."""
 
     version: int = AGENT_SCHEDULE_DEFINITION_VERSION
     prompt: str = Field(min_length=1, max_length=4_000)
+    execution_mode: AgentScheduleExecutionMode = (
+        AgentScheduleExecutionMode.FROZEN_ACTIONS
+    )
+    # Legacy schedules replay this immutable action list. New agent-loop
+    # schedules intentionally leave it empty and use ``tool_allowlist``.
     actions: list[AgentScheduleAction] = Field(
-        min_length=1,
+        default_factory=list,
         max_length=MAX_AGENT_SCHEDULE_ACTIONS,
+    )
+    tool_allowlist: list[str] = Field(
+        default_factory=list,
+        max_length=MAX_AGENT_SCHEDULE_TOOL_ALLOWLIST,
+    )
+    max_planning_steps: int = Field(
+        default=MAX_AGENT_SCHEDULE_PLANNING_STEPS,
+        ge=1,
+        le=MAX_AGENT_SCHEDULE_PLANNING_STEPS,
     )
     delivery: AgentScheduleDiscordDelivery
     max_runtime_seconds: int = Field(default=120, ge=5, le=300)
@@ -114,6 +150,20 @@ class AgentScheduleDefinition(BaseModel):
             raise ValueError("prompt is required")
         return normalized
 
+    @field_validator("tool_allowlist")
+    @classmethod
+    def _normalize_tool_allowlist(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for raw_name in value:
+            tool_name = str(raw_name or "").strip()
+            if not tool_name:
+                raise ValueError("scheduled tool names must not be blank")
+            if tool_name not in AGENT_SCHEDULE_ALLOWED_TOOL_NAMES:
+                raise ValueError("scheduled tool is not supported")
+            if tool_name not in normalized:
+                normalized.append(tool_name)
+        return normalized
+
     @model_validator(mode="after")
     def _validate_summary_data_boundary(self) -> "AgentScheduleDefinition":
         if self.version != AGENT_SCHEDULE_DEFINITION_VERSION:
@@ -121,6 +171,26 @@ class AgentScheduleDefinition(BaseModel):
         if self.summary_mode == "model_for_public_data" and not self.sources_are_public:
             raise ValueError(
                 "model summaries require an explicit public-source classification"
+            )
+        if self.execution_mode is AgentScheduleExecutionMode.FROZEN_ACTIONS:
+            if not self.actions:
+                raise ValueError("frozen-action schedules require at least one action")
+            if self.tool_allowlist:
+                raise ValueError(
+                    "frozen-action schedules cannot include a tool allowlist"
+                )
+            return self
+        if self.actions:
+            raise ValueError("agent-loop schedules cannot include frozen actions")
+        if not self.tool_allowlist:
+            raise ValueError("agent-loop schedules require at least one allowed tool")
+        # The loop may call a model to select tools, but its observations are
+        # always a bounded safe projection. The older public-data switch only
+        # applies to the legacy GitHub result summarizer.
+        if self.summary_mode != "deterministic" or self.sources_are_public:
+            raise ValueError(
+                "agent-loop schedules use safe observations and cannot opt into "
+                "legacy public-data summaries"
             )
         return self
 

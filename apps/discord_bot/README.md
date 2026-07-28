@@ -217,6 +217,17 @@ and result snippets are not audit logged.
     require the explicit `public_sources:true` acknowledgement; otherwise the
     delivery is a deterministic issue list.
 
+- `/schedule-agent`
+  - Description: Create a generic, durable, read-only agent report with a
+    five-field cron schedule and an explicit Discord destination channel.
+  - Required role: Admin / Owner.
+  - Guardrails: the schedule saves its objective and its current catalog of
+    approved GitHub, CRM, Billing/ERP, onboarding, and public-web tools. Each
+    run may take a short model-planned loop, but every action is rechecked
+    against that catalog and the owner's live Discord roles. Writes are never
+    available; raw CRM/ERP/billing/onboarding records are not fed to the model
+    or posted by the generic report.
+
 - `/schedules`, `/schedule-control`, `/schedule-run`
   - Description: List, pause/resume/archive, or queue a manual run of retained
     recurring reports.

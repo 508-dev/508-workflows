@@ -15,6 +15,7 @@ from five08.agent import (
     AgentToolAction,
     ToolRuntimeConfig,
 )
+from five08.agent import tools as agent_tools
 from five08.agent.tools import ToolRegistry
 from five08.clients.erpnext import ERPNextAPIError, ERPNextClient
 
@@ -171,6 +172,69 @@ def _registry(
         ),
         clients,
     )
+
+
+class _OnboardingCursor:
+    def __init__(self) -> None:
+        self.query = ""
+
+    def __enter__(self) -> "_OnboardingCursor":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def execute(self, query: str) -> None:
+        self.query = query
+
+    def fetchall(self) -> list[dict[str, Any]]:
+        return [
+            {"state": "pending", "count": 3, "stale_count": 1},
+            {"state": "onboarded", "count": 2, "stale_count": 0},
+        ]
+
+
+class _OnboardingConnection:
+    def __init__(self, cursor: _OnboardingCursor) -> None:
+        self.cursor_value = cursor
+
+    def __enter__(self) -> "_OnboardingConnection":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def cursor(self, **_kwargs: object) -> _OnboardingCursor:
+        return self.cursor_value
+
+
+def test_onboarding_summary_is_aggregate_only_and_schedule_safe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The onboarding catalog exposes queue health, never a generic DB reader."""
+
+    cursor = _OnboardingCursor()
+    connection = _OnboardingConnection(cursor)
+    monkeypatch.setattr(agent_tools, "connect", lambda *_args, **_kwargs: connection)
+    registry = ToolRegistry(
+        runtime_config=ToolRuntimeConfig(postgres_url="postgres://test")
+    )
+
+    result = registry.execute(
+        "onboarding_read.get_summary",
+        {},
+        organization_id="org-508",
+        actor_id="user-1",
+    )
+
+    assert result == {
+        "total": 5,
+        "by_state": {"pending": 3, "onboarded": 2},
+        "stale_count": 1,
+    }
+    assert "email" not in cursor.query.casefold()
+    assert "onboarding_read.get_summary" in registry.schedule_safe_tool_names()
+    assert "crm_write.update_contact" not in registry.schedule_safe_tool_names()
 
 
 def test_erp_reads_return_whitelisted_summaries_and_close_clients() -> None:

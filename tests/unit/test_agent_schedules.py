@@ -13,6 +13,7 @@ from five08.agent.schedules import (
     AgentScheduleAction,
     AgentScheduleDefinition,
     AgentScheduleDiscordDelivery,
+    AgentScheduleExecutionMode,
     AgentScheduleRunStatus,
     claim_agent_schedule_run,
     create_due_agent_schedule_runs,
@@ -66,6 +67,37 @@ def test_schedule_action_rejects_tool_or_argument_expansion() -> None:
 
     with pytest.raises(ValidationError, match="unknown arguments"):
         _github_action(assignee="someone")
+
+
+def test_agent_loop_definition_requires_a_saved_read_only_catalog() -> None:
+    """A generic objective cannot acquire tools dynamically at run time."""
+
+    definition = AgentScheduleDefinition(
+        prompt="Inspect onboarding health and report blockers.",
+        execution_mode=AgentScheduleExecutionMode.AGENT_LOOP,
+        tool_allowlist=["onboarding_read.get_summary", "erp_read.search_projects"],
+        delivery=_delivery(),
+    )
+
+    assert definition.actions == []
+    assert definition.tool_allowlist == [
+        "onboarding_read.get_summary",
+        "erp_read.search_projects",
+    ]
+    with pytest.raises(ValidationError, match="at least one allowed tool"):
+        AgentScheduleDefinition(
+            prompt="Inspect onboarding health.",
+            execution_mode=AgentScheduleExecutionMode.AGENT_LOOP,
+            delivery=_delivery(),
+        )
+    with pytest.raises(ValidationError, match="cannot include frozen actions"):
+        AgentScheduleDefinition(
+            prompt="Inspect onboarding health.",
+            execution_mode=AgentScheduleExecutionMode.AGENT_LOOP,
+            actions=[_github_action()],
+            tool_allowlist=["onboarding_read.get_summary"],
+            delivery=_delivery(),
+        )
 
 
 def test_schedule_timing_enforces_minimum_cadence_and_preserves_timezone() -> None:

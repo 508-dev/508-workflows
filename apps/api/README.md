@@ -91,19 +91,20 @@ curl -X GET "http://localhost:8090/jobs/<job_id>" \
 ### Recurring agent schedules
 
 Recurring schedules are durable worker jobs, not long-lived Discord requests.
-The initial supported envelope is GitHub issue search → one explicit Discord
-channel report. A human prompt is retained and, when an operator explicitly
-opts into a public-data model summary, can guide that summary. The stored
-actions, repository, scopes, runtime cap, and delivery destination are frozen
-at creation. Prompts cannot select new tools or write data.
+New schedules retain a natural-language objective plus an explicit, fixed
+catalog of schedule-safe read-only tool IDs. The run-time planner can make a
+short bounded loop over that catalog (GitHub, CRM, Billing/ERP, onboarding, or
+public web), but cannot select a write, add a capability, or change delivery.
+The older frozen GitHub envelope remains supported for `/schedule-github-issues`.
 
 Schedule management requires `agent:schedule:manage`, which is Admin-only. On
 every create, control, manual run, and background execution, the API retrieves
 a fresh Discord member-role snapshot from the bot. A run requires the owner to
 still hold the manager scope and every saved read scope; a role revocation
-therefore skips it before a tool call or Discord post. Public-data model
-summaries are opt-in and send only minimized GitHub issue metadata; the default
-report is deterministic and sends no issue data to a model.
+therefore skips it before a tool call or Discord post. CRM, ERP, billing, and
+onboarding output is reduced to bounded aggregate observations before a
+follow-up model step and before generic Discord delivery. Legacy public-data
+GitHub summaries remain opt-in.
 
 The internal bot-facing management routes live under `/agent/schedules*`; the
 worker calls `POST /internal/agent-schedules/runs/{run_id}` using the existing

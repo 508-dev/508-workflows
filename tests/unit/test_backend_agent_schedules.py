@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -11,11 +12,22 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from fastapi import Request
 
-from five08.agent import AgentIdentityContext
+from five08.agent import (
+    AgentExecutionResult,
+    AgentIdentityContext,
+    AgentModelConfig,
+    AgentOrchestrator,
+    AgentPlannerResult,
+    PlannerDraft,
+    PlannerDraftAction,
+    PolicyEngine,
+    ToolRegistry,
+)
 from five08.agent.schedules import (
     AgentScheduleAction,
     AgentScheduleDefinition,
     AgentScheduleDiscordDelivery,
+    AgentScheduleExecutionMode,
     AgentScheduleRecord,
     AgentScheduleRunRecord,
     AgentScheduleRunStatus,
@@ -80,6 +92,190 @@ def _run() -> AgentScheduleRunRecord:
         created_at=now,
         updated_at=now,
     )
+
+
+def _agent_loop_schedule(*, tool_allowlist: list[str]) -> AgentScheduleRecord:
+    schedule = _schedule()
+    return replace(
+        schedule,
+        definition=AgentScheduleDefinition(
+            prompt="Inspect the CRM pipeline and summarize what needs attention.",
+            execution_mode=AgentScheduleExecutionMode.AGENT_LOOP,
+            tool_allowlist=tool_allowlist,
+            delivery=AgentScheduleDiscordDelivery(guild_id="1000", channel_id="2000"),
+        ),
+        allowed_scopes=frozenset({"agent:schedule:manage", "crm:contact:read"}),
+    )
+
+
+def test_agent_loop_creation_persists_an_exact_default_tool_catalog() -> None:
+    """The generic creation surface captures tools now, rather than later."""
+
+    definition = api._agent_schedule_definition_from_fields(
+        SimpleNamespace(
+            prompt="Review ERP, CRM, and onboarding health.",
+            execution_mode="agent_loop",
+            tool_allowlist=[],
+            channel_id="2000",
+        ),
+        guild_id="1000",
+    )
+
+    assert definition.execution_mode is AgentScheduleExecutionMode.AGENT_LOOP
+    assert definition.actions == []
+    assert "onboarding_read.get_summary" in definition.tool_allowlist
+    assert "crm_write.update_contact" not in definition.tool_allowlist
+
+
+class _LoopPlanner:
+    def __init__(self, first_draft: PlannerDraft, final_draft: PlannerDraft) -> None:
+        self.first_draft = first_draft
+        self.final_draft = final_draft
+        self.observations: list[dict[str, str]] = []
+        self.model_config = AgentModelConfig()
+
+    def plan(self, **_kwargs: object) -> AgentPlannerResult:
+        return AgentPlannerResult(
+            draft=self.first_draft,
+            model=self.model_config.resolve("fast"),
+            latency_ms=1,
+        )
+
+    def plan_with_observations(
+        self,
+        *,
+        tool_observations: list[dict[str, str]],
+        **_kwargs: object,
+    ) -> AgentPlannerResult:
+        self.observations = tool_observations
+        return AgentPlannerResult(
+            draft=self.final_draft,
+            model=self.model_config.resolve("fast"),
+            latency_ms=1,
+        )
+
+
+class _LoopOrchestrator:
+    def __init__(self, planner: _LoopPlanner) -> None:
+        self.registry = ToolRegistry()
+        self.policy = PolicyEngine()
+        self.model_config = AgentModelConfig()
+        self.planner = planner
+        self.plans = []
+
+    def execute_plan(
+        self, plan: object, *_args: object, **_kwargs: object
+    ) -> list[AgentExecutionResult]:
+        self.plans.append(plan)
+        return [
+            AgentExecutionResult(
+                tool_name="crm_read.search_contacts",
+                status="succeeded",
+                result={
+                    "contacts": [
+                        {
+                            "id": "contact-123",
+                            "name": "Private Person",
+                            "emailAddress": "private@example.com",
+                            "phoneNumber": "+1-555-0100",
+                        },
+                        {
+                            "id": "contact-456",
+                            "name": "Another Private Person",
+                            "emailAddress": "another@example.com",
+                        },
+                    ]
+                },
+            )
+        ]
+
+
+def test_agent_loop_uses_safe_aggregate_observations_for_private_tools() -> None:
+    """Raw CRM records never return to the planner on the second loop step."""
+
+    planner = _LoopPlanner(
+        PlannerDraft(
+            status="planned",
+            actions=[
+                PlannerDraftAction(
+                    tool_name="crm_read.search_contacts",
+                    arguments={"query": "onboarding", "limit": 5},
+                    summary="Inspect CRM onboarding contacts",
+                )
+            ],
+        ),
+        PlannerDraft(
+            status="answer",
+            answer="The CRM search found two matching contacts.",
+        ),
+    )
+    orchestrator = _LoopOrchestrator(planner)
+    schedule = _agent_loop_schedule(tool_allowlist=["crm_read.search_contacts"])
+    context = AgentIdentityContext(
+        discord_user_id="1001",
+        organization_id="1000",
+        guild_id="1000",
+        roles=["Admin"],
+    )
+
+    outcome = api._run_agent_schedule_loop(
+        orchestrator=cast(AgentOrchestrator, orchestrator),
+        schedule=schedule,
+        run=_run(),
+        context=context,
+        effective_scopes=orchestrator.policy.scopes_for_context(context),
+        deadline_monotonic=1_000_000_000_000.0,
+    )
+
+    assert outcome.error is None
+    assert outcome.answer == "The CRM search found two matching contacts."
+    assert len(orchestrator.plans) == 1
+    observation = json.loads(planner.observations[0]["data_json"])
+    assert observation == {"matching_contact_count": 2}
+    assert "private@example.com" not in planner.observations[0]["data_json"]
+    assert "Private Person" not in planner.observations[0]["data_json"]
+
+
+def test_agent_loop_rejects_a_write_before_any_tool_executes() -> None:
+    """The model cannot turn a scheduled report into a CRM mutation."""
+
+    planner = _LoopPlanner(
+        PlannerDraft(
+            status="planned",
+            actions=[
+                PlannerDraftAction(
+                    tool_name="crm_write.update_contact",
+                    arguments={
+                        "contact_id": "contact-123",
+                        "updates": {"cOnboardingState": "approved"},
+                    },
+                    summary="Update onboarding state",
+                )
+            ],
+        ),
+        PlannerDraft(status="answer", answer="unused"),
+    )
+    orchestrator = _LoopOrchestrator(planner)
+    schedule = _agent_loop_schedule(tool_allowlist=["crm_read.search_contacts"])
+    context = AgentIdentityContext(
+        discord_user_id="1001",
+        organization_id="1000",
+        guild_id="1000",
+        roles=["Admin"],
+    )
+
+    outcome = api._run_agent_schedule_loop(
+        orchestrator=cast(AgentOrchestrator, orchestrator),
+        schedule=schedule,
+        run=_run(),
+        context=context,
+        effective_scopes=orchestrator.policy.scopes_for_context(context),
+        deadline_monotonic=1_000_000_000_000.0,
+    )
+
+    assert outcome.error == "scheduled_planner_proposed_unallowed_tool"
+    assert outcome.results == []
+    assert orchestrator.plans == []
 
 
 @pytest.mark.asyncio

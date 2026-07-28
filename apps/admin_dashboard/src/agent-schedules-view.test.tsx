@@ -16,16 +16,13 @@ const schedule: AgentSchedule = {
   next_run_at: "2026-08-03T00:00:00Z",
   last_run_at: null,
   definition: {
-    prompt: "Group related issues and recommend priorities.",
+    prompt: "Inspect onboarding and ERP health.",
+    execution_mode: "agent_loop",
     summary_mode: "deterministic",
     sources_are_public: false,
+    tool_allowlist: ["onboarding_read.get_summary", "erp_read.search_projects"],
     delivery: { channel_id: "789" },
-    actions: [
-      {
-        tool_name: "github_issue.search_issues",
-        arguments: { repository: "508-dev/508-workflows", query: "label:bug" },
-      },
-    ],
+    actions: [],
   },
 }
 
@@ -47,8 +44,8 @@ describe("AgentSchedulesView", () => {
     )
 
     expect(screen.getByText("Weekly GitHub triage")).toBeVisible()
-    expect(screen.getByText("508-dev/508-workflows · label:bug")).toBeVisible()
-    expect(screen.getByText(/frozen read-only tool envelope/i)).toBeVisible()
+    expect(screen.getByText("Bounded agent loop · 2 read-only tools")).toBeVisible()
+    expect(screen.getByText(/fixed catalog of read-only tools/i)).toBeVisible()
 
     fireEvent.click(screen.getByRole("button", { name: "Pause" }))
 

@@ -142,8 +142,9 @@ class SharedSettings(BaseSettings):
         le=604_800,
     )
     # Durable recurring agent work is dispatched by the API and executed by a
-    # worker job. Definitions remain intentionally low-frequency and bounded
-    # so an accidental cron expression cannot create unbounded provider cost.
+    # worker job. Definitions retain a fixed read-only capability catalog and
+    # remain low-frequency/bounded so cron or model loops cannot create
+    # unbounded provider cost.
     agent_schedule_enabled: bool = True
     agent_schedule_dispatch_interval_seconds: int = Field(default=30, ge=5, le=300)
     agent_schedule_dispatch_batch_size: int = Field(default=25, ge=1, le=100)
