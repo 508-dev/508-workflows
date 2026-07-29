@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -1779,10 +1780,42 @@ def test_task_creation_is_not_rerouted_to_member_agreement_submission() -> None:
     assert response.plan.actions[0].tool_name == "task_write.create_task"
 
 
+def test_deterministic_supported_workflow_does_not_depend_on_model_routing() -> None:
+    class FailingPlanner:
+        def plan(self, **_kwargs: object) -> AgentPlannerResult:
+            raise AssertionError("planner should not run for a known workflow")
+
+    response = AgentOrchestrator(planner=FailingPlanner()).plan(
+        "Create 508 accounts for Jane Doe with mailbox jane@508.dev",
+        _context(roles=["Admin"]),
+    )
+
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    assert response.plan.planner == "deterministic_regex"
+    assert response.plan.actions[0].tool_name == "account_write.create_user_accounts"
+
+
+def test_structured_planner_failures_are_observable_before_fallback(caplog) -> None:
+    class FailingPlanner:
+        def plan(self, **_kwargs: object) -> AgentPlannerResult:
+            raise ValueError("provider did not return valid JSON")
+
+    with caplog.at_level(logging.WARNING, logger="five08.agent.orchestrator"):
+        response = AgentOrchestrator(planner=FailingPlanner()).plan(
+            "Help me with something unusual",
+            _context(),
+        )
+
+    assert response.status == "needs_clarification"
+    assert "Structured agent planner failed" in caplog.text
+    assert "error_type=ValueError" in caplog.text
+
+
 def test_agent_uses_structured_planner_for_multi_action_confirmation() -> None:
     class FakePlanner:
         def plan(self, **kwargs: object) -> AgentPlannerResult:
-            assert kwargs["model_tier"] == "strong"
+            assert kwargs["model_tier"] == "fast"
             return AgentPlannerResult(
                 draft=PlannerDraft(
                     status="planned",
@@ -1812,7 +1845,10 @@ def test_agent_uses_structured_planner_for_multi_action_confirmation() -> None:
 
     orchestrator = AgentOrchestrator(planner=FakePlanner())
 
-    response = orchestrator.plan("Invite Sarah to Outline", _context(roles=["Admin"]))
+    response = orchestrator.plan(
+        "Help Sarah get started at 508",
+        _context(roles=["Admin"]),
+    )
 
     assert response.status == "requires_confirmation"
     assert response.plan is not None
