@@ -369,6 +369,27 @@ def claim_job_for_execution(
     return _as_record(row) if row is not None else None
 
 
+def renew_job_execution_lease(
+    settings: SharedSettings,
+    job_id: str,
+    *,
+    claim_token: str,
+) -> bool:
+    """Extend a running job's lease only while the same worker still owns it."""
+    query = """
+        UPDATE jobs
+        SET locked_at = NOW(),
+            updated_at = NOW()
+        WHERE id = %s
+          AND status = 'running'
+          AND locked_by = %s;
+    """
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(query, (job_id, claim_token))
+            return cursor.rowcount > 0
+
+
 def mark_job_succeeded(
     settings: SharedSettings,
     job_id: str,

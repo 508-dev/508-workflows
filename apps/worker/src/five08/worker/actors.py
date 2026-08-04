@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from math import ceil
+from threading import Event, Thread
 from typing import Any, Final
 
 import dramatiq
@@ -12,10 +16,13 @@ from five08.discord_webhook import DiscordWebhookLogger
 
 from five08.queue import (
     JobRecord,
+    JobStatus,
     claim_job_for_execution,
+    get_job,
     mark_job_dead,
     mark_job_retry,
     mark_job_succeeded,
+    renew_job_execution_lease,
 )
 from five08.worker.config import settings
 from five08.worker.crm.docuseal_processor import DocusealAgreementNonRetryableError
@@ -180,6 +187,81 @@ def _compute_retry_delay_seconds(attempt: int) -> int:
     return min(base * (2 ** max(attempt - 1, 0)), capped)
 
 
+def _job_lease_seconds() -> int:
+    """Return the persisted execution lease duration."""
+    return max(1, int(settings.job_timeout_seconds))
+
+
+def _requeue_running_job_after_lease(job_id: str) -> None:
+    """Keep one redelivery pending while another worker owns a fresh lease."""
+    try:
+        job = get_job(settings, job_id)
+    except Exception:
+        logger.exception(
+            "Unable to inspect active execution lease for duplicate job_id=%s",
+            job_id,
+        )
+        return
+    if job is None or job.status is not JobStatus.RUNNING or job.locked_at is None:
+        return
+
+    lease_expires_at = job.locked_at + timedelta(seconds=_job_lease_seconds())
+    remaining_seconds = (
+        lease_expires_at - datetime.now(tz=timezone.utc)
+    ).total_seconds()
+    delay_seconds = max(0, ceil(remaining_seconds))
+    logger.info(
+        "Deferring duplicate delivery for job_id=%s until its active lease expires",
+        job_id,
+    )
+    execute_job.send_with_options(args=(job_id,), delay=delay_seconds * 1000)
+
+
+@contextmanager
+def _renew_job_lease_while_running(
+    job_id: str,
+    claim_token: str,
+) -> Iterator[None]:
+    """Refresh a running job lease until its synchronous handler returns."""
+    stop_event = Event()
+    interval_seconds = max(0.1, _job_lease_seconds() / 3)
+
+    def _heartbeat() -> None:
+        while not stop_event.wait(interval_seconds):
+            try:
+                if renew_job_execution_lease(
+                    settings,
+                    job_id,
+                    claim_token=claim_token,
+                ):
+                    continue
+                logger.warning(
+                    "Stopping lease heartbeat for job_id=%s because its lease was replaced",
+                    job_id,
+                )
+                return
+            except Exception:
+                logger.exception(
+                    "Failed to renew execution lease for job_id=%s", job_id
+                )
+
+    heartbeat = Thread(
+        target=_heartbeat,
+        name=f"job-lease-heartbeat-{job_id}",
+        daemon=True,
+    )
+    heartbeat.start()
+    try:
+        yield
+    finally:
+        stop_event.set()
+        heartbeat.join(timeout=1)
+        if heartbeat.is_alive():
+            logger.warning(
+                "Lease heartbeat did not stop promptly for job_id=%s", job_id
+            )
+
+
 def _schedule_retry(job: JobRecord, attempts: int, *, error: str) -> None:
     job_id = job.id
     claim_token = job.locked_by
@@ -225,6 +307,7 @@ def _run_job(job_id: str) -> None:
         worker_name=settings.worker_name,
     )
     if job is None:
+        _requeue_running_job_after_lease(job_id)
         logger.info("Skipping job_id=%s because it is no longer claimable", job_id)
         return
     claim_token = job.locked_by
@@ -269,7 +352,8 @@ def _run_job(job_id: str) -> None:
 
     try:
         args, kwargs = _extract_call_args(job)
-        result = handler(*args, **kwargs)
+        with _renew_job_lease_while_running(job_id, claim_token):
+            result = handler(*args, **kwargs)
         transitioned = mark_job_succeeded(
             settings,
             job_id,

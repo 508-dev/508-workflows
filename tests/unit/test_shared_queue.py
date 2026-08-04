@@ -12,6 +12,7 @@ from five08.queue import (
     mark_job_dead,
     mark_job_retry,
     mark_job_succeeded,
+    renew_job_execution_lease,
 )
 from five08.settings import SharedSettings
 
@@ -147,6 +148,31 @@ def test_claim_job_for_execution_reclaims_an_expired_running_lease() -> None:
     assert "locked_at IS NULL" in query
     assert "locked_at <= NOW() - (%s * INTERVAL '1 second')" in query
     assert parameters[-2:] == ("running", 30)
+
+
+def test_renew_job_execution_lease_fences_updates_to_the_current_worker() -> None:
+    """A heartbeat may only extend the lease it originally claimed."""
+
+    cursor = MagicMock()
+    cursor.rowcount = 1
+    connection = MagicMock()
+    connection.__enter__.return_value.cursor.return_value.__enter__.return_value = (
+        cursor
+    )
+
+    with patch("five08.queue.get_postgres_connection", return_value=connection):
+        renewed = renew_job_execution_lease(
+            SharedSettings(),
+            "job-1",
+            claim_token="worker-1:claim-1",
+        )
+
+    assert renewed is True
+    query, parameters = cursor.execute.call_args.args
+    assert "SET locked_at = NOW()" in query
+    assert "AND status = 'running'" in query
+    assert "AND locked_by = %s" in query
+    assert parameters == ("job-1", "worker-1:claim-1")
 
 
 def test_stale_owner_cannot_mark_job_succeeded() -> None:
