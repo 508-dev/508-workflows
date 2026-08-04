@@ -70,19 +70,28 @@ from five08.agent.privacy import contains_private_agent_identifier
 from five08.agent.schedules import (
     AGENT_SCHEDULE_ALLOWED_TOOL_NAMES,
     AgentScheduleRecord,
+    AgentScheduleRunDeliveryStatus,
     AgentScheduleRunRecord,
     AgentScheduleStatus,
     archive_agent_schedule,
+    clear_agent_schedule_run_job_id,
     claim_agent_schedule_run,
+    claim_agent_schedule_run_delivery,
     complete_agent_schedule_run,
     create_agent_schedule,
     create_due_agent_schedule_runs,
     create_manual_agent_schedule_run,
+    fail_agent_schedule_run,
     get_agent_schedule,
     get_agent_schedule_run,
     list_agent_schedules,
+    list_stale_agent_schedule_run_delivery_claims,
+    list_agent_schedule_runs_needing_queue_reconciliation,
     list_unenqueued_agent_schedule_runs,
+    mark_agent_schedule_run_delivery_posted,
+    mark_agent_schedule_run_delivery_unknown,
     pause_agent_schedule,
+    release_agent_schedule_run_delivery_claim,
     resume_agent_schedule,
     set_agent_schedule_run_job_id,
 )
@@ -1414,6 +1423,12 @@ async def _post_agent_schedule_report_to_bot(
         },
         timeout_seconds=20.0,
     )
+
+
+def _agent_schedule_report_was_not_sent(delivery: Mapping[str, Any]) -> bool:
+    """Trust only the bot's explicit pre-send outcome when retrying a report."""
+
+    return str(delivery.get("delivery_outcome") or "") == "not_attempted"
 
 
 async def _validate_agent_schedule_channel_with_bot(
@@ -10380,6 +10395,14 @@ def _agent_schedule_running_reclaim_before(*, now: datetime | None = None) -> da
     return comparison_time - timedelta(seconds=lease_seconds)
 
 
+def _agent_schedule_delivery_claim_stale_before(
+    *, now: datetime | None = None
+) -> datetime:
+    """Use the run lease as the conservative operator-visibility threshold."""
+
+    return _agent_schedule_running_reclaim_before(now=now)
+
+
 def _agent_schedule_loop_error_is_non_retryable(error: str) -> bool:
     """Classify deterministic planner-policy rejections separately from outages."""
 
@@ -10660,6 +10683,64 @@ async def _execute_agent_schedule_run(
         results=results,
         model_summary=model_summary,
     )
+    delivery_claim = await asyncio.to_thread(
+        claim_agent_schedule_run_delivery,
+        settings,
+        run_id=run.id,
+    )
+    if delivery_claim is None:
+        current = await asyncio.to_thread(
+            get_agent_schedule_run,
+            settings,
+            run_id=run.id,
+        )
+        if (
+            current is not None
+            and current.delivery_status is AgentScheduleRunDeliveryStatus.POSTED
+        ):
+            completed = await asyncio.to_thread(
+                complete_agent_schedule_run,
+                settings,
+                run_id=run.id,
+                status=AgentScheduleRunStatus.SUCCEEDED,
+                output=report_content,
+            )
+            return {
+                "status": AgentScheduleRunStatus.SUCCEEDED.value,
+                "schedule_id": schedule.id,
+                "delivery_status": "already_posted",
+                "run": _agent_schedule_run_payload(completed or current),
+            }, 200
+        # A previous process may have sent the Discord request but failed before
+        # it could durably record the response. Retrying that side effect could
+        # post the report twice, so turn a stale claim into an explicit unknown
+        # outcome and require a fresh manual run instead.
+        if (
+            current is not None
+            and current.delivery_status is AgentScheduleRunDeliveryStatus.CLAIMED
+        ):
+            current = (
+                await asyncio.to_thread(
+                    mark_agent_schedule_run_delivery_unknown,
+                    settings,
+                    run_id=run.id,
+                )
+                or current
+            )
+        completed = await asyncio.to_thread(
+            complete_agent_schedule_run,
+            settings,
+            run_id=run.id,
+            status=AgentScheduleRunStatus.FAILED,
+            error="report_delivery_outcome_unknown",
+        )
+        return {
+            "status": AgentScheduleRunStatus.FAILED.value,
+            "schedule_id": schedule.id,
+            "delivery_status": "outcome_unknown",
+            "error": "report_delivery_outcome_unknown",
+            "run": _agent_schedule_run_payload(completed or current or run),
+        }, 200
     try:
         delivery, delivery_status = await _post_agent_schedule_report_to_bot(
             request,
@@ -10667,21 +10748,63 @@ async def _execute_agent_schedule_run(
             run=run,
             content=report_content,
         )
-    except RuntimeError as exc:
+    except RuntimeError:
+        await asyncio.to_thread(
+            mark_agent_schedule_run_delivery_unknown,
+            settings,
+            run_id=run.id,
+        )
         completed = await asyncio.to_thread(
             complete_agent_schedule_run,
             settings,
             run_id=run.id,
             status=AgentScheduleRunStatus.FAILED,
-            error=str(exc),
+            error="report_delivery_outcome_unknown",
         )
         return {
-            "error": str(exc),
+            "status": AgentScheduleRunStatus.FAILED.value,
             "schedule_id": schedule.id,
+            "delivery_status": "outcome_unknown",
+            "error": "report_delivery_outcome_unknown",
             "run": _agent_schedule_run_payload(completed or run),
-        }, 503
+        }, 200
     if delivery_status >= 400:
-        delivery_error = str(delivery.get("error") or "report_delivery_failed")
+        if _agent_schedule_report_was_not_sent(delivery):
+            # The bot rejected this request before ``channel.send``. Releasing
+            # the durable claim makes the worker retry safe after a transient
+            # lookup or permission problem is repaired.
+            released_delivery = await asyncio.to_thread(
+                release_agent_schedule_run_delivery_claim,
+                settings,
+                run_id=run.id,
+            )
+            if released_delivery is not None:
+                delivery_error = str(
+                    delivery.get("error") or "report_delivery_not_attempted"
+                )
+                completed = await asyncio.to_thread(
+                    complete_agent_schedule_run,
+                    settings,
+                    run_id=run.id,
+                    status=AgentScheduleRunStatus.FAILED,
+                    error=delivery_error,
+                )
+                return {
+                    "status": AgentScheduleRunStatus.FAILED.value,
+                    "schedule_id": schedule.id,
+                    "delivery_status": "not_posted",
+                    "error": delivery_error,
+                    "run": _agent_schedule_run_payload(completed or released_delivery),
+                }, 502
+        # A failed bot response can arrive after Discord accepted the message.
+        # Do not retry this run's external side effect without a durable bot
+        # idempotency key.
+        await asyncio.to_thread(
+            mark_agent_schedule_run_delivery_unknown,
+            settings,
+            run_id=run.id,
+        )
+        delivery_error = "report_delivery_outcome_unknown"
         completed = await asyncio.to_thread(
             complete_agent_schedule_run,
             settings,
@@ -10690,10 +10813,12 @@ async def _execute_agent_schedule_run(
             error=delivery_error,
         )
         return {
-            "error": delivery_error,
+            "status": AgentScheduleRunStatus.FAILED.value,
             "schedule_id": schedule.id,
+            "delivery_status": "outcome_unknown",
+            "error": delivery_error,
             "run": _agent_schedule_run_payload(completed or run),
-        }, delivery_status
+        }, 200
 
     completed = await asyncio.to_thread(
         complete_agent_schedule_run,
@@ -10883,6 +11008,93 @@ async def _control_agent_schedule_for_context(
         metadata={"schedule_id": schedule.id, "schedule_name": schedule.name},
     )
     return {"status": action, "schedule": _agent_schedule_payload(schedule)}, 200
+
+
+async def _resolve_stale_agent_schedule_delivery_for_context(
+    request: Request,
+    *,
+    run_id: str,
+    context: AgentIdentityContext,
+) -> tuple[dict[str, Any], int]:
+    """Mark an aged delivery claim unknown without ever resending the report."""
+
+    fresh_context, error_payload, status_code = await _agent_schedule_manager_context(
+        request,
+        context,
+    )
+    if error_payload is not None:
+        return error_payload, status_code
+    assert fresh_context is not None
+
+    run = await asyncio.to_thread(get_agent_schedule_run, settings, run_id=run_id)
+    if run is None:
+        return {"error": "schedule_run_not_found"}, 404
+    schedule = await asyncio.to_thread(
+        get_agent_schedule,
+        settings,
+        schedule_id=run.schedule_id,
+    )
+    if schedule is None or schedule.guild_id != fresh_context.guild_id:
+        return {"error": "schedule_run_not_found"}, 404
+
+    claimed_before = _agent_schedule_delivery_claim_stale_before()
+    if (
+        run.delivery_status is not AgentScheduleRunDeliveryStatus.CLAIMED
+        or run.delivery_claimed_at is None
+        or run.delivery_claimed_at > claimed_before
+        or run.status
+        not in {AgentScheduleRunStatus.RUNNING, AgentScheduleRunStatus.FAILED}
+    ):
+        return {"error": "schedule_delivery_claim_not_stale"}, 409
+
+    resolved = await asyncio.to_thread(
+        mark_agent_schedule_run_delivery_unknown,
+        settings,
+        run_id=run.id,
+        claimed_before=claimed_before,
+    )
+    if resolved is None:
+        # Concurrent operators may have already made the same no-retry
+        # decision. Reuse that state rather than interpreting it as a reason
+        # to send the report again.
+        resolved = await asyncio.to_thread(
+            get_agent_schedule_run,
+            settings,
+            run_id=run.id,
+        )
+        if (
+            resolved is None
+            or resolved.delivery_status is not AgentScheduleRunDeliveryStatus.UNKNOWN
+        ):
+            return {"error": "schedule_delivery_claim_resolution_failed"}, 409
+
+    if resolved.status is AgentScheduleRunStatus.RUNNING:
+        completed = await asyncio.to_thread(
+            complete_agent_schedule_run,
+            settings,
+            run_id=resolved.id,
+            status=AgentScheduleRunStatus.FAILED,
+            error="report_delivery_outcome_unknown",
+        )
+        if completed is not None:
+            resolved = completed
+
+    _schedule_agent_audit_event(
+        context=fresh_context,
+        action="agent.schedule.delivery.mark_unknown",
+        result=AuditResult.SUCCESS,
+        plan=None,
+        metadata={
+            "schedule_id": schedule.id,
+            "run_id": resolved.id,
+            "delivery_status": resolved.delivery_status.value,
+        },
+    )
+    return {
+        "status": "delivery_outcome_marked_unknown",
+        "schedule_id": schedule.id,
+        "run": _agent_schedule_run_payload(resolved),
+    }, 200
 
 
 async def _run_agent_schedule_for_context(
@@ -11121,6 +11333,13 @@ async def dashboard_agent_schedules_handler(request: Request) -> JSONResponse:
             settings,
             guild_id=guild_id,
         )
+        delivery_attention = await asyncio.to_thread(
+            list_stale_agent_schedule_run_delivery_claims,
+            settings,
+            guild_id=guild_id,
+            claimed_before=_agent_schedule_delivery_claim_stale_before(),
+            limit=settings.agent_schedule_dispatch_batch_size,
+        )
     except Exception:
         logger.exception("Failed loading dashboard agent schedules")
         return JSONResponse({"error": "schedule_list_failed"}, status_code=503)
@@ -11128,6 +11347,9 @@ async def dashboard_agent_schedules_handler(request: Request) -> JSONResponse:
         {
             "scheduler_enabled": settings.agent_schedule_enabled,
             "schedules": [_agent_schedule_payload(schedule) for schedule in schedules],
+            "delivery_attention": [
+                _agent_schedule_run_payload(run) for run in delivery_attention
+            ],
         }
     )
 
@@ -11203,6 +11425,37 @@ async def dashboard_control_agent_schedule_handler(
         request,
         schedule_id=schedule_id,
         action=payload.action,
+        context=context,
+    )
+    return JSONResponse(response_payload, status_code=status_code)
+
+
+async def dashboard_resolve_agent_schedule_delivery_handler(
+    request: Request,
+    run_id: str,
+) -> JSONResponse:
+    """Let a dashboard operator resolve an aged report claim without resend."""
+
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_CONFIGURATION_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+    context, context_error = await _dashboard_agent_schedule_context(request, session)
+    if context_error is not None:
+        return context_error
+    assert context is not None
+    (
+        response_payload,
+        status_code,
+    ) = await _resolve_stale_agent_schedule_delivery_for_context(
+        request,
+        run_id=run_id,
         context=context,
     )
     return JSONResponse(response_payload, status_code=status_code)

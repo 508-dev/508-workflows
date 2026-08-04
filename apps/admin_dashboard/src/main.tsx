@@ -62,6 +62,7 @@ import { cn } from "@/lib/utils"
 import {
   type AgentSchedule,
   type AgentScheduleCreateValues,
+  type AgentScheduleRun,
   type AgentSchedulesResponse,
   AgentSchedulesView,
 } from "@/views/agent-schedules-view"
@@ -1000,6 +1001,9 @@ function App() {
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([])
   const [agentReport, setAgentReport] = useState<AgentReport | null>(null)
   const [agentSchedules, setAgentSchedules] = useState<AgentSchedule[]>([])
+  const [agentScheduleDeliveryAttention, setAgentScheduleDeliveryAttention] = useState<
+    AgentScheduleRun[]
+  >([])
   const [agentScheduleDispatcherEnabled, setAgentScheduleDispatcherEnabled] = useState(false)
   const [discordDiagnostics, setDiscordDiagnostics] = useState<DiscordDiagnosticsResponse | null>(
     null,
@@ -2322,6 +2326,7 @@ function App() {
     try {
       const payload = await requestJson<AgentSchedulesResponse>("/dashboard/api/agent-schedules")
       setAgentSchedules(payload.schedules || [])
+      setAgentScheduleDeliveryAttention(payload.delivery_attention || [])
       setAgentScheduleDispatcherEnabled(Boolean(payload.scheduler_enabled))
     } catch (error) {
       showError(error, "Unable to load recurring agent schedules")
@@ -2382,6 +2387,23 @@ function App() {
       await loadAgentSchedules()
     } catch (error) {
       showError(error, "Unable to queue the recurring agent schedule")
+    } finally {
+      setBusy(key, false)
+    }
+  }
+
+  async function resolveAgentScheduleDelivery(runId: string) {
+    const key = `agentScheduleDelivery:${runId}`
+    setBusy(key, true)
+    try {
+      await requestJson<unknown>(
+        `/dashboard/api/agent-schedules/runs/${encodeURIComponent(runId)}/delivery/resolve`,
+        { method: "POST" },
+      )
+      showToast("Marked the uncertain report delivery as unknown", "warning")
+      await loadAgentSchedules()
+    } catch (error) {
+      showError(error, "Unable to resolve the uncertain report delivery")
     } finally {
       setBusy(key, false)
     }
@@ -3343,6 +3365,7 @@ function App() {
           {view === "schedules" ? (
             <AgentSchedulesView
               schedules={agentSchedules}
+              deliveryAttention={agentScheduleDeliveryAttention}
               schedulerEnabled={agentScheduleDispatcherEnabled}
               loading={loading}
               canWrite={can("configuration:write")}
@@ -3351,6 +3374,7 @@ function App() {
               onCreate={createAgentSchedule}
               onControl={controlAgentSchedule}
               onRun={runAgentSchedule}
+              onResolveDelivery={resolveAgentScheduleDelivery}
             />
           ) : null}
 

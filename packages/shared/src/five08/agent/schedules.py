@@ -1016,6 +1016,45 @@ def claim_agent_schedule_run_delivery(
     return _as_schedule_run_record(row) if row is not None else None
 
 
+def release_agent_schedule_run_delivery_claim(
+    settings: SharedSettings,
+    *,
+    run_id: str,
+) -> AgentScheduleRunRecord | None:
+    """Release a claim only after the bot proves no Discord send was attempted.
+
+    A durable claim normally prevents every retry from posting the same report.
+    The one safe exception is a bot response from before ``channel.send``; that
+    outcome can be retried without risking a duplicate Discord message.
+    """
+
+    normalized_run_id = _normalize_uuid(run_id)
+    if normalized_run_id is None:
+        return None
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                UPDATE agent_schedule_runs
+                SET delivery_status = %s,
+                    delivery_message_id = NULL,
+                    delivery_claimed_at = NULL,
+                    updated_at = NOW()
+                WHERE id = %s
+                  AND status = 'running'
+                  AND delivery_status = %s
+                RETURNING *
+                """,
+                (
+                    AgentScheduleRunDeliveryStatus.PENDING.value,
+                    normalized_run_id,
+                    AgentScheduleRunDeliveryStatus.CLAIMED.value,
+                ),
+            )
+            row = cursor.fetchone()
+    return _as_schedule_run_record(row) if row is not None else None
+
+
 def mark_agent_schedule_run_delivery_posted(
     settings: SharedSettings,
     *,
@@ -1057,31 +1096,81 @@ def mark_agent_schedule_run_delivery_unknown(
     settings: SharedSettings,
     *,
     run_id: str,
+    claimed_before: datetime | None = None,
 ) -> AgentScheduleRunRecord | None:
-    """Record an ambiguous delivery outcome without risking a duplicate post."""
+    """Record an ambiguous delivery outcome without risking a duplicate post.
+
+    ``claimed_before`` supports an operator-only stale-claim resolution path;
+    it never turns an active delivery attempt into an unknown outcome.
+    """
 
     normalized_run_id = _normalize_uuid(run_id)
     if normalized_run_id is None:
         return None
+    query = """
+        UPDATE agent_schedule_runs
+        SET delivery_status = %s,
+            updated_at = NOW()
+        WHERE id = %s
+          AND delivery_status = %s
+    """
+    params: tuple[object, ...] = (
+        AgentScheduleRunDeliveryStatus.UNKNOWN.value,
+        normalized_run_id,
+        AgentScheduleRunDeliveryStatus.CLAIMED.value,
+    )
+    if claimed_before is not None:
+        query += " AND delivery_claimed_at <= %s"
+        params += (_utc_datetime(claimed_before),)
+    query += " RETURNING *"
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+    return _as_schedule_run_record(row) if row is not None else None
+
+
+def list_stale_agent_schedule_run_delivery_claims(
+    settings: SharedSettings,
+    *,
+    guild_id: str,
+    claimed_before: datetime,
+    limit: int = 100,
+) -> list[AgentScheduleRunRecord]:
+    """List aged, unconfirmed claims for an operator-only recovery surface.
+
+    This is diagnostic only.  It deliberately does not reclaim or retry a
+    Discord side effect because a process might have died after Discord
+    accepted the request but before it persisted the message identifier.
+    """
+
+    normalized_guild_id = _normalize_discord_snowflake(guild_id)
+    if normalized_guild_id is None:
+        return []
+    bounded_limit = max(1, min(int(limit), 100))
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
                 """
-                UPDATE agent_schedule_runs
-                SET delivery_status = %s,
-                    updated_at = NOW()
-                WHERE id = %s
-                  AND delivery_status = %s
-                RETURNING *
+                SELECT runs.*
+                FROM agent_schedule_runs AS runs
+                INNER JOIN agent_schedules AS schedules
+                    ON schedules.id = runs.schedule_id
+                WHERE schedules.guild_id = %s
+                  AND runs.delivery_status = %s
+                  AND runs.delivery_claimed_at <= %s
+                ORDER BY runs.delivery_claimed_at ASC
+                LIMIT %s
                 """,
                 (
-                    AgentScheduleRunDeliveryStatus.UNKNOWN.value,
-                    normalized_run_id,
+                    normalized_guild_id,
                     AgentScheduleRunDeliveryStatus.CLAIMED.value,
+                    _utc_datetime(claimed_before),
+                    bounded_limit,
                 ),
             )
-            row = cursor.fetchone()
-    return _as_schedule_run_record(row) if row is not None else None
+            rows = cursor.fetchall()
+    return [_as_schedule_run_record(row) for row in rows]
 
 
 def get_agent_schedule_run(

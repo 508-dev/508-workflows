@@ -1050,3 +1050,204 @@ async def test_schedule_execution_never_posts_a_report_twice_after_recorded_deli
     assert response["delivery_status"] == "already_posted"
     post_report.assert_not_awaited()
     assert complete_run.call_args.kwargs["status"] is AgentScheduleRunStatus.SUCCEEDED
+
+
+@pytest.mark.asyncio
+async def test_pre_send_bot_failure_releases_delivery_claim_for_worker_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bot lookup failure is known not to have posted a Discord message."""
+
+    queued_run = _run()
+    running_run = replace(
+        queued_run,
+        status=AgentScheduleRunStatus.RUNNING,
+        started_at=datetime.now(tz=timezone.utc),
+    )
+    claimed_run = replace(
+        running_run,
+        delivery_status=AgentScheduleRunDeliveryStatus.CLAIMED,
+        delivery_claimed_at=datetime.now(tz=timezone.utc),
+    )
+    released_run = replace(
+        claimed_run,
+        delivery_status=AgentScheduleRunDeliveryStatus.PENDING,
+        delivery_claimed_at=None,
+    )
+    failed_run = replace(
+        released_run,
+        status=AgentScheduleRunStatus.FAILED,
+        error="channel_lookup_failed",
+    )
+    schedule = _schedule()
+    context = AgentIdentityContext(
+        discord_user_id="1001",
+        organization_id="1000",
+        guild_id="1000",
+        roles=["Admin"],
+    )
+
+    async def refreshed_context(*_args: object, **_kwargs: object):
+        return context, None, 200
+
+    release_claim = Mock(return_value=released_run)
+    complete_run = Mock(return_value=failed_run)
+    mark_unknown = Mock()
+    orchestrator = SimpleNamespace(
+        policy=SimpleNamespace(
+            scopes_for_context=Mock(return_value=set(schedule.allowed_scopes))
+        ),
+        execute_plan=Mock(
+            return_value=[
+                AgentExecutionResult(
+                    tool_name="github_issue.search_issues",
+                    status="succeeded",
+                    result={"issues": []},
+                )
+            ]
+        ),
+    )
+    monkeypatch.setattr(api, "get_agent_schedule_run", Mock(return_value=queued_run))
+    monkeypatch.setattr(
+        api,
+        "claim_agent_schedule_run",
+        Mock(return_value=running_run),
+    )
+    monkeypatch.setattr(api, "get_agent_schedule", Mock(return_value=schedule))
+    monkeypatch.setattr(api, "_fresh_agent_schedule_context", refreshed_context)
+    monkeypatch.setattr(api, "_get_agent_orchestrator", lambda: orchestrator)
+    monkeypatch.setattr(api, "_agent_schedule_plan", Mock(return_value=object()))
+    monkeypatch.setattr(api, "_model_agent_schedule_summary", Mock(return_value=None))
+    monkeypatch.setattr(
+        api,
+        "claim_agent_schedule_run_delivery",
+        Mock(return_value=claimed_run),
+    )
+    monkeypatch.setattr(api, "release_agent_schedule_run_delivery_claim", release_claim)
+    monkeypatch.setattr(api, "mark_agent_schedule_run_delivery_unknown", mark_unknown)
+    monkeypatch.setattr(api, "complete_agent_schedule_run", complete_run)
+    monkeypatch.setattr(
+        api,
+        "_post_agent_schedule_report_to_bot",
+        AsyncMock(
+            return_value=(
+                {
+                    "error": "channel_lookup_failed",
+                    "delivery_outcome": "not_attempted",
+                },
+                502,
+            )
+        ),
+    )
+
+    response, status_code = await api._execute_agent_schedule_run(
+        cast(Request, SimpleNamespace()),
+        run_id=queued_run.id,
+    )
+
+    assert status_code == 502
+    assert response["delivery_status"] == "not_posted"
+    assert response["error"] == "channel_lookup_failed"
+    release_claim.assert_called_once_with(api.settings, run_id=queued_run.id)
+    mark_unknown.assert_not_called()
+    assert complete_run.call_args.kwargs["status"] is AgentScheduleRunStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_dashboard_lists_stale_delivery_claims_for_operator_attention(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dashboard exposes aged claims without the dispatcher resending them."""
+
+    stale_run = replace(
+        _run(),
+        status=AgentScheduleRunStatus.RUNNING,
+        delivery_status=AgentScheduleRunDeliveryStatus.CLAIMED,
+        delivery_claimed_at=datetime.now(tz=timezone.utc) - timedelta(seconds=301),
+    )
+
+    async def dashboard_session(*_args: object, **_kwargs: object):
+        return None, None
+
+    stale_claims = Mock(return_value=[stale_run])
+    monkeypatch.setattr(api, "_dashboard_session_or_error", dashboard_session)
+    monkeypatch.setattr(api, "_configured_agent_schedule_guild_id", lambda: "1000")
+    monkeypatch.setattr(api, "list_agent_schedules", Mock(return_value=[]))
+    monkeypatch.setattr(
+        api,
+        "list_stale_agent_schedule_run_delivery_claims",
+        stale_claims,
+    )
+
+    response = await api.dashboard_agent_schedules_handler(
+        cast(Request, SimpleNamespace())
+    )
+
+    assert response.status_code == 200
+    payload = json.loads(response.body)
+    assert payload["delivery_attention"][0]["id"] == stale_run.id
+    assert payload["delivery_attention"][0]["delivery_status"] == "claimed"
+    assert stale_claims.call_args.kwargs["guild_id"] == "1000"
+
+
+@pytest.mark.asyncio
+async def test_operator_can_mark_stale_delivery_claim_unknown_without_resend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Manual claim resolution keeps the at-most-once contract intact."""
+
+    stale_run = replace(
+        _run(),
+        status=AgentScheduleRunStatus.RUNNING,
+        started_at=datetime.now(tz=timezone.utc) - timedelta(seconds=301),
+        delivery_status=AgentScheduleRunDeliveryStatus.CLAIMED,
+        delivery_claimed_at=datetime.now(tz=timezone.utc) - timedelta(seconds=301),
+    )
+    marked_unknown = replace(
+        stale_run,
+        delivery_status=AgentScheduleRunDeliveryStatus.UNKNOWN,
+    )
+    completed_run = replace(
+        marked_unknown,
+        status=AgentScheduleRunStatus.FAILED,
+        error="report_delivery_outcome_unknown",
+    )
+    context = AgentIdentityContext(
+        discord_user_id="1001",
+        organization_id="1000",
+        guild_id="1000",
+        roles=["Admin"],
+    )
+
+    async def manager_context(*_args: object, **_kwargs: object):
+        return context, None, 200
+
+    mark_unknown = Mock(return_value=marked_unknown)
+    complete_run = Mock(return_value=completed_run)
+    audit = Mock()
+    post_report = AsyncMock(side_effect=AssertionError("must not resend"))
+    monkeypatch.setattr(api, "_agent_schedule_manager_context", manager_context)
+    monkeypatch.setattr(api, "get_agent_schedule_run", Mock(return_value=stale_run))
+    monkeypatch.setattr(api, "get_agent_schedule", Mock(return_value=_schedule()))
+    monkeypatch.setattr(api, "mark_agent_schedule_run_delivery_unknown", mark_unknown)
+    monkeypatch.setattr(api, "complete_agent_schedule_run", complete_run)
+    monkeypatch.setattr(api, "_schedule_agent_audit_event", audit)
+    monkeypatch.setattr(api, "_post_agent_schedule_report_to_bot", post_report)
+
+    (
+        response,
+        status_code,
+    ) = await api._resolve_stale_agent_schedule_delivery_for_context(
+        cast(Request, SimpleNamespace()),
+        run_id=stale_run.id,
+        context=context,
+    )
+
+    assert status_code == 200
+    assert response["status"] == "delivery_outcome_marked_unknown"
+    assert response["run"]["delivery_status"] == "unknown"
+    assert response["run"]["status"] == "failed"
+    assert mark_unknown.call_args.kwargs["run_id"] == stale_run.id
+    assert complete_run.call_args.kwargs["status"] is AgentScheduleRunStatus.FAILED
+    post_report.assert_not_awaited()
+    audit.assert_called_once()

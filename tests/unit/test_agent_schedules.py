@@ -15,12 +15,16 @@ from five08.agent.schedules import (
     AgentScheduleDiscordDelivery,
     AgentScheduleExecutionMode,
     AgentScheduleProposal,
+    AgentScheduleRunDeliveryStatus,
     AgentScheduleRunStatus,
     claim_agent_schedule_run,
     create_manual_agent_schedule_run,
     create_due_agent_schedule_runs,
     get_agent_schedule,
     get_agent_schedule_run,
+    list_stale_agent_schedule_run_delivery_claims,
+    mark_agent_schedule_run_delivery_unknown,
+    release_agent_schedule_run_delivery_claim,
     validate_agent_schedule_timing,
 )
 from five08.settings import SharedSettings
@@ -263,6 +267,8 @@ class _FakeScheduleCursor:
         self._current_query = query
 
     def fetchall(self) -> list[dict[str, Any]]:
+        if "FROM agent_schedule_runs AS runs" in self._current_query:
+            return [self._run_row]
         if "FROM agent_schedules" in self._current_query:
             return [self._schedule_row]
         return []
@@ -467,3 +473,123 @@ def test_claim_can_recover_a_running_schedule_after_its_lease_expires(
     query, params = cursor.calls[0]
     assert "status = 'running' AND started_at <= %s" in query
     assert params == (AgentScheduleRunStatus.RUNNING.value, run_id, stale_before)
+
+
+def test_pre_send_delivery_failure_releases_only_the_claimed_running_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A known pre-send bot response makes one durable retry safe."""
+
+    now = datetime(2026, 7, 28, 9, 0, tzinfo=timezone.utc)
+    run_id = "00000000-0000-0000-0000-000000000001"
+    run_row = {
+        "id": run_id,
+        "schedule_id": "schedule-1",
+        "occurrence_at": now,
+        "trigger": "schedule",
+        "status": "running",
+        "job_id": "job-1",
+        "started_at": now,
+        "finished_at": None,
+        "output": None,
+        "error": None,
+        "delivery_status": "pending",
+        "delivery_message_id": None,
+        "delivery_claimed_at": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    cursor = _FakeScheduleCursor(schedule_row={}, run_row=run_row)
+    monkeypatch.setattr(
+        schedules,
+        "get_postgres_connection",
+        lambda _settings: _FakeScheduleConnection(cursor),
+    )
+
+    released = release_agent_schedule_run_delivery_claim(
+        SharedSettings(),
+        run_id=run_id,
+    )
+
+    assert released is not None
+    assert released.delivery_status is AgentScheduleRunDeliveryStatus.PENDING
+    query, params = cursor.calls[0]
+    assert "status = 'running'" in query
+    assert "delivery_status = %s" in query
+    assert params == (
+        AgentScheduleRunDeliveryStatus.PENDING.value,
+        run_id,
+        AgentScheduleRunDeliveryStatus.CLAIMED.value,
+    )
+
+
+def test_stale_delivery_claims_are_listed_and_manually_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Operators can inspect stale claims without the dispatcher retrying them."""
+
+    claimed_at = datetime(2026, 7, 28, 9, 0, tzinfo=timezone.utc)
+    claimed_before = datetime(2026, 7, 28, 9, 5, tzinfo=timezone.utc)
+    run_id = "00000000-0000-0000-0000-000000000001"
+    run_row = {
+        "id": run_id,
+        "schedule_id": "schedule-1",
+        "occurrence_at": claimed_at,
+        "trigger": "schedule",
+        "status": "running",
+        "job_id": "job-1",
+        "started_at": claimed_at,
+        "finished_at": None,
+        "output": None,
+        "error": None,
+        "delivery_status": "claimed",
+        "delivery_message_id": None,
+        "delivery_claimed_at": claimed_at,
+        "created_at": claimed_at,
+        "updated_at": claimed_at,
+    }
+    cursor = _FakeScheduleCursor(schedule_row={}, run_row=run_row)
+    monkeypatch.setattr(
+        schedules,
+        "get_postgres_connection",
+        lambda _settings: _FakeScheduleConnection(cursor),
+    )
+
+    claims = list_stale_agent_schedule_run_delivery_claims(
+        SharedSettings(),
+        guild_id="1000",
+        claimed_before=claimed_before,
+        limit=25,
+    )
+
+    assert [claim.id for claim in claims] == [run_id]
+    query, params = cursor.calls[0]
+    assert "runs.delivery_claimed_at <= %s" in query
+    assert params == (
+        "1000",
+        AgentScheduleRunDeliveryStatus.CLAIMED.value,
+        claimed_before,
+        25,
+    )
+
+    cursor = _FakeScheduleCursor(schedule_row={}, run_row=run_row)
+    monkeypatch.setattr(
+        schedules,
+        "get_postgres_connection",
+        lambda _settings: _FakeScheduleConnection(cursor),
+    )
+    resolved = mark_agent_schedule_run_delivery_unknown(
+        SharedSettings(),
+        run_id=run_id,
+        claimed_before=claimed_before,
+    )
+
+    assert resolved is not None
+    query, params = cursor.calls[0]
+    assert "delivery_claimed_at <= %s" in query
+    assert params == (
+        AgentScheduleRunDeliveryStatus.UNKNOWN.value,
+        run_id,
+        AgentScheduleRunDeliveryStatus.CLAIMED.value,
+        claimed_before,
+    )

@@ -782,9 +782,15 @@ class InternalAPIRoutes:
 
         content = str(payload.content or "").strip()
         if not content:
-            return {"error": "report_content_required"}, 400
+            return {
+                "error": "report_content_required",
+                "delivery_outcome": "not_attempted",
+            }, 400
         if len(content) > 1_900:
-            return {"error": "report_content_too_long"}, 400
+            return {
+                "error": "report_content_too_long",
+                "delivery_outcome": "not_attempted",
+            }, 400
         (
             channel,
             validation,
@@ -794,7 +800,10 @@ class InternalAPIRoutes:
             channel_id=payload.channel_id,
         )
         if channel is None:
-            return validation, validation_status
+            return {
+                **validation,
+                "delivery_outcome": "not_attempted",
+            }, validation_status
 
         try:
             message = await channel.send(
@@ -802,7 +811,10 @@ class InternalAPIRoutes:
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         except discord.Forbidden:
-            return {"error": "report_send_forbidden"}, 403
+            return {
+                "error": "report_send_forbidden",
+                "delivery_outcome": "not_attempted",
+            }, 403
         except discord.HTTPException as exc:
             logger.warning(
                 "Failed posting schedule report schedule_id=%s run_id=%s: %s",
@@ -810,10 +822,14 @@ class InternalAPIRoutes:
                 payload.run_id,
                 exc,
             )
-            return {"error": "report_send_failed"}, 502
+            return {
+                "error": "report_send_failed",
+                "delivery_outcome": "unknown",
+            }, 502
 
         return {
             "status": "posted",
+            "delivery_outcome": "posted",
             "guild_id": validation["guild_id"],
             "channel_id": validation["channel_id"],
             "message_id": str(message.id),
@@ -823,18 +839,34 @@ class InternalAPIRoutes:
         """Deliver a bounded recurring report without allowing mentions."""
 
         if not self._is_authorized(request):
-            return web.json_response({"error": "unauthorized"}, status=401)
+            return web.json_response(
+                {"error": "unauthorized", "delivery_outcome": "not_attempted"},
+                status=401,
+            )
         try:
             payload_data = await request.json()
         except Exception:
-            return web.json_response({"error": "invalid_json"}, status=400)
+            return web.json_response(
+                {"error": "invalid_json", "delivery_outcome": "not_attempted"},
+                status=400,
+            )
         if not isinstance(payload_data, dict):
-            return web.json_response({"error": "payload_must_be_object"}, status=400)
+            return web.json_response(
+                {
+                    "error": "payload_must_be_object",
+                    "delivery_outcome": "not_attempted",
+                },
+                status=400,
+            )
         try:
             payload = PostAgentScheduleReportRequest.model_validate(payload_data)
         except (ValidationError, TypeError) as exc:
             return web.json_response(
-                {"error": "invalid_payload", "detail": str(exc)},
+                {
+                    "error": "invalid_payload",
+                    "detail": str(exc),
+                    "delivery_outcome": "not_attempted",
+                },
                 status=400,
             )
         result, status_code = await self._post_agent_schedule_report(payload)

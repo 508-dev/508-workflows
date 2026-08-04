@@ -15,6 +15,7 @@ from five08.discord_bot.utils.internal_api import (
     GigThreadStatusRequest,
     InternalAPIRoutes,
     MemberAgreementRoleRequest,
+    PostAgentScheduleReportRequest,
     PostJobLeadRequest,
     StageJobLeadRequest,
 )
@@ -376,6 +377,39 @@ class TestInternalAPIRoutes:
             "status": "ready",
             "guild_id": "1000",
             "channel_id": "2000",
+        }
+
+    @pytest.mark.asyncio
+    async def test_agent_schedule_report_marks_channel_lookup_failure_not_attempted(
+        self,
+        internal_api_routes,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """The API can safely retry a report only when send was never reached."""
+
+        async def unavailable_channel(*_args: object, **_kwargs: object):
+            return None, {"error": "channel_lookup_failed"}, 502
+
+        monkeypatch.setattr(
+            internal_api_routes,
+            "_resolve_agent_schedule_channel",
+            unavailable_channel,
+        )
+
+        result, status_code = await internal_api_routes._post_agent_schedule_report(
+            PostAgentScheduleReportRequest(
+                guild_id="1000",
+                channel_id="2000",
+                schedule_id="schedule-1",
+                run_id="run-1",
+                content="Report body",
+            )
+        )
+
+        assert status_code == 502
+        assert result == {
+            "error": "channel_lookup_failed",
+            "delivery_outcome": "not_attempted",
         }
 
     @pytest.mark.asyncio

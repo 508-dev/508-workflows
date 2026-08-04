@@ -42,9 +42,18 @@ export type AgentSchedule = {
   }
 }
 
+export type AgentScheduleRun = {
+  id: string
+  schedule_id: string
+  status: string
+  delivery_status: string
+  delivery_claimed_at?: string | null
+}
+
 export type AgentSchedulesResponse = {
   scheduler_enabled: boolean
   schedules: AgentSchedule[]
+  delivery_attention?: AgentScheduleRun[]
 }
 
 export type AgentScheduleCreateValues = {
@@ -84,6 +93,7 @@ function scheduleActionSummary(schedule: AgentSchedule) {
 
 export function AgentSchedulesView({
   schedules,
+  deliveryAttention,
   schedulerEnabled,
   loading,
   canWrite,
@@ -92,8 +102,10 @@ export function AgentSchedulesView({
   onCreate,
   onControl,
   onRun,
+  onResolveDelivery,
 }: {
   schedules: AgentSchedule[]
+  deliveryAttention: AgentScheduleRun[]
   schedulerEnabled: boolean
   loading: Record<string, boolean>
   canWrite: boolean
@@ -102,6 +114,7 @@ export function AgentSchedulesView({
   onCreate: (values: AgentScheduleCreateValues) => Promise<boolean>
   onControl: (scheduleId: string, action: "pause" | "resume" | "archive") => void
   onRun: (scheduleId: string) => void
+  onResolveDelivery: (runId: string) => void
 }) {
   const [name, setName] = useState("")
   const [cronExpression, setCronExpression] = useState("0 9 * * 1")
@@ -117,6 +130,7 @@ export function AgentSchedulesView({
     channelId.trim() &&
     prompt.trim() &&
     !loading.createAgentSchedule
+  const scheduleNameById = new Map(schedules.map((schedule) => [schedule.id, schedule.name]))
 
   async function submit() {
     if (!canSubmit) return
@@ -163,6 +177,49 @@ export function AgentSchedulesView({
         </CardHeader>
       </Card>
 
+      {deliveryAttention.length > 0 ? (
+        <Card className="border-amber-400/40">
+          <CardHeader>
+            <div>
+              <CardTitle>Delivery attention required</CardTitle>
+              <p className="mt-1 text-sm text-muted-foreground">
+                These report claims outlived the execution lease. Discord may or may not have
+                accepted them, so they will never be sent automatically. Mark the old outcome
+                unknown before using Run now to request a fresh report.
+              </p>
+            </div>
+          </CardHeader>
+          <CardContent className="grid gap-3">
+            {deliveryAttention.map((run) => {
+              const resolveKey = `agentScheduleDelivery:${run.id}`
+              return (
+                <div
+                  key={run.id}
+                  className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border px-3 py-2"
+                >
+                  <div className="grid gap-1 text-sm">
+                    <span>{scheduleNameById.get(run.schedule_id) || "Archived schedule"}</span>
+                    <code className="text-xs text-muted-foreground">{run.id}</code>
+                    <span className="text-xs text-muted-foreground">
+                      Claimed {timestamp(run.delivery_claimed_at)}
+                    </span>
+                  </div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={!canCreate || loading[resolveKey]}
+                    onClick={() => onResolveDelivery(run.id)}
+                  >
+                    Mark outcome unknown
+                  </Button>
+                </div>
+              )
+            })}
+          </CardContent>
+        </Card>
+      ) : null}
+
       {canWrite ? (
         <Card>
           <CardHeader>
@@ -170,8 +227,9 @@ export function AgentSchedulesView({
               <CardTitle>New agent report</CardTitle>
               <p className="mt-1 text-sm text-muted-foreground">
                 Runs at most once every five minutes. The saved catalog includes every currently
-                supported read-only GitHub, CRM, ERP, billing, onboarding, and public-web tool that
-                your Discord permissions permit.
+                supported read-only CRM, ERP, billing, onboarding, and public-web tool that your
+                Discord permissions permit. Create GitHub reports with{" "}
+                <code>/schedule-github-issues</code> in Discord.
               </p>
             </div>
           </CardHeader>

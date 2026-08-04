@@ -45,6 +45,7 @@ class BackendRouteSurface(Protocol):
     dashboard_create_project_handler: RouteHandler
     dashboard_create_agent_schedule_handler: RouteHandler
     dashboard_control_agent_schedule_handler: RouteHandler
+    dashboard_resolve_agent_schedule_delivery_handler: RouteHandler
     dashboard_discord_diagnostics_handler: RouteHandler
     dashboard_erpnext_account_managers_handler: RouteHandler
     dashboard_erpnext_contacts_handler: RouteHandler
@@ -147,6 +148,9 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
     )
     dashboard_control_agent_schedule_handler = (
         api.dashboard_control_agent_schedule_handler
+    )
+    dashboard_resolve_agent_schedule_delivery_handler = (
+        api.dashboard_resolve_agent_schedule_delivery_handler
     )
     dashboard_discord_diagnostics_handler = api.dashboard_discord_diagnostics_handler
     dashboard_erpnext_account_managers_handler = (
@@ -288,6 +292,11 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
     app.add_api_route(
         "/dashboard/api/agent-schedules/{schedule_id}/run",
         dashboard_run_agent_schedule_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/dashboard/api/agent-schedules/runs/{run_id}/delivery/resolve",
+        dashboard_resolve_agent_schedule_delivery_handler,
         methods=["POST"],
     )
     app.add_api_route(
