@@ -62,6 +62,9 @@ With `--live-planner`, the configured provider returns a structured tool-call
 draft. The harness still does not let the model authorize users or perform side
 effects: deterministic policy checks scopes, write actions stop at confirmation,
 and read actions use fixture stubs when provided.
+For a request that production can route deterministically, the harness evaluates
+that same production route while retaining the provider draft in
+`raw_model_output` for inspection.
 
 Without `--live-planner`, the runner uses the deterministic parser path. That is
 useful for local no-key debugging, but it is not the main PR gate.

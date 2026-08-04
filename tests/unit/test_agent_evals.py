@@ -12,6 +12,7 @@ from five08.agent.evals import (
     AgentEvalObservedAction,
     evaluate_observed,
     load_env_file,
+    load_fixtures,
     list_eval_model_profiles,
     resolve_eval_model_profile,
     run_live_planner_eval_suite,
@@ -254,6 +255,59 @@ def test_live_planner_eval_falls_back_for_parseable_clarification(monkeypatch) -
     }
 
 
+def test_live_planner_eval_preserves_raw_misroute_but_uses_production_route(
+    monkeypatch,
+) -> None:
+    raw_output = json.dumps(
+        {
+            "status": "planned",
+            "intent": "create_task",
+            "clarification_question": None,
+            "actions": [
+                {
+                    "tool_name": "github_issue.get_issue",
+                    "arguments": {
+                        "repository": "508-dev/todos",
+                        "issue_number": 123,
+                    },
+                    "summary": "Retrieve GitHub issue 123",
+                }
+            ],
+        }
+    )
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"choices": [{"message": {"content": raw_output}}]}
+
+    monkeypatch.setenv("OPENAI_API_KEY_DIRECT", "direct-key")
+    monkeypatch.setattr(
+        "five08.agent.evals.requests.post",
+        lambda *_args, **_kwargs: FakeResponse(),
+    )
+
+    report = run_live_planner_eval_suite(
+        suite="canonical",
+        model="openai-direct",
+        ids=["task_create_mentions_github_issue_001"],
+        timeout_seconds=1,
+    )
+
+    assert report.summary["passed"] == 1
+    scenario = report.scenarios[0]
+    assert scenario.observed.raw_model_output == raw_output
+    assert scenario.observed.actions[0].tool_name == "task_write.create_task"
+    assert scenario.observed.actions[0].arguments == {
+        "title": "follow up on GitHub issue 123",
+        "project": "Atlas",
+    }
+
+
 def test_live_planner_eval_retries_one_bad_plan(monkeypatch) -> None:
     class FakeResponse:
         status_code = 200
@@ -280,8 +334,8 @@ def test_live_planner_eval_retries_one_bad_plan(monkeypatch) -> None:
         '{"status":"planned","intent":"search_crm_contacts",'
         '"clarification_question":null,'
         '"actions":[{"tool_name":"crm_read.search_contacts",'
-        '"arguments":{"query":"Sarah","limit":5},'
-        '"summary":"Search CRM contacts matching Sarah"}]}',
+        '"arguments":{"query":"Caleb","limit":5},'
+        '"summary":"Search CRM contacts matching Caleb"}]}',
     ]
     calls: list[str] = []
 
@@ -291,11 +345,15 @@ def test_live_planner_eval_retries_one_bad_plan(monkeypatch) -> None:
 
     monkeypatch.setenv("OPENAI_API_KEY_DIRECT", "direct-key")
     monkeypatch.setattr("five08.agent.evals.requests.post", fake_post)
+    fixture = load_fixtures(suite="canonical", ids=["crm_contact_info_lookup_001"])[
+        0
+    ].model_copy(update={"known_failure": None})
+    monkeypatch.setattr("five08.agent.evals.load_fixtures", lambda **_kwargs: [fixture])
 
     report = run_live_planner_eval_suite(
         suite="canonical",
         model="openai-direct",
-        ids=["crm_contact_search_001"],
+        ids=["crm_contact_info_lookup_001"],
         timeout_seconds=1,
     )
 
@@ -336,11 +394,15 @@ def test_live_planner_eval_applies_production_argument_gate(monkeypatch) -> None
         "five08.agent.evals.requests.post",
         lambda *_args, **_kwargs: FakeResponse(),
     )
+    fixture = load_fixtures(suite="canonical", ids=["crm_contact_info_lookup_001"])[
+        0
+    ].model_copy(update={"known_failure": None})
+    monkeypatch.setattr("five08.agent.evals.load_fixtures", lambda **_kwargs: [fixture])
 
     report = run_live_planner_eval_suite(
         suite="canonical",
         model="openai-direct",
-        ids=["crm_contact_update_confirmation_001"],
+        ids=["crm_contact_info_lookup_001"],
         timeout_seconds=1,
     )
 

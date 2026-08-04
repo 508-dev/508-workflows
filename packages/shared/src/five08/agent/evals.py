@@ -1008,6 +1008,17 @@ def _response_from_live_draft(
     )
     if resolved_member_agreement is not None:
         return resolved_member_agreement
+    # The live call is retained as a planner-quality probe and its raw response
+    # is reported, but executable behavior must use the same deterministic
+    # routing boundary as production.
+    deterministic_action = orchestrator._parse_action(message)
+    if deterministic_action is not None:
+        return orchestrator._response_for_deterministic_action(
+            action=deterministic_action,
+            context=context,
+            planning_text=message,
+            planner="deterministic_regex",
+        )
     if draft.status == "needs_clarification" or not draft.actions:
         fallback_action = _deterministic_live_planner_fallback(
             orchestrator=orchestrator,
