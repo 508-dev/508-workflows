@@ -9562,6 +9562,58 @@ async def _enqueue_agent_schedule_run(
 async def _dispatch_pending_agent_schedule_runs(queue: QueueClient) -> None:
     """Deliver every persisted-but-unenqueued occurrence to the worker queue."""
 
+    reconciliation_needed = await asyncio.to_thread(
+        list_agent_schedule_runs_needing_queue_reconciliation,
+        settings,
+        limit=settings.agent_schedule_dispatch_batch_size,
+    )
+    for reconciliation in reconciliation_needed:
+        run = reconciliation.run
+        if (
+            reconciliation.job_status is None
+            and run.status is AgentScheduleRunStatus.QUEUED
+        ):
+            if await asyncio.to_thread(
+                clear_agent_schedule_run_job_id,
+                settings,
+                run_id=run.id,
+                job_id=run.job_id or "",
+            ):
+                logger.warning(
+                    "Released missing worker job reference for agent schedule run_id=%s",
+                    run.id,
+                )
+            continue
+        error = (
+            "worker_job_missing"
+            if reconciliation.job_status is None
+            else (
+                f"worker_job_{reconciliation.job_status}:"
+                f"{reconciliation.job_last_error or 'worker_job_terminal'}"
+            )
+        )
+        failed = await asyncio.to_thread(
+            fail_agent_schedule_run,
+            settings,
+            run_id=run.id,
+            error=error,
+            execution_token=(
+                run.execution_token
+                if run.status is AgentScheduleRunStatus.RUNNING
+                else None
+            ),
+        )
+        if failed is None:
+            logger.info("Skipping stale schedule-run reconciliation run_id=%s", run.id)
+            continue
+        logger.error(
+            "Marked agent schedule run failed after terminal worker job run_id=%s "
+            "job_id=%s job_status=%s",
+            run.id,
+            run.job_id,
+            reconciliation.job_status,
+        )
+
     pending = await asyncio.to_thread(
         list_unenqueued_agent_schedule_runs,
         settings,
@@ -10480,6 +10532,10 @@ async def _execute_agent_schedule_run(
                 "run": _agent_schedule_run_payload(current),
             }, 200
         return {"error": "schedule_run_claim_failed"}, 409
+    execution_token = run.execution_token
+    if execution_token is None:
+        logger.error("Schedule run claim returned no execution token run_id=%s", run.id)
+        return {"error": "schedule_run_claim_missing_execution_token"}, 409
 
     schedule = await asyncio.to_thread(
         get_agent_schedule, settings, schedule_id=run.schedule_id
@@ -10489,6 +10545,7 @@ async def _execute_agent_schedule_run(
             complete_agent_schedule_run,
             settings,
             run_id=run.id,
+            execution_token=execution_token,
             status=AgentScheduleRunStatus.FAILED,
             error="schedule_not_found",
         )
@@ -10498,6 +10555,7 @@ async def _execute_agent_schedule_run(
             complete_agent_schedule_run,
             settings,
             run_id=run.id,
+            execution_token=execution_token,
             status=AgentScheduleRunStatus.SKIPPED,
             error="schedule_not_active",
         )
@@ -10531,6 +10589,7 @@ async def _execute_agent_schedule_run(
             complete_agent_schedule_run,
             settings,
             run_id=run.id,
+            execution_token=execution_token,
             status=terminal_status,
             error=context_error,
         )
@@ -10553,6 +10612,7 @@ async def _execute_agent_schedule_run(
             complete_agent_schedule_run,
             settings,
             run_id=run.id,
+            execution_token=execution_token,
             status=AgentScheduleRunStatus.FAILED,
             error="agent_orchestrator_not_configured",
         )
@@ -10568,6 +10628,7 @@ async def _execute_agent_schedule_run(
             complete_agent_schedule_run,
             settings,
             run_id=run.id,
+            execution_token=execution_token,
             status=AgentScheduleRunStatus.SKIPPED,
             error="owner_scopes_no_longer_granted",
         )
@@ -10607,6 +10668,7 @@ async def _execute_agent_schedule_run(
                     complete_agent_schedule_run,
                     settings,
                     run_id=run.id,
+                    execution_token=execution_token,
                     status=terminal_status,
                     error=loop_outcome.error,
                 )
@@ -10637,6 +10699,7 @@ async def _execute_agent_schedule_run(
             complete_agent_schedule_run,
             settings,
             run_id=run.id,
+            execution_token=execution_token,
             status=AgentScheduleRunStatus.FAILED,
             error="scheduled_tool_execution_failed",
         )
@@ -10657,6 +10720,7 @@ async def _execute_agent_schedule_run(
             complete_agent_schedule_run,
             settings,
             run_id=run.id,
+            execution_token=execution_token,
             status=AgentScheduleRunStatus.SKIPPED,
             error=denied_result.error or "scheduled_action_denied",
         )
@@ -10672,6 +10736,7 @@ async def _execute_agent_schedule_run(
             complete_agent_schedule_run,
             settings,
             run_id=run.id,
+            execution_token=execution_token,
             status=AgentScheduleRunStatus.FAILED,
             error=failed_result.error or "scheduled_action_failed",
         )
@@ -10698,6 +10763,7 @@ async def _execute_agent_schedule_run(
         claim_agent_schedule_run_delivery,
         settings,
         run_id=run.id,
+        execution_token=execution_token,
     )
     if delivery_claim is None:
         current = await asyncio.to_thread(
@@ -10705,6 +10771,12 @@ async def _execute_agent_schedule_run(
             settings,
             run_id=run.id,
         )
+        if current is not None and current.execution_token != execution_token:
+            return {
+                "error": "schedule_run_claim_replaced",
+                "schedule_id": schedule.id,
+                "run": _agent_schedule_run_payload(current),
+            }, 409
         if (
             current is not None
             and current.delivery_status is AgentScheduleRunDeliveryStatus.POSTED
@@ -10713,6 +10785,7 @@ async def _execute_agent_schedule_run(
                 complete_agent_schedule_run,
                 settings,
                 run_id=run.id,
+                execution_token=execution_token,
                 status=AgentScheduleRunStatus.SUCCEEDED,
                 output=report_content,
             )
@@ -10735,6 +10808,7 @@ async def _execute_agent_schedule_run(
                     mark_agent_schedule_run_delivery_unknown,
                     settings,
                     run_id=run.id,
+                    execution_token=execution_token,
                 )
                 or current
             )
@@ -10742,6 +10816,7 @@ async def _execute_agent_schedule_run(
             complete_agent_schedule_run,
             settings,
             run_id=run.id,
+            execution_token=execution_token,
             status=AgentScheduleRunStatus.FAILED,
             error="report_delivery_outcome_unknown",
         )
@@ -10764,11 +10839,13 @@ async def _execute_agent_schedule_run(
             mark_agent_schedule_run_delivery_unknown,
             settings,
             run_id=run.id,
+            execution_token=execution_token,
         )
         completed = await asyncio.to_thread(
             complete_agent_schedule_run,
             settings,
             run_id=run.id,
+            execution_token=execution_token,
             status=AgentScheduleRunStatus.FAILED,
             error="report_delivery_outcome_unknown",
         )
@@ -10788,6 +10865,7 @@ async def _execute_agent_schedule_run(
                 release_agent_schedule_run_delivery_claim,
                 settings,
                 run_id=run.id,
+                execution_token=execution_token,
             )
             if released_delivery is not None:
                 delivery_error = str(
@@ -10797,6 +10875,7 @@ async def _execute_agent_schedule_run(
                     complete_agent_schedule_run,
                     settings,
                     run_id=run.id,
+                    execution_token=execution_token,
                     status=AgentScheduleRunStatus.FAILED,
                     error=delivery_error,
                 )
@@ -10814,12 +10893,14 @@ async def _execute_agent_schedule_run(
             mark_agent_schedule_run_delivery_unknown,
             settings,
             run_id=run.id,
+            execution_token=execution_token,
         )
         delivery_error = "report_delivery_outcome_unknown"
         completed = await asyncio.to_thread(
             complete_agent_schedule_run,
             settings,
             run_id=run.id,
+            execution_token=execution_token,
             status=AgentScheduleRunStatus.FAILED,
             error=delivery_error,
         )
@@ -10831,10 +10912,76 @@ async def _execute_agent_schedule_run(
             "run": _agent_schedule_run_payload(completed or run),
         }, 200
 
+    message_id = str(delivery.get("message_id") or "").strip()
+    if not message_id:
+        await asyncio.to_thread(
+            mark_agent_schedule_run_delivery_unknown,
+            settings,
+            run_id=run.id,
+            execution_token=execution_token,
+        )
+        completed = await asyncio.to_thread(
+            complete_agent_schedule_run,
+            settings,
+            run_id=run.id,
+            execution_token=execution_token,
+            status=AgentScheduleRunStatus.FAILED,
+            error="report_delivery_outcome_unknown",
+        )
+        return {
+            "status": AgentScheduleRunStatus.FAILED.value,
+            "schedule_id": schedule.id,
+            "delivery_status": "outcome_unknown",
+            "error": "report_delivery_outcome_unknown",
+            "run": _agent_schedule_run_payload(completed or run),
+        }, 200
+
+    recorded_delivery = await asyncio.to_thread(
+        mark_agent_schedule_run_delivery_posted,
+        settings,
+        run_id=run.id,
+        execution_token=execution_token,
+        message_id=message_id,
+    )
+    if recorded_delivery is None:
+        current = await asyncio.to_thread(
+            get_agent_schedule_run,
+            settings,
+            run_id=run.id,
+        )
+        if current is not None and current.execution_token != execution_token:
+            return {
+                "error": "schedule_run_claim_replaced",
+                "schedule_id": schedule.id,
+                "run": _agent_schedule_run_payload(current),
+            }, 409
+        if (
+            current is not None
+            and current.delivery_status is AgentScheduleRunDeliveryStatus.POSTED
+        ):
+            recorded_delivery = current
+        else:
+            completed = await asyncio.to_thread(
+                complete_agent_schedule_run,
+                settings,
+                run_id=run.id,
+                execution_token=execution_token,
+                status=AgentScheduleRunStatus.FAILED,
+                error="report_delivery_outcome_unknown",
+            )
+            return {
+                "status": AgentScheduleRunStatus.FAILED.value,
+                "schedule_id": schedule.id,
+                "delivery_status": "outcome_unknown",
+                "error": "report_delivery_outcome_unknown",
+                "run": _agent_schedule_run_payload(completed or current or run),
+            }, 200
+
     completed = await asyncio.to_thread(
         complete_agent_schedule_run,
         settings,
         run_id=run.id,
+        execution_token=execution_token,
         status=AgentScheduleRunStatus.SUCCEEDED,
         output=report_content,
     )
@@ -11052,6 +11199,7 @@ async def _resolve_stale_agent_schedule_delivery_for_context(
     if (
         run.delivery_status is not AgentScheduleRunDeliveryStatus.CLAIMED
         or run.delivery_claimed_at is None
+        or run.execution_token is None
         or run.delivery_claimed_at > claimed_before
         or run.status
         not in {AgentScheduleRunStatus.RUNNING, AgentScheduleRunStatus.FAILED}
@@ -11062,6 +11210,7 @@ async def _resolve_stale_agent_schedule_delivery_for_context(
         mark_agent_schedule_run_delivery_unknown,
         settings,
         run_id=run.id,
+        execution_token=run.execution_token,
         claimed_before=claimed_before,
     )
     if resolved is None:
@@ -11080,10 +11229,14 @@ async def _resolve_stale_agent_schedule_delivery_for_context(
             return {"error": "schedule_delivery_claim_resolution_failed"}, 409
 
     if resolved.status is AgentScheduleRunStatus.RUNNING:
+        resolved_execution_token = resolved.execution_token
+        if resolved_execution_token is None:
+            return {"error": "schedule_delivery_claim_resolution_failed"}, 409
         completed = await asyncio.to_thread(
             complete_agent_schedule_run,
             settings,
             run_id=resolved.id,
+            execution_token=resolved_execution_token,
             status=AgentScheduleRunStatus.FAILED,
             error="report_delivery_outcome_unknown",
         )

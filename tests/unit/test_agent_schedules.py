@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 from pydantic import ValidationError
@@ -18,11 +19,15 @@ from five08.agent.schedules import (
     AgentScheduleRunDeliveryStatus,
     AgentScheduleRunStatus,
     claim_agent_schedule_run,
+    claim_agent_schedule_run_delivery,
+    complete_agent_schedule_run,
     create_manual_agent_schedule_run,
     create_due_agent_schedule_runs,
+    fail_agent_schedule_run,
     get_agent_schedule,
     get_agent_schedule_run,
     list_stale_agent_schedule_run_delivery_claims,
+    mark_agent_schedule_run_delivery_posted,
     mark_agent_schedule_run_delivery_unknown,
     release_agent_schedule_run_delivery_claim,
     validate_agent_schedule_timing,
@@ -440,6 +445,7 @@ def test_claim_can_recover_a_running_schedule_after_its_lease_expires(
 ) -> None:
     stale_before = datetime(2026, 7, 28, 9, 0, tzinfo=timezone.utc)
     run_id = "00000000-0000-0000-0000-000000000001"
+    execution_token = "00000000-0000-0000-0000-000000000002"
     run_row = {
         "id": run_id,
         "schedule_id": "schedule-1",
@@ -451,6 +457,7 @@ def test_claim_can_recover_a_running_schedule_after_its_lease_expires(
         "finished_at": None,
         "output": None,
         "error": None,
+        "execution_token": execution_token,
         "created_at": stale_before,
         "updated_at": stale_before,
     }
@@ -461,6 +468,7 @@ def test_claim_can_recover_a_running_schedule_after_its_lease_expires(
         "get_postgres_connection",
         lambda _settings: connection,
     )
+    monkeypatch.setattr(schedules, "uuid4", lambda: execution_token)
 
     run = claim_agent_schedule_run(
         SharedSettings(),
@@ -472,7 +480,13 @@ def test_claim_can_recover_a_running_schedule_after_its_lease_expires(
     assert run.status is AgentScheduleRunStatus.RUNNING
     query, params = cursor.calls[0]
     assert "status = 'running' AND started_at <= %s" in query
-    assert params == (AgentScheduleRunStatus.RUNNING.value, run_id, stale_before)
+    assert "execution_token = %s" in query
+    assert params == (
+        AgentScheduleRunStatus.RUNNING.value,
+        execution_token,
+        run_id,
+        stale_before,
+    )
 
 
 def test_pre_send_delivery_failure_releases_only_the_claimed_running_run(
@@ -482,6 +496,7 @@ def test_pre_send_delivery_failure_releases_only_the_claimed_running_run(
 
     now = datetime(2026, 7, 28, 9, 0, tzinfo=timezone.utc)
     run_id = "00000000-0000-0000-0000-000000000001"
+    execution_token = "00000000-0000-0000-0000-000000000002"
     run_row = {
         "id": run_id,
         "schedule_id": "schedule-1",
@@ -496,6 +511,7 @@ def test_pre_send_delivery_failure_releases_only_the_claimed_running_run(
         "delivery_status": "pending",
         "delivery_message_id": None,
         "delivery_claimed_at": None,
+        "execution_token": execution_token,
         "created_at": now,
         "updated_at": now,
     }
@@ -509,16 +525,19 @@ def test_pre_send_delivery_failure_releases_only_the_claimed_running_run(
     released = release_agent_schedule_run_delivery_claim(
         SharedSettings(),
         run_id=run_id,
+        execution_token=execution_token,
     )
 
     assert released is not None
     assert released.delivery_status is AgentScheduleRunDeliveryStatus.PENDING
     query, params = cursor.calls[0]
     assert "status = 'running'" in query
+    assert "execution_token = %s" in query
     assert "delivery_status = %s" in query
     assert params == (
         AgentScheduleRunDeliveryStatus.PENDING.value,
         run_id,
+        execution_token,
         AgentScheduleRunDeliveryStatus.CLAIMED.value,
     )
 
@@ -531,6 +550,7 @@ def test_stale_delivery_claims_are_listed_and_manually_bounded(
     claimed_at = datetime(2026, 7, 28, 9, 0, tzinfo=timezone.utc)
     claimed_before = datetime(2026, 7, 28, 9, 5, tzinfo=timezone.utc)
     run_id = "00000000-0000-0000-0000-000000000001"
+    execution_token = "00000000-0000-0000-0000-000000000002"
     run_row = {
         "id": run_id,
         "schedule_id": "schedule-1",
@@ -545,6 +565,7 @@ def test_stale_delivery_claims_are_listed_and_manually_bounded(
         "delivery_status": "claimed",
         "delivery_message_id": None,
         "delivery_claimed_at": claimed_at,
+        "execution_token": execution_token,
         "created_at": claimed_at,
         "updated_at": claimed_at,
     }
@@ -581,6 +602,7 @@ def test_stale_delivery_claims_are_listed_and_manually_bounded(
     resolved = mark_agent_schedule_run_delivery_unknown(
         SharedSettings(),
         run_id=run_id,
+        execution_token=execution_token,
         claimed_before=claimed_before,
     )
 
@@ -590,6 +612,54 @@ def test_stale_delivery_claims_are_listed_and_manually_bounded(
     assert params == (
         AgentScheduleRunDeliveryStatus.UNKNOWN.value,
         run_id,
+        execution_token,
         AgentScheduleRunDeliveryStatus.CLAIMED.value,
         claimed_before,
     )
+
+
+@pytest.mark.parametrize(
+    ("transition", "kwargs"),
+    [
+        (
+            complete_agent_schedule_run,
+            {"status": AgentScheduleRunStatus.FAILED, "error": "late result"},
+        ),
+        (fail_agent_schedule_run, {"error": "late dispatch failure"}),
+        (claim_agent_schedule_run_delivery, {}),
+        (release_agent_schedule_run_delivery_claim, {}),
+        (mark_agent_schedule_run_delivery_posted, {"message_id": "message-1"}),
+        (mark_agent_schedule_run_delivery_unknown, {}),
+    ],
+)
+def test_stale_execution_token_cannot_change_a_reclaimed_run(
+    monkeypatch: pytest.MonkeyPatch,
+    transition: Any,
+    kwargs: dict[str, Any],
+) -> None:
+    """Every active-run transition is fenced to its claiming execution."""
+
+    cursor = MagicMock()
+    cursor.fetchone.return_value = None
+    connection = MagicMock()
+    connection.__enter__.return_value.cursor.return_value.__enter__.return_value = (
+        cursor
+    )
+    monkeypatch.setattr(
+        schedules,
+        "get_postgres_connection",
+        lambda _settings: connection,
+    )
+    token = "00000000-0000-0000-0000-000000000099"
+
+    changed = transition(
+        SharedSettings(),
+        run_id="00000000-0000-0000-0000-000000000001",
+        execution_token=token,
+        **kwargs,
+    )
+
+    assert changed is None
+    query, params = cursor.execute.call_args.args
+    assert "execution_token = %s" in query
+    assert token in params

@@ -94,6 +94,7 @@ def _run() -> AgentScheduleRunRecord:
         error=None,
         created_at=now,
         updated_at=now,
+        execution_token="00000000-0000-0000-0000-000000000001",
     )
 
 
@@ -649,6 +650,117 @@ def test_agent_loop_rejects_invalid_crm_search_before_execution(
 
 
 @pytest.mark.asyncio
+async def test_schedule_dispatch_reconciles_a_terminal_worker_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dead queue job becomes a visible failed run instead of staying queued."""
+
+    reconciliation = SimpleNamespace(
+        run=_run(),
+        job_status="dead",
+        job_last_error="worker exhausted retries",
+    )
+    fail_run = Mock()
+    monkeypatch.setattr(
+        api,
+        "list_agent_schedule_runs_needing_queue_reconciliation",
+        Mock(return_value=[reconciliation]),
+    )
+    monkeypatch.setattr(api, "fail_agent_schedule_run", fail_run)
+    monkeypatch.setattr(
+        api,
+        "list_unenqueued_agent_schedule_runs",
+        Mock(return_value=[]),
+    )
+
+    await api._dispatch_pending_agent_schedule_runs(Mock())
+
+    fail_run.assert_called_once()
+    assert fail_run.call_args.kwargs["run_id"] == "run-1"
+    assert fail_run.call_args.kwargs["error"] == (
+        "worker_job_dead:worker exhausted retries"
+    )
+    assert fail_run.call_args.kwargs["execution_token"] is None
+
+
+@pytest.mark.asyncio
+async def test_schedule_dispatch_reenqueues_a_run_with_missing_worker_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dangling job reference is released and recovered in the same pass."""
+
+    run = _run()
+    reconciliation = SimpleNamespace(
+        run=run,
+        job_status=None,
+        job_last_error=None,
+    )
+    clear_job_id = Mock(return_value=True)
+    enqueue_run = AsyncMock()
+    monkeypatch.setattr(
+        api,
+        "list_agent_schedule_runs_needing_queue_reconciliation",
+        Mock(return_value=[reconciliation]),
+    )
+    monkeypatch.setattr(api, "clear_agent_schedule_run_job_id", clear_job_id)
+    monkeypatch.setattr(
+        api,
+        "list_unenqueued_agent_schedule_runs",
+        Mock(return_value=[run]),
+    )
+    monkeypatch.setattr(api, "_enqueue_agent_schedule_run", enqueue_run)
+
+    queue = Mock()
+    await api._dispatch_pending_agent_schedule_runs(queue)
+
+    clear_job_id.assert_called_once_with(
+        api.settings,
+        run_id=run.id,
+        job_id=run.job_id,
+    )
+    enqueue_run.assert_awaited_once_with(queue, run)
+
+
+@pytest.mark.asyncio
+async def test_schedule_dispatch_fails_a_running_run_with_missing_worker_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A crashed worker cannot leave a running schedule occurrence forever."""
+
+    run = replace(
+        _run(),
+        status=AgentScheduleRunStatus.RUNNING,
+        started_at=datetime.now(tz=timezone.utc),
+    )
+    reconciliation = SimpleNamespace(
+        run=run,
+        job_status=None,
+        job_last_error=None,
+    )
+    fail_run = Mock()
+    clear_job_id = Mock()
+    monkeypatch.setattr(
+        api,
+        "list_agent_schedule_runs_needing_queue_reconciliation",
+        Mock(return_value=[reconciliation]),
+    )
+    monkeypatch.setattr(api, "fail_agent_schedule_run", fail_run)
+    monkeypatch.setattr(api, "clear_agent_schedule_run_job_id", clear_job_id)
+    monkeypatch.setattr(
+        api,
+        "list_unenqueued_agent_schedule_runs",
+        Mock(return_value=[]),
+    )
+
+    await api._dispatch_pending_agent_schedule_runs(Mock())
+
+    clear_job_id.assert_not_called()
+    fail_run.assert_called_once()
+    assert fail_run.call_args.kwargs["error"] == "worker_job_missing"
+    assert fail_run.call_args.kwargs["execution_token"] == run.execution_token
+
+
+@pytest.mark.asyncio
 async def test_confirmed_agent_schedule_creation_binds_current_channel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1000,6 +1112,9 @@ async def test_schedule_execution_skips_revoked_owner_before_tools_or_discord(
     complete_run.assert_called_once()
     assert complete_run.call_args.kwargs["status"] is AgentScheduleRunStatus.SKIPPED
     assert complete_run.call_args.kwargs["error"] == "owner_scopes_no_longer_granted"
+    assert (
+        complete_run.call_args.kwargs["execution_token"] == running_run.execution_token
+    )
     make_plan.assert_not_called()
     post_report.assert_not_awaited()
 
@@ -1076,6 +1191,7 @@ async def test_schedule_execution_never_posts_a_report_twice_after_recorded_deli
         _run(),
         status=AgentScheduleRunStatus.RUNNING,
         started_at=datetime.now(tz=timezone.utc) - timedelta(seconds=301),
+        execution_token="00000000-0000-0000-0000-000000000010",
         delivery_status=AgentScheduleRunDeliveryStatus.POSTED,
         delivery_message_id="discord-message-1",
         delivery_claimed_at=datetime.now(tz=timezone.utc) - timedelta(seconds=302),
@@ -1083,6 +1199,7 @@ async def test_schedule_execution_never_posts_a_report_twice_after_recorded_deli
     reclaimed_run = replace(
         stale_running_run,
         started_at=datetime.now(tz=timezone.utc),
+        execution_token="00000000-0000-0000-0000-000000000011",
     )
     completed_run = replace(
         reclaimed_run,
@@ -1119,7 +1236,7 @@ async def test_schedule_execution_never_posts_a_report_twice_after_recorded_deli
     monkeypatch.setattr(
         api,
         "get_agent_schedule_run",
-        Mock(side_effect=[stale_running_run, stale_running_run]),
+        Mock(side_effect=[stale_running_run, reclaimed_run]),
     )
     monkeypatch.setattr(
         api, "claim_agent_schedule_run", Mock(return_value=reclaimed_run)
@@ -1147,6 +1264,10 @@ async def test_schedule_execution_never_posts_a_report_twice_after_recorded_deli
     assert response["delivery_status"] == "already_posted"
     post_report.assert_not_awaited()
     assert complete_run.call_args.kwargs["status"] is AgentScheduleRunStatus.SUCCEEDED
+    assert (
+        complete_run.call_args.kwargs["execution_token"]
+        == reclaimed_run.execution_token
+    )
 
 
 @pytest.mark.asyncio
@@ -1245,9 +1366,16 @@ async def test_pre_send_bot_failure_releases_delivery_claim_for_worker_retry(
     assert status_code == 502
     assert response["delivery_status"] == "not_posted"
     assert response["error"] == "channel_lookup_failed"
-    release_claim.assert_called_once_with(api.settings, run_id=queued_run.id)
+    release_claim.assert_called_once_with(
+        api.settings,
+        run_id=queued_run.id,
+        execution_token=running_run.execution_token,
+    )
     mark_unknown.assert_not_called()
     assert complete_run.call_args.kwargs["status"] is AgentScheduleRunStatus.FAILED
+    assert (
+        complete_run.call_args.kwargs["execution_token"] == running_run.execution_token
+    )
 
 
 @pytest.mark.asyncio
@@ -1345,6 +1473,11 @@ async def test_operator_can_mark_stale_delivery_claim_unknown_without_resend(
     assert response["run"]["delivery_status"] == "unknown"
     assert response["run"]["status"] == "failed"
     assert mark_unknown.call_args.kwargs["run_id"] == stale_run.id
+    assert mark_unknown.call_args.kwargs["execution_token"] == stale_run.execution_token
     assert complete_run.call_args.kwargs["status"] is AgentScheduleRunStatus.FAILED
+    assert (
+        complete_run.call_args.kwargs["execution_token"]
+        == marked_unknown.execution_token
+    )
     post_report.assert_not_awaited()
     audit.assert_called_once()

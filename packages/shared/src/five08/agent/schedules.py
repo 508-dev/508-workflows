@@ -274,6 +274,10 @@ class AgentScheduleRunRecord:
     error: str | None
     created_at: datetime
     updated_at: datetime
+    # Each successful claim assigns a new durable execution lease.  It is kept
+    # out of API payloads and fences a reclaimed worker from recording a late
+    # terminal result or delivery transition.
+    execution_token: str | None = None
 
 
 @dataclass(frozen=True)
@@ -982,6 +986,7 @@ def claim_agent_schedule_run_delivery(
     settings: SharedSettings,
     *,
     run_id: str,
+    execution_token: str,
 ) -> AgentScheduleRunRecord | None:
     """Reserve a report delivery before making the Discord side effect.
 
@@ -991,7 +996,8 @@ def claim_agent_schedule_run_delivery(
     """
 
     normalized_run_id = _normalize_uuid(run_id)
-    if normalized_run_id is None:
+    normalized_execution_token = _normalize_uuid(execution_token)
+    if normalized_run_id is None or normalized_execution_token is None:
         return None
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
@@ -1003,12 +1009,14 @@ def claim_agent_schedule_run_delivery(
                     updated_at = NOW()
                 WHERE id = %s
                   AND status = 'running'
+                  AND execution_token = %s
                   AND delivery_status = %s
                 RETURNING *
                 """,
                 (
                     AgentScheduleRunDeliveryStatus.CLAIMED.value,
                     normalized_run_id,
+                    normalized_execution_token,
                     AgentScheduleRunDeliveryStatus.PENDING.value,
                 ),
             )
@@ -1020,6 +1028,7 @@ def release_agent_schedule_run_delivery_claim(
     settings: SharedSettings,
     *,
     run_id: str,
+    execution_token: str,
 ) -> AgentScheduleRunRecord | None:
     """Release a claim only after the bot proves no Discord send was attempted.
 
@@ -1029,7 +1038,8 @@ def release_agent_schedule_run_delivery_claim(
     """
 
     normalized_run_id = _normalize_uuid(run_id)
-    if normalized_run_id is None:
+    normalized_execution_token = _normalize_uuid(execution_token)
+    if normalized_run_id is None or normalized_execution_token is None:
         return None
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
@@ -1042,12 +1052,14 @@ def release_agent_schedule_run_delivery_claim(
                     updated_at = NOW()
                 WHERE id = %s
                   AND status = 'running'
+                  AND execution_token = %s
                   AND delivery_status = %s
                 RETURNING *
                 """,
                 (
                     AgentScheduleRunDeliveryStatus.PENDING.value,
                     normalized_run_id,
+                    normalized_execution_token,
                     AgentScheduleRunDeliveryStatus.CLAIMED.value,
                 ),
             )
@@ -1059,6 +1071,7 @@ def mark_agent_schedule_run_delivery_posted(
     settings: SharedSettings,
     *,
     run_id: str,
+    execution_token: str,
     message_id: str,
 ) -> AgentScheduleRunRecord | None:
     """Record a confirmed Discord message for a claimed schedule run."""
@@ -1067,7 +1080,8 @@ def mark_agent_schedule_run_delivery_posted(
     if not normalized_message_id:
         raise ValueError("schedule delivery message id is required")
     normalized_run_id = _normalize_uuid(run_id)
-    if normalized_run_id is None:
+    normalized_execution_token = _normalize_uuid(execution_token)
+    if normalized_run_id is None or normalized_execution_token is None:
         return None
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
@@ -1078,6 +1092,8 @@ def mark_agent_schedule_run_delivery_posted(
                     delivery_message_id = %s,
                     updated_at = NOW()
                 WHERE id = %s
+                  AND status = 'running'
+                  AND execution_token = %s
                   AND delivery_status = %s
                 RETURNING *
                 """,
@@ -1085,6 +1101,7 @@ def mark_agent_schedule_run_delivery_posted(
                     AgentScheduleRunDeliveryStatus.POSTED.value,
                     normalized_message_id,
                     normalized_run_id,
+                    normalized_execution_token,
                     AgentScheduleRunDeliveryStatus.CLAIMED.value,
                 ),
             )
@@ -1096,6 +1113,7 @@ def mark_agent_schedule_run_delivery_unknown(
     settings: SharedSettings,
     *,
     run_id: str,
+    execution_token: str,
     claimed_before: datetime | None = None,
 ) -> AgentScheduleRunRecord | None:
     """Record an ambiguous delivery outcome without risking a duplicate post.
@@ -1105,18 +1123,21 @@ def mark_agent_schedule_run_delivery_unknown(
     """
 
     normalized_run_id = _normalize_uuid(run_id)
-    if normalized_run_id is None:
+    normalized_execution_token = _normalize_uuid(execution_token)
+    if normalized_run_id is None or normalized_execution_token is None:
         return None
     query = """
         UPDATE agent_schedule_runs
         SET delivery_status = %s,
             updated_at = NOW()
         WHERE id = %s
+          AND execution_token = %s
           AND delivery_status = %s
     """
     params: tuple[object, ...] = (
         AgentScheduleRunDeliveryStatus.UNKNOWN.value,
         normalized_run_id,
+        normalized_execution_token,
         AgentScheduleRunDeliveryStatus.CLAIMED.value,
     )
     if claimed_before is not None:
@@ -1209,6 +1230,7 @@ def claim_agent_schedule_run(
     normalized_run_id = _normalize_uuid(run_id)
     if normalized_run_id is None:
         return None
+    execution_token = str(uuid4())
     if reclaim_running_before is None:
         query = """
             UPDATE agent_schedule_runs
@@ -1216,6 +1238,7 @@ def claim_agent_schedule_run(
                 started_at = NOW(),
                 finished_at = NULL,
                 error = NULL,
+                execution_token = %s,
                 updated_at = NOW()
             WHERE id = %s
               AND status IN ('queued', 'failed')
@@ -1223,6 +1246,7 @@ def claim_agent_schedule_run(
         """
         params: tuple[object, ...] = (
             AgentScheduleRunStatus.RUNNING.value,
+            execution_token,
             normalized_run_id,
         )
     else:
@@ -1232,6 +1256,7 @@ def claim_agent_schedule_run(
                 started_at = NOW(),
                 finished_at = NULL,
                 error = NULL,
+                execution_token = %s,
                 updated_at = NOW()
             WHERE id = %s
               AND (
@@ -1242,6 +1267,7 @@ def claim_agent_schedule_run(
         """
         params = (
             AgentScheduleRunStatus.RUNNING.value,
+            execution_token,
             normalized_run_id,
             _utc_datetime(reclaim_running_before),
         )
@@ -1256,6 +1282,7 @@ def complete_agent_schedule_run(
     settings: SharedSettings,
     *,
     run_id: str,
+    execution_token: str,
     status: AgentScheduleRunStatus,
     output: str | None = None,
     error: str | None = None,
@@ -1270,7 +1297,8 @@ def complete_agent_schedule_run(
         raise ValueError("schedule run completion status must be terminal")
 
     normalized_run_id = _normalize_uuid(run_id)
-    if normalized_run_id is None:
+    normalized_execution_token = _normalize_uuid(execution_token)
+    if normalized_run_id is None or normalized_execution_token is None:
         return None
     normalized_output = _bounded_text(output, MAX_AGENT_SCHEDULE_OUTPUT_CHARS)
     normalized_error = _bounded_text(error, MAX_AGENT_SCHEDULE_ERROR_CHARS)
@@ -1286,9 +1314,16 @@ def complete_agent_schedule_run(
                     updated_at = NOW()
                 WHERE id = %s
                   AND status = 'running'
+                  AND execution_token = %s
                 RETURNING *
                 """,
-                (status.value, normalized_output, normalized_error, normalized_run_id),
+                (
+                    status.value,
+                    normalized_output,
+                    normalized_error,
+                    normalized_run_id,
+                    normalized_execution_token,
+                ),
             )
             row = cursor.fetchone()
             if row is None:
@@ -1310,32 +1345,61 @@ def fail_agent_schedule_run(
     *,
     run_id: str,
     error: str,
+    execution_token: str | None = None,
 ) -> AgentScheduleRunRecord | None:
-    """Persist a terminal worker-dispatch failure without executing the run."""
+    """Persist a dispatch failure, fenced when an execution is already active.
+
+    Queued runs have not acquired an execution lease, so a dispatcher may mark
+    those failures without a token.  A running run must present the exact
+    token returned by :func:`claim_agent_schedule_run`.
+    """
 
     normalized_run_id = _normalize_uuid(run_id)
     if normalized_run_id is None:
         return None
     normalized_error = _bounded_text(error, MAX_AGENT_SCHEDULE_ERROR_CHARS)
+    normalized_execution_token = (
+        _normalize_uuid(execution_token) if execution_token is not None else None
+    )
+    if execution_token is not None and normalized_execution_token is None:
+        return None
+    if normalized_execution_token is None:
+        query = """
+            UPDATE agent_schedule_runs
+            SET status = %s,
+                error = %s,
+                finished_at = NOW(),
+                updated_at = NOW()
+            WHERE id = %s
+              AND status = 'queued'
+            RETURNING *
+        """
+        params: tuple[object, ...] = (
+            AgentScheduleRunStatus.FAILED.value,
+            normalized_error,
+            normalized_run_id,
+        )
+    else:
+        query = """
+            UPDATE agent_schedule_runs
+            SET status = %s,
+                error = %s,
+                finished_at = NOW(),
+                updated_at = NOW()
+            WHERE id = %s
+              AND status = 'running'
+              AND execution_token = %s
+            RETURNING *
+        """
+        params = (
+            AgentScheduleRunStatus.FAILED.value,
+            normalized_error,
+            normalized_run_id,
+            normalized_execution_token,
+        )
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
-            cursor.execute(
-                """
-                UPDATE agent_schedule_runs
-                SET status = %s,
-                    error = %s,
-                    finished_at = NOW(),
-                    updated_at = NOW()
-                WHERE id = %s
-                  AND status IN ('queued', 'running')
-                RETURNING *
-                """,
-                (
-                    AgentScheduleRunStatus.FAILED.value,
-                    normalized_error,
-                    normalized_run_id,
-                ),
-            )
+            cursor.execute(query, params)
             row = cursor.fetchone()
             if row is None:
                 return None
@@ -1413,6 +1477,11 @@ def _as_schedule_run_record(row: dict[str, Any]) -> AgentScheduleRunRecord:
         error=str(row["error"]) if row.get("error") is not None else None,
         created_at=_utc_datetime(row["created_at"]),
         updated_at=_utc_datetime(row["updated_at"]),
+        execution_token=(
+            str(row["execution_token"])
+            if row.get("execution_token") is not None
+            else None
+        ),
     )
 
 
