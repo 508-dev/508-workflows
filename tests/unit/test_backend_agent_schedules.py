@@ -126,7 +126,12 @@ def test_agent_loop_creation_persists_an_exact_default_tool_catalog() -> None:
     assert definition.execution_mode is AgentScheduleExecutionMode.AGENT_LOOP
     assert definition.actions == []
     assert "onboarding_read.get_summary" in definition.tool_allowlist
+    assert "github_issue.search_issues" not in definition.tool_allowlist
     assert "crm_write.update_contact" not in definition.tool_allowlist
+    assert definition.tool_allowlist == sorted(
+        api.AGENT_SCHEDULE_ALLOWED_TOOL_NAMES
+        & ToolRegistry().schedule_safe_tool_names()
+    )
 
 
 @pytest.mark.parametrize(

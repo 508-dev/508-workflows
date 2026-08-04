@@ -9279,7 +9279,13 @@ def _agent_schedule_definition_from_fields(
         # A generic schedule is useful without a tool-picker ceremony. Its
         # persisted catalog is still exact: newly added tools do not reach an
         # existing schedule until an admin creates or replaces it deliberately.
-        tool_allowlist = requested_tools or sorted(AGENT_SCHEDULE_ALLOWED_TOOL_NAMES)
+        # Derive defaults from the stricter manifest opt-in so a merely
+        # read-only tool (including GitHub search) never joins a model loop by
+        # accident.
+        tool_allowlist = requested_tools or sorted(
+            AGENT_SCHEDULE_ALLOWED_TOOL_NAMES
+            & ToolRegistry().schedule_safe_tool_names()
+        )
         return AgentScheduleDefinition(
             prompt=prompt,
             execution_mode=execution_mode,
@@ -10835,7 +10841,7 @@ async def _run_agent_schedule_for_context(
         return error_payload, status_code
     assert fresh_context is not None
     try:
-        run = await asyncio.to_thread(
+        manual_run = await asyncio.to_thread(
             create_manual_agent_schedule_run,
             settings,
             schedule_id=schedule_id,
@@ -10844,10 +10850,18 @@ async def _run_agent_schedule_for_context(
     except Exception:
         logger.exception("Failed creating manual agent schedule run id=%s", schedule_id)
         return {"error": "schedule_run_create_failed"}, 503
-    if run is None:
+    if manual_run is None:
         return {"error": "schedule_not_found_or_archived"}, 404
+    run = manual_run.run
 
-    worker_job = await _enqueue_agent_schedule_run(request.app.state.queue, run)
+    should_dispatch = manual_run.created or (
+        run.status is AgentScheduleRunStatus.QUEUED and run.job_id is None
+    )
+    worker_job = (
+        await _enqueue_agent_schedule_run(request.app.state.queue, run)
+        if should_dispatch
+        else None
+    )
     _schedule_agent_audit_event(
         context=fresh_context,
         action="agent.schedule.run",
@@ -10857,14 +10871,24 @@ async def _run_agent_schedule_for_context(
             "schedule_id": schedule_id,
             "run_id": run.id,
             "job_id": worker_job.id if worker_job is not None else None,
+            "created": manual_run.created,
         },
     )
+    response_status = (
+        "queued"
+        if manual_run.created
+        else (
+            "already_queued"
+            if run.status is AgentScheduleRunStatus.QUEUED
+            else "already_requested"
+        )
+    )
     return {
-        "status": "queued",
+        "status": response_status,
         "run": _agent_schedule_run_payload(run),
         "job_id": worker_job.id if worker_job is not None else None,
-        "dispatch_pending": worker_job is None,
-    }, 202
+        "dispatch_pending": should_dispatch and worker_job is None,
+    }, 202 if should_dispatch else 200
 
 
 async def agent_schedule_create_handler(request: Request) -> JSONResponse:

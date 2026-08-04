@@ -17,7 +17,10 @@ from five08.agent.schedules import (
     AgentScheduleProposal,
     AgentScheduleRunStatus,
     claim_agent_schedule_run,
+    create_manual_agent_schedule_run,
     create_due_agent_schedule_runs,
+    get_agent_schedule,
+    get_agent_schedule_run,
     validate_agent_schedule_timing,
 )
 from five08.settings import SharedSettings
@@ -154,6 +157,41 @@ def test_schedule_timing_enforces_minimum_cadence_and_preserves_timezone() -> No
     assert next_run_at == datetime(2026, 8, 3, 0, 0, tzinfo=timezone.utc)
 
 
+def test_schedule_timing_rejects_a_later_tight_cron_cluster() -> None:
+    """Validation must not accept a sparse first gap then an hourly cluster."""
+
+    with pytest.raises(ValueError, match="no more often than every 7200 seconds"):
+        validate_agent_schedule_timing(
+            "0 0,1 * * *",
+            "UTC",
+            now=datetime(2026, 7, 28, 0, 30, tzinfo=timezone.utc),
+            minimum_interval_seconds=7_200,
+        )
+
+
+def test_schedule_ids_are_rejected_before_opening_a_database_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Malformed path IDs must be ordinary misses instead of PostgreSQL errors."""
+
+    monkeypatch.setattr(
+        schedules,
+        "get_postgres_connection",
+        lambda _settings: (_ for _ in ()).throw(AssertionError("must not connect")),
+    )
+
+    assert get_agent_schedule(SharedSettings(), schedule_id="not-a-uuid") is None
+    assert get_agent_schedule_run(SharedSettings(), run_id="not-a-uuid") is None
+    assert (
+        create_manual_agent_schedule_run(
+            SharedSettings(),
+            schedule_id="not-a-uuid",
+            guild_id="1000",
+        )
+        is None
+    )
+
+
 class _FakeScheduleCursor:
     def __init__(
         self,
@@ -201,6 +239,82 @@ class _FakeScheduleConnection:
 
     def cursor(self, **_kwargs: object) -> _FakeScheduleCursor:
         return self._cursor
+
+
+class _ManualRunCursor:
+    def __init__(self, rows: list[dict[str, Any] | None]) -> None:
+        self.calls: list[tuple[str, tuple[Any, ...] | None]] = []
+        self._rows = rows
+
+    def __enter__(self) -> "_ManualRunCursor":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def execute(self, query: str, params: tuple[Any, ...] | None = None) -> None:
+        self.calls.append((query, params))
+
+    def fetchone(self) -> dict[str, Any] | None:
+        return self._rows.pop(0)
+
+
+class _ManualRunConnection:
+    def __init__(self, cursor: _ManualRunCursor) -> None:
+        self._cursor = cursor
+
+    def __enter__(self) -> "_ManualRunConnection":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def cursor(self, **_kwargs: object) -> _ManualRunCursor:
+        return self._cursor
+
+
+def test_manual_run_requests_coalesce_within_the_schedule_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A repeat request returns the prior run without inserting a second one."""
+
+    now = datetime(2026, 7, 28, 9, 0, tzinfo=timezone.utc)
+    schedule_id = "00000000-0000-0000-0000-000000000010"
+    existing_run = {
+        "id": "00000000-0000-0000-0000-000000000011",
+        "schedule_id": schedule_id,
+        "occurrence_at": now,
+        "trigger": "manual",
+        "status": "queued",
+        "job_id": None,
+        "started_at": None,
+        "finished_at": None,
+        "output": None,
+        "error": None,
+        "delivery_status": "pending",
+        "delivery_message_id": None,
+        "delivery_claimed_at": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    cursor = _ManualRunCursor([{"id": schedule_id}, existing_run])
+    monkeypatch.setattr(
+        schedules,
+        "get_postgres_connection",
+        lambda _settings: _ManualRunConnection(cursor),
+    )
+
+    result = create_manual_agent_schedule_run(
+        SharedSettings(),
+        schedule_id=schedule_id,
+        guild_id="1000",
+        now=now,
+    )
+
+    assert result is not None
+    assert result.created is False
+    assert result.run.id == existing_run["id"]
+    assert not any("INSERT INTO agent_schedule_runs" in query for query, _ in cursor.calls)
 
 
 def test_due_schedule_creates_one_catch_up_then_advances_past_now(
@@ -269,8 +383,9 @@ def test_claim_can_recover_a_running_schedule_after_its_lease_expires(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     stale_before = datetime(2026, 7, 28, 9, 0, tzinfo=timezone.utc)
+    run_id = "00000000-0000-0000-0000-000000000001"
     run_row = {
-        "id": "run-1",
+        "id": run_id,
         "schedule_id": "schedule-1",
         "occurrence_at": stale_before,
         "trigger": "schedule",
@@ -293,7 +408,7 @@ def test_claim_can_recover_a_running_schedule_after_its_lease_expires(
 
     run = claim_agent_schedule_run(
         SharedSettings(),
-        run_id="run-1",
+        run_id=run_id,
         reclaim_running_before=stale_before,
     )
 
@@ -301,4 +416,4 @@ def test_claim_can_recover_a_running_schedule_after_its_lease_expires(
     assert run.status is AgentScheduleRunStatus.RUNNING
     query, params = cursor.calls[0]
     assert "status = 'running' AND started_at <= %s" in query
-    assert params == (AgentScheduleRunStatus.RUNNING.value, "run-1", stale_before)
+    assert params == (AgentScheduleRunStatus.RUNNING.value, run_id, stale_before)

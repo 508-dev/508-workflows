@@ -10,10 +10,10 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from typing import Any, Literal
-from uuid import uuid4
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from croniter import CroniterBadCronError, CroniterBadDateError, croniter
@@ -270,11 +270,37 @@ class AgentScheduleRunRecord:
     updated_at: datetime
 
 
+@dataclass(frozen=True)
+class AgentScheduleRunQueueReconciliation:
+    """A nonterminal run whose durable worker job needs dispatcher attention."""
+
+    run: AgentScheduleRunRecord
+    job_status: str | None
+    job_last_error: str | None
+
+
+@dataclass(frozen=True)
+class AgentScheduleManualRunResult:
+    """Result of a manual run request, including whether it created work."""
+
+    run: AgentScheduleRunRecord
+    created: bool
+
+
 def _normalize_discord_snowflake(value: object) -> str:
     normalized = str(value or "").strip()
     if not normalized or not normalized.isdecimal() or int(normalized) <= 0:
         raise ValueError("Discord IDs must be positive decimal snowflakes")
     return normalized
+
+
+def _normalize_uuid(value: object) -> str | None:
+    """Return a canonical UUID or ``None`` before it reaches a UUID column."""
+
+    try:
+        return str(UUID(str(value)))
+    except (AttributeError, TypeError, ValueError):
+        return None
 
 
 def _validate_github_issue_search_arguments(arguments: dict[str, Any]) -> None:
@@ -386,15 +412,24 @@ def validate_agent_schedule_timing(
         normalized_timezone,
         after=now,
     )
-    second = next_agent_schedule_occurrence(
-        normalized_cron,
-        normalized_timezone,
-        after=first,
-    )
-    if (second - first).total_seconds() < max(60, minimum_interval_seconds):
-        raise ValueError(
-            f"schedule must run no more often than every {minimum_interval_seconds} seconds"
+    effective_minimum_interval = max(60, minimum_interval_seconds)
+    # Two adjacent occurrences are insufficient for cron expressions with a
+    # sparse first gap followed by a tight cluster (for example ``0 0,1 * *``).
+    # Inspect a bounded future sequence so validation remains predictable even
+    # for every-minute schedules while covering irregular daily/weekly patterns.
+    previous = first
+    for _ in range(512):
+        next_occurrence = next_agent_schedule_occurrence(
+            normalized_cron,
+            normalized_timezone,
+            after=previous,
         )
+        if (next_occurrence - previous).total_seconds() < effective_minimum_interval:
+            raise ValueError(
+                "schedule must run no more often than every "
+                f"{effective_minimum_interval} seconds"
+            )
+        previous = next_occurrence
     return normalized_cron, normalized_timezone, first
 
 
@@ -480,10 +515,13 @@ def get_agent_schedule(
 ) -> AgentScheduleRecord | None:
     """Load one persisted schedule without changing its lifecycle."""
 
+    normalized_schedule_id = _normalize_uuid(schedule_id)
+    if normalized_schedule_id is None:
+        return None
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
-                "SELECT * FROM agent_schedules WHERE id = %s", (schedule_id,)
+                "SELECT * FROM agent_schedules WHERE id = %s", (normalized_schedule_id,)
             )
             row = cursor.fetchone()
     return _as_schedule_record(row) if row is not None else None
@@ -526,6 +564,9 @@ def pause_agent_schedule(
     """Pause a schedule without deleting its frozen definition or history."""
 
     normalized_guild_id = _normalize_discord_snowflake(guild_id)
+    normalized_schedule_id = _normalize_uuid(schedule_id)
+    if normalized_schedule_id is None:
+        return None
     query = """
         UPDATE agent_schedules
         SET status = %s,
@@ -540,7 +581,11 @@ def pause_agent_schedule(
         with conn.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
                 query,
-                (AgentScheduleStatus.PAUSED.value, schedule_id, normalized_guild_id),
+                (
+                    AgentScheduleStatus.PAUSED.value,
+                    normalized_schedule_id,
+                    normalized_guild_id,
+                ),
             )
             row = cursor.fetchone()
     return _as_schedule_record(row) if row is not None else None
@@ -556,6 +601,9 @@ def resume_agent_schedule(
     """Resume a schedule from its next future cron occurrence, never backfill."""
 
     normalized_guild_id = _normalize_discord_snowflake(guild_id)
+    normalized_schedule_id = _normalize_uuid(schedule_id)
+    if normalized_schedule_id is None:
+        return None
     normalized_now = _utc_datetime(now or datetime.now(tz=timezone.utc))
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
@@ -565,7 +613,7 @@ def resume_agent_schedule(
                 WHERE id = %s AND guild_id = %s
                 FOR UPDATE
                 """,
-                (schedule_id, normalized_guild_id),
+                (normalized_schedule_id, normalized_guild_id),
             )
             row = cursor.fetchone()
             if row is None:
@@ -587,7 +635,11 @@ def resume_agent_schedule(
                 WHERE id = %s
                 RETURNING *
                 """,
-                (AgentScheduleStatus.ACTIVE.value, next_run_at, schedule_id),
+                (
+                    AgentScheduleStatus.ACTIVE.value,
+                    next_run_at,
+                    normalized_schedule_id,
+                ),
             )
             updated = cursor.fetchone()
     return _as_schedule_record(updated) if updated is not None else None
@@ -602,6 +654,9 @@ def archive_agent_schedule(
     """Retire a schedule while retaining an auditable immutable definition."""
 
     normalized_guild_id = _normalize_discord_snowflake(guild_id)
+    normalized_schedule_id = _normalize_uuid(schedule_id)
+    if normalized_schedule_id is None:
+        return None
     query = """
         UPDATE agent_schedules
         SET status = %s,
@@ -614,7 +669,11 @@ def archive_agent_schedule(
         with conn.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
                 query,
-                (AgentScheduleStatus.ARCHIVED.value, schedule_id, normalized_guild_id),
+                (
+                    AgentScheduleStatus.ARCHIVED.value,
+                    normalized_schedule_id,
+                    normalized_guild_id,
+                ),
             )
             row = cursor.fetchone()
     return _as_schedule_record(row) if row is not None else None
@@ -626,13 +685,19 @@ def create_manual_agent_schedule_run(
     schedule_id: str,
     guild_id: str,
     now: datetime | None = None,
-) -> AgentScheduleRunRecord | None:
-    """Queue a manual one-off run for an active schedule."""
+) -> AgentScheduleManualRunResult | None:
+    """Queue one manual run, coalescing requests within the configured cooldown."""
 
     normalized_guild_id = _normalize_discord_snowflake(guild_id)
+    normalized_schedule_id = _normalize_uuid(schedule_id)
+    if normalized_schedule_id is None:
+        return None
     occurrence_at = _utc_datetime(now or datetime.now(tz=timezone.utc))
     run_id = str(uuid4())
-    query = """
+    recent_cutoff = occurrence_at - timedelta(
+        seconds=max(60, settings.agent_schedule_min_interval_seconds)
+    )
+    insert_query = """
         INSERT INTO agent_schedule_runs (
             id,
             schedule_id,
@@ -640,28 +705,67 @@ def create_manual_agent_schedule_run(
             trigger,
             status
         )
-        SELECT %s, id, %s, %s, %s
-        FROM agent_schedules
-        WHERE id = %s
-          AND guild_id = %s
-          AND status = 'active'
+        VALUES (%s, %s, %s, %s, %s)
         RETURNING *
     """
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
+            # Locking the parent schedule serializes concurrent manual requests
+            # without relying on a best-effort application-side cooldown.
             cursor.execute(
-                query,
+                """
+                SELECT id
+                FROM agent_schedules
+                WHERE id = %s
+                  AND guild_id = %s
+                  AND status = 'active'
+                FOR UPDATE
+                """,
+                (normalized_schedule_id, normalized_guild_id),
+            )
+            if cursor.fetchone() is None:
+                return None
+            cursor.execute(
+                """
+                SELECT *
+                FROM agent_schedule_runs
+                WHERE schedule_id = %s
+                  AND trigger = %s
+                  AND occurrence_at >= %s
+                ORDER BY occurrence_at DESC
+                LIMIT 1
+                """,
+                (
+                    normalized_schedule_id,
+                    AgentScheduleRunTrigger.MANUAL.value,
+                    recent_cutoff,
+                ),
+            )
+            recent_row = cursor.fetchone()
+            if recent_row is not None:
+                return AgentScheduleManualRunResult(
+                    run=_as_schedule_run_record(recent_row),
+                    created=False,
+                )
+            cursor.execute(
+                insert_query,
                 (
                     run_id,
+                    normalized_schedule_id,
                     occurrence_at,
                     AgentScheduleRunTrigger.MANUAL.value,
                     AgentScheduleRunStatus.QUEUED.value,
-                    schedule_id,
-                    normalized_guild_id,
                 ),
             )
             row = cursor.fetchone()
-    return _as_schedule_run_record(row) if row is not None else None
+    return (
+        AgentScheduleManualRunResult(
+            run=_as_schedule_run_record(row),
+            created=True,
+        )
+        if row is not None
+        else None
+    )
 
 
 def create_due_agent_schedule_runs(
@@ -765,6 +869,80 @@ def list_unenqueued_agent_schedule_runs(
     return [_as_schedule_run_record(row) for row in rows]
 
 
+def list_agent_schedule_runs_needing_queue_reconciliation(
+    settings: SharedSettings,
+    *,
+    limit: int = 100,
+) -> list[AgentScheduleRunQueueReconciliation]:
+    """Find nonterminal runs whose worker job disappeared or became terminal.
+
+    A terminal worker job cannot make forward progress by itself.  The API
+    dispatcher can re-enqueue a queued run with a missing reference, or record
+    the terminal worker error against the durable schedule run.
+    """
+
+    bounded_limit = max(1, min(int(limit), 500))
+    query = """
+        SELECT runs.*, jobs.status AS worker_job_status,
+               jobs.last_error AS worker_job_last_error
+        FROM agent_schedule_runs AS runs
+        LEFT JOIN jobs ON jobs.id = runs.job_id
+        WHERE runs.status IN ('queued', 'running')
+          AND runs.job_id IS NOT NULL
+          AND (jobs.id IS NULL OR jobs.status IN ('dead', 'canceled'))
+        ORDER BY runs.created_at ASC
+        LIMIT %s
+    """
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(query, (bounded_limit,))
+            rows = cursor.fetchall()
+    return [
+        AgentScheduleRunQueueReconciliation(
+            run=_as_schedule_run_record(row),
+            job_status=(
+                str(row["worker_job_status"])
+                if row.get("worker_job_status") is not None
+                else None
+            ),
+            job_last_error=(
+                str(row["worker_job_last_error"])
+                if row.get("worker_job_last_error") is not None
+                else None
+            ),
+        )
+        for row in rows
+    ]
+
+
+def clear_agent_schedule_run_job_id(
+    settings: SharedSettings,
+    *,
+    run_id: str,
+    job_id: str,
+) -> bool:
+    """Release a missing worker-job reference so the run can be re-enqueued."""
+
+    normalized_run_id = _normalize_uuid(run_id)
+    normalized_job_id = _normalize_uuid(job_id)
+    if normalized_run_id is None or normalized_job_id is None:
+        return False
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE agent_schedule_runs
+                SET job_id = NULL,
+                    updated_at = NOW()
+                WHERE id = %s
+                  AND status = 'queued'
+                  AND job_id = %s
+                """,
+                (normalized_run_id, normalized_job_id),
+            )
+            return cursor.rowcount > 0
+
+
 def set_agent_schedule_run_job_id(
     settings: SharedSettings,
     *,
@@ -773,6 +951,10 @@ def set_agent_schedule_run_job_id(
 ) -> None:
     """Attach the idempotent durable worker job to its schedule occurrence."""
 
+    normalized_run_id = _normalize_uuid(run_id)
+    normalized_job_id = _normalize_uuid(job_id)
+    if normalized_run_id is None or normalized_job_id is None:
+        return
     with get_postgres_connection(settings) as conn:
         with conn.cursor() as cursor:
             cursor.execute(
@@ -784,8 +966,114 @@ def set_agent_schedule_run_job_id(
                   AND status = 'queued'
                   AND job_id IS NULL
                 """,
-                (job_id, run_id),
+                (normalized_job_id, normalized_run_id),
             )
+
+
+def claim_agent_schedule_run_delivery(
+    settings: SharedSettings,
+    *,
+    run_id: str,
+) -> AgentScheduleRunRecord | None:
+    """Reserve a report delivery before making the Discord side effect.
+
+    The claim is intentionally durable and is never retried automatically once
+    an outcome becomes ambiguous. That makes one schedule-run identifier an
+    at-most-once Discord delivery key across worker and API retries.
+    """
+
+    normalized_run_id = _normalize_uuid(run_id)
+    if normalized_run_id is None:
+        return None
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                UPDATE agent_schedule_runs
+                SET delivery_status = %s,
+                    delivery_claimed_at = NOW(),
+                    updated_at = NOW()
+                WHERE id = %s
+                  AND status = 'running'
+                  AND delivery_status = %s
+                RETURNING *
+                """,
+                (
+                    AgentScheduleRunDeliveryStatus.CLAIMED.value,
+                    normalized_run_id,
+                    AgentScheduleRunDeliveryStatus.PENDING.value,
+                ),
+            )
+            row = cursor.fetchone()
+    return _as_schedule_run_record(row) if row is not None else None
+
+
+def mark_agent_schedule_run_delivery_posted(
+    settings: SharedSettings,
+    *,
+    run_id: str,
+    message_id: str,
+) -> AgentScheduleRunRecord | None:
+    """Record a confirmed Discord message for a claimed schedule run."""
+
+    normalized_message_id = str(message_id or "").strip()
+    if not normalized_message_id:
+        raise ValueError("schedule delivery message id is required")
+    normalized_run_id = _normalize_uuid(run_id)
+    if normalized_run_id is None:
+        return None
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                UPDATE agent_schedule_runs
+                SET delivery_status = %s,
+                    delivery_message_id = %s,
+                    updated_at = NOW()
+                WHERE id = %s
+                  AND delivery_status = %s
+                RETURNING *
+                """,
+                (
+                    AgentScheduleRunDeliveryStatus.POSTED.value,
+                    normalized_message_id,
+                    normalized_run_id,
+                    AgentScheduleRunDeliveryStatus.CLAIMED.value,
+                ),
+            )
+            row = cursor.fetchone()
+    return _as_schedule_run_record(row) if row is not None else None
+
+
+def mark_agent_schedule_run_delivery_unknown(
+    settings: SharedSettings,
+    *,
+    run_id: str,
+) -> AgentScheduleRunRecord | None:
+    """Record an ambiguous delivery outcome without risking a duplicate post."""
+
+    normalized_run_id = _normalize_uuid(run_id)
+    if normalized_run_id is None:
+        return None
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                UPDATE agent_schedule_runs
+                SET delivery_status = %s,
+                    updated_at = NOW()
+                WHERE id = %s
+                  AND delivery_status = %s
+                RETURNING *
+                """,
+                (
+                    AgentScheduleRunDeliveryStatus.UNKNOWN.value,
+                    normalized_run_id,
+                    AgentScheduleRunDeliveryStatus.CLAIMED.value,
+                ),
+            )
+            row = cursor.fetchone()
+    return _as_schedule_run_record(row) if row is not None else None
 
 
 def get_agent_schedule_run(
@@ -795,9 +1083,14 @@ def get_agent_schedule_run(
 ) -> AgentScheduleRunRecord | None:
     """Load one scheduled occurrence by its durable run identifier."""
 
+    normalized_run_id = _normalize_uuid(run_id)
+    if normalized_run_id is None:
+        return None
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
-            cursor.execute("SELECT * FROM agent_schedule_runs WHERE id = %s", (run_id,))
+            cursor.execute(
+                "SELECT * FROM agent_schedule_runs WHERE id = %s", (normalized_run_id,)
+            )
             row = cursor.fetchone()
     return _as_schedule_run_record(row) if row is not None else None
 
@@ -816,6 +1109,9 @@ def claim_agent_schedule_run(
     crash; callers choose that conservative timestamp explicitly.
     """
 
+    normalized_run_id = _normalize_uuid(run_id)
+    if normalized_run_id is None:
+        return None
     if reclaim_running_before is None:
         query = """
             UPDATE agent_schedule_runs
@@ -828,7 +1124,10 @@ def claim_agent_schedule_run(
               AND status IN ('queued', 'failed')
             RETURNING *
         """
-        params: tuple[object, ...] = (AgentScheduleRunStatus.RUNNING.value, run_id)
+        params: tuple[object, ...] = (
+            AgentScheduleRunStatus.RUNNING.value,
+            normalized_run_id,
+        )
     else:
         query = """
             UPDATE agent_schedule_runs
@@ -846,7 +1145,7 @@ def claim_agent_schedule_run(
         """
         params = (
             AgentScheduleRunStatus.RUNNING.value,
-            run_id,
+            normalized_run_id,
             _utc_datetime(reclaim_running_before),
         )
     with get_postgres_connection(settings) as conn:
@@ -873,6 +1172,9 @@ def complete_agent_schedule_run(
     }:
         raise ValueError("schedule run completion status must be terminal")
 
+    normalized_run_id = _normalize_uuid(run_id)
+    if normalized_run_id is None:
+        return None
     normalized_output = _bounded_text(output, MAX_AGENT_SCHEDULE_OUTPUT_CHARS)
     normalized_error = _bounded_text(error, MAX_AGENT_SCHEDULE_ERROR_CHARS)
     with get_postgres_connection(settings) as conn:
@@ -889,7 +1191,53 @@ def complete_agent_schedule_run(
                   AND status = 'running'
                 RETURNING *
                 """,
-                (status.value, normalized_output, normalized_error, run_id),
+                (status.value, normalized_output, normalized_error, normalized_run_id),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            cursor.execute(
+                """
+                UPDATE agent_schedules
+                SET last_run_at = %s,
+                    updated_at = NOW()
+                WHERE id = %s
+                """,
+                (row["finished_at"], row["schedule_id"]),
+            )
+    return _as_schedule_run_record(row)
+
+
+def fail_agent_schedule_run(
+    settings: SharedSettings,
+    *,
+    run_id: str,
+    error: str,
+) -> AgentScheduleRunRecord | None:
+    """Persist a terminal worker-dispatch failure without executing the run."""
+
+    normalized_run_id = _normalize_uuid(run_id)
+    if normalized_run_id is None:
+        return None
+    normalized_error = _bounded_text(error, MAX_AGENT_SCHEDULE_ERROR_CHARS)
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                UPDATE agent_schedule_runs
+                SET status = %s,
+                    error = %s,
+                    finished_at = NOW(),
+                    updated_at = NOW()
+                WHERE id = %s
+                  AND status IN ('queued', 'running')
+                RETURNING *
+                """,
+                (
+                    AgentScheduleRunStatus.FAILED.value,
+                    normalized_error,
+                    normalized_run_id,
+                ),
             )
             row = cursor.fetchone()
             if row is None:
@@ -914,6 +1262,9 @@ def list_agent_schedule_runs(
 ) -> list[AgentScheduleRunRecord]:
     """List recent execution outcomes for dashboard and Discord inspection."""
 
+    normalized_schedule_id = _normalize_uuid(schedule_id)
+    if normalized_schedule_id is None:
+        return []
     bounded_limit = max(1, min(int(limit), 100))
     query = """
         SELECT *
@@ -924,7 +1275,7 @@ def list_agent_schedule_runs(
     """
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
-            cursor.execute(query, (schedule_id, bounded_limit))
+            cursor.execute(query, (normalized_schedule_id, bounded_limit))
             rows = cursor.fetchall()
     return [_as_schedule_run_record(row) for row in rows]
 
