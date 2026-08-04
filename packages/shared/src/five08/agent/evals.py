@@ -168,6 +168,7 @@ class AgentEvalFixture(BaseModel):
     seed: AgentEvalSeed = Field(default_factory=AgentEvalSeed)
     request: AgentEvalRequest
     expect: AgentEvalExpect
+    provider_expect: AgentEvalExpect | None = None
     known_failure: AgentEvalKnownFailure | None = None
 
 
@@ -649,7 +650,7 @@ def run_fixture_with_live_planner(
         timeout_seconds=timeout_seconds,
     )
     provider_draft = _evaluate_provider_draft(
-        fixture.expect,
+        fixture.provider_expect or fixture.expect,
         call,
         registry=orchestrator.registry,
     )

@@ -28,6 +28,10 @@
   "request": {
     "message": "Send member agreement to Caleb"
   },
+  "provider_expect": {
+    "status": "needs_clarification",
+    "actions": []
+  },
   "expect": {
     "status": "requires_confirmation",
     "intent": "send_member_agreement",

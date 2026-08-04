@@ -264,6 +264,54 @@ def test_live_planner_eval_uses_production_route_when_draft_clarifies(
     }
 
 
+def test_live_planner_eval_uses_raw_provider_expectations_before_enrichment(
+    monkeypatch,
+) -> None:
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"status":"needs_clarification",'
+                                '"intent":"send_member_agreement",'
+                                '"clarification_question":"What is Caleb\'s email address?",'
+                                '"actions":[]}'
+                            )
+                        }
+                    }
+                ]
+            }
+
+    monkeypatch.setenv("OPENAI_API_KEY_DIRECT", "direct-key")
+    monkeypatch.setattr(
+        "five08.agent.evals.requests.post",
+        lambda *_args, **_kwargs: FakeResponse(),
+    )
+
+    report = run_live_planner_eval_suite(
+        suite="canonical",
+        model="openai-direct",
+        ids=["member_agreement_crm_resolve_001"],
+        timeout_seconds=1,
+    )
+
+    assert report.summary["passed"] == 1
+    assert report.metrics["bad_plans"] == 0
+    scenario = report.scenarios[0]
+    assert scenario.provider_draft is not None
+    assert scenario.provider_draft.status == "passed"
+    assert (
+        scenario.observed.actions[0].arguments["submitter_email"] == "caleb@example.com"
+    )
+
+
 def test_live_planner_eval_records_raw_misroute_but_uses_production_route(
     monkeypatch,
 ) -> None:
