@@ -208,41 +208,46 @@ class PostgresMemoryStore:
         )
         comparison_time = normalize_memory_time(now)
         query = """
-            SELECT
-                id,
-                organization_id,
-                scope_type,
-                scope_id,
-                key,
-                value_json,
-                visibility,
-                source_type,
-                source_ref,
-                source_excerpt_hash,
-                created_by,
-                verification_status,
-                confidence,
-                expires_at,
-                deleted_at,
-                created_at,
-                updated_at
-            FROM agent_memory_facts
-            WHERE organization_id = %s
-              AND scope_type = %s
-              AND scope_id = %s
-              AND (
-                  (visibility = 'private' AND scope_type = 'user' AND scope_id = %s)
-                  OR (
-                      visibility = 'project'
-                      AND scope_type = 'project'
-                      AND scope_id = %s
+            WITH newest_facts AS (
+                SELECT
+                    id,
+                    organization_id,
+                    scope_type,
+                    scope_id,
+                    key,
+                    value_json,
+                    visibility,
+                    source_type,
+                    source_ref,
+                    source_excerpt_hash,
+                    created_by,
+                    verification_status,
+                    confidence,
+                    expires_at,
+                    deleted_at,
+                    created_at,
+                    updated_at
+                FROM agent_memory_facts
+                WHERE organization_id = %s
+                  AND scope_type = %s
+                  AND scope_id = %s
+                  AND (
+                      (visibility = 'private' AND scope_type = 'user' AND scope_id = %s)
+                      OR (
+                          visibility = 'project'
+                          AND scope_type = 'project'
+                          AND scope_id = %s
+                      )
+                      OR (visibility = 'org' AND scope_type = 'org' AND scope_id = %s)
                   )
-                  OR (visibility = 'org' AND scope_type = 'org' AND scope_id = %s)
-              )
-              AND (%s OR deleted_at IS NULL)
-              AND (expires_at IS NULL OR expires_at > %s)
+                  AND (%s OR deleted_at IS NULL)
+                  AND (expires_at IS NULL OR expires_at > %s)
+                ORDER BY created_at DESC, id DESC
+                LIMIT %s
+            )
+            SELECT *
+            FROM newest_facts
             ORDER BY created_at ASC, id ASC
-            LIMIT %s
         """
         with self._connection_factory() as conn:
             with conn.cursor(row_factory=dict_row) as cursor:

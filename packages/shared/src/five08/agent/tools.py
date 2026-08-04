@@ -1675,6 +1675,10 @@ class ToolRegistry:
             raise PermissionError("Project memory writes require project memory scope")
         if scope_type == "org" and "memory:admin" not in actor_scopes:
             raise PermissionError("Org memory writes require memory admin scope")
+        if scope_type == "org":
+            raise ValueError(
+                "Org memory writes are disabled until scoped org memory reads are available"
+            )
         key = str(arguments.get("key") or "").strip()
         value = arguments.get("value_json")
         if not key:

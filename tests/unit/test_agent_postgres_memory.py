@@ -171,7 +171,11 @@ def test_list_facts_filters_by_tenant_visibility_soft_delete_and_expiry() -> Non
     assert "visibility = 'org'" in query
     assert "deleted_at IS NULL" in query
     assert "expires_at IS NULL OR expires_at > %s" in query
+    assert "WITH newest_facts AS" in query
+    assert "ORDER BY created_at DESC, id DESC" in query
     assert "ORDER BY created_at ASC, id ASC" in query
+    assert query.index("ORDER BY created_at DESC, id DESC") < query.index("LIMIT %s")
+    assert query.index("LIMIT %s") < query.index("ORDER BY created_at ASC, id ASC")
     assert "LIMIT %s" in query
     assert params == (
         "org-1",

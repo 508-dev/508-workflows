@@ -525,6 +525,24 @@ def test_org_memory_write_rejects_argument_scope_mismatch() -> None:
         )
 
 
+def test_org_memory_write_is_disabled_without_a_scoped_read_tool() -> None:
+    registry = ToolRegistry(memory_store=InMemoryMemoryStore())
+
+    with pytest.raises(ValueError, match="disabled until scoped org memory reads"):
+        registry.execute(
+            "memory_write.remember_fact",
+            {
+                "scope_type": "org",
+                "scope_id": "org-1",
+                "key": "policy",
+                "value_json": {"text": "Use private confirmations"},
+            },
+            organization_id="org-1",
+            actor_id="123",
+            actor_scopes={"memory:write_self", "memory:admin"},
+        )
+
+
 def test_project_memory_visibility_requires_matching_project_scope() -> None:
     memory_store = InMemoryMemoryStore(
         [
