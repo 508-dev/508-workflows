@@ -151,12 +151,12 @@ jobs:
         run_live=false
         while IFS= read -r file; do
           case "$file" in
-            .github/workflows/test.yml|scripts/agent_eval.py|tests/unit/test_agent_cog.py|tests/unit/test_agent_evals.py|tests/unit/test_agent_gateway.py|pyproject.toml|uv.lock)
-              run=true
-              ;;
-            packages/shared/src/five08/agent/*|packages/shared/src/five08/model_catalog.py|packages/shared/src/five08/data/model-profiles.json|apps/discord_bot/src/five08/discord_bot/cogs/agent.py|tests/evals/discord-agent/*)
+            .github/workflows/test.yml|scripts/agent_eval.py|packages/shared/src/five08/agent/*|packages/shared/src/five08/model_catalog.py|packages/shared/src/five08/data/model-profiles.json|apps/discord_bot/src/five08/discord_bot/cogs/agent.py|tests/evals/discord-agent/*)
               run=true
               run_live=true
+              ;;
+            tests/unit/test_agent_cog.py|tests/unit/test_agent_evals.py|tests/unit/test_agent_gateway.py|pyproject.toml|uv.lock)
+              run=true
               ;;
           esac
         done <<< "$changed_files"
