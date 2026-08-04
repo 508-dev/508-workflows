@@ -278,5 +278,38 @@ def test_review_job_lead_uses_exact_id_after_prefix_lookup(monkeypatch) -> None:
     assert cursor.executed[1][1] == (
         "approved",
         "42",
+        "approved",
         "11111111-1111-1111-1111-111111111111",
+        ["pending", "approved"],
+    )
+
+
+def test_review_job_lead_restores_rejected_lead_to_pending(monkeypatch) -> None:
+    cursor = _CursorStub(
+        rows=[
+            [_lead_row(status="rejected", reviewed_by_discord_user_id="42")],
+            _lead_row(status="pending", reviewed_by_discord_user_id=None, reviewed_at=None),
+        ]
+    )
+    _install_connection_stub(monkeypatch, cursor)
+
+    restored = job_leads.review_job_lead(
+        job_leads.SharedSettings(),
+        lead_id="11111111",
+        status=JobLeadStatus.PENDING,
+        reviewer_discord_user_id="42",
+    )
+
+    assert restored is not None
+    assert restored.status is JobLeadStatus.PENDING
+    assert restored.reviewed_by_discord_user_id is None
+    assert restored.reviewed_at is None
+    query, params = cursor.executed[1]
+    assert "status = ANY(%s)" in query
+    assert params == (
+        "pending",
+        None,
+        "pending",
+        "11111111-1111-1111-1111-111111111111",
+        ["rejected"],
     )

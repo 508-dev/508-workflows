@@ -238,6 +238,8 @@ _DISCORD_LINK_REPLAY_TTL_SECONDS = 10
 _PROJECT_ROSTER_USER_CANDIDATE_CACHE_MAX_SIZE = 128
 _PROJECT_ROSTER_USER_CANDIDATE_CACHE_LOCK = threading.RLock()
 _PROJECT_ROSTER_USER_CANDIDATE_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_JOB_LEAD_SCRAPE_JOB_TYPE = "scrape_job_leads_job"
+_JOB_LEAD_SCRAPE_STATUS_LOOKBACK_DAYS = 366
 
 
 @dataclass(frozen=True)
@@ -1970,6 +1972,40 @@ def _dashboard_job_payload(job: Any) -> dict[str, Any]:
         "updated_at": job.updated_at.isoformat(),
         "payload": _redact_dashboard_job_payload(job.type, payload),
         "result": _redact_sensitive_payload(result),
+    }
+
+
+def _dashboard_job_lead_scrape_status_payload(
+    job: JobRecord | None,
+) -> dict[str, Any]:
+    """Return a Gigs-scoped view of the latest HN scrape background job."""
+    if job is None:
+        return {
+            "status": "not_run",
+            "job_id": None,
+            "source": "hackernews_who_is_hiring",
+            "story_id": None,
+            "created_at": None,
+            "updated_at": None,
+            "last_error": None,
+            "result": None,
+        }
+
+    payload = job.payload if isinstance(job.payload, dict) else {}
+    kwargs = payload.get("kwargs")
+    kwargs = kwargs if isinstance(kwargs, dict) else {}
+    raw_result = payload.get("result")
+    result = _redact_sensitive_payload(raw_result)
+    result_source = raw_result.get("source") if isinstance(raw_result, dict) else None
+    return {
+        "status": job.status.value,
+        "job_id": job.id,
+        "source": result_source or kwargs.get("source") or "hackernews_who_is_hiring",
+        "story_id": kwargs.get("story_id"),
+        "created_at": job.created_at.isoformat(),
+        "updated_at": job.updated_at.isoformat(),
+        "last_error": job.last_error,
+        "result": result,
     }
 
 
@@ -4441,11 +4477,51 @@ async def dashboard_job_leads_handler(
     )
 
 
+async def dashboard_job_lead_scrape_status_handler(
+    request: Request,
+    job_id: str | None = Query(default=None),
+) -> JSONResponse:
+    """Return the latest, or one requested, HN scrape status for the Gigs view."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_GIGS_READ,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+    steering_error = _dashboard_steering_or_error(session)
+    if steering_error is not None:
+        return steering_error
+
+    normalized_job_id = job_id.strip() if job_id is not None else ""
+    if job_id is not None and not normalized_job_id:
+        return JSONResponse({"error": "job_id_required"}, status_code=400)
+
+    if normalized_job_id:
+        job = await asyncio.to_thread(get_job, settings, normalized_job_id)
+        if job is None or job.type != _JOB_LEAD_SCRAPE_JOB_TYPE:
+            return JSONResponse({"error": "job_not_found"}, status_code=404)
+    else:
+        jobs = await asyncio.to_thread(
+            list_jobs,
+            settings,
+            created_after=datetime.now(tz=timezone.utc)
+            - timedelta(days=_JOB_LEAD_SCRAPE_STATUS_LOOKBACK_DAYS),
+            limit=1,
+            job_type=_JOB_LEAD_SCRAPE_JOB_TYPE,
+        )
+        job = jobs[0] if jobs else None
+
+    return JSONResponse(
+        jsonable_encoder(_dashboard_job_lead_scrape_status_payload(job))
+    )
+
+
 async def dashboard_review_job_lead_handler(
     request: Request,
     lead_id: str,
 ) -> JSONResponse:
-    """Approve or reject one sourced job lead from the dashboard."""
+    """Review or restore one sourced job lead from the dashboard."""
     session, error_response = await _dashboard_session_or_error(
         request,
         required_permission=DASHBOARD_PERMISSION_GIGS_WRITE,

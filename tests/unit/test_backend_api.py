@@ -3875,6 +3875,102 @@ def test_dashboard_job_leads_rejects_invalid_status(client: TestClient) -> None:
     mock_leads.assert_not_called()
 
 
+def test_dashboard_job_lead_scrape_status_reports_latest_run(
+    client: TestClient,
+) -> None:
+    session = _dashboard_write_session()
+    now = datetime(2026, 8, 4, 7, 30, tzinfo=timezone.utc)
+    job = api.JobRecord(
+        id="job-leads-1",
+        type="scrape_job_leads_job",
+        status=api.JobStatus.SUCCEEDED,
+        payload={
+            "args": [],
+            "kwargs": {"source": "hackernews_who_is_hiring", "story_id": None},
+            "result": {
+                "source": "hackernews_who_is_hiring",
+                "thread_found": True,
+                "threads": [
+                    {
+                        "story_id": 49156683,
+                        "title": "Ask HN: Who is hiring? (August 2026)",
+                        "url": "https://news.ycombinator.com/item?id=49156683",
+                        "comments_reported": 140,
+                    }
+                ],
+                "potential_gigs_scraped": 108,
+                "included": 3,
+                "filtered_out": 105,
+                "filter_reasons": {
+                    "empty": 0,
+                    "seeking_work": 2,
+                    "not_contractor_friendly": 103,
+                },
+                "created": 2,
+                "updated": 1,
+                "persisted": 3,
+            },
+        },
+        idempotency_key="job-leads:hackernews_who_is_hiring:latest:202608040730",
+        attempts=1,
+        max_attempts=8,
+        run_after=None,
+        locked_at=None,
+        locked_by=None,
+        last_error=None,
+        created_at=now,
+        updated_at=now,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.list_jobs", return_value=[job]) as mock_jobs,
+    ):
+        response = client.get("/dashboard/api/gig-leads/scrape-status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "succeeded"
+    assert payload["job_id"] == "job-leads-1"
+    assert payload["result"]["threads"][0]["story_id"] == 49156683
+    assert payload["result"]["potential_gigs_scraped"] == 108
+    assert payload["result"]["included"] == 3
+    assert payload["result"]["filtered_out"] == 105
+    assert payload["result"]["persisted"] == 3
+    assert mock_jobs.call_args.kwargs["job_type"] == "scrape_job_leads_job"
+    assert mock_jobs.call_args.kwargs["limit"] == 1
+
+
+def test_dashboard_job_lead_scrape_status_reports_not_run(client: TestClient) -> None:
+    session = _dashboard_write_session()
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.list_jobs", return_value=[]),
+    ):
+        response = client.get("/dashboard/api/gig-leads/scrape-status")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "not_run",
+        "job_id": None,
+        "source": "hackernews_who_is_hiring",
+        "story_id": None,
+        "created_at": None,
+        "updated_at": None,
+        "last_error": None,
+        "result": None,
+    }
+
+
 def test_dashboard_review_job_lead_approves_with_discord_reviewer(
     client: TestClient,
 ) -> None:
@@ -3967,6 +4063,37 @@ def test_dashboard_review_job_lead_uses_admin_sso_subject_for_reviewer(
         status="rejected",
         reviewer_discord_user_id="oidc-subject-1",
     )
+
+
+def test_dashboard_review_job_lead_restores_rejected_lead_to_pending(
+    client: TestClient,
+) -> None:
+    session = _dashboard_write_session()
+    restored = {"id": "lead-1", "status": "pending", "title": "Contract engineer"}
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.review_job_lead", return_value=restored) as mock_review,
+        patch("five08.backend.api.insert_audit_event") as mock_insert,
+    ):
+        response = client.post(
+            "/dashboard/api/gig-leads/lead-1/review",
+            json={"status": "pending"},
+        )
+
+    assert response.status_code == 200
+    mock_review.assert_called_once_with(
+        api.settings,
+        lead_id="lead-1",
+        status="pending",
+        reviewer_discord_user_id="steering-1",
+    )
+    audit_payload = mock_insert.call_args.args[1]
+    assert audit_payload.metadata == {"lead_id": "lead-1", "status": "pending"}
 
 
 def test_dashboard_review_job_lead_returns_404_for_missing_lead(

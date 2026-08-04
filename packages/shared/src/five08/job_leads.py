@@ -454,29 +454,51 @@ def review_job_lead(
     status: JobLeadStatus | str,
     reviewer_discord_user_id: str,
 ) -> JobLead | None:
-    """Approve or reject a pending lead without publishing it."""
+    """Review a lead or restore a rejected lead to the pending queue."""
     normalized_status = _normalize_status(status)
-    if normalized_status not in {JobLeadStatus.APPROVED, JobLeadStatus.REJECTED}:
-        raise ValueError("Job lead review status must be approved or rejected.")
+    if normalized_status not in {
+        JobLeadStatus.PENDING,
+        JobLeadStatus.APPROVED,
+        JobLeadStatus.REJECTED,
+    }:
+        raise ValueError(
+            "Job lead review status must be pending, approved, or rejected."
+        )
     existing = get_job_lead(settings, lead_id)
     if existing is None:
         return None
+    allowed_source_statuses = (
+        [JobLeadStatus.REJECTED.value]
+        if normalized_status is JobLeadStatus.PENDING
+        else [JobLeadStatus.PENDING.value, JobLeadStatus.APPROVED.value]
+    )
+    reviewer = (
+        None
+        if normalized_status is JobLeadStatus.PENDING
+        else reviewer_discord_user_id
+    )
     query = """
         UPDATE job_leads
         SET
             status = %s,
             reviewed_by_discord_user_id = %s,
-            reviewed_at = NOW(),
+            reviewed_at = CASE WHEN %s = 'pending' THEN NULL ELSE NOW() END,
             updated_at = NOW()
         WHERE id = %s
-          AND status IN ('pending', 'approved')
+          AND status = ANY(%s)
         RETURNING *
     """
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
                 query,
-                (normalized_status.value, reviewer_discord_user_id, existing.id),
+                (
+                    normalized_status.value,
+                    reviewer,
+                    normalized_status.value,
+                    existing.id,
+                    allowed_source_statuses,
+                ),
             )
             row = cursor.fetchone()
     return _as_lead(row) if row is not None else None

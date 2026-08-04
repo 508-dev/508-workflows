@@ -491,6 +491,61 @@ def test_hacker_news_source_extracts_top_level_contractor_posts() -> None:
     assert classification["contact_email"] == "hiring@acme.example"
 
 
+def test_hacker_news_source_reports_thread_and_filter_counts() -> None:
+    source = HackerNewsWhoIsHiringLeadSource(client=_FakeHackerNewsClient())
+
+    source.collect()
+
+    assert source.collection_report() == {
+        "thread_found": True,
+        "threads": [
+            {
+                "story_id": 48357725,
+                "title": "Ask HN: Who is hiring? (June 2026)",
+                "url": "https://news.ycombinator.com/item?id=48357725",
+                "created_at": "2026-06-01T00:00:00+00:00",
+                "comments_reported": 3,
+                "potential_gigs_scraped": 2,
+                "included": 1,
+                "filtered_out": 1,
+                "filter_reasons": {
+                    "empty": 0,
+                    "seeking_work": 1,
+                    "not_contractor_friendly": 0,
+                },
+            }
+        ],
+        "potential_gigs_scraped": 2,
+        "included": 1,
+        "filtered_out": 1,
+        "filter_reasons": {
+            "empty": 0,
+            "seeking_work": 1,
+            "not_contractor_friendly": 0,
+        },
+    }
+
+
+def test_hacker_news_source_reports_no_discovered_thread() -> None:
+    source = HackerNewsWhoIsHiringLeadSource(
+        client=SimpleNamespace(search_who_is_hiring_threads=lambda **_kwargs: []),  # type: ignore[arg-type]
+    )
+
+    assert source.collect() == []
+    assert source.collection_report() == {
+        "thread_found": False,
+        "threads": [],
+        "potential_gigs_scraped": 0,
+        "included": 0,
+        "filtered_out": 0,
+        "filter_reasons": {
+            "empty": 0,
+            "seeking_work": 0,
+            "not_contractor_friendly": 0,
+        },
+    }
+
+
 def test_hacker_news_source_uses_injected_classifier_for_lead_filtering() -> None:
     source = HackerNewsWhoIsHiringLeadSource(
         client=_FakeClassifierHackerNewsClient(),

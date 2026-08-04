@@ -64,6 +64,13 @@ threads into a review queue. Each lead shows an explicit employment type such
 as `Full-time`, `Part-time / contract`, or `Full-time or part-time / contract`,
 plus whether the result came from the LLM classifier or keyword fallback.
 
+The Leads tab retains the latest scrape result so operators can confirm that a
+monthly thread was found. It links to the discovered HN thread and reports HN's
+comment count, direct top-level posts scanned as potential gigs, included leads,
+filtered posts (with reasons), and records created or refreshed. A found thread
+with zero top-level posts is reported separately from a missing thread; re-run
+the scrape as new employers add comments.
+
 When a post contains them, the review card exposes the role-specific
 application page and a direct contact email as separate actions. Model-proposed
 links and email addresses are accepted only when they appear verbatim in the
@@ -71,6 +78,13 @@ source post; deterministic scoring prefers application pages over company
 homepages. Re-scraping can correct pending or rejected leads that were
 previously admitted by a keyword false positive, while approved or posted leads
 remain unchanged.
+
+Lead cards keep a compact excerpt by default and can expand to show the full
+normalized HN comment. Rejected leads can be restored to `pending` for another
+review; the restoration clears the prior review marker while the dashboard audit
+trail records the action. Posting a lead keeps the reviewer on the Leads tab,
+marks that card `Posted`, and exposes links to the resulting Discord thread and
+dashboard gig when available.
 
 ## Candidate Sources
 
