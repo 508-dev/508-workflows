@@ -24,9 +24,11 @@ from five08.agent import (
     AgentToolAction,
     InMemoryTaskStore,
     ToolRegistry,
+    ToolRuntimeConfig,
 )
 from five08.backend import api
 from five08.job_channels import JobPostingType, RegisteredJobPostChannel
+from five08.settings import SharedSettings
 from five08.worker.masking import mask_email
 
 
@@ -55,6 +57,74 @@ class _FakePostgresConnection:
 
     def close(self) -> None:
         return None
+
+
+def test_cached_api_orchestrator_refreshes_policy_from_live_runtime_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A process-local orchestrator must not retain dashboard GitHub settings."""
+
+    runtime_configs = [
+        ToolRuntimeConfig(
+            github_default_repo="508-dev/old-repository",
+            github_allowed_repos="508-dev/old-repository",
+        )
+    ]
+
+    def live_runtime_config(*_args: object) -> ToolRuntimeConfig:
+        return runtime_configs[0]
+
+    monkeypatch.setattr(
+        api,
+        "settings",
+        SharedSettings(
+            environment="production",
+            discord_server_id="1000",
+            agent_discord_admin_role_ids="1001",
+        ),
+    )
+    monkeypatch.setattr(api, "_AGENT_ORCHESTRATOR", None)
+    monkeypatch.setattr(
+        api.ToolRuntimeConfig,
+        "from_settings",
+        live_runtime_config,
+    )
+
+    orchestrator = api._get_agent_orchestrator()
+    initial_policy = orchestrator.policy
+
+    assert api._get_agent_orchestrator() is orchestrator
+    assert initial_policy.github_default_repo == "508-dev/old-repository"
+    assert "agent:schedule:manage" in initial_policy.scopes_for_context(
+        AgentIdentityContext(
+            discord_user_id="user-1",
+            organization_id="1000",
+            guild_id="1000",
+            role_ids=["1001"],
+        )
+    )
+
+    runtime_configs[0] = ToolRuntimeConfig(
+        github_default_repo="508-dev/new-repository",
+        github_allowed_repos="508-dev/new-repository",
+    )
+    refreshed_policy = orchestrator.policy
+
+    assert api._get_agent_orchestrator() is orchestrator
+    assert refreshed_policy is not initial_policy
+    assert refreshed_policy.github_default_repo == "508-dev/new-repository"
+    assert refreshed_policy.github_configured_repositories == {"508-dev/new-repository"}
+    assert (
+        refreshed_policy.scopes_for_context(
+            AgentIdentityContext(
+                discord_user_id="user-1",
+                organization_id="2000",
+                guild_id="2000",
+                role_ids=["1001"],
+            )
+        )
+        == set()
+    )
 
 
 def test_crm_sync_scheduler_skips_start_without_espo_config(

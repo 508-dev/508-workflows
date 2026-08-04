@@ -439,7 +439,10 @@ def _get_agent_orchestrator() -> AgentOrchestrator:
                 intent_normalizer=OpenAICompatibleIntentNormalizer.from_settings(
                     settings
                 ),
-                policy=PolicyEngine.from_settings(settings),
+                policy_factory=lambda: PolicyEngine.from_settings(
+                    settings,
+                    runtime_config=ToolRuntimeConfig.from_settings(settings),
+                ),
                 max_planning_steps=settings.agent_planning_max_steps,
                 max_public_web_seconds=settings.agent_public_web_deadline_seconds,
             )

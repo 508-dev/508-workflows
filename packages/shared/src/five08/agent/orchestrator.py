@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from time import monotonic
@@ -116,6 +117,7 @@ class AgentOrchestrator:
         *,
         registry: ToolRegistry | None = None,
         policy: PolicyEngine | None = None,
+        policy_factory: Callable[[], PolicyEngine] | None = None,
         model_config: AgentModelConfig | None = None,
         planner: AgentPlanner | None = None,
         intent_normalizer: AgentIntentNormalizer | None = None,
@@ -127,6 +129,7 @@ class AgentOrchestrator:
     ) -> None:
         self.registry = registry or ToolRegistry()
         self._explicit_policy = policy
+        self._policy_factory = policy_factory
         self.model_config = model_config or AgentModelConfig()
         self.planner = planner
         self.intent_normalizer = intent_normalizer
@@ -138,10 +141,12 @@ class AgentOrchestrator:
 
     @property
     def policy(self) -> PolicyEngine:
-        """Use live GitHub repository configuration unless a test overrides it."""
+        """Resolve the current policy while preserving explicit test overrides."""
 
-        return self._explicit_policy or PolicyEngine.from_runtime_config(
-            self.registry.runtime_config
+        return self._explicit_policy or (
+            self._policy_factory()
+            if self._policy_factory is not None
+            else PolicyEngine.from_runtime_config(self.registry.runtime_config)
         )
 
     def plan(self, message: str, context: AgentIdentityContext) -> AgentResponse:
