@@ -400,6 +400,16 @@ _AGENT_SCHEDULE_REPORT_MAX_CHARS = 1_900
 _AGENT_SCHEDULE_RUNNING_LEASE_SECONDS = 300
 _AGENT_SCHEDULE_LOOP_MAX_ACTIONS_PER_STEP = 2
 _AGENT_SCHEDULE_LOOP_MAX_OBSERVATION_CHARS = 12_000
+_AGENT_SCHEDULE_CRM_TOOL_NAMES = frozenset({"crm_read.search_contacts"})
+_AGENT_SCHEDULE_ERP_TOOL_NAMES = frozenset(
+    {
+        "billing_read.search_invoices",
+        "billing_read.get_invoice_summary",
+        "billing_read.search_suppliers",
+        "erp_read.search_projects",
+        "erp_read.get_project_summary",
+    }
+)
 # `asyncio.wait_for` cannot stop a synchronous DNS/HTTP call running in a
 # worker thread. Keep the number of such requests bounded while the API has
 # already returned its caller-visible timeout response.
@@ -9303,6 +9313,36 @@ def _agent_schedule_manager_error(context: AgentIdentityContext) -> str | None:
     return None
 
 
+def _default_agent_schedule_tool_allowlist(
+    runtime_config: ToolRuntimeConfig,
+) -> list[str]:
+    """Return schedule-safe tools backed by the current integration config."""
+
+    schedule_safe_tools = ToolRegistry(
+        runtime_config=runtime_config
+    ).schedule_safe_tool_names()
+    # A generic schedule should not advertise an optional integration that
+    # cannot serve the planner at execution time. Explicit administrator
+    # selections remain deliberate and are preserved by the caller.
+    if not str(runtime_config.firecrawl_api_key or "").strip():
+        schedule_safe_tools -= {"web_read.extract"}
+    if not all(
+        str(value or "").strip()
+        for value in (runtime_config.espo_base_url, runtime_config.espo_api_key)
+    ):
+        schedule_safe_tools -= _AGENT_SCHEDULE_CRM_TOOL_NAMES
+    if not all(
+        str(value or "").strip()
+        for value in (
+            runtime_config.erpnext_base_url,
+            runtime_config.erpnext_api_key,
+            runtime_config.agent_erp_organization_id,
+        )
+    ):
+        schedule_safe_tools -= _AGENT_SCHEDULE_ERP_TOOL_NAMES
+    return sorted(AGENT_SCHEDULE_ALLOWED_TOOL_NAMES & schedule_safe_tools)
+
+
 def _agent_schedule_definition_from_fields(
     payload: Any,
     *,
@@ -9340,16 +9380,8 @@ def _agent_schedule_definition_from_fields(
         # read-only tool (including GitHub search) never joins a model loop by
         # accident.
         runtime_config = ToolRuntimeConfig.from_settings(settings)
-        schedule_safe_tools = ToolRegistry(
-            runtime_config=runtime_config
-        ).schedule_safe_tool_names()
-        # A Firecrawl credential is required specifically for extraction. Do
-        # not let a generic schedule persist a tool that its runtime cannot
-        # service; explicit administrator-selected tools remain deliberate.
-        if not str(runtime_config.firecrawl_api_key or "").strip():
-            schedule_safe_tools -= {"web_read.extract"}
-        tool_allowlist = requested_tools or sorted(
-            AGENT_SCHEDULE_ALLOWED_TOOL_NAMES & schedule_safe_tools
+        tool_allowlist = requested_tools or _default_agent_schedule_tool_allowlist(
+            runtime_config
         )
         return AgentScheduleDefinition(
             prompt=prompt,

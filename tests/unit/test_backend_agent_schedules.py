@@ -130,14 +130,8 @@ def test_agent_loop_creation_persists_an_exact_default_tool_catalog() -> None:
     assert "onboarding_read.get_summary" in definition.tool_allowlist
     assert "github_issue.search_issues" not in definition.tool_allowlist
     assert "crm_write.update_contact" not in definition.tool_allowlist
-    runtime_config = ToolRuntimeConfig.from_settings(api.settings)
-    expected_tools = ToolRegistry(
-        runtime_config=runtime_config
-    ).schedule_safe_tool_names()
-    if not str(runtime_config.firecrawl_api_key or "").strip():
-        expected_tools -= {"web_read.extract"}
-    assert definition.tool_allowlist == sorted(
-        api.AGENT_SCHEDULE_ALLOWED_TOOL_NAMES & expected_tools
+    assert definition.tool_allowlist == api._default_agent_schedule_tool_allowlist(
+        ToolRuntimeConfig.from_settings(api.settings)
     )
 
 
@@ -179,6 +173,57 @@ def test_agent_loop_creation_includes_configured_web_extraction(
     )
 
     assert "web_read.extract" in definition.tool_allowlist
+
+
+def test_agent_loop_creation_omits_unconfigured_optional_integrations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Generic schedules do not advertise integrations missing their credentials."""
+
+    monkeypatch.setattr(api.settings, "espo_base_url", None)
+    monkeypatch.setattr(api.settings, "espo_api_key", None)
+    monkeypatch.setattr(api.settings, "erpnext_base_url", None)
+    monkeypatch.setattr(api.settings, "erpnext_api_key", None)
+    monkeypatch.setattr(api.settings, "agent_erp_organization_id", None)
+
+    definition = api._agent_schedule_definition_from_fields(
+        SimpleNamespace(
+            prompt="Review current operational health.",
+            execution_mode="agent_loop",
+            tool_allowlist=[],
+            channel_id="2000",
+        ),
+        guild_id="1000",
+    )
+
+    assert "crm_read.search_contacts" not in definition.tool_allowlist
+    assert not (set(definition.tool_allowlist) & api._AGENT_SCHEDULE_ERP_TOOL_NAMES)
+    assert "onboarding_read.get_summary" in definition.tool_allowlist
+
+
+def test_agent_loop_creation_includes_configured_optional_integrations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Generic schedules retain integrations with all required runtime config."""
+
+    monkeypatch.setattr(api.settings, "espo_base_url", "https://crm.example.test")
+    monkeypatch.setattr(api.settings, "espo_api_key", "espo-key")
+    monkeypatch.setattr(api.settings, "erpnext_base_url", "https://erp.example.test")
+    monkeypatch.setattr(api.settings, "erpnext_api_key", "erp-key")
+    monkeypatch.setattr(api.settings, "agent_erp_organization_id", "1000")
+
+    definition = api._agent_schedule_definition_from_fields(
+        SimpleNamespace(
+            prompt="Review current operational health.",
+            execution_mode="agent_loop",
+            tool_allowlist=[],
+            channel_id="2000",
+        ),
+        guild_id="1000",
+    )
+
+    assert "crm_read.search_contacts" in definition.tool_allowlist
+    assert api._AGENT_SCHEDULE_ERP_TOOL_NAMES <= set(definition.tool_allowlist)
 
 
 def test_frozen_github_schedule_requires_an_allowlisted_repository(
