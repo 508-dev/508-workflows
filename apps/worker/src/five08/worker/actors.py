@@ -182,15 +182,29 @@ def _compute_retry_delay_seconds(attempt: int) -> int:
 
 def _schedule_retry(job: JobRecord, attempts: int, *, error: str) -> None:
     job_id = job.id
+    claim_token = job.locked_by
+    if claim_token is None:
+        logger.error(
+            "Skipping retry for job_id=%s because its execution claim has no lease token",
+            job_id,
+        )
+        return
     delay_seconds = _compute_retry_delay_seconds(attempts)
     retry_at = datetime.now(tz=timezone.utc) + timedelta(seconds=delay_seconds)
-    mark_job_retry(
+    transitioned = mark_job_retry(
         settings,
         job_id,
         attempts=attempts,
         run_after=retry_at,
         last_error=error,
+        claim_token=claim_token,
     )
+    if not transitioned:
+        logger.info(
+            "Skipping retry for job_id=%s because its execution lease was replaced",
+            job_id,
+        )
+        return
     if _should_log_job_event(event_type="retrying", job_type=job.type):
         _log_job_event(
             event_type="retrying",
@@ -213,21 +227,34 @@ def _run_job(job_id: str) -> None:
     if job is None:
         logger.info("Skipping job_id=%s because it is no longer claimable", job_id)
         return
+    claim_token = job.locked_by
+    if claim_token is None:
+        logger.error(
+            "Skipping job_id=%s because its execution claim has no lease token",
+            job_id,
+        )
+        return
 
     handler = _HANDLERS.get(job.type)
     if handler is None:
         error = f"Unknown job type: {job.type}"
         logger.error("Marking job dead id=%s error=%s", job_id, error)
-        mark_job_dead(settings, job_id, attempts=job.attempts, last_error=error)
-        _log_job_event(
-            event_type="dead",
-            job_id=job.id,
-            job_type=job.type,
-            attempts=_job_attempt_display(job.attempts),
-            max_attempts=job.max_attempts,
-            worker_name=settings.worker_name,
-            error=error,
-        )
+        if mark_job_dead(
+            settings,
+            job_id,
+            attempts=job.attempts,
+            last_error=error,
+            claim_token=claim_token,
+        ):
+            _log_job_event(
+                event_type="dead",
+                job_id=job.id,
+                job_type=job.type,
+                attempts=_job_attempt_display(job.attempts),
+                max_attempts=job.max_attempts,
+                worker_name=settings.worker_name,
+                error=error,
+            )
         return
 
     if _should_log_job_event(event_type="started", job_type=job.type):
@@ -243,12 +270,19 @@ def _run_job(job_id: str) -> None:
     try:
         args, kwargs = _extract_call_args(job)
         result = handler(*args, **kwargs)
-        mark_job_succeeded(
+        transitioned = mark_job_succeeded(
             settings,
             job_id,
             result=result,
             base_payload=job.payload,
+            claim_token=claim_token,
         )
+        if not transitioned:
+            logger.info(
+                "Ignoring stale success for job_id=%s because its lease was replaced",
+                job_id,
+            )
+            return
         logger.info("Completed job_id=%s type=%s", job_id, job.type)
         if _should_log_job_event(event_type="succeeded", job_type=job.type):
             _log_job_event(
@@ -272,12 +306,19 @@ def _run_job(job_id: str) -> None:
             next_attempt,
             error,
         )
-        mark_job_dead(
+        transitioned = mark_job_dead(
             settings,
             job_id,
             attempts=next_attempt,
             last_error=error,
+            claim_token=claim_token,
         )
+        if not transitioned:
+            logger.info(
+                "Ignoring stale terminal failure for job_id=%s because its lease was replaced",
+                job_id,
+            )
+            return
         _log_job_event(
             event_type="dead",
             job_id=job.id,
@@ -295,12 +336,19 @@ def _run_job(job_id: str) -> None:
         )
 
         if next_attempt >= job.max_attempts:
-            mark_job_dead(
+            transitioned = mark_job_dead(
                 settings,
                 job_id,
                 attempts=next_attempt,
                 last_error=error,
+                claim_token=claim_token,
             )
+            if not transitioned:
+                logger.info(
+                    "Ignoring stale terminal failure for job_id=%s because its lease was replaced",
+                    job_id,
+                )
+                return
             _log_job_event(
                 event_type="dead",
                 job_id=job.id,

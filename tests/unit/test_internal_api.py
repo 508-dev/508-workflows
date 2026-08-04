@@ -364,7 +364,10 @@ class TestInternalAPIRoutes:
             FakeMessageable,
         )
 
-        result, status_code = await internal_api_routes._validate_agent_schedule_channel(
+        (
+            result,
+            status_code,
+        ) = await internal_api_routes._validate_agent_schedule_channel(
             AgentScheduleChannelRequest(guild_id="1000", channel_id="2000")
         )
 

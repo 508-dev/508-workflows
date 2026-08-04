@@ -729,11 +729,15 @@ class InternalAPIRoutes:
             ):
                 return None, {"error": "missing_channel_send_permission"}, 403
 
-        return channel, {
-            "status": "ready",
-            "guild_id": str(guild.id),
-            "channel_id": str(normalized_channel_id),
-        }, 200
+        return (
+            channel,
+            {
+                "status": "ready",
+                "guild_id": str(guild.id),
+                "channel_id": str(normalized_channel_id),
+            },
+            200,
+        )
 
     async def _validate_agent_schedule_channel(
         self,
@@ -747,7 +751,9 @@ class InternalAPIRoutes:
         )
         return result, status_code
 
-    async def agent_schedule_channel_handler(self, request: web.Request) -> web.Response:
+    async def agent_schedule_channel_handler(
+        self, request: web.Request
+    ) -> web.Response:
         """Validate an intended recurring-report channel without sending a message."""
 
         if not self._is_authorized(request):
@@ -779,7 +785,11 @@ class InternalAPIRoutes:
             return {"error": "report_content_required"}, 400
         if len(content) > 1_900:
             return {"error": "report_content_too_long"}, 400
-        channel, validation, validation_status = await self._resolve_agent_schedule_channel(
+        (
+            channel,
+            validation,
+            validation_status,
+        ) = await self._resolve_agent_schedule_channel(
             guild_id=payload.guild_id,
             channel_id=payload.channel_id,
         )

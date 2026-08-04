@@ -17,7 +17,7 @@ def test_run_job_schedules_retry_for_docuseal_processing_error() -> None:
     job = JobRecord(
         id="job-123",
         type="process_docuseal_agreement_job",
-        status=JobStatus.QUEUED,
+        status=JobStatus.RUNNING,
         payload={
             "args": ["member@508.dev", "2026-02-25 12:00:00", 42],
             "kwargs": {},
@@ -27,7 +27,7 @@ def test_run_job_schedules_retry_for_docuseal_processing_error() -> None:
         max_attempts=8,
         run_after=None,
         locked_at=None,
-        locked_by=None,
+        locked_by="worker-1:claim-123",
         last_error=None,
         created_at=now,
         updated_at=now,
@@ -70,7 +70,7 @@ def test_run_job_marks_dead_for_non_retryable_docuseal_error() -> None:
     job = JobRecord(
         id="job-124",
         type="process_docuseal_agreement_job",
-        status=JobStatus.QUEUED,
+        status=JobStatus.RUNNING,
         payload={
             "args": ["member@508.dev", "not-a-date", 42],
             "kwargs": {},
@@ -80,7 +80,7 @@ def test_run_job_marks_dead_for_non_retryable_docuseal_error() -> None:
         max_attempts=8,
         run_after=None,
         locked_at=None,
-        locked_by=None,
+        locked_by="worker-1:claim-124",
         last_error=None,
         created_at=now,
         updated_at=now,
@@ -158,3 +158,34 @@ def test_run_job_executes_only_one_duplicate_broker_delivery() -> None:
     assert mock_claim.call_count == 2
     handler.assert_called_once_with("member@508.dev", "2026-02-25 12:00:00", 42)
     mock_mark_succeeded.assert_called_once()
+
+
+def test_schedule_retry_does_not_redeliver_after_lease_is_replaced() -> None:
+    """A stale worker must not schedule another delivery after losing its lease."""
+
+    now = datetime.now(timezone.utc)
+    job = JobRecord(
+        id="job-126",
+        type="process_docuseal_agreement_job",
+        status=JobStatus.RUNNING,
+        payload={"args": [], "kwargs": {}},
+        idempotency_key=None,
+        attempts=1,
+        max_attempts=8,
+        run_after=None,
+        locked_at=now,
+        locked_by="worker-1:expired-claim",
+        last_error=None,
+        created_at=now,
+        updated_at=now,
+    )
+
+    with (
+        patch("five08.worker.actors.mark_job_retry", return_value=False) as mock_retry,
+        patch.object(actors.execute_job, "send_with_options") as mock_send,
+    ):
+        actors._schedule_retry(job, 2, error="transient failure")
+
+    mock_retry.assert_called_once()
+    assert mock_retry.call_args.kwargs["claim_token"] == "worker-1:expired-claim"
+    mock_send.assert_not_called()

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from enum import StrEnum
 from typing import Any, Protocol, cast
 from uuid import uuid4
@@ -262,7 +262,10 @@ def _mark_job(
     locked_by: Any = _UNSET,
     run_after: Any = _UNSET,
     last_error: Any = _UNSET,
-) -> None:
+    claim_token: str,
+) -> bool:
+    """Persist a job transition fenced to one active execution lease."""
+
     updates: list[str] = []
     params: list[Any] = []
 
@@ -288,19 +291,23 @@ def _mark_job(
         updates.append("last_error = %s")
         params.append(last_error)
     if not updates:
-        return
+        return False
 
     updates.append("updated_at = NOW()")
     params.append(job_id)
+    params.append(claim_token)
 
     query = f"""
         UPDATE jobs
         SET {", ".join(updates)}
-        WHERE id = %s;
+        WHERE id = %s
+          AND status = 'running'
+          AND locked_by = %s;
     """
     with get_postgres_connection(settings) as conn:
         with conn.cursor() as cursor:
             cursor.execute(trusted_sql(query), params)
+            return cursor.rowcount > 0
 
 
 def claim_job_for_execution(
@@ -309,14 +316,17 @@ def claim_job_for_execution(
     *,
     worker_name: str,
 ) -> JobRecord | None:
-    """Atomically claim a due queued or retryable job for one worker.
+    """Atomically claim due work or safely recover an expired running lease.
 
     Queue adapters provide at-least-once delivery, so duplicate broker messages
     are expected. The conditional update is the execution boundary: only the
     caller that transitions the persisted job to ``running`` may invoke its
-    side-effectful handler.
+    side-effectful handler. A unique lease token fences stale workers from
+    recording a later success/retry/dead transition after their claim expires.
     """
 
+    lease_seconds = max(1, int(settings.job_timeout_seconds))
+    claim_token = f"{worker_name}:{uuid4()}"
     query = """
         UPDATE jobs
         SET status = %s,
@@ -326,8 +336,19 @@ def claim_job_for_execution(
             last_error = NULL,
             updated_at = NOW()
         WHERE id = %s
-          AND status IN (%s, %s)
-          AND (run_after IS NULL OR run_after <= NOW())
+          AND (
+              (
+                  status IN (%s, %s)
+                  AND (run_after IS NULL OR run_after <= NOW())
+              )
+              OR (
+                  status = %s
+                  AND (
+                      locked_at IS NULL
+                      OR locked_at <= NOW() - (%s * INTERVAL '1 second')
+                  )
+              )
+          )
         RETURNING *;
     """
     with get_postgres_connection(settings) as conn:
@@ -336,29 +357,16 @@ def claim_job_for_execution(
                 query,
                 (
                     JobStatus.RUNNING.value,
-                    worker_name,
+                    claim_token,
                     job_id,
                     JobStatus.QUEUED.value,
                     JobStatus.FAILED.value,
+                    JobStatus.RUNNING.value,
+                    lease_seconds,
                 ),
             )
             row = cursor.fetchone()
     return _as_record(row) if row is not None else None
-
-
-def mark_job_running(
-    settings: SharedSettings, job_id: str, *, worker_name: str
-) -> None:
-    """Mark a job as actively executing."""
-    _mark_job(
-        settings,
-        job_id,
-        status=JobStatus.RUNNING,
-        locked_at=datetime.now(tz=timezone.utc),
-        locked_by=worker_name,
-        run_after=None,
-        last_error=None,
-    )
 
 
 def mark_job_succeeded(
@@ -367,7 +375,8 @@ def mark_job_succeeded(
     *,
     result: Any | None = None,
     base_payload: dict[str, Any] | None = None,
-) -> None:
+    claim_token: str,
+) -> bool:
     """Mark successful completion."""
     payload: Any = _UNSET
     if result is not None:
@@ -375,7 +384,7 @@ def mark_job_succeeded(
         merged_payload["result"] = result
         payload = merged_payload
 
-    _mark_job(
+    return _mark_job(
         settings,
         job_id,
         status=JobStatus.SUCCEEDED,
@@ -384,6 +393,7 @@ def mark_job_succeeded(
         locked_by=None,
         run_after=None,
         last_error=None,
+        claim_token=claim_token,
     )
 
 
@@ -394,14 +404,15 @@ def mark_job_retry(
     attempts: int,
     run_after: datetime,
     last_error: str,
-) -> None:
+    claim_token: str,
+) -> bool:
     """Record a retryable failure using `_mark_job` with `JobStatus.FAILED`.
 
     This marks a non-terminal failure state while attempts are still below the
     max-attempts threshold. Callers should use this for retry scheduling paths;
     terminal failures should use `mark_job_dead`, which writes `JobStatus.DEAD`.
     """
-    _mark_job(
+    return _mark_job(
         settings,
         job_id,
         status=JobStatus.FAILED,
@@ -410,6 +421,7 @@ def mark_job_retry(
         last_error=last_error,
         locked_at=None,
         locked_by=None,
+        claim_token=claim_token,
     )
 
 
@@ -419,9 +431,10 @@ def mark_job_dead(
     *,
     attempts: int,
     last_error: str,
-) -> None:
+    claim_token: str,
+) -> bool:
     """Mark a job as permanently dead."""
-    _mark_job(
+    return _mark_job(
         settings,
         job_id,
         status=JobStatus.DEAD,
@@ -430,6 +443,7 @@ def mark_job_dead(
         last_error=last_error,
         locked_at=None,
         locked_by=None,
+        claim_token=claim_token,
     )
 
 

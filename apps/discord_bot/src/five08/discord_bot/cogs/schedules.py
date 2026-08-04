@@ -307,7 +307,9 @@ class AgentSchedulesCog(commands.Cog):
         if status == "already_requested":
             run_status = str(run.get("status") or "completed")
             return f"A recent schedule run `{run_id}` already exists ({run_status})."
-        return f"Schedule run `{run_id}` request accepted ({status or 'unknown status'})."
+        return (
+            f"Schedule run `{run_id}` request accepted ({status or 'unknown status'})."
+        )
 
     def _context(self, interaction: discord.Interaction) -> dict[str, Any] | None:
         guild_id = getattr(interaction, "guild_id", None)

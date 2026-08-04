@@ -10706,12 +10706,13 @@ async def _create_agent_schedule_for_context(
     if manager_error is not None:
         return {"error": "schedule_not_authorized", "detail": manager_error}, 403
     try:
-        channel_validation, channel_status = (
-            await _validate_agent_schedule_channel_with_bot(
-                request,
-                guild_id=fresh_context.guild_id or "",
-                channel_id=str(payload.channel_id),
-            )
+        (
+            channel_validation,
+            channel_status,
+        ) = await _validate_agent_schedule_channel_with_bot(
+            request,
+            guild_id=fresh_context.guild_id or "",
+            channel_id=str(payload.channel_id),
         )
     except RuntimeError as exc:
         logger.warning("Unable to validate schedule report channel: %s", exc)

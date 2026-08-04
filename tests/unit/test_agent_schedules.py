@@ -341,7 +341,9 @@ def test_manual_run_requests_coalesce_within_the_schedule_cooldown(
     assert result is not None
     assert result.created is False
     assert result.run.id == existing_run["id"]
-    assert not any("INSERT INTO agent_schedule_runs" in query for query, _ in cursor.calls)
+    assert not any(
+        "INSERT INTO agent_schedule_runs" in query for query, _ in cursor.calls
+    )
 
 
 def test_due_schedule_creates_one_catch_up_then_advances_past_now(
