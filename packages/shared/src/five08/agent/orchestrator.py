@@ -49,6 +49,12 @@ _ELLIPTICAL_TASK_CLAUSE_RE = re.compile(
     r"^\s*(?:another|(?:a\s+)?(?:second|third|fourth)|one\s+more|an\s+additional)\s+task\b",
     re.IGNORECASE,
 )
+_SHARED_WORKFLOW_VERB_RE = re.compile(
+    r"^\s*(?:please\s+)?(?P<verb>"
+    r"search|find|list|show|create|open|update|edit|close|assign|add|invite|send|provision"
+    r")\b",
+    re.IGNORECASE,
+)
 _WEEKDAYS = {
     "monday": 0,
     "tuesday": 1,
@@ -220,6 +226,17 @@ class AgentOrchestrator:
         )
         if workflow_count > 1:
             return True
+        shared_verb_match = (
+            _SHARED_WORKFLOW_VERB_RE.match(clauses[0]) if clauses else None
+        )
+        if shared_verb_match is not None:
+            verb = shared_verb_match.group("verb")
+            if any(
+                self._parse_action(clause) is None
+                and self._parse_action(f"{verb} {clause}") is not None
+                for clause in clauses[1:]
+            ):
+                return True
         return workflow_count > 0 and any(
             _ELLIPTICAL_TASK_CLAUSE_RE.match(clause) for clause in clauses
         )

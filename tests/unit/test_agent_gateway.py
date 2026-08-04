@@ -1897,6 +1897,30 @@ def test_elliptical_compound_task_request_uses_the_model_planner() -> None:
     ]
 
 
+def test_shared_verb_compound_workflow_uses_the_model_planner() -> None:
+    planner_calls: list[dict[str, object]] = []
+
+    class RecordingPlanner:
+        def plan(self, **kwargs: object) -> AgentPlannerResult:
+            planner_calls.append(kwargs)
+            return AgentPlannerResult(
+                draft=PlannerDraft(
+                    status="needs_clarification",
+                    clarification_question="Which task and issue details should I use?",
+                ),
+                model=AgentModelConfig().resolve("fast"),
+                latency_ms=1,
+            )
+
+    request = "Search tasks in project Atlas and GitHub issues for onboarding"
+    response = AgentOrchestrator(planner=RecordingPlanner()).plan(request, _context())
+
+    assert len(planner_calls) == 1
+    assert planner_calls[0]["message"] == request
+    assert response.status == "needs_clarification"
+    assert response.plan is None
+
+
 def test_agent_uses_structured_planner_for_multi_action_confirmation() -> None:
     class FakePlanner:
         def plan(self, **kwargs: object) -> AgentPlannerResult:

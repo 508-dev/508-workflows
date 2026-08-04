@@ -1074,6 +1074,17 @@ def _evaluate_provider_draft(
             strict=False,
         )
     )
+    if expected_status == "needs_clarification":
+        checks.append(
+            _check(
+                "provider_draft.clarification_question_present",
+                True,
+                bool(
+                    draft.clarification_question
+                    and draft.clarification_question.strip()
+                ),
+            )
+        )
     for index, observed_action in enumerate(draft.actions):
         try:
             registry.validate_planner_action(
