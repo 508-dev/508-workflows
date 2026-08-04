@@ -39,7 +39,9 @@ class SharedSettings(BaseSettings):
     job_max_attempts: int = 8
     job_retry_base_seconds: int = 5
     job_retry_max_seconds: int = 300
-    job_timeout_seconds: int = 600
+    # The worker reserves five seconds before this durable lease expires for
+    # Dramatiq's hard actor deadline and cleanup.
+    job_timeout_seconds: int = Field(default=600, ge=6)
     job_result_ttl_seconds: int = 3600
     gig_recruiting_stale_days: int = Field(default=7, ge=1)
     gig_contacted_reminder_days: int = Field(default=5, ge=1)

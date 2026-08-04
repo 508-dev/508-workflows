@@ -38,6 +38,13 @@ def test_non_local_settings_do_not_eagerly_reject_missing_runtime_dependencies()
     )
 
 
+def test_job_timeout_requires_room_for_the_worker_hard_deadline() -> None:
+    """A reclaimable lease must leave time for actor cancellation and cleanup."""
+
+    with pytest.raises(ValidationError, match="greater than or equal to 6"):
+        SharedSettings(job_timeout_seconds=5)
+
+
 def test_sentry_environment_and_sampling_are_not_env_configurable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

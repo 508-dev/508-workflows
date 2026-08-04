@@ -100,7 +100,8 @@ dashboard field.
 - `REDIS_URL`
 - `REDIS_QUEUE_NAME`
 - `REDIS_KEY_PREFIX`
-- `JOB_TIMEOUT_SECONDS`
+- `JOB_TIMEOUT_SECONDS` (minimum `6`; the worker reserves five seconds before
+  the durable lease expires for cancellation and recovery)
 - `JOB_RESULT_TTL_SECONDS`
 - `JOB_MAX_ATTEMPTS`
 - `JOB_RETRY_BASE_SECONDS`

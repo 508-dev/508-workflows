@@ -7,11 +7,13 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from math import ceil
-from threading import Event, Thread
+from threading import Event, Thread, get_ident
 from typing import Any, Final
 
 import dramatiq
 from dramatiq.brokers.redis import RedisBroker
+from dramatiq.middleware.threading import Interrupt, raise_thread_exception
+from dramatiq.middleware.time_limit import TimeLimitExceeded
 from five08.discord_webhook import DiscordWebhookLogger
 
 from five08.queue import (
@@ -53,6 +55,11 @@ _JOB_WEBHOOK_LOGGER = DiscordWebhookLogger(
 _QUEUE_NAME = settings.worker_queue_name
 _HANDLERS = JOB_FUNCTIONS
 _SYNC_PEOPLE_JOB_NAME: Final[str] = "sync_people_from_crm_job"
+_JOB_LEASE_EXPIRY_MARGIN_SECONDS: Final[int] = 5
+
+
+class JobLeaseLostError(Interrupt):
+    """Interrupt normal completion after a job execution lease is no longer safe."""
 
 
 def _job_attempt_display(attempts: int) -> int:
@@ -192,6 +199,40 @@ def _job_lease_seconds() -> int:
     return max(1, int(settings.job_timeout_seconds))
 
 
+def _job_actor_time_limit_milliseconds(*, lease_seconds: int | None = None) -> int:
+    """End Python job execution before its durable lease becomes reclaimable.
+
+    Dramatiq checks time limits once per second by default, so reserve a small
+    fixed interval for that check and actor cleanup before another worker can
+    claim the durable job lease.
+    """
+
+    configured_lease_seconds = (
+        _job_lease_seconds() if lease_seconds is None else int(lease_seconds)
+    )
+    if configured_lease_seconds <= _JOB_LEASE_EXPIRY_MARGIN_SECONDS:
+        raise ValueError(
+            "job_timeout_seconds must exceed the five-second lease expiry margin"
+        )
+    return (configured_lease_seconds - _JOB_LEASE_EXPIRY_MARGIN_SECONDS) * 1000
+
+
+def _execute_job_actor_options(*, lease_seconds: int | None = None) -> dict[str, Any]:
+    """Return the actor options tied to the configured durable job lease."""
+
+    return {
+        "queue_name": _QUEUE_NAME,
+        "max_retries": 0,
+        "time_limit": _job_actor_time_limit_milliseconds(lease_seconds=lease_seconds),
+    }
+
+
+def _schedule_job_lease_recovery(job_id: str, *, delay_seconds: int) -> None:
+    """Leave one broker delivery that can reclaim a crashed or timed-out job."""
+
+    execute_job.send_with_options(args=(job_id,), delay=delay_seconds * 1000)
+
+
 def _requeue_running_job_after_lease(job_id: str) -> None:
     """Keep one redelivery pending while another worker owns a fresh lease."""
     try:
@@ -214,7 +255,7 @@ def _requeue_running_job_after_lease(job_id: str) -> None:
         "Deferring duplicate delivery for job_id=%s until its active lease expires",
         job_id,
     )
-    execute_job.send_with_options(args=(job_id,), delay=delay_seconds * 1000)
+    _schedule_job_lease_recovery(job_id, delay_seconds=delay_seconds)
 
 
 @contextmanager
@@ -222,8 +263,18 @@ def _renew_job_lease_while_running(
     job_id: str,
     claim_token: str,
 ) -> Iterator[None]:
-    """Refresh a running job lease until its synchronous handler returns."""
+    """Refresh a running job lease and fence completion after a renewal failure.
+
+    A definitive ownership loss requests Dramatiq's documented asynchronous
+    thread interruption. That cannot interrupt a blocked system call, so the
+    actor's hard ``time_limit`` still ends Python execution before this lease
+    may be reclaimed. This guard also prevents a handler that returns after a
+    failed renewal from recording a stale success or retry.
+    """
+
     stop_event = Event()
+    lease_lost = Event()
+    actor_thread_id = get_ident()
     interval_seconds = max(0.1, _job_lease_seconds() / 3)
 
     def _heartbeat() -> None:
@@ -236,13 +287,18 @@ def _renew_job_lease_while_running(
                 ):
                     continue
                 logger.warning(
-                    "Stopping lease heartbeat for job_id=%s because its lease was replaced",
+                    "Cancelling job_id=%s because its execution lease was replaced",
                     job_id,
                 )
+                if stop_event.is_set():
+                    return
+                lease_lost.set()
+                raise_thread_exception(actor_thread_id, JobLeaseLostError)
                 return
             except Exception:
                 logger.exception(
-                    "Failed to renew execution lease for job_id=%s", job_id
+                    "Failed to renew execution lease for job_id=%s; retrying until deadline",
+                    job_id,
                 )
 
     heartbeat = Thread(
@@ -260,6 +316,8 @@ def _renew_job_lease_while_running(
             logger.warning(
                 "Lease heartbeat did not stop promptly for job_id=%s", job_id
             )
+    if lease_lost.is_set():
+        raise JobLeaseLostError(f"Execution lease lost for job_id={job_id}")
 
 
 def _schedule_retry(job: JobRecord, attempts: int, *, error: str) -> None:
@@ -352,6 +410,7 @@ def _run_job(job_id: str) -> None:
 
     try:
         args, kwargs = _extract_call_args(job)
+        _schedule_job_lease_recovery(job_id, delay_seconds=_job_lease_seconds())
         with _renew_job_lease_while_running(job_id, claim_token):
             result = handler(*args, **kwargs)
         transitioned = mark_job_succeeded(
@@ -448,7 +507,18 @@ def _run_job(job_id: str) -> None:
         # on state transition.
 
 
-@dramatiq.actor(queue_name=_QUEUE_NAME, max_retries=0)
+@dramatiq.actor(**_execute_job_actor_options())
 def execute_job(job_id: str) -> None:
-    """Entry-point actor for all worker jobs."""
-    _run_job(job_id)
+    """Entry-point actor for all worker jobs with a lease-bound deadline."""
+
+    try:
+        _run_job(job_id)
+    except (JobLeaseLostError, TimeLimitExceeded) as exc:
+        # A recovery delivery was scheduled when this execution claimed the
+        # job. Do not create a regular retry or write a terminal state from a
+        # worker that no longer has a safely renewable lease.
+        logger.warning(
+            "Stopped job_id=%s before lease expiry due to %s; awaiting recovery delivery",
+            job_id,
+            type(exc).__name__,
+        )
