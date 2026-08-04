@@ -57,7 +57,7 @@ class AgentScheduleCreateFields(BaseModel):
     tool_allowlist: list[str] = Field(default_factory=list, max_length=16)
     repository: str | None = Field(default=None, min_length=3, max_length=256)
     query: str = Field(default="", max_length=512)
-    state: Literal["open", "closed", "all"] = "open"
+    state: Literal["open", "closed"] = "open"
     limit: int = Field(default=10, ge=1, le=20)
     channel_id: str = Field(min_length=1, max_length=32)
     summary_mode: Literal["deterministic", "model_for_public_data"] = "deterministic"

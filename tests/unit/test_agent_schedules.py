@@ -73,6 +73,27 @@ def test_schedule_action_rejects_tool_or_argument_expansion() -> None:
         _github_action(assignee="someone")
 
 
+@pytest.mark.parametrize(
+    "query",
+    ["repo:other/private", "OR -repo:other/private", "(repo:other/private)"],
+)
+def test_schedule_action_rejects_repository_query_qualifiers(query: str) -> None:
+    """A frozen repository cannot be broadened by an issue-search qualifier."""
+
+    with pytest.raises(ValidationError, match="cannot override its repository"):
+        _github_action(query=query)
+
+
+def test_schedule_action_defaults_to_an_explicit_bounded_issue_state() -> None:
+    """Persisted actions keep the safe default instead of an unrestricted state."""
+
+    action = _github_action(state="")
+
+    assert action.arguments["state"] == "open"
+    with pytest.raises(ValidationError, match="open or closed"):
+        _github_action(state="all")
+
+
 def test_agent_loop_definition_requires_a_saved_read_only_catalog() -> None:
     """A generic objective cannot acquire tools dynamically at run time."""
 

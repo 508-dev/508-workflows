@@ -134,6 +134,79 @@ def test_agent_loop_creation_persists_an_exact_default_tool_catalog() -> None:
     )
 
 
+def test_frozen_github_schedule_requires_an_allowlisted_repository(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A report fails at creation rather than on every future worker run."""
+
+    monkeypatch.setattr(api.settings, "github_default_repo", "508-dev/todos")
+    monkeypatch.setattr(
+        api.settings,
+        "github_allowed_repos",
+        "508-dev/508-workflows, 508-dev/infra",
+    )
+    payload = SimpleNamespace(
+        prompt="Group related GitHub issues.",
+        execution_mode="frozen_actions",
+        channel_id="2000",
+        repository="other-owner/private-repo",
+        query="label:bug",
+        state="open",
+        limit=10,
+        summary_mode="deterministic",
+        sources_are_public=False,
+    )
+
+    with pytest.raises(ValueError, match="GITHUB_DEFAULT_REPO"):
+        api._agent_schedule_definition_from_fields(payload, guild_id="1000")
+
+
+def test_frozen_github_schedule_accepts_a_configured_allowlisted_repository(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Static operator configuration can deliberately approve another repo."""
+
+    monkeypatch.setattr(api.settings, "github_default_repo", "508-dev/todos")
+    monkeypatch.setattr(api.settings, "github_allowed_repos", "508-dev/infra")
+    payload = SimpleNamespace(
+        prompt="Group related GitHub issues.",
+        execution_mode="frozen_actions",
+        channel_id="2000",
+        repository="508-dev/infra",
+        query="label:bug",
+        state="open",
+        limit=10,
+        summary_mode="deterministic",
+        sources_are_public=False,
+    )
+
+    definition = api._agent_schedule_definition_from_fields(payload, guild_id="1000")
+
+    assert definition.actions[0].arguments["repository"] == "508-dev/infra"
+
+
+def test_frozen_github_schedule_defaults_to_an_explicit_open_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An omitted state cannot turn into an unrestricted GitHub query later."""
+
+    monkeypatch.setattr(api.settings, "github_default_repo", "508-dev/todos")
+    payload = SimpleNamespace(
+        prompt="Group related GitHub issues.",
+        execution_mode="frozen_actions",
+        channel_id="2000",
+        repository="508-dev/todos",
+        query="label:bug",
+        limit=10,
+        summary_mode="deterministic",
+        sources_are_public=False,
+    )
+
+    definition = api._agent_schedule_definition_from_fields(payload, guild_id="1000")
+
+    assert definition.actions[0].arguments["state"] == "open"
+
+
 @pytest.mark.parametrize(
     "prompt",
     [

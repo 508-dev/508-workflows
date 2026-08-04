@@ -12,6 +12,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
+import re
 from typing import Any, Literal
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -45,6 +46,7 @@ MAX_AGENT_SCHEDULE_TOOL_ALLOWLIST = 16
 MAX_AGENT_SCHEDULE_PLANNING_STEPS = 3
 MAX_AGENT_SCHEDULE_OUTPUT_CHARS = 8_000
 MAX_AGENT_SCHEDULE_ERROR_CHARS = 2_000
+_SCHEDULE_GITHUB_REPOSITORY_QUALIFIER = re.compile(r"\b-?repo\s*:", re.IGNORECASE)
 
 
 class AgentScheduleStatus(StrEnum):
@@ -128,6 +130,10 @@ class AgentScheduleAction(BaseModel):
         if self.tool_name not in AGENT_SCHEDULE_ALLOWED_TOOL_NAMES:
             raise ValueError("scheduled tool is not supported")
         if self.tool_name == "github_issue.search_issues":
+            self.arguments = {
+                **self.arguments,
+                "state": str(self.arguments.get("state") or "open").strip().casefold(),
+            }
             _validate_github_issue_search_arguments(self.arguments)
         return self
 
@@ -319,10 +325,12 @@ def _validate_github_issue_search_arguments(arguments: dict[str, Any]) -> None:
     query = str(arguments.get("query") or "").strip()
     if len(query) > 512:
         raise ValueError("scheduled GitHub issue query is too long")
+    if _SCHEDULE_GITHUB_REPOSITORY_QUALIFIER.search(query):
+        raise ValueError("scheduled GitHub issue query cannot override its repository")
 
     state = str(arguments.get("state") or "open").strip().casefold()
-    if state not in {"open", "closed", "all"}:
-        raise ValueError("scheduled GitHub issue state must be open, closed, or all")
+    if state not in {"open", "closed"}:
+        raise ValueError("scheduled GitHub issue state must be open or closed")
 
     raw_limit = arguments.get("limit", 10)
     if isinstance(raw_limit, bool):

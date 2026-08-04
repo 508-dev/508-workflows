@@ -9199,6 +9199,29 @@ def _configured_agent_schedule_guild_id() -> str | None:
     return value
 
 
+def _configured_agent_schedule_github_repositories() -> set[str]:
+    """Return the static GitHub repository allowlist for frozen schedules."""
+
+    config = ToolRuntimeConfig.from_settings(settings)
+    return {
+        repository.strip().strip("/").casefold()
+        for raw_value in (config.github_default_repo, config.github_allowed_repos)
+        for repository in str(raw_value or "").split(",")
+        if repository.strip().strip("/")
+    }
+
+
+def _validate_agent_schedule_github_repository(repository: str) -> None:
+    """Keep a persistent GitHub report pinned to an operator-approved repo."""
+
+    normalized_repository = repository.strip().strip("/").casefold()
+    if normalized_repository not in _configured_agent_schedule_github_repositories():
+        raise ValueError(
+            "scheduled GitHub repository is not allowed by GITHUB_DEFAULT_REPO "
+            "or GITHUB_ALLOWED_REPOS"
+        )
+
+
 async def _fresh_agent_schedule_context(
     request: Request,
     *,
@@ -9316,10 +9339,11 @@ def _agent_schedule_definition_from_fields(
         raise ValueError(
             "model-summarized schedule prompts cannot contain internal record identifiers"
         )
-    repository = str(payload.repository or "").strip()
+    repository = str(getattr(payload, "repository", None) or "").strip()
     query = str(payload.query or "").strip()
-    state = str(payload.state).strip().casefold()
+    state = str(getattr(payload, "state", "open") or "open").strip().casefold()
     limit = int(payload.limit)
+    _validate_agent_schedule_github_repository(repository)
     return AgentScheduleDefinition(
         prompt=prompt,
         execution_mode=execution_mode,
