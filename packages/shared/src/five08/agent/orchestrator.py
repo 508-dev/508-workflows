@@ -128,13 +128,21 @@ class AgentOrchestrator:
         if resolved_member_agreement is not None:
             return resolved_member_agreement
 
+        planner: LiteralPlanner = "deterministic_regex"
+        planning_text = text
+        action = self._parse_action(text)
+        if action is not None:
+            return self._response_for_deterministic_action(
+                action=action,
+                context=context,
+                planning_text=planning_text,
+                planner=planner,
+            )
+
         planned_response = self._plan_with_model(text, context)
         if planned_response is not None:
             return planned_response
 
-        planner: LiteralPlanner = "deterministic_regex"
-        planning_text = text
-        action = self._parse_action(text)
         if action is None and not re.search(
             r"\bcreate\s+(?:a\s+)?task\b", text, re.IGNORECASE
         ):
@@ -159,6 +167,23 @@ class AgentOrchestrator:
                     "Try asking me to manage a task, GitHub issue, CRM contact, or member account."
                 ),
             )
+        return self._response_for_deterministic_action(
+            action=action,
+            context=context,
+            planning_text=planning_text,
+            planner=planner,
+        )
+
+    def _response_for_deterministic_action(
+        self,
+        *,
+        action: AgentToolAction,
+        context: AgentIdentityContext,
+        planning_text: str,
+        planner: LiteralPlanner,
+    ) -> AgentResponse:
+        """Plan a known workflow before asking a model to infer an intent."""
+
         if action.tool_name == "task_read.search_tasks" and not action.arguments.get(
             "project"
         ):

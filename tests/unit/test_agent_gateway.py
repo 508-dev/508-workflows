@@ -1779,10 +1779,30 @@ def test_task_creation_is_not_rerouted_to_member_agreement_submission() -> None:
     assert response.plan.actions[0].tool_name == "task_write.create_task"
 
 
+def test_explicit_task_creation_does_not_depend_on_model_routing() -> None:
+    class FailingPlanner:
+        def plan(self, **_kwargs: object) -> AgentPlannerResult:
+            raise AssertionError("planner should not run for a known workflow")
+
+    response = AgentOrchestrator(planner=FailingPlanner()).plan(
+        "Create a task to follow up on GitHub issue 123 in project Atlas",
+        _context(),
+    )
+
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    assert response.plan.planner == "deterministic_regex"
+    assert response.plan.actions[0].tool_name == "task_write.create_task"
+    assert response.plan.actions[0].arguments == {
+        "title": "follow up on GitHub issue 123",
+        "project": "Atlas",
+    }
+
+
 def test_agent_uses_structured_planner_for_multi_action_confirmation() -> None:
     class FakePlanner:
         def plan(self, **kwargs: object) -> AgentPlannerResult:
-            assert kwargs["model_tier"] == "strong"
+            assert kwargs["model_tier"] == "fast"
             return AgentPlannerResult(
                 draft=PlannerDraft(
                     status="planned",
@@ -1812,7 +1832,9 @@ def test_agent_uses_structured_planner_for_multi_action_confirmation() -> None:
 
     orchestrator = AgentOrchestrator(planner=FakePlanner())
 
-    response = orchestrator.plan("Invite Sarah to Outline", _context(roles=["Admin"]))
+    response = orchestrator.plan(
+        "Help Sarah get started at 508", _context(roles=["Admin"])
+    )
 
     assert response.status == "requires_confirmation"
     assert response.plan is not None
