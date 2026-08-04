@@ -10,6 +10,7 @@ import pytest
 
 from five08.engagements import EngagementStatus
 from five08.discord_bot.utils.internal_api import (
+    AgentScheduleChannelRequest,
     AgentScheduleMemberSnapshotRequest,
     GigThreadStatusRequest,
     InternalAPIRoutes,
@@ -333,6 +334,46 @@ class TestInternalAPIRoutes:
         assert status_code == 403
         assert result == {"error": "guild_mismatch"}
         guild.fetch_member.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_agent_schedule_channel_validation_requires_a_messageable_target(
+        self,
+        internal_api_routes,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A schedule is not persisted until the bot can post in its channel."""
+
+        monkeypatch.setattr(
+            "five08.discord_bot.utils.internal_api.settings.discord_server_id",
+            "1000",
+        )
+
+        class FakeMessageable:
+            def __init__(self, guild: object) -> None:
+                self.guild = guild
+
+            def permissions_for(self, _member: object) -> SimpleNamespace:
+                return SimpleNamespace(view_channel=True, send_messages=True)
+
+        guild = SimpleNamespace(id=1000, me=object())
+        channel = FakeMessageable(guild)
+        internal_api_routes.bot.get_guild.return_value = guild
+        internal_api_routes.bot.get_channel.return_value = channel
+        monkeypatch.setattr(
+            "five08.discord_bot.utils.internal_api.discord.abc.Messageable",
+            FakeMessageable,
+        )
+
+        result, status_code = await internal_api_routes._validate_agent_schedule_channel(
+            AgentScheduleChannelRequest(guild_id="1000", channel_id="2000")
+        )
+
+        assert status_code == 200
+        assert result == {
+            "status": "ready",
+            "guild_id": "1000",
+            "channel_id": "2000",
+        }
 
     @pytest.mark.asyncio
     async def test_update_gig_thread_status_rewrites_title_marker(

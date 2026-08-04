@@ -24,6 +24,10 @@ import {
 } from "lucide-react"
 import { type ReactNode, StrictMode, useEffect, useMemo, useRef, useState } from "react"
 import { createRoot } from "react-dom/client"
+import {
+  type AgentScheduleRunResponse,
+  agentScheduleRunToastMessage,
+} from "@/agent-schedule-run-status"
 import { Empty } from "@/components/empty"
 import { SortableTableHead } from "@/components/sortable-table-head"
 import { Badge } from "@/components/ui/badge"
@@ -2370,11 +2374,11 @@ function App() {
     const key = `agentScheduleRun:${scheduleId}`
     setBusy(key, true)
     try {
-      await requestJson<unknown>(
+      const response = await requestJson<AgentScheduleRunResponse>(
         `/dashboard/api/agent-schedules/${encodeURIComponent(scheduleId)}/run`,
         { method: "POST" },
       )
-      showToast("Queued recurring agent schedule run", "ok")
+      showToast(agentScheduleRunToastMessage(response), "ok")
       await loadAgentSchedules()
     } catch (error) {
       showError(error, "Unable to queue the recurring agent schedule")

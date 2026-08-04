@@ -169,6 +169,33 @@ def test_schedule_timing_rejects_a_later_tight_cron_cluster() -> None:
         )
 
 
+def test_schedule_timing_reports_the_effective_minimum_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A configured value below one minute must not leak into the error text."""
+
+    now = datetime(2026, 7, 28, 0, 0, tzinfo=timezone.utc)
+    occurrences = iter(
+        [
+            now.replace(minute=1),
+            now.replace(minute=1, second=30),
+        ]
+    )
+    monkeypatch.setattr(
+        schedules,
+        "next_agent_schedule_occurrence",
+        lambda *_args, **_kwargs: next(occurrences),
+    )
+
+    with pytest.raises(ValueError, match="no more often than every 60 seconds"):
+        validate_agent_schedule_timing(
+            "* * * * *",
+            "UTC",
+            now=now,
+            minimum_interval_seconds=10,
+        )
+
+
 def test_schedule_ids_are_rejected_before_opening_a_database_connection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

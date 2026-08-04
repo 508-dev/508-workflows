@@ -1416,6 +1416,22 @@ async def _post_agent_schedule_report_to_bot(
     )
 
 
+async def _validate_agent_schedule_channel_with_bot(
+    request: Request,
+    *,
+    guild_id: str,
+    channel_id: str,
+) -> tuple[dict[str, Any], int]:
+    """Prove a report channel is usable before persisting it in a schedule."""
+
+    return await _request_agent_schedule_bot_json(
+        request,
+        path="/internal/agent-schedules/channel",
+        payload={"guild_id": guild_id, "channel_id": channel_id},
+        timeout_seconds=12.0,
+    )
+
+
 MAX_SESSION_COOKIE_CANDIDATES = 5
 
 
@@ -10686,6 +10702,25 @@ async def _create_agent_schedule_for_context(
     )
     if fresh_context is None:
         return {"error": context_error or "member_snapshot_failed"}, context_status
+    manager_error = _agent_schedule_manager_error(fresh_context)
+    if manager_error is not None:
+        return {"error": "schedule_not_authorized", "detail": manager_error}, 403
+    try:
+        channel_validation, channel_status = (
+            await _validate_agent_schedule_channel_with_bot(
+                request,
+                guild_id=fresh_context.guild_id or "",
+                channel_id=str(payload.channel_id),
+            )
+        )
+    except RuntimeError as exc:
+        logger.warning("Unable to validate schedule report channel: %s", exc)
+        return {"error": "schedule_channel_validation_failed"}, 503
+    if channel_status != 200:
+        return {
+            "error": "invalid_schedule_channel",
+            "detail": str(channel_validation.get("error") or "channel_unavailable"),
+        }, (503 if channel_status >= 500 else 400)
     try:
         definition = _agent_schedule_definition_from_fields(
             payload,
@@ -10862,6 +10897,7 @@ async def _run_agent_schedule_for_context(
         if should_dispatch
         else None
     )
+    job_id = worker_job.id if worker_job is not None else run.job_id
     _schedule_agent_audit_event(
         context=fresh_context,
         action="agent.schedule.run",
@@ -10870,7 +10906,7 @@ async def _run_agent_schedule_for_context(
         metadata={
             "schedule_id": schedule_id,
             "run_id": run.id,
-            "job_id": worker_job.id if worker_job is not None else None,
+            "job_id": job_id,
             "created": manual_run.created,
         },
     )
@@ -10886,7 +10922,7 @@ async def _run_agent_schedule_for_context(
     return {
         "status": response_status,
         "run": _agent_schedule_run_payload(run),
-        "job_id": worker_job.id if worker_job is not None else None,
+        "job_id": job_id,
         "dispatch_pending": should_dispatch and worker_job is None,
     }, 202 if should_dispatch else 200
 

@@ -603,6 +603,176 @@ async def test_schedule_creation_uses_refreshed_roles_not_stale_request_roles(
 
 
 @pytest.mark.asyncio
+async def test_schedule_creation_rejects_an_unusable_discord_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The destination check must happen before any schedule row is written."""
+
+    context = AgentIdentityContext(
+        discord_user_id="1001",
+        organization_id="1000",
+        guild_id="1000",
+        roles=["Admin"],
+    )
+    payload = SimpleNamespace(channel_id="2000")
+
+    async def fresh_context(*_args: object, **_kwargs: object):
+        return context, None, 200
+
+    async def invalid_channel(*_args: object, **_kwargs: object):
+        return {"error": "missing_channel_send_permission"}, 403
+
+    create_schedule = Mock()
+    monkeypatch.setattr(api, "_fresh_agent_schedule_context", fresh_context)
+    monkeypatch.setattr(api, "_agent_schedule_manager_error", Mock(return_value=None))
+    monkeypatch.setattr(
+        api,
+        "_validate_agent_schedule_channel_with_bot",
+        invalid_channel,
+    )
+    monkeypatch.setattr(api, "create_agent_schedule", create_schedule)
+
+    response, status_code = await api._create_agent_schedule_for_context(
+        cast(Request, SimpleNamespace()),
+        payload=payload,
+        context=context,
+    )
+
+    assert status_code == 400
+    assert response == {
+        "error": "invalid_schedule_channel",
+        "detail": "missing_channel_send_permission",
+    }
+    create_schedule.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_manual_schedule_run_redelivers_a_coalesced_unenqueued_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second click recovers only an already-created run missing its job."""
+
+    context = AgentIdentityContext(
+        discord_user_id="1001",
+        organization_id="1000",
+        guild_id="1000",
+        roles=["Admin"],
+    )
+    run = replace(_run(), job_id=None)
+    manual_run = SimpleNamespace(run=run, created=False)
+    enqueue = AsyncMock(return_value=SimpleNamespace(id="job-2"))
+
+    async def manager_context(*_args: object, **_kwargs: object):
+        return context, None, 200
+
+    monkeypatch.setattr(api, "_agent_schedule_manager_context", manager_context)
+    monkeypatch.setattr(
+        api,
+        "create_manual_agent_schedule_run",
+        Mock(return_value=manual_run),
+    )
+    monkeypatch.setattr(api, "_enqueue_agent_schedule_run", enqueue)
+    monkeypatch.setattr(api, "_schedule_agent_audit_event", Mock())
+
+    response, status_code = await api._run_agent_schedule_for_context(
+        cast(
+            Request,
+            SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(queue=object()))),
+        ),
+        schedule_id="schedule-1",
+        context=context,
+    )
+
+    assert status_code == 202
+    assert response["status"] == "already_queued"
+    assert response["job_id"] == "job-2"
+    assert response["dispatch_pending"] is False
+    enqueue.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_manual_schedule_run_does_not_enqueue_an_already_completed_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cooldown coalescing must not resurrect a completed report run."""
+
+    context = AgentIdentityContext(
+        discord_user_id="1001",
+        organization_id="1000",
+        guild_id="1000",
+        roles=["Admin"],
+    )
+    manual_run = SimpleNamespace(
+        run=replace(_run(), status=AgentScheduleRunStatus.SUCCEEDED),
+        created=False,
+    )
+    enqueue = AsyncMock()
+
+    async def manager_context(*_args: object, **_kwargs: object):
+        return context, None, 200
+
+    monkeypatch.setattr(api, "_agent_schedule_manager_context", manager_context)
+    monkeypatch.setattr(
+        api,
+        "create_manual_agent_schedule_run",
+        Mock(return_value=manual_run),
+    )
+    monkeypatch.setattr(api, "_enqueue_agent_schedule_run", enqueue)
+    monkeypatch.setattr(api, "_schedule_agent_audit_event", Mock())
+
+    response, status_code = await api._run_agent_schedule_for_context(
+        cast(Request, SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))),
+        schedule_id="schedule-1",
+        context=context,
+    )
+
+    assert status_code == 200
+    assert response["status"] == "already_requested"
+    assert response["dispatch_pending"] is False
+    enqueue.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_manual_schedule_run_returns_the_existing_worker_job_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A coalesced queued run must not look like its dispatch is pending."""
+
+    context = AgentIdentityContext(
+        discord_user_id="1001",
+        organization_id="1000",
+        guild_id="1000",
+        roles=["Admin"],
+    )
+    manual_run = SimpleNamespace(run=_run(), created=False)
+    enqueue = AsyncMock()
+
+    async def manager_context(*_args: object, **_kwargs: object):
+        return context, None, 200
+
+    monkeypatch.setattr(api, "_agent_schedule_manager_context", manager_context)
+    monkeypatch.setattr(
+        api,
+        "create_manual_agent_schedule_run",
+        Mock(return_value=manual_run),
+    )
+    monkeypatch.setattr(api, "_enqueue_agent_schedule_run", enqueue)
+    monkeypatch.setattr(api, "_schedule_agent_audit_event", Mock())
+
+    response, status_code = await api._run_agent_schedule_for_context(
+        cast(Request, SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))),
+        schedule_id="schedule-1",
+        context=context,
+    )
+
+    assert status_code == 200
+    assert response["status"] == "already_queued"
+    assert response["job_id"] == "job-1"
+    assert response["dispatch_pending"] is False
+    enqueue.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_schedule_execution_skips_revoked_owner_before_tools_or_discord(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

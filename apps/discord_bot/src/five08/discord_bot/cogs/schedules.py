@@ -287,12 +287,27 @@ class AgentSchedulesCog(commands.Cog):
                 ephemeral=True,
             )
             return
-        run = response.get("run") if isinstance(response.get("run"), dict) else {}
-        job_id = str(response.get("job_id") or "dispatch pending")
         await interaction.followup.send(
-            f"Queued schedule run `{run.get('id') or 'unknown'}` (worker job: {job_id}).",
+            self._manual_run_response_message(response),
             ephemeral=True,
         )
+
+    @staticmethod
+    def _manual_run_response_message(response: dict[str, Any]) -> str:
+        """Describe whether a manual click created work or found a prior run."""
+
+        run = response.get("run") if isinstance(response.get("run"), dict) else {}
+        run_id = str(run.get("id") or "unknown")
+        job_id = str(response.get("job_id") or run.get("job_id") or "dispatch pending")
+        status = str(response.get("status") or "").strip()
+        if status == "queued":
+            return f"Queued schedule run `{run_id}` (worker job: {job_id})."
+        if status == "already_queued":
+            return f"Schedule run `{run_id}` is already queued (worker job: {job_id})."
+        if status == "already_requested":
+            run_status = str(run.get("status") or "completed")
+            return f"A recent schedule run `{run_id}` already exists ({run_status})."
+        return f"Schedule run `{run_id}` request accepted ({status or 'unknown status'})."
 
     def _context(self, interaction: discord.Interaction) -> dict[str, Any] | None:
         guild_id = getattr(interaction, "guild_id", None)
