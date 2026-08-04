@@ -1838,7 +1838,11 @@ def test_admin_can_search_crm_contacts() -> None:
             return [FakeContact()]
 
     class FakeRegistry(ToolRegistry):
-        def _crm_repository(self) -> FakeRepository:
+        def _crm_repository(
+            self,
+            *,
+            deadline_monotonic: float | None = None,
+        ) -> Any:
             return FakeRepository()
 
     orchestrator = AgentOrchestrator(
@@ -1873,7 +1877,11 @@ def test_agent_uses_intent_normalizer_after_deterministic_parse_miss() -> None:
             return [FakeContact()]
 
     class FakeRegistry(ToolRegistry):
-        def _crm_repository(self) -> FakeRepository:
+        def _crm_repository(
+            self,
+            *,
+            deadline_monotonic: float | None = None,
+        ) -> Any:
             return FakeRepository()
 
     class FakeNormalizer:
@@ -2955,7 +2963,11 @@ def test_crm_contact_search_for_mark_is_not_update_intent() -> None:
             return [FakeContact()]
 
     class FakeRegistry(ToolRegistry):
-        def _crm_repository(self) -> FakeRepository:
+        def _crm_repository(
+            self,
+            *,
+            deadline_monotonic: float | None = None,
+        ) -> Any:
             return FakeRepository()
 
     orchestrator = AgentOrchestrator(
@@ -3246,6 +3258,7 @@ def _install_account_tool_fakes(
             str(initial_contact["id"]): dict(initial_contact)
         }
         updates: list[tuple[str, dict[str, Any]]] = []
+        deadline_monotonic_values: list[float | None] = []
         fail_fields = fail_crm_update_fields or set()
 
         def __init__(
@@ -3253,10 +3266,13 @@ def _install_account_tool_fakes(
             base_url: str,
             api_key: str,
             timeout_seconds: float = 20.0,
+            *,
+            deadline_monotonic: float | None = None,
         ) -> None:
             self.base_url = base_url
             self.api_key = api_key
             self.timeout_seconds = timeout_seconds
+            self.deadline_monotonic_values.append(deadline_monotonic)
 
         def get_contact(self, contact_id: str) -> dict[str, Any]:
             return dict(self.contacts[contact_id])
@@ -3476,6 +3492,7 @@ def _install_account_tool_fakes(
     FakeBrevoClient.subscriptions = []
     FakeKeilaClient.contacts = {}
     FakeKeilaClient.upserts = []
+    FakeEspoClient.deadline_monotonic_values = []
 
     monkeypatch.setattr("five08.agent.tools.EspoClient", FakeEspoClient)
     monkeypatch.setattr("five08.agent.tools.AuthentikClient", FakeAuthentikClient)
@@ -3492,6 +3509,24 @@ def _install_account_tool_fakes(
         keila=FakeKeilaClient,
         events=events,
     )
+
+
+def test_crm_search_forwards_schedule_deadline_to_espo_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fakes = _install_account_tool_fakes(monkeypatch)
+    registry = ToolRegistry(runtime_config=_account_runtime_config())
+
+    result = registry.execute(
+        "crm_read.search_contacts",
+        {"query": "Jane"},
+        organization_id="org-1",
+        actor_id="123",
+        deadline_monotonic=123.0,
+    )
+
+    assert result["contacts"][0]["name"] == "Jane Doe"
+    assert fakes.espo.deadline_monotonic_values == [123.0]
 
 
 def test_contact_lookup_does_not_treat_long_name_as_contact_id() -> None:
