@@ -7,7 +7,7 @@ import logging
 import re
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -45,6 +45,7 @@ from five08.clients.migadu import (
 )
 from five08.clients.outline import OutlineClient
 from five08.crm_contacts import EspoContactRepository
+from five08.deadlines import DeadlineExceeded, clamp_timeout_seconds
 from five08.newsletter_sync import (
     format_newsletter_sync_warning,
     sync_newsletter_contacts,
@@ -1019,20 +1020,24 @@ class ToolRegistry:
             )
         github_scopes = actor_scopes or set()
         if tool_name == "github_issue.search_issues":
-            return self._github_client().search_issues(
+            return self._github_client(
+                deadline_monotonic=deadline_monotonic
+            ).search_issues(
                 repository=self._resolve_repository(
                     arguments,
                     actor_scopes=github_scopes,
+                    deadline_monotonic=deadline_monotonic,
                 ),
                 query=str(arguments.get("query") or "").strip(),
                 state=str(arguments.get("state") or "open").strip().lower(),
                 limit=_positive_int(arguments.get("limit"), default=10, maximum=20),
             )
         if tool_name == "github_issue.get_issue":
-            return self._github_client().get_issue(
+            return self._github_client(deadline_monotonic=deadline_monotonic).get_issue(
                 repository=self._resolve_repository(
                     arguments,
                     actor_scopes=github_scopes,
+                    deadline_monotonic=deadline_monotonic,
                 ),
                 issue_number=_required_positive_int(
                     arguments.get("issue_number"),
@@ -1193,36 +1198,45 @@ class ToolRegistry:
                 fields=_github_project_fields(arguments.get("fields")),
             )
         if tool_name == "crm_read.search_contacts":
-            return self._search_crm_contacts(arguments)
+            return self._search_crm_contacts(
+                arguments,
+                deadline_monotonic=deadline_monotonic,
+            )
         if tool_name == "billing_read.search_invoices":
             return self._search_erp_invoices(
                 arguments,
                 organization_id=organization_id,
+                deadline_monotonic=deadline_monotonic,
             )
         if tool_name == "billing_read.get_invoice_summary":
             return self._get_erp_invoice_summary(
                 arguments,
                 organization_id=organization_id,
+                deadline_monotonic=deadline_monotonic,
             )
         if tool_name == "billing_read.search_suppliers":
             return self._search_erp_suppliers(
                 arguments,
                 organization_id=organization_id,
+                deadline_monotonic=deadline_monotonic,
             )
         if tool_name == "erp_read.search_projects":
             return self._search_erp_projects(
                 arguments,
                 organization_id=organization_id,
+                deadline_monotonic=deadline_monotonic,
             )
         if tool_name == "erp_read.get_project_summary":
             return self._get_erp_project_summary(
                 arguments,
                 organization_id=organization_id,
+                deadline_monotonic=deadline_monotonic,
             )
         if tool_name == "onboarding_read.get_summary":
             return self._get_onboarding_summary(
                 arguments,
                 organization_id=organization_id,
+                deadline_monotonic=deadline_monotonic,
             )
         if tool_name == "crm_write.update_contact":
             return self._update_crm_contact(arguments)
@@ -1280,10 +1294,20 @@ class ToolRegistry:
             )
         raise KeyError(f"Unknown tool {tool_name}")
 
-    def _erpnext_client(self) -> ERPNextClient:
+    def _erpnext_client(
+        self,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> ERPNextClient:
         config = self.runtime_config
+        timeout_seconds = clamp_timeout_seconds(
+            max(1.0, float(config.erpnext_api_timeout_seconds)),
+            deadline_monotonic=deadline_monotonic,
+        )
         if self._erpnext_client_factory is not None:
-            return self._erpnext_client_factory(config)
+            return self._erpnext_client_factory(
+                replace(config, erpnext_api_timeout_seconds=timeout_seconds)
+            )
         base_url = _optional_str(config.erpnext_base_url)
         api_key = _optional_str(config.erpnext_api_key)
         if base_url is None or api_key is None:
@@ -1291,7 +1315,8 @@ class ToolRegistry:
         return ERPNextClient(
             base_url=base_url,
             api_key=api_key,
-            timeout_seconds=max(1.0, float(config.erpnext_api_timeout_seconds)),
+            timeout_seconds=timeout_seconds,
+            deadline_monotonic=deadline_monotonic,
         )
 
     def _require_erp_tenant(self, organization_id: str | None) -> str:
@@ -1316,13 +1341,14 @@ class ToolRegistry:
         arguments: dict[str, Any],
         *,
         organization_id: str | None,
+        deadline_monotonic: float | None = None,
     ) -> dict[str, Any]:
         _validate_erp_read_arguments("billing_read.search_invoices", arguments)
         self._require_erp_tenant(organization_id)
         invoice_type = _erp_invoice_type(arguments["invoice_type"])
         query = _erp_search_query(arguments["query"], field_name="Invoice query")
         limit = _erp_result_limit(arguments.get("limit"), default=5)
-        client = self._erpnext_client()
+        client = self._erpnext_client(deadline_monotonic=deadline_monotonic)
         try:
             try:
                 rows = client.search_invoices(
@@ -1345,6 +1371,7 @@ class ToolRegistry:
         arguments: dict[str, Any],
         *,
         organization_id: str | None,
+        deadline_monotonic: float | None = None,
     ) -> dict[str, Any]:
         _validate_erp_read_arguments("billing_read.get_invoice_summary", arguments)
         self._require_erp_tenant(organization_id)
@@ -1354,7 +1381,7 @@ class ToolRegistry:
             field_name="Invoice id",
             maximum=140,
         )
-        client = self._erpnext_client()
+        client = self._erpnext_client(deadline_monotonic=deadline_monotonic)
         try:
             try:
                 row = client.get_invoice(
@@ -1379,12 +1406,13 @@ class ToolRegistry:
         arguments: dict[str, Any],
         *,
         organization_id: str | None,
+        deadline_monotonic: float | None = None,
     ) -> dict[str, Any]:
         _validate_erp_read_arguments("billing_read.search_suppliers", arguments)
         self._require_erp_tenant(organization_id)
         query = _erp_search_query(arguments["query"], field_name="Supplier query")
         limit = _erp_result_limit(arguments.get("limit"), default=5)
-        client = self._erpnext_client()
+        client = self._erpnext_client(deadline_monotonic=deadline_monotonic)
         try:
             try:
                 rows = client.search_suppliers(query, limit=limit)
@@ -1400,6 +1428,7 @@ class ToolRegistry:
         arguments: dict[str, Any],
         *,
         organization_id: str | None,
+        deadline_monotonic: float | None = None,
     ) -> dict[str, Any]:
         _validate_erp_read_arguments("erp_read.search_projects", arguments)
         self._require_erp_tenant(organization_id)
@@ -1408,7 +1437,7 @@ class ToolRegistry:
             field_name="ERP project query",
         )
         limit = _erp_result_limit(arguments.get("limit"), default=5)
-        client = self._erpnext_client()
+        client = self._erpnext_client(deadline_monotonic=deadline_monotonic)
         try:
             try:
                 rows = client.list_records(
@@ -1432,6 +1461,7 @@ class ToolRegistry:
         arguments: dict[str, Any],
         *,
         organization_id: str | None,
+        deadline_monotonic: float | None = None,
     ) -> dict[str, Any]:
         _validate_erp_read_arguments("erp_read.get_project_summary", arguments)
         self._require_erp_tenant(organization_id)
@@ -1440,7 +1470,7 @@ class ToolRegistry:
             field_name="ERP project id",
             maximum=140,
         )
-        client = self._erpnext_client()
+        client = self._erpnext_client(deadline_monotonic=deadline_monotonic)
         try:
             try:
                 row = client.get_project(project_id)
@@ -1456,6 +1486,7 @@ class ToolRegistry:
         arguments: dict[str, Any],
         *,
         organization_id: str | None,
+        deadline_monotonic: float | None = None,
     ) -> dict[str, Any]:
         """Return a non-identifying summary of the local onboarding queue.
 
@@ -1498,15 +1529,59 @@ class ToolRegistry:
             GROUP BY 1
             ORDER BY 1
         """
+        connect_timeout_seconds = 5
+        statement_timeout_milliseconds = 10_000
+        if deadline_monotonic is not None:
+            remaining_connect_timeout = clamp_timeout_seconds(
+                float(connect_timeout_seconds),
+                deadline_monotonic=deadline_monotonic,
+            )
+            # libpq accepts whole seconds for connect_timeout. Do not round up
+            # and start a connection that can outlive the schedule deadline.
+            connect_timeout_seconds = int(remaining_connect_timeout)
+            if connect_timeout_seconds < 1:
+                raise DeadlineExceeded(
+                    "Onboarding database connection deadline exceeded"
+                )
+            statement_timeout_milliseconds = max(
+                1,
+                int(
+                    clamp_timeout_seconds(
+                        statement_timeout_milliseconds / 1_000,
+                        deadline_monotonic=deadline_monotonic,
+                    )
+                    * 1_000
+                ),
+            )
         try:
             with connect(
                 postgres_url,
-                connect_timeout=5,
-                options="-c statement_timeout=10000",
+                connect_timeout=connect_timeout_seconds,
+                options=f"-c statement_timeout={statement_timeout_milliseconds}",
             ) as conn:
                 with conn.cursor(row_factory=dict_row) as cursor:
+                    if deadline_monotonic is not None:
+                        # The connect phase can consume part of the budget, so
+                        # re-clamp the statement timeout immediately before the
+                        # database query begins.
+                        remaining_statement_timeout_milliseconds = max(
+                            1,
+                            int(
+                                clamp_timeout_seconds(
+                                    statement_timeout_milliseconds / 1_000,
+                                    deadline_monotonic=deadline_monotonic,
+                                )
+                                * 1_000
+                            ),
+                        )
+                        cursor.execute(
+                            "SELECT set_config('statement_timeout', %s, true)",
+                            (str(remaining_statement_timeout_milliseconds),),
+                        )
                     cursor.execute(query)
                     rows = cursor.fetchall()
+        except DeadlineExceeded:
+            raise
         except Exception:
             logger.warning("Onboarding summary lookup failed", exc_info=True)
             raise RuntimeError(
@@ -1729,7 +1804,11 @@ class ToolRegistry:
         )
         return {"fact": _memory_fact_payload(fact)}
 
-    def _github_client(self) -> GitHubClient:
+    def _github_client(
+        self,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> GitHubClient:
         config = self.runtime_config
         app_values = (
             _optional_str(config.github_app_client_id),
@@ -1747,6 +1826,17 @@ class ToolRegistry:
             assert installation_id is not None
             assert private_key is not None
             provider_config = (client_id, installation_id, private_key)
+            if deadline_monotonic is not None:
+                provider = GitHubAppTokenProvider(
+                    client_id=client_id,
+                    installation_id=installation_id,
+                    private_key=private_key.replace("\\n", "\n"),
+                    deadline_monotonic=deadline_monotonic,
+                )
+                return GitHubClient(
+                    token_provider=provider,
+                    deadline_monotonic=deadline_monotonic,
+                )
             if (
                 self._github_app_provider is None
                 or self._github_app_provider_config != provider_config
@@ -1758,16 +1848,23 @@ class ToolRegistry:
                 )
                 self._github_app_provider_config = provider_config
                 self._github_installation_repository_cache = None
-            return GitHubClient(token_provider=self._github_app_provider)
+            return GitHubClient(
+                token_provider=self._github_app_provider,
+                deadline_monotonic=deadline_monotonic,
+            )
 
         token = _required_config(config.github_api_token, "GITHUB_API_TOKEN")
-        return GitHubClient(token=token)
+        return GitHubClient(
+            token=token,
+            deadline_monotonic=deadline_monotonic,
+        )
 
     def _resolve_repository(
         self,
         arguments: dict[str, Any],
         *,
         actor_scopes: set[str],
+        deadline_monotonic: float | None = None,
     ) -> str:
         repository = _optional_str(arguments.get("repository"))
         if repository is None:
@@ -1822,7 +1919,10 @@ class ToolRegistry:
             "github:repository:all:write",
         } & actor_scopes:
             if config.github_steering_all_installed_repos and github_app_is_set:
-                if normalized_key in self._installed_github_repository_names(config):
+                if normalized_key in self._installed_github_repository_names(
+                    config,
+                    deadline_monotonic=deadline_monotonic,
+                ):
                     return normalized_repository
                 raise ValueError(
                     "GitHub repository is not selected for this GitHub App installation"
@@ -1878,6 +1978,8 @@ class ToolRegistry:
     def _installed_github_repository_names(
         self,
         config: ToolRuntimeConfig,
+        *,
+        deadline_monotonic: float | None = None,
     ) -> frozenset[str]:
         """Return GitHub App-selected repositories with a short local cache."""
 
@@ -1899,7 +2001,9 @@ class ToolRegistry:
         ):
             return cached[2]
 
-        payload = self._github_client().list_installation_repositories()
+        payload = self._github_client(
+            deadline_monotonic=deadline_monotonic
+        ).list_installation_repositories()
         names = frozenset(
             full_name.casefold()
             for repository in payload.get("repositories", [])
@@ -1913,20 +2017,39 @@ class ToolRegistry:
         )
         return names
 
-    def _crm_repository(self) -> EspoContactRepository:
-        return EspoContactRepository(self._espo_client())
+    def _crm_repository(
+        self,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> EspoContactRepository:
+        return EspoContactRepository(
+            self._espo_client(deadline_monotonic=deadline_monotonic)
+        )
 
-    def _espo_client(self) -> EspoClient:
+    def _espo_client(
+        self,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> EspoClient:
         base_url = _required_config(self.runtime_config.espo_base_url, "ESPO_BASE_URL")
         api_key = _required_config(self.runtime_config.espo_api_key, "ESPO_API_KEY")
-        return EspoClient(base_url, api_key)
+        return EspoClient(
+            base_url,
+            api_key,
+            deadline_monotonic=deadline_monotonic,
+        )
 
-    def _search_crm_contacts(self, arguments: dict[str, Any]) -> dict[str, Any]:
+    def _search_crm_contacts(
+        self,
+        arguments: dict[str, Any],
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> dict[str, Any]:
         query = str(arguments.get("query") or "").strip()
         if not query:
             raise ValueError("CRM contact search query is required")
         limit = _positive_int(arguments.get("limit"), default=5, maximum=10)
-        contacts = self._crm_repository().search(
+        contacts = self._crm_repository(deadline_monotonic=deadline_monotonic).search(
             limit=limit,
             select=[
                 "id",

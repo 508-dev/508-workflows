@@ -1335,6 +1335,15 @@ class AgentOrchestrator:
             else self.policy.scopes_for_context(context)
         )
         for action in plan.actions:
+            if deadline_monotonic is not None and monotonic() >= deadline_monotonic:
+                results.append(
+                    AgentExecutionResult(
+                        tool_name=action.tool_name,
+                        status="failed",
+                        error="Agent execution deadline exceeded before starting tool",
+                    )
+                )
+                break
             manifest = self.registry.get(action.tool_name)
             decision = self.policy.authorize_with_scopes(
                 context=context,

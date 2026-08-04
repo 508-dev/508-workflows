@@ -15,7 +15,9 @@ from five08.agent import (
     AgentToolAction,
     ToolRuntimeConfig,
 )
+from five08.agent import orchestrator as agent_orchestrator
 from five08.agent import tools as agent_tools
+from five08 import deadlines
 from five08.agent.tools import ToolRegistry
 from five08.clients.erpnext import ERPNextAPIError, ERPNextClient
 
@@ -177,6 +179,7 @@ def _registry(
 class _OnboardingCursor:
     def __init__(self) -> None:
         self.query = ""
+        self.calls: list[tuple[str, object | None]] = []
 
     def __enter__(self) -> "_OnboardingCursor":
         return self
@@ -184,8 +187,9 @@ class _OnboardingCursor:
     def __exit__(self, *_args: object) -> None:
         return None
 
-    def execute(self, query: str) -> None:
+    def execute(self, query: str, params: object | None = None) -> None:
         self.query = query
+        self.calls.append((query, params))
 
     def fetchall(self) -> list[dict[str, Any]]:
         return [
@@ -235,6 +239,115 @@ def test_onboarding_summary_is_aggregate_only_and_schedule_safe(
     assert "email" not in cursor.query.casefold()
     assert "onboarding_read.get_summary" in registry.schedule_safe_tool_names()
     assert "crm_write.update_contact" not in registry.schedule_safe_tool_names()
+
+
+def test_scheduled_erp_read_clamps_its_client_timeout_to_remaining_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_timeouts: list[float] = []
+
+    def factory(config: ToolRuntimeConfig) -> ERPNextClient:
+        captured_timeouts.append(config.erpnext_api_timeout_seconds)
+        return FakeERPNextClient()
+
+    monkeypatch.setattr(deadlines, "monotonic", lambda: 100.0)
+    registry = ToolRegistry(
+        runtime_config=ToolRuntimeConfig(
+            agent_erp_organization_id="org-508",
+            erpnext_api_timeout_seconds=20.0,
+        ),
+        erpnext_client_factory=factory,
+    )
+
+    registry.execute(
+        "billing_read.search_invoices",
+        {"invoice_type": "sales", "query": "SINV", "limit": 3},
+        organization_id="org-508",
+        actor_id="user-1",
+        deadline_monotonic=105.0,
+    )
+
+    assert captured_timeouts == [5.0]
+
+
+def test_scheduled_onboarding_summary_clamps_database_timeouts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cursor = _OnboardingCursor()
+    connection = _OnboardingConnection(cursor)
+    captured_connect_kwargs: dict[str, object] = {}
+
+    def connect(*_args: object, **kwargs: object) -> _OnboardingConnection:
+        captured_connect_kwargs.update(kwargs)
+        return connection
+
+    monkeypatch.setattr(agent_tools, "connect", connect)
+    monkeypatch.setattr(deadlines, "monotonic", lambda: 100.0)
+    registry = ToolRegistry(
+        runtime_config=ToolRuntimeConfig(postgres_url="postgres://test")
+    )
+
+    registry.execute(
+        "onboarding_read.get_summary",
+        {},
+        organization_id="org-508",
+        actor_id="user-1",
+        deadline_monotonic=104.5,
+    )
+
+    assert captured_connect_kwargs == {
+        "connect_timeout": 4,
+        "options": "-c statement_timeout=4500",
+    }
+    assert cursor.calls[0] == (
+        "SELECT set_config('statement_timeout', %s, true)",
+        ("4500",),
+    )
+
+
+def test_execute_plan_does_not_start_another_tool_after_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = ToolRegistry()
+    calls: list[str] = []
+
+    def execute(tool_name: str, *_args: object, **_kwargs: object) -> dict[str, str]:
+        calls.append(tool_name)
+        return {"tool_name": tool_name}
+
+    monkeypatch.setattr(registry, "execute", execute)
+    timestamps = iter([100.0, 105.0])
+    monkeypatch.setattr(agent_orchestrator, "monotonic", lambda: next(timestamps))
+    plan = AgentPlan(
+        plan_id="deadline-plan",
+        intent="scheduled_billing_report",
+        model_tier="fast",
+        model=AgentModelConfig().resolve("fast"),
+        actions=[
+            AgentToolAction(
+                tool_name="billing_read.search_invoices",
+                arguments={"invoice_type": "sales", "query": "SINV"},
+                summary="Search sales invoices",
+            ),
+            AgentToolAction(
+                tool_name="billing_read.search_invoices",
+                arguments={"invoice_type": "sales", "query": "SINV"},
+                summary="Search sales invoices again",
+            ),
+        ],
+        human_summary="Search sales invoices twice",
+    )
+
+    results = AgentOrchestrator(registry=registry).execute_plan(
+        plan,
+        _context(["Billing Team"]),
+        effective_scopes={"billing:invoice:read"},
+        deadline_monotonic=102.0,
+    )
+
+    assert calls == ["billing_read.search_invoices"]
+    assert [result.status for result in results] == ["succeeded", "failed"]
+    assert results[1].error == "Agent execution deadline exceeded before starting tool"
 
 
 def test_erp_reads_return_whitelisted_summaries_and_close_clients() -> None:

@@ -11,6 +11,7 @@ from typing import Any, Protocol, TypeAlias
 import jwt
 import requests
 
+from five08.deadlines import DeadlineExceeded, clamp_timeout_seconds
 from five08.tls import default_ca_bundle_path
 
 
@@ -86,12 +87,14 @@ class GitHubAppTokenProvider:
         private_key: str,
         base_url: str = "https://api.github.com",
         timeout_seconds: float = 20.0,
+        deadline_monotonic: float | None = None,
     ) -> None:
         self.client_id = str(client_id).strip()
         self.installation_id = str(installation_id).strip()
         self.private_key = private_key
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
+        self.deadline_monotonic = deadline_monotonic
         self._cache: dict[_TokenCacheKey, _CachedInstallationToken] = {}
         self._lock = threading.RLock()
 
@@ -125,6 +128,13 @@ class GitHubAppTokenProvider:
                 payload["permissions"] = dict(permissions)
 
             try:
+                timeout_seconds = clamp_timeout_seconds(
+                    self.timeout_seconds,
+                    deadline_monotonic=self.deadline_monotonic,
+                )
+            except DeadlineExceeded as exc:
+                raise GitHubAPIError("GitHub token request deadline exceeded") from exc
+            try:
                 response = requests.request(
                     "POST",
                     f"{self.base_url}/app/installations/{self.installation_id}/access_tokens",
@@ -134,7 +144,7 @@ class GitHubAppTokenProvider:
                         "X-GitHub-Api-Version": GITHUB_API_VERSION,
                     },
                     json=payload or None,
-                    timeout=self.timeout_seconds,
+                    timeout=timeout_seconds,
                     verify=default_ca_bundle_path(),
                 )
             except requests.RequestException as exc:
@@ -198,6 +208,7 @@ class GitHubClient:
         token_provider: GitHubTokenProvider | None = None,
         base_url: str = "https://api.github.com",
         timeout_seconds: float = 20.0,
+        deadline_monotonic: float | None = None,
     ) -> None:
         if token_provider is None:
             if not token or not token.strip():
@@ -206,6 +217,7 @@ class GitHubClient:
         self.token_provider = token_provider
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
+        self.deadline_monotonic = deadline_monotonic
         self.status_code: int | None = None
 
     def create_issue(
@@ -513,6 +525,13 @@ class GitHubClient:
                 permissions=permissions,
             )
             try:
+                timeout_seconds = clamp_timeout_seconds(
+                    self.timeout_seconds,
+                    deadline_monotonic=self.deadline_monotonic,
+                )
+            except DeadlineExceeded as exc:
+                raise GitHubAPIError("GitHub request deadline exceeded") from exc
+            try:
                 response = requests.request(
                     method,
                     f"{self.base_url}{path}",
@@ -523,7 +542,7 @@ class GitHubClient:
                     },
                     json=json,
                     params=params,
-                    timeout=self.timeout_seconds,
+                    timeout=timeout_seconds,
                     verify=default_ca_bundle_path(),
                 )
             except requests.RequestException as exc:

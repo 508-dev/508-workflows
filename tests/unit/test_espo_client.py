@@ -2,6 +2,9 @@
 
 from unittest.mock import Mock, patch
 
+import pytest
+
+from five08 import deadlines
 from five08.clients.espo import EspoClient
 from five08.tls import default_ca_bundle_path
 
@@ -29,3 +32,25 @@ def test_list_contacts_uses_explicit_ca_bundle() -> None:
         timeout=20.0,
         verify=default_ca_bundle_path(),
     )
+
+
+def test_list_contacts_clamps_timeout_to_execution_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.content = b'{"list": [], "total": 0}'
+    mock_response.json.return_value = {"list": [], "total": 0}
+    monkeypatch.setattr(deadlines, "monotonic", lambda: 100.0)
+
+    with patch(
+        "five08.clients.espo.requests.request",
+        return_value=mock_response,
+    ) as mock_request:
+        EspoClient(
+            "https://crm.example.com",
+            "secret",
+            deadline_monotonic=105.0,
+        ).list_contacts({"offset": 0, "maxSize": 50})
+
+    assert mock_request.call_args.kwargs["timeout"] == 5.0

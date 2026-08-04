@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
+from five08 import deadlines
 from five08.clients.github import GitHubAppTokenProvider, GitHubClient
 from five08.tls import default_ca_bundle_path
 
@@ -28,6 +29,19 @@ def test_github_client_uses_default_ca_bundle() -> None:
         client.create_issue(repository="508-dev/508-workflows", title="Fix thing")
 
     assert mock_request.call_args.kwargs["verify"] == default_ca_bundle_path()
+
+
+def test_github_client_clamps_timeout_to_execution_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(deadlines, "monotonic", lambda: 100.0)
+    client = GitHubClient(token="token", deadline_monotonic=105.0)
+
+    with patch("five08.clients.github.requests.request") as mock_request:
+        mock_request.return_value = _FakeResponse()
+        client.get_issue(repository="508-dev/508-workflows", issue_number=1)
+
+    assert mock_request.call_args.kwargs["timeout"] == 5.0
 
 
 class _Response:
