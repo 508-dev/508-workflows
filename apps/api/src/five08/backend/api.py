@@ -9339,9 +9339,17 @@ def _agent_schedule_definition_from_fields(
         # Derive defaults from the stricter manifest opt-in so a merely
         # read-only tool (including GitHub search) never joins a model loop by
         # accident.
+        runtime_config = ToolRuntimeConfig.from_settings(settings)
+        schedule_safe_tools = ToolRegistry(
+            runtime_config=runtime_config
+        ).schedule_safe_tool_names()
+        # A Firecrawl credential is required specifically for extraction. Do
+        # not let a generic schedule persist a tool that its runtime cannot
+        # service; explicit administrator-selected tools remain deliberate.
+        if not str(runtime_config.firecrawl_api_key or "").strip():
+            schedule_safe_tools -= {"web_read.extract"}
         tool_allowlist = requested_tools or sorted(
-            AGENT_SCHEDULE_ALLOWED_TOOL_NAMES
-            & ToolRegistry().schedule_safe_tool_names()
+            AGENT_SCHEDULE_ALLOWED_TOOL_NAMES & schedule_safe_tools
         )
         return AgentScheduleDefinition(
             prompt=prompt,

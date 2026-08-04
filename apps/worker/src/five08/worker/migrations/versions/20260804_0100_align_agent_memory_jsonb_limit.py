@@ -38,7 +38,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Restore the original JSONB text-size constraint."""
+    """Restore the old guard without rejecting rows valid under this revision."""
 
     op.drop_constraint(
         "ck_agent_memory_facts_value_json_size",
@@ -49,4 +49,7 @@ def downgrade() -> None:
         "ck_agent_memory_facts_value_json_size",
         "agent_memory_facts",
         f"octet_length(value_json::text) <= {_COMPACT_VALUE_JSON_MAX_BYTES}",
+        # PostgreSQL still checks new or changed rows, while existing facts
+        # accepted by the wider upgraded constraint remain downgradeable.
+        postgresql_not_valid=True,
     )
