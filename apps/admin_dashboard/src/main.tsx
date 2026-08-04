@@ -1807,8 +1807,8 @@ function App() {
         nextStatus === "pending"
           ? "Restored lead to pending"
           : `${nextStatus === "approved" ? "Approved" : "Rejected"} lead`
-      showToast(message, "ok")
       await loadGigLeads()
+      showToast(message, "ok")
     } catch (error) {
       showError(error, "Unable to review lead")
     } finally {

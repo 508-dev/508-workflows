@@ -964,9 +964,7 @@ class HackerNewsWhoIsHiringLeadSource:
                 report.potential_gigs_scraped for report in self._thread_reports
             ),
             "included": sum(report.included for report in self._thread_reports),
-            "filtered_out": sum(
-                report.filtered_out for report in self._thread_reports
-            ),
+            "filtered_out": sum(report.filtered_out for report in self._thread_reports),
             "filter_reasons": filter_reasons,
         }
 
@@ -1009,9 +1007,7 @@ def scrape_job_leads(
     leads = adapter.collect()
     collection_report_factory = getattr(adapter, "collection_report", None)
     raw_collection_report = (
-        collection_report_factory()
-        if callable(collection_report_factory)
-        else {}
+        collection_report_factory() if callable(collection_report_factory) else {}
     )
     collection_report: dict[str, Any] = {}
     if isinstance(raw_collection_report, dict):

@@ -473,9 +473,7 @@ def review_job_lead(
         else [JobLeadStatus.PENDING.value, JobLeadStatus.APPROVED.value]
     )
     reviewer = (
-        None
-        if normalized_status is JobLeadStatus.PENDING
-        else reviewer_discord_user_id
+        None if normalized_status is JobLeadStatus.PENDING else reviewer_discord_user_id
     )
     query = """
         UPDATE job_leads

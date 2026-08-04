@@ -4077,7 +4077,9 @@ def test_dashboard_review_job_lead_restores_rejected_lead_to_pending(
             new_callable=AsyncMock,
             return_value=("session-1", session),
         ),
-        patch("five08.backend.api.review_job_lead", return_value=restored) as mock_review,
+        patch(
+            "five08.backend.api.review_job_lead", return_value=restored
+        ) as mock_review,
         patch("five08.backend.api.insert_audit_event") as mock_insert,
     ):
         response = client.post(

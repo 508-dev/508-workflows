@@ -288,7 +288,9 @@ def test_review_job_lead_restores_rejected_lead_to_pending(monkeypatch) -> None:
     cursor = _CursorStub(
         rows=[
             [_lead_row(status="rejected", reviewed_by_discord_user_id="42")],
-            _lead_row(status="pending", reviewed_by_discord_user_id=None, reviewed_at=None),
+            _lead_row(
+                status="pending", reviewed_by_discord_user_id=None, reviewed_at=None
+            ),
         ]
     )
     _install_connection_stub(monkeypatch, cursor)
