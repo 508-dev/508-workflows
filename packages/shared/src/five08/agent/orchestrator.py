@@ -41,6 +41,10 @@ _MONTH_DATE_RE = re.compile(
     r"\s+(\d{1,2})(?:,\s*|\s+)(20\d{2})\b",
     re.IGNORECASE,
 )
+_WORKFLOW_CLAUSE_SEPARATOR_RE = re.compile(
+    r"\s*(?:;|\b(?:and\s+then|and\s+also|then|also|and)\b)\s*",
+    re.IGNORECASE,
+)
 _WEEKDAYS = {
     "monday": 0,
     "tuesday": 1,
@@ -176,6 +180,9 @@ class AgentOrchestrator:
     ) -> AgentResponse | None:
         """Return the production response for an explicitly recognized workflow."""
 
+        if self._has_multiple_deterministic_workflows(text):
+            return None
+
         resolved_member_agreement = self._plan_member_agreement_from_crm(
             text,
             context,
@@ -193,6 +200,17 @@ class AgentOrchestrator:
                 planner="deterministic_regex",
             )
         return None
+
+    def _has_multiple_deterministic_workflows(self, text: str) -> bool:
+        """Avoid collapsing separately recognized commands into one regex action."""
+
+        workflow_count = sum(
+            self._parse_action(clause) is not None
+            or self._extract_member_agreement_recipient(clause) is not None
+            for clause in _WORKFLOW_CLAUSE_SEPARATOR_RE.split(text)
+            if clause.strip()
+        )
+        return workflow_count > 1
 
     def _response_for_deterministic_action(
         self,

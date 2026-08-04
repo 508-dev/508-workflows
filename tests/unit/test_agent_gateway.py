@@ -1780,15 +1780,26 @@ def test_task_creation_is_not_rerouted_to_member_agreement_submission() -> None:
 
 
 def test_explicit_task_creation_does_not_depend_on_model_routing() -> None:
-    class FailingPlanner:
-        def plan(self, **_kwargs: object) -> AgentPlannerResult:
-            raise AssertionError("planner should not run for a known workflow")
+    planner_calls: list[dict[str, object]] = []
 
-    response = AgentOrchestrator(planner=FailingPlanner()).plan(
+    class RecordingPlanner:
+        def plan(self, **kwargs: object) -> AgentPlannerResult:
+            planner_calls.append(kwargs)
+            return AgentPlannerResult(
+                draft=PlannerDraft(
+                    status="needs_clarification",
+                    clarification_question="What should I do next?",
+                ),
+                model=AgentModelConfig().resolve("fast"),
+                latency_ms=1,
+            )
+
+    response = AgentOrchestrator(planner=RecordingPlanner()).plan(
         "Create a task to follow up on GitHub issue 123 in project Atlas",
         _context(),
     )
 
+    assert planner_calls == []
     assert response.status == "requires_confirmation"
     assert response.plan is not None
     assert response.plan.planner == "deterministic_regex"
@@ -1797,6 +1808,51 @@ def test_explicit_task_creation_does_not_depend_on_model_routing() -> None:
         "title": "follow up on GitHub issue 123",
         "project": "Atlas",
     }
+
+
+def test_compound_deterministic_workflows_use_the_model_planner() -> None:
+    planner_calls: list[dict[str, object]] = []
+
+    class RecordingPlanner:
+        def plan(self, **kwargs: object) -> AgentPlannerResult:
+            planner_calls.append(kwargs)
+            return AgentPlannerResult(
+                draft=PlannerDraft(
+                    status="planned",
+                    intent="invite_and_follow_up",
+                    actions=[
+                        {
+                            "tool_name": "outline_write.invite_user",
+                            "arguments": {"email": "sarah@example.com"},
+                            "summary": "Invite Sarah to Outline",
+                        },
+                        {
+                            "tool_name": "task_write.create_task",
+                            "arguments": {"title": "follow up"},
+                            "summary": "Create a follow-up task",
+                        },
+                    ],
+                ),
+                model=AgentModelConfig().resolve("fast"),
+                latency_ms=1,
+            )
+
+    response = AgentOrchestrator(planner=RecordingPlanner()).plan(
+        "Invite sarah@example.com to Outline and create a task to follow up",
+        _context(roles=["Admin"]),
+    )
+
+    assert len(planner_calls) == 1
+    assert planner_calls[0]["message"] == (
+        "Invite sarah@example.com to Outline and create a task to follow up"
+    )
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    assert response.plan.planner == "live_model"
+    assert [action.tool_name for action in response.plan.actions] == [
+        "outline_write.invite_user",
+        "task_write.create_task",
+    ]
 
 
 def test_agent_uses_structured_planner_for_multi_action_confirmation() -> None:
