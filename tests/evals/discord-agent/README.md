@@ -63,8 +63,11 @@ draft. The harness still does not let the model authorize users or perform side
 effects: deterministic policy checks scopes, write actions stop at confirmation,
 and read actions use fixture stubs when provided.
 For a request that production can route deterministically, the harness evaluates
-that same production route while retaining the provider draft in
-`raw_model_output` for inspection.
+that same production route before independently probing the provider draft.
+Production checks control the scenario and CI result; the raw draft's parse and
+semantic mismatches are retained in `raw_model_output`, `bad_plans` metrics,
+and the Markdown/trace reports so deterministic routing does not hide provider
+quality regressions.
 
 Without `--live-planner`, the runner uses the deterministic parser path. That is
 useful for local no-key debugging, but it is not the main PR gate.

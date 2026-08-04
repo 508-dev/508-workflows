@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import requests
+
 from five08.agent.evals import (
     AgentEvalExpect,
     AgentEvalExpectedAction,
@@ -15,6 +17,8 @@ from five08.agent.evals import (
     load_fixtures,
     list_eval_model_profiles,
     resolve_eval_model_profile,
+    render_markdown_report,
+    render_trace_report,
     run_live_planner_eval_suite,
     run_eval_suite,
     write_report,
@@ -204,7 +208,9 @@ def test_live_planner_eval_prompt_uses_resolved_github_defaults(monkeypatch) -> 
     }
 
 
-def test_live_planner_eval_falls_back_for_parseable_clarification(monkeypatch) -> None:
+def test_live_planner_eval_uses_production_route_when_draft_clarifies(
+    monkeypatch,
+) -> None:
     class FakeResponse:
         status_code = 200
 
@@ -247,15 +253,18 @@ def test_live_planner_eval_falls_back_for_parseable_clarification(monkeypatch) -
 
     assert report.summary["passed"] == 1
     assert report.summary["failed"] == 0
+    assert report.metrics["bad_plans"] == 1
     scenario = report.scenarios[0]
     assert scenario.status == "passed"
+    assert scenario.provider_draft is not None
+    assert scenario.provider_draft.status == "failed"
     assert scenario.observed.actions[0].arguments == {
         "project": "Atlas",
         "query": "onboarding",
     }
 
 
-def test_live_planner_eval_preserves_raw_misroute_but_uses_production_route(
+def test_live_planner_eval_records_raw_misroute_but_uses_production_route(
     monkeypatch,
 ) -> None:
     raw_output = json.dumps(
@@ -299,6 +308,8 @@ def test_live_planner_eval_preserves_raw_misroute_but_uses_production_route(
     )
 
     assert report.summary["passed"] == 1
+    assert report.metrics["bad_plans"] == 1
+    assert report.metrics["provider_draft_failures"] == 1
     scenario = report.scenarios[0]
     assert scenario.observed.raw_model_output == raw_output
     assert scenario.observed.actions[0].tool_name == "task_write.create_task"
@@ -306,6 +317,93 @@ def test_live_planner_eval_preserves_raw_misroute_but_uses_production_route(
         "title": "follow up on GitHub issue 123",
         "project": "Atlas",
     }
+    assert scenario.provider_draft is not None
+    assert scenario.provider_draft.status == "failed"
+    assert {
+        check.name for check in scenario.provider_draft.checks if not check.passed
+    } >= {
+        "provider_draft.actions[0].tool_name",
+        "provider_draft.actions[0].arguments.title",
+        "provider_draft.actions[0].arguments.project",
+    }
+    assert "Provider draft failures" in render_markdown_report(report)
+    trace = render_trace_report(report)
+    assert "### Provider Draft Probe" in trace
+    assert "provider_draft.actions[0].tool_name" in trace
+
+
+def test_live_planner_eval_records_provider_timeout_for_deterministic_route(
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_post(*_args: object, **_kwargs: object) -> object:
+        calls.append("call")
+        raise requests.Timeout("provider timeout")
+
+    monkeypatch.setenv("OPENAI_API_KEY_DIRECT", "direct-key")
+    monkeypatch.setattr("five08.agent.evals.requests.post", fake_post)
+
+    report = run_live_planner_eval_suite(
+        suite="canonical",
+        model="openai-direct",
+        ids=["task_create_mentions_github_issue_001"],
+        timeout_seconds=1,
+    )
+
+    assert calls == ["call"]
+    assert report.summary["passed"] == 1
+    assert report.summary["failed"] == 0
+    assert report.metrics["parse_failures"] == 1
+    assert report.metrics["bad_plans"] == 1
+    scenario = report.scenarios[0]
+    assert scenario.observed.parse_success is False
+    assert scenario.observed.actions[0].tool_name == "task_write.create_task"
+    assert scenario.provider_draft is not None
+    assert scenario.provider_draft.status == "parse_failed"
+    assert len(scenario.provider_draft.checks) == 1
+    check = scenario.provider_draft.checks[0]
+    assert check.name == "provider_draft.parse_success"
+    assert check.passed is False
+    assert check.expected is True
+    assert check.observed is False
+
+
+def test_live_planner_eval_records_invalid_draft_for_deterministic_route(
+    monkeypatch,
+) -> None:
+    raw_output = "not valid planner JSON"
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"choices": [{"message": {"content": raw_output}}]}
+
+    monkeypatch.setenv("OPENAI_API_KEY_DIRECT", "direct-key")
+    monkeypatch.setattr(
+        "five08.agent.evals.requests.post",
+        lambda *_args, **_kwargs: FakeResponse(),
+    )
+
+    report = run_live_planner_eval_suite(
+        suite="canonical",
+        model="openai-direct",
+        ids=["task_create_mentions_github_issue_001"],
+        timeout_seconds=1,
+    )
+
+    assert report.summary["passed"] == 1
+    assert report.metrics["bad_plans"] == 1
+    scenario = report.scenarios[0]
+    assert scenario.observed.parse_success is False
+    assert scenario.observed.raw_model_output == raw_output
+    assert scenario.observed.actions[0].tool_name == "task_write.create_task"
+    assert scenario.provider_draft is not None
+    assert scenario.provider_draft.status == "parse_failed"
 
 
 def test_live_planner_eval_retries_one_bad_plan(monkeypatch) -> None:

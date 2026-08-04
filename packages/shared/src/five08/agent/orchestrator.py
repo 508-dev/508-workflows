@@ -108,11 +108,7 @@ class AgentOrchestrator:
 
     def plan(self, message: str, context: AgentIdentityContext) -> AgentResponse:
         text = message.strip()
-        loaded_context = self.context_loader.load(
-            context=context,
-            bounds=self.context_bounds,
-        )
-        context = context.model_copy(update={"context_snippets": loaded_context})
+        context = self._load_request_context(context)
         if not text:
             return AgentResponse(
                 status="needs_clarification",
@@ -120,25 +116,13 @@ class AgentOrchestrator:
                 clarification_question="What task or project action should I take?",
             )
 
-        resolved_member_agreement = self._plan_member_agreement_from_crm(
-            text,
-            context,
-            planner="deterministic_regex",
-        )
-        if resolved_member_agreement is not None:
-            return resolved_member_agreement
+        deterministic_response = self._plan_deterministic_workflow(text, context)
+        if deterministic_response is not None:
+            return deterministic_response
 
         planner: LiteralPlanner = "deterministic_regex"
         planning_text = text
-        action = self._parse_action(text)
-        if action is not None:
-            return self._response_for_deterministic_action(
-                action=action,
-                context=context,
-                planning_text=planning_text,
-                planner=planner,
-            )
-
+        action: AgentToolAction | None = None
         planned_response = self._plan_with_model(text, context)
         if planned_response is not None:
             return planned_response
@@ -173,6 +157,42 @@ class AgentOrchestrator:
             planning_text=planning_text,
             planner=planner,
         )
+
+    def _load_request_context(
+        self, context: AgentIdentityContext
+    ) -> AgentIdentityContext:
+        """Load bounded request context before deterministic or model planning."""
+
+        loaded_context = self.context_loader.load(
+            context=context,
+            bounds=self.context_bounds,
+        )
+        return context.model_copy(update={"context_snippets": loaded_context})
+
+    def _plan_deterministic_workflow(
+        self,
+        text: str,
+        context: AgentIdentityContext,
+    ) -> AgentResponse | None:
+        """Return the production response for an explicitly recognized workflow."""
+
+        resolved_member_agreement = self._plan_member_agreement_from_crm(
+            text,
+            context,
+            planner="deterministic_regex",
+        )
+        if resolved_member_agreement is not None:
+            return resolved_member_agreement
+
+        action = self._parse_action(text)
+        if action is not None:
+            return self._response_for_deterministic_action(
+                action=action,
+                context=context,
+                planning_text=text,
+                planner="deterministic_regex",
+            )
+        return None
 
     def _response_for_deterministic_action(
         self,
