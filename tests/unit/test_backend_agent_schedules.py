@@ -551,6 +551,57 @@ def test_agent_loop_rejects_a_write_before_any_tool_executes() -> None:
     assert orchestrator.plans == []
 
 
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"query": "   "},
+        {"query": "onboarding", "limit": 0},
+        {"query": "onboarding", "limit": 11},
+        {"query": "onboarding", "limit": "5"},
+    ],
+)
+def test_agent_loop_rejects_invalid_crm_search_before_execution(
+    arguments: dict[str, object],
+) -> None:
+    """A malformed planned CRM search is deterministic, not retryable provider work."""
+
+    planner = _LoopPlanner(
+        PlannerDraft(
+            status="planned",
+            actions=[
+                PlannerDraftAction(
+                    tool_name="crm_read.search_contacts",
+                    arguments=arguments,
+                    summary="Inspect CRM onboarding contacts",
+                )
+            ],
+        ),
+        PlannerDraft(status="answer", answer="unused"),
+    )
+    orchestrator = _LoopOrchestrator(planner)
+    schedule = _agent_loop_schedule(tool_allowlist=["crm_read.search_contacts"])
+    context = AgentIdentityContext(
+        discord_user_id="1001",
+        organization_id="1000",
+        guild_id="1000",
+        roles=["Admin"],
+    )
+
+    outcome = api._run_agent_schedule_loop(
+        orchestrator=cast(AgentOrchestrator, orchestrator),
+        schedule=schedule,
+        run=_run(),
+        context=context,
+        effective_scopes=orchestrator.policy.scopes_for_context(context),
+        deadline_monotonic=1_000_000_000_000.0,
+    )
+
+    assert outcome.error == "scheduled_planner_action_invalid"
+    assert outcome.results == []
+    assert orchestrator.plans == []
+    assert api._agent_schedule_loop_error_is_non_retryable(outcome.error)
+
+
 @pytest.mark.asyncio
 async def test_confirmed_agent_schedule_creation_binds_current_channel(
     monkeypatch: pytest.MonkeyPatch,

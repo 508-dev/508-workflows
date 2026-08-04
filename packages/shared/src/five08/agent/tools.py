@@ -914,6 +914,8 @@ class ToolRegistry:
             updates = arguments.get("updates")
             if not isinstance(updates, dict) or set(updates) != {"cOnboardingState"}:
                 raise ValueError("unsupported_crm_update_fields")
+        if tool_name == "crm_read.search_contacts":
+            _validate_crm_contact_search_arguments(arguments)
         if tool_name == "agent_schedule.create":
             try:
                 AgentScheduleProposal.model_validate(arguments)
@@ -1474,12 +1476,19 @@ class ToolRegistry:
         try:
             try:
                 row = client.get_project(project_id)
-            except ERPNextAPIError:
-                logger.warning("ERP project summary lookup failed", exc_info=True)
-                raise RuntimeError("ERP lookup is temporarily unavailable") from None
+            except ERPNextAPIError as exc:
+                if exc.status_code == 404:
+                    row = None
+                else:
+                    logger.warning("ERP project summary lookup failed", exc_info=True)
+                    raise RuntimeError(
+                        "ERP lookup is temporarily unavailable"
+                    ) from None
         finally:
             client.close()
-        return {"project": _erp_project_summary_payload(row)}
+        return {
+            "project": _erp_project_summary_payload(row) if row is not None else None
+        }
 
     def _get_onboarding_summary(
         self,
@@ -3401,6 +3410,19 @@ def _positive_int(value: Any, *, default: int, maximum: int) -> int:
     except (TypeError, ValueError):
         parsed = default
     return min(max(parsed, 1), maximum)
+
+
+def _validate_crm_contact_search_arguments(arguments: dict[str, Any]) -> None:
+    """Reject unusable model-planned CRM searches before schedule execution."""
+
+    _required_text(arguments.get("query"), "CRM contact search query is required")
+    limit = arguments.get("limit")
+    if limit is None:
+        return
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        raise ValueError("CRM contact search limit must be an integer between 1 and 10")
+    if not 1 <= limit <= 10:
+        raise ValueError("CRM contact search limit must be between 1 and 10")
 
 
 def _required_positive_int(value: Any, *, field_name: str) -> int:

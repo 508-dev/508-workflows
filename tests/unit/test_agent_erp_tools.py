@@ -25,10 +25,16 @@ from five08.clients.erpnext import ERPNextAPIError, ERPNextClient
 class FakeERPNextClient(ERPNextClient):
     """In-memory ERP client that records read-only agent calls."""
 
-    def __init__(self, *, fail_invoice_search: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail_invoice_search: bool = False,
+        project_error_status: int | None = None,
+    ) -> None:
         self.calls: list[tuple[str, dict[str, object]]] = []
         self.closed = False
         self.fail_invoice_search = fail_invoice_search
+        self.project_error_status = project_error_status
 
     def close(self) -> None:
         self.closed = True
@@ -133,6 +139,11 @@ class FakeERPNextClient(ERPNextClient):
 
     def get_project(self, project_id: str) -> dict[str, Any]:
         self.calls.append(("get_project", {"project_id": project_id}))
+        if self.project_error_status is not None:
+            raise ERPNextAPIError(
+                "ERPNext project lookup failed",
+                status_code=self.project_error_status,
+            )
         return self.list_records(
             "Project",
             fields=[],
@@ -157,11 +168,15 @@ def _registry(
     *,
     configured_organization_id: str | None = "org-508",
     fail_invoice_search: bool = False,
+    project_error_status: int | None = None,
 ) -> tuple[ToolRegistry, list[FakeERPNextClient]]:
     clients: list[FakeERPNextClient] = []
 
     def factory(_config: ToolRuntimeConfig) -> ERPNextClient:
-        client = FakeERPNextClient(fail_invoice_search=fail_invoice_search)
+        client = FakeERPNextClient(
+            fail_invoice_search=fail_invoice_search,
+            project_error_status=project_error_status,
+        )
         clients.append(client)
         return client
 
@@ -524,6 +539,20 @@ def test_erp_client_errors_are_generic_and_close_the_client() -> None:
         )
 
     assert "internal detail" not in str(exc.value)
+    assert clients[0].closed
+
+
+def test_erp_project_summary_returns_null_for_a_missing_project() -> None:
+    registry, clients = _registry(project_error_status=404)
+
+    result = registry.execute(
+        "erp_read.get_project_summary",
+        {"project_id": "PROJ-MISSING"},
+        organization_id="org-508",
+        actor_id="user-1",
+    )
+
+    assert result == {"project": None}
     assert clients[0].closed
 
 
