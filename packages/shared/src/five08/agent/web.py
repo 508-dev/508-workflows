@@ -584,6 +584,14 @@ def _effective_request_timeout(timeout_seconds: float) -> float:
     return min(timeout_seconds, remaining)
 
 
+def _ensure_web_deadline() -> None:
+    """Fail before consuming another streamed response chunk after a deadline."""
+
+    deadline = _WEB_REQUEST_DEADLINE.get()
+    if deadline is not None and deadline - monotonic() <= 0:
+        raise WebResearchTransportError("Public web research deadline exceeded.")
+
+
 def _normalize_query(query: str) -> str:
     if not isinstance(query, str):
         raise WebResearchValidationError("Web search query must be text.")
@@ -736,6 +744,7 @@ def _read_bounded_json_response(provider: str, response: requests.Response) -> A
     total_bytes = 0
     try:
         for chunk in response.iter_content(chunk_size=WEB_RESPONSE_CHUNK_BYTES):
+            _ensure_web_deadline()
             if not chunk:
                 continue
             if not isinstance(chunk, bytes):

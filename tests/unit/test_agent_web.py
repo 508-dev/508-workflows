@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 import pytest
 import requests
 
+import five08.agent.web as agent_web
 from five08.agent.web import (
     MAX_WEB_EXTRACT_CONTENT_CHARS,
     MAX_WEB_RESPONSE_BYTES,
@@ -453,6 +454,25 @@ def test_provider_response_body_is_capped_before_json_parsing() -> None:
             BraveWebSearch(api_key="token").search("query")
 
     response.iter_content.assert_not_called()
+
+
+def test_streamed_response_stops_when_the_global_web_deadline_expires(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A long-lived chunked response cannot keep a scheduled run alive."""
+
+    response = _response({"web": {"results": []}})
+    response.iter_content.return_value = [b'{"web":', b'{"results": []}}']
+    timestamps = iter([9.0, 10.0])
+    monkeypatch.setattr(agent_web, "monotonic", lambda: next(timestamps))
+
+    with (
+        agent_web._web_request_deadline(10.0),
+        pytest.raises(WebResearchTransportError, match="deadline exceeded"),
+    ):
+        agent_web._response_json("test", response)
+
+    response.close.assert_called_once()
 
 
 def test_web_search_query_and_limit_are_bounded() -> None:
