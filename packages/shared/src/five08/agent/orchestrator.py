@@ -45,6 +45,10 @@ _WORKFLOW_CLAUSE_SEPARATOR_RE = re.compile(
     r"\s*(?:;|\b(?:and\s+then|and\s+also|then|also|and)\b)\s*",
     re.IGNORECASE,
 )
+_ELLIPTICAL_TASK_CLAUSE_RE = re.compile(
+    r"^\s*(?:another|(?:a\s+)?(?:second|third|fourth)|one\s+more|an\s+additional)\s+task\b",
+    re.IGNORECASE,
+)
 _WEEKDAYS = {
     "monday": 0,
     "tuesday": 1,
@@ -202,15 +206,23 @@ class AgentOrchestrator:
         return None
 
     def _has_multiple_deterministic_workflows(self, text: str) -> bool:
-        """Avoid collapsing separately recognized commands into one regex action."""
+        """Avoid collapsing separate or elliptical commands into one regex action."""
 
+        clauses = [
+            clause
+            for clause in _WORKFLOW_CLAUSE_SEPARATOR_RE.split(text)
+            if clause.strip()
+        ]
         workflow_count = sum(
             self._parse_action(clause) is not None
             or self._extract_member_agreement_recipient(clause) is not None
-            for clause in _WORKFLOW_CLAUSE_SEPARATOR_RE.split(text)
-            if clause.strip()
+            for clause in clauses
         )
-        return workflow_count > 1
+        if workflow_count > 1:
+            return True
+        return workflow_count > 0 and any(
+            _ELLIPTICAL_TASK_CLAUSE_RE.match(clause) for clause in clauses
+        )
 
     def _response_for_deterministic_action(
         self,

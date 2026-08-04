@@ -648,7 +648,11 @@ def run_fixture_with_live_planner(
         message=message,
         timeout_seconds=timeout_seconds,
     )
-    provider_draft = _evaluate_provider_draft(fixture.expect, call)
+    provider_draft = _evaluate_provider_draft(
+        fixture.expect,
+        call,
+        registry=orchestrator.registry,
+    )
     if deterministic_response is not None:
         response = deterministic_response
     else:
@@ -1027,6 +1031,8 @@ def _parse_live_planner_json(raw_output: str) -> LivePlannerDraft:
 def _evaluate_provider_draft(
     expect: AgentEvalExpect,
     call: LivePlannerCallResult,
+    *,
+    registry: ToolRegistry,
 ) -> AgentEvalProviderDraftProbe:
     """Evaluate raw provider semantics without conflating them with execution."""
 
@@ -1067,6 +1073,23 @@ def _evaluate_provider_draft(
             strict=False,
         )
     )
+    for index, observed_action in enumerate(draft.actions):
+        try:
+            registry.validate_planner_action(
+                observed_action.tool_name,
+                observed_action.arguments,
+            )
+        except ValueError:
+            schema_valid = False
+        else:
+            schema_valid = True
+        checks.append(
+            _check(
+                f"provider_draft.actions[{index}].schema_valid",
+                True,
+                schema_valid,
+            )
+        )
     if expect.actions is not None:
         checks.append(
             _check(
@@ -1096,7 +1119,7 @@ def _evaluate_provider_draft(
                     f"{prefix}.tool_name",
                     expected_action.tool_name,
                     observed_action.tool_name,
-                    strict=False,
+                    strict=True,
                 )
             )
             if expected_action.arguments is not None:

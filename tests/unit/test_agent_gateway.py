@@ -1855,6 +1855,48 @@ def test_compound_deterministic_workflows_use_the_model_planner() -> None:
     ]
 
 
+def test_elliptical_compound_task_request_uses_the_model_planner() -> None:
+    planner_calls: list[dict[str, object]] = []
+
+    class RecordingPlanner:
+        def plan(self, **kwargs: object) -> AgentPlannerResult:
+            planner_calls.append(kwargs)
+            return AgentPlannerResult(
+                draft=PlannerDraft(
+                    status="planned",
+                    intent="create_tasks",
+                    actions=[
+                        {
+                            "tool_name": "task_write.create_task",
+                            "arguments": {"title": "draft the agenda"},
+                            "summary": "Draft the agenda",
+                        },
+                        {
+                            "tool_name": "task_write.create_task",
+                            "arguments": {"title": "book a room"},
+                            "summary": "Book a room",
+                        },
+                    ],
+                ),
+                model=AgentModelConfig().resolve("fast"),
+                latency_ms=1,
+            )
+
+    response = AgentOrchestrator(planner=RecordingPlanner()).plan(
+        "Create a task to draft the agenda and another task to book a room",
+        _context(),
+    )
+
+    assert len(planner_calls) == 1
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    assert response.plan.planner == "live_model"
+    assert [action.arguments["title"] for action in response.plan.actions] == [
+        "draft the agenda",
+        "book a room",
+    ]
+
+
 def test_agent_uses_structured_planner_for_multi_action_confirmation() -> None:
     class FakePlanner:
         def plan(self, **kwargs: object) -> AgentPlannerResult:

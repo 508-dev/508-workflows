@@ -332,6 +332,114 @@ def test_live_planner_eval_records_raw_misroute_but_uses_production_route(
     assert "provider_draft.actions[0].tool_name" in trace
 
 
+def test_live_planner_eval_rejects_provider_tool_name_prefixes(monkeypatch) -> None:
+    raw_output = json.dumps(
+        {
+            "status": "planned",
+            "intent": "create_task",
+            "clarification_question": None,
+            "actions": [
+                {
+                    "tool_name": "task_write.create_task_v2",
+                    "arguments": {
+                        "title": "follow up on GitHub issue 123",
+                        "project": "Atlas",
+                    },
+                    "summary": "Create a follow-up task",
+                }
+            ],
+        }
+    )
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"choices": [{"message": {"content": raw_output}}]}
+
+    monkeypatch.setenv("OPENAI_API_KEY_DIRECT", "direct-key")
+    monkeypatch.setattr(
+        "five08.agent.evals.requests.post",
+        lambda *_args, **_kwargs: FakeResponse(),
+    )
+
+    report = run_live_planner_eval_suite(
+        suite="canonical",
+        model="openai-direct",
+        ids=["task_create_mentions_github_issue_001"],
+        timeout_seconds=1,
+    )
+
+    assert report.summary["passed"] == 1
+    assert report.metrics["bad_plans"] == 1
+    scenario = report.scenarios[0]
+    assert scenario.provider_draft is not None
+    assert scenario.provider_draft.status == "failed"
+    assert {
+        check.name for check in scenario.provider_draft.checks if not check.passed
+    } >= {
+        "provider_draft.actions[0].tool_name",
+        "provider_draft.actions[0].schema_valid",
+    }
+
+
+def test_live_planner_eval_rejects_unknown_provider_action_arguments(
+    monkeypatch,
+) -> None:
+    raw_output = json.dumps(
+        {
+            "status": "planned",
+            "intent": "create_task",
+            "clarification_question": None,
+            "actions": [
+                {
+                    "tool_name": "task_write.create_task",
+                    "arguments": {
+                        "title": "follow up on GitHub issue 123",
+                        "project": "Atlas",
+                        "organization_id": "org-1",
+                    },
+                    "summary": "Create a follow-up task",
+                }
+            ],
+        }
+    )
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"choices": [{"message": {"content": raw_output}}]}
+
+    monkeypatch.setenv("OPENAI_API_KEY_DIRECT", "direct-key")
+    monkeypatch.setattr(
+        "five08.agent.evals.requests.post",
+        lambda *_args, **_kwargs: FakeResponse(),
+    )
+
+    report = run_live_planner_eval_suite(
+        suite="canonical",
+        model="openai-direct",
+        ids=["task_create_mentions_github_issue_001"],
+        timeout_seconds=1,
+    )
+
+    assert report.summary["passed"] == 1
+    assert report.metrics["bad_plans"] == 1
+    scenario = report.scenarios[0]
+    assert scenario.provider_draft is not None
+    assert scenario.provider_draft.status == "failed"
+    assert {
+        check.name for check in scenario.provider_draft.checks if not check.passed
+    } == {"provider_draft.actions[0].schema_valid"}
+
+
 def test_live_planner_eval_records_provider_timeout_for_deterministic_route(
     monkeypatch,
 ) -> None:

@@ -65,9 +65,11 @@ and read actions use fixture stubs when provided.
 For a request that production can route deterministically, the harness evaluates
 that same production route before independently probing the provider draft.
 Production checks control the scenario and CI result; the raw draft's parse and
-semantic mismatches are retained in `raw_model_output`, `bad_plans` metrics,
-and the Markdown/trace reports so deterministic routing does not hide provider
-quality regressions.
+semantic mismatches are retained in each scenario's `provider_draft.checks`,
+in the `provider_draft_failures` and `provider_draft_parse_failures` metrics,
+and in the Markdown/trace reports, so deterministic routing does not hide
+provider quality regressions. The raw provider text stays in
+`raw_model_output`; `bad_plans` remains an alias for provider-draft failures.
 
 Without `--live-planner`, the runner uses the deterministic parser path. That is
 useful for local no-key debugging, but it is not the main PR gate.
