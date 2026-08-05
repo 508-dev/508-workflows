@@ -478,14 +478,16 @@ def run_live_planner_eval_suite(
         )
         if time_to_first_turn_ms is None:
             time_to_first_turn_ms = _elapsed_ms(suite_started)
-        if result.status == "failed":
+        if result.status == "failed" or _provider_draft_failed(result):
             retry_result = run_fixture_with_live_planner(
                 fixture=fixture,
                 profile=profile,
                 timeout_seconds=timeout_seconds,
             )
             retries += 1
-            if retry_result.status != "failed":
+            if retry_result.status != "failed" and not _provider_draft_failed(
+                retry_result
+            ):
                 result = retry_result
         scenario_results.append(result)
     passed = sum(1 for result in scenario_results if result.status == "passed")
@@ -538,6 +540,14 @@ def run_live_planner_eval_suite(
             "retries": retries,
         },
         scenarios=scenario_results,
+    )
+
+
+def _provider_draft_failed(result: AgentEvalScenarioResult) -> bool:
+    """Return whether the provider probe failed independently of production."""
+
+    return (
+        result.provider_draft is not None and result.provider_draft.status != "passed"
     )
 
 

@@ -534,7 +534,7 @@ def test_live_planner_eval_rejects_unknown_provider_action_arguments(
     } == {"provider_draft.actions[0].schema_valid"}
 
 
-def test_live_planner_eval_records_provider_timeout_for_deterministic_route(
+def test_live_planner_eval_retries_provider_timeout_for_deterministic_route(
     monkeypatch,
 ) -> None:
     calls: list[str] = []
@@ -553,7 +553,7 @@ def test_live_planner_eval_records_provider_timeout_for_deterministic_route(
         timeout_seconds=1,
     )
 
-    assert calls == ["call"]
+    assert calls == ["call", "call"]
     assert report.summary["passed"] == 1
     assert report.summary["failed"] == 0
     assert report.metrics["parse_failures"] == 1
@@ -563,6 +563,7 @@ def test_live_planner_eval_records_provider_timeout_for_deterministic_route(
     assert scenario.observed.actions[0].tool_name == "task_write.create_task"
     assert scenario.provider_draft is not None
     assert scenario.provider_draft.status == "parse_failed"
+    assert report.metrics["retries"] == 1
     assert len(scenario.provider_draft.checks) == 1
     check = scenario.provider_draft.checks[0]
     assert check.name == "provider_draft.parse_success"
@@ -662,6 +663,56 @@ def test_live_planner_eval_retries_one_bad_plan(monkeypatch) -> None:
     assert report.summary["failed"] == 0
     assert report.metrics["retries"] == 1
     assert report.scenarios[0].status == "passed"
+
+
+def test_live_planner_eval_retries_bad_provider_probe_for_deterministic_route(
+    monkeypatch,
+) -> None:
+    class FakeResponse:
+        status_code = 200
+
+        def __init__(self, content: str) -> None:
+            self._content = content
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"choices": [{"message": {"content": self._content}}]}
+
+    responses = [
+        '{"status":"needs_clarification","intent":null,'
+        '"clarification_question":"Which project?","actions":[]}',
+        '{"status":"planned","intent":"search_tasks",'
+        '"clarification_question":null,"actions":['
+        '{"tool_name":"task_read.search_tasks",'
+        '"arguments":{"query":"onboarding","project":"Atlas"},'
+        '"summary":"Search Atlas tasks"}]}',
+    ]
+    calls: list[str] = []
+
+    def fake_post(*args: object, **kwargs: object) -> FakeResponse:
+        calls.append("call")
+        return FakeResponse(responses.pop(0))
+
+    monkeypatch.setenv("OPENAI_API_KEY_DIRECT", "direct-key")
+    monkeypatch.setattr("five08.agent.evals.requests.post", fake_post)
+    fixture = load_fixtures(suite="canonical", ids=["search_project_tasks_001"])[0]
+    monkeypatch.setattr("five08.agent.evals.load_fixtures", lambda **_kwargs: [fixture])
+
+    report = run_live_planner_eval_suite(
+        suite="canonical",
+        model="openai-direct",
+        ids=["search_project_tasks_001"],
+        timeout_seconds=1,
+    )
+
+    assert len(calls) == 2
+    assert report.summary["passed"] == 1
+    assert report.metrics["bad_plans"] == 0
+    assert report.metrics["retries"] == 1
+    assert report.scenarios[0].provider_draft is not None
+    assert report.scenarios[0].provider_draft.status == "passed"
 
 
 def test_live_planner_eval_applies_production_argument_gate(monkeypatch) -> None:
