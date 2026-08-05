@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Iterable, Protocol
 
 from five08.agent.memory import contains_sensitive_memory_text
+from five08.agent.privacy import contains_private_agent_identifier
 from five08.agent.models import (
     AgentContextSnippet,
     AgentContextSource,
@@ -91,11 +92,14 @@ def bound_context_snippets(
                 "Redacted UUID values from untrusted agent context count=%s",
                 redacted_uuid_count,
             )
-        if _contains_private_context_text(redacted_text):
+        if _contains_private_context_text(
+            redacted_text
+        ) or contains_private_agent_identifier(redacted_text):
             # Request-supplied thread context is untrusted and may contain a
-            # credential or an email address that must never cross the model
-            # boundary. UUIDs above are safe to redact while preserving the
-            # rest of the operator-relevant context.
+            # credential, email address, or internal record identifier that
+            # must never cross the model boundary. UUIDs above are safe to
+            # redact while preserving the rest of the operator-relevant
+            # context.
             continue
         # The request envelope is untrusted: a caller could claim a tiny token
         # count for a very large snippet. Count the exact text that will be

@@ -1224,7 +1224,9 @@ def claim_agent_schedule_run(
     A worker retry may reclaim a failed run. A successfully completed run is
     never re-executed if a transport timeout causes the worker to retry. The
     API may additionally reclaim a run whose lease expired after a process
-    crash; callers choose that conservative timestamp explicitly.
+    crash; callers choose that conservative timestamp explicitly. A run with
+    a claimed Discord delivery is never reclaimed automatically, because that
+    external side effect may still be in flight.
     """
 
     normalized_run_id = _normalize_uuid(run_id)
@@ -1261,7 +1263,11 @@ def claim_agent_schedule_run(
             WHERE id = %s
               AND (
                   status IN ('queued', 'failed')
-                  OR (status = 'running' AND started_at <= %s)
+                  OR (
+                      status = 'running'
+                      AND started_at <= %s
+                      AND delivery_status <> %s
+                  )
               )
             RETURNING *
         """
@@ -1270,6 +1276,7 @@ def claim_agent_schedule_run(
             execution_token,
             normalized_run_id,
             _utc_datetime(reclaim_running_before),
+            AgentScheduleRunDeliveryStatus.CLAIMED.value,
         )
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:

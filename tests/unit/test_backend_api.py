@@ -1179,6 +1179,44 @@ def test_agent_request_for_write_returns_confirmation_plan(
     )
 
 
+def test_agent_request_audit_redacts_memory_write_values() -> None:
+    """A forgotten fact cannot remain recoverable from audit metadata."""
+
+    plan = AgentPlan(
+        plan_id="memory-plan-1",
+        intent="remember_fact",
+        planner="deterministic_regex",
+        model_tier="fast",
+        model=AgentModelConfig().resolve("fast"),
+        actions=[
+            AgentToolAction(
+                tool_name="memory_write.remember_fact",
+                arguments={
+                    "scope_type": "user",
+                    "key": "accommodation",
+                    "value_json": {"text": "my temporary accommodation"},
+                },
+                summary="Remember a private preference",
+                requires_confirmation=True,
+            )
+        ],
+        human_summary="Remember a private preference",
+        requires_confirmation=True,
+    )
+
+    metadata = api._agent_request_audit_metadata(
+        message="Remember that my accommodation is 123 Private Street.",
+        response=AgentResponse(
+            status="requires_confirmation",
+            plan=plan,
+            message="Please confirm this memory update.",
+        ),
+    )
+
+    assert metadata["message_sanitized"] == "[memory write request redacted]"
+    assert "Private Street" not in str(metadata)
+
+
 def test_agent_request_rejects_oversized_message(
     client: TestClient,
     auth_headers: dict[str, str],

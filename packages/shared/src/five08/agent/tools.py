@@ -584,6 +584,7 @@ class ToolRegistry:
                 tenant_scoped=False,
                 idempotent=True,
                 write=False,
+                schedule_safe=True,
             ),
             "github_issue.get_issue": ToolManifest(
                 name="github_issue.get_issue",

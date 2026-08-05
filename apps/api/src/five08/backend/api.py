@@ -17,9 +17,11 @@ import json
 import threading
 import time
 from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from functools import partial
 from time import monotonic
 from typing import Any, Literal, cast
 from urllib.parse import quote, unquote, urlencode, urlparse, urlsplit, urlunsplit
@@ -414,6 +416,14 @@ _AGENT_SCHEDULE_ERP_TOOL_NAMES = frozenset(
 # worker thread. Keep the number of such requests bounded while the API has
 # already returned its caller-visible timeout response.
 _AGENT_REQUEST_PLAN_BULKHEAD = threading.BoundedSemaphore(value=4)
+# Scheduled loops can block on a model or an external provider. Keep their
+# threads separate from the default executor used by request/database work and
+# retain a capacity slot until a timed-out synchronous call actually returns.
+_AGENT_SCHEDULE_LOOP_EXECUTOR = ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix="agent-schedule-loop",
+)
+_AGENT_SCHEDULE_LOOP_BULKHEAD = threading.BoundedSemaphore(value=4)
 
 
 class AgentRequestPlanCapacityError(RuntimeError):
@@ -472,6 +482,80 @@ def _run_agent_plan(
         return orchestrator.plan(message, context)
     finally:
         _AGENT_REQUEST_PLAN_BULKHEAD.release()
+
+
+def _run_agent_schedule_loop_with_bulkhead(
+    *,
+    orchestrator: AgentOrchestrator,
+    schedule: AgentScheduleRecord,
+    run: AgentScheduleRunRecord,
+    context: AgentIdentityContext,
+    effective_scopes: set[str],
+    deadline_monotonic: float,
+) -> _AgentScheduleLoopOutcome:
+    """Execute one schedule loop while retaining its isolated capacity slot."""
+
+    try:
+        return _run_agent_schedule_loop(
+            orchestrator=orchestrator,
+            schedule=schedule,
+            run=run,
+            context=context,
+            effective_scopes=effective_scopes,
+            deadline_monotonic=deadline_monotonic,
+        )
+    finally:
+        _AGENT_SCHEDULE_LOOP_BULKHEAD.release()
+
+
+async def _run_agent_schedule_loop_bounded(
+    *,
+    orchestrator: AgentOrchestrator,
+    schedule: AgentScheduleRecord,
+    run: AgentScheduleRunRecord,
+    context: AgentIdentityContext,
+    effective_scopes: set[str],
+    deadline_monotonic: float,
+) -> _AgentScheduleLoopOutcome:
+    """Run a schedule loop in its bounded executor through its hard deadline."""
+
+    if not _AGENT_SCHEDULE_LOOP_BULKHEAD.acquire(blocking=False):
+        return _AgentScheduleLoopOutcome(
+            results=[],
+            error="scheduled_agent_loop_capacity_exceeded",
+        )
+    remaining_seconds = deadline_monotonic - monotonic()
+    if remaining_seconds <= 0:
+        _AGENT_SCHEDULE_LOOP_BULKHEAD.release()
+        return _AgentScheduleLoopOutcome(
+            results=[],
+            error="scheduled_agent_loop_timed_out",
+        )
+    try:
+        future = asyncio.get_running_loop().run_in_executor(
+            _AGENT_SCHEDULE_LOOP_EXECUTOR,
+            partial(
+                _run_agent_schedule_loop_with_bulkhead,
+                orchestrator=orchestrator,
+                schedule=schedule,
+                run=run,
+                context=context,
+                effective_scopes=effective_scopes,
+                deadline_monotonic=deadline_monotonic,
+            ),
+        )
+    except Exception:
+        _AGENT_SCHEDULE_LOOP_BULKHEAD.release()
+        raise
+    try:
+        # Shield the executor future: timing out the HTTP request must not
+        # cancel the synchronous work and release its capacity slot early.
+        return await asyncio.wait_for(asyncio.shield(future), timeout=remaining_seconds)
+    except TimeoutError:
+        return _AgentScheduleLoopOutcome(
+            results=[],
+            error="scheduled_agent_loop_timed_out",
+        )
 
 
 def _is_authorized_with_secret(
@@ -2194,7 +2278,14 @@ def _agent_request_audit_metadata(
             }
         )
         return metadata
-    metadata["message_sanitized"] = _sanitize_agent_audit_message(message)
+    if response.plan is not None and any(
+        action.tool_name.startswith("memory_write.") for action in response.plan.actions
+    ):
+        # A forgotten fact must not remain recoverable from a second durable
+        # audit copy. Keep the action name/outcome above, but never its value.
+        metadata["message_sanitized"] = "[memory write request redacted]"
+    else:
+        metadata["message_sanitized"] = _sanitize_agent_audit_message(message)
     return metadata
 
 
@@ -10679,8 +10770,7 @@ async def _execute_agent_schedule_run(
     model_summary: str | None = None
     try:
         if schedule.definition.execution_mode is AgentScheduleExecutionMode.AGENT_LOOP:
-            loop_outcome = await asyncio.to_thread(
-                _run_agent_schedule_loop,
+            loop_outcome = await _run_agent_schedule_loop_bounded(
                 orchestrator=orchestrator,
                 schedule=schedule,
                 run=run,

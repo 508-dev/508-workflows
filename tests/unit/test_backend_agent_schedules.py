@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from time import monotonic
+from threading import Event
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, Mock
@@ -128,7 +131,7 @@ def test_agent_loop_creation_persists_an_exact_default_tool_catalog() -> None:
     assert definition.execution_mode is AgentScheduleExecutionMode.AGENT_LOOP
     assert definition.actions == []
     assert "onboarding_read.get_summary" in definition.tool_allowlist
-    assert "github_issue.search_issues" not in definition.tool_allowlist
+    assert "github_issue.search_issues" in definition.tool_allowlist
     assert "crm_write.update_contact" not in definition.tool_allowlist
     assert definition.tool_allowlist == api._default_agent_schedule_tool_allowlist(
         ToolRuntimeConfig.from_settings(api.settings)
@@ -692,6 +695,128 @@ def test_agent_loop_rejects_invalid_crm_search_before_execution(
     assert outcome.results == []
     assert orchestrator.plans == []
     assert api._agent_schedule_loop_error_is_non_retryable(outcome.error)
+
+
+@pytest.mark.asyncio
+async def test_schedule_loop_uses_its_dedicated_bounded_executor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blocked schedule loop cannot occupy the API's default thread pool."""
+
+    expected = api._AgentScheduleLoopOutcome(results=[])
+    invoked = Mock(return_value=expected)
+    monkeypatch.setattr(api, "_run_agent_schedule_loop", invoked)
+    event_loop = asyncio.get_running_loop()
+    captured: dict[str, object] = {}
+
+    class RecordingLoop:
+        def run_in_executor(
+            self, executor: object, func: object
+        ) -> asyncio.Future[object]:
+            captured["executor"] = executor
+            future: asyncio.Future[object] = event_loop.create_future()
+            assert callable(func)
+            future.set_result(func())
+            return future
+
+    monkeypatch.setattr(api.asyncio, "get_running_loop", lambda: RecordingLoop())
+
+    outcome = await api._run_agent_schedule_loop_bounded(
+        orchestrator=cast(AgentOrchestrator, SimpleNamespace()),
+        schedule=_agent_loop_schedule(tool_allowlist=["onboarding_read.get_summary"]),
+        run=_run(),
+        context=AgentIdentityContext(
+            discord_user_id="1001",
+            organization_id="1000",
+            guild_id="1000",
+            roles=["Admin"],
+        ),
+        effective_scopes={"agent:schedule:manage"},
+        deadline_monotonic=monotonic() + 30,
+    )
+
+    assert outcome is expected
+    assert captured["executor"] is api._AGENT_SCHEDULE_LOOP_EXECUTOR
+    invoked.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_schedule_loop_capacity_refuses_another_sync_submission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Timed-out synchronous loops retain capacity until their threads return."""
+
+    bulkhead = Mock()
+    bulkhead.acquire.return_value = False
+    monkeypatch.setattr(api, "_AGENT_SCHEDULE_LOOP_BULKHEAD", bulkhead)
+
+    outcome = await api._run_agent_schedule_loop_bounded(
+        orchestrator=cast(AgentOrchestrator, SimpleNamespace()),
+        schedule=_agent_loop_schedule(tool_allowlist=["onboarding_read.get_summary"]),
+        run=_run(),
+        context=AgentIdentityContext(
+            discord_user_id="1001",
+            organization_id="1000",
+            guild_id="1000",
+            roles=["Admin"],
+        ),
+        effective_scopes={"agent:schedule:manage"},
+        deadline_monotonic=monotonic() + 30,
+    )
+
+    assert outcome.error == "scheduled_agent_loop_capacity_exceeded"
+    bulkhead.acquire.assert_called_once_with(blocking=False)
+
+
+@pytest.mark.asyncio
+async def test_schedule_loop_timeout_retains_capacity_until_sync_work_returns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timed-out thread cannot make room for another concurrent execution."""
+
+    started = Event()
+    release = Event()
+    finished = Event()
+    bulkhead = Mock()
+    bulkhead.acquire.return_value = True
+
+    def blocked_loop(**_kwargs: object) -> api._AgentScheduleLoopOutcome:
+        started.set()
+        try:
+            release.wait(timeout=1)
+            return api._AgentScheduleLoopOutcome(results=[])
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(api, "_AGENT_SCHEDULE_LOOP_BULKHEAD", bulkhead)
+    monkeypatch.setattr(api, "_run_agent_schedule_loop", blocked_loop)
+
+    outcome = await api._run_agent_schedule_loop_bounded(
+        orchestrator=cast(AgentOrchestrator, SimpleNamespace()),
+        schedule=_agent_loop_schedule(tool_allowlist=["onboarding_read.get_summary"]),
+        run=_run(),
+        context=AgentIdentityContext(
+            discord_user_id="1001",
+            organization_id="1000",
+            guild_id="1000",
+            roles=["Admin"],
+        ),
+        effective_scopes={"agent:schedule:manage"},
+        deadline_monotonic=monotonic() + 0.05,
+    )
+
+    assert outcome.error == "scheduled_agent_loop_timed_out"
+    assert started.is_set()
+    bulkhead.release.assert_not_called()
+
+    release.set()
+    for _ in range(100):
+        if finished.is_set() and bulkhead.release.called:
+            break
+        await asyncio.sleep(0.01)
+
+    assert finished.is_set()
+    bulkhead.release.assert_called_once()
 
 
 @pytest.mark.asyncio

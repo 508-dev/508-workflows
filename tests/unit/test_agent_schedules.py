@@ -479,14 +479,46 @@ def test_claim_can_recover_a_running_schedule_after_its_lease_expires(
     assert run is not None
     assert run.status is AgentScheduleRunStatus.RUNNING
     query, params = cursor.calls[0]
-    assert "status = 'running' AND started_at <= %s" in query
+    assert "status = 'running'" in query
+    assert "started_at <= %s" in query
     assert "execution_token = %s" in query
+    assert "delivery_status <> %s" in query
     assert params == (
         AgentScheduleRunStatus.RUNNING.value,
         execution_token,
         run_id,
         stale_before,
+        AgentScheduleRunDeliveryStatus.CLAIMED.value,
     )
+
+
+def test_claim_does_not_reclaim_a_run_with_an_in_flight_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale run remains operator-visible while Discord delivery is claimed."""
+
+    cursor = MagicMock()
+    cursor.fetchone.return_value = None
+    connection = MagicMock()
+    connection.__enter__.return_value.cursor.return_value.__enter__.return_value = (
+        cursor
+    )
+    monkeypatch.setattr(
+        schedules,
+        "get_postgres_connection",
+        lambda _settings: connection,
+    )
+
+    claimed = claim_agent_schedule_run(
+        SharedSettings(),
+        run_id="00000000-0000-0000-0000-000000000001",
+        reclaim_running_before=datetime(2026, 7, 28, 9, 0, tzinfo=timezone.utc),
+    )
+
+    assert claimed is None
+    query, params = cursor.execute.call_args.args
+    assert "delivery_status <> %s" in query
+    assert params[-1] == AgentScheduleRunDeliveryStatus.CLAIMED.value
 
 
 def test_pre_send_delivery_failure_releases_only_the_claimed_running_run(

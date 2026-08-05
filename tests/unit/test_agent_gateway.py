@@ -204,6 +204,9 @@ def test_context_loader_recounts_forged_small_token_metadata() -> None:
         "Bearer abcdefghijklmnopqrstuv",
         "SSN 123-45-6789",
         "Contact customer@example.com about the task.",
+        "Review CRM contact contact-123 before the next onboarding step.",
+        "Follow up on TASK-123 before the next steering meeting.",
+        "Inspect Purchase Invoice PINV-123 for the billing report.",
     ],
 )
 def test_context_loader_drops_private_request_snippets_before_model(
