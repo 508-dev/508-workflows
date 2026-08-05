@@ -79,6 +79,7 @@ class JobLead:
     posted_at: datetime | None
     created_at: datetime
     updated_at: datetime
+    engagement_id: str | None = None
 
 
 def job_lead_classification(lead: JobLead | dict[str, Any]) -> dict[str, Any]:
@@ -181,6 +182,14 @@ def job_lead_display_payload(lead: JobLead | dict[str, Any]) -> dict[str, Any]:
             "created_at": lead.created_at,
             "updated_at": lead.updated_at,
         }
+    raw_engagement_id = (
+        lead.get("engagement_id") if isinstance(lead, dict) else lead.engagement_id
+    )
+    engagement_id = str(raw_engagement_id or "").strip()
+    if engagement_id:
+        payload["engagement_id"] = engagement_id
+    else:
+        payload.pop("engagement_id", None)
     payload["contractor_classification"] = job_lead_classification(lead)
     payload["review_summary"] = format_job_lead_review_summary(lead)
     return payload
@@ -234,6 +243,7 @@ def _as_lead(row: dict[str, Any]) -> JobLead:
         posted_at=row.get("posted_at"),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        engagement_id=str(row.get("engagement_id") or "").strip() or None,
     )
 
 
@@ -412,8 +422,15 @@ def list_job_leads(
         params.append(_normalize_status(status).value)
     where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     query = f"""
-        SELECT *
+        SELECT job_leads.*, linked_engagement.id::text AS engagement_id
         FROM job_leads
+        LEFT JOIN LATERAL (
+            SELECT id
+            FROM engagements
+            WHERE discord_thread_id = job_leads.discord_thread_id
+            ORDER BY created_at DESC
+            LIMIT 1
+        ) AS linked_engagement ON TRUE
         {where_clause}
         ORDER BY confidence DESC, source_posted_at DESC NULLS LAST, created_at DESC
         LIMIT %s
@@ -455,7 +472,16 @@ def review_job_lead(
     reviewer_discord_user_id: str,
 ) -> JobLead | None:
     """Review a lead or restore a rejected lead to the pending queue."""
-    normalized_status = _normalize_status(status)
+    try:
+        normalized_status = (
+            status
+            if isinstance(status, JobLeadStatus)
+            else JobLeadStatus(str(status).strip().casefold())
+        )
+    except ValueError:
+        raise ValueError(
+            "Job lead review status must be pending, approved, or rejected."
+        ) from None
     if normalized_status not in {
         JobLeadStatus.PENDING,
         JobLeadStatus.APPROVED,

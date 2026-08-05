@@ -3777,6 +3777,7 @@ def test_dashboard_job_leads_returns_pending_leads(client: TestClient) -> None:
             "title": "Contract engineer",
             "body_normalized": "Looking for a short term contractor.",
             "tags": ["contract"],
+            "engagement_id": "gig-1",
             "created_at": "2026-07-01T00:00:00+00:00",
             "updated_at": "2026-07-01T00:00:00+00:00",
         }
@@ -3804,6 +3805,7 @@ def test_dashboard_job_leads_returns_pending_leads(client: TestClient) -> None:
     assert payload[0]["contractor_classification"]["method"] == "heuristic"
     assert payload[0]["contractor_classification"]["tags"] == ["contract"]
     assert payload[0]["review_summary"].startswith("Keyword fallback:")
+    assert payload[0]["engagement_id"] == "gig-1"
     mock_leads.assert_called_once_with(
         api.settings,
         status=api.JobLeadStatus.PENDING,

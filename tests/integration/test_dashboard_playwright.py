@@ -665,6 +665,9 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             job_leads_payload[0]["discord_guild_id"] = "guild-1"
             job_leads_payload[0]["discord_channel_id"] = "channel-1"
             job_leads_payload[0]["discord_thread_id"] = "thread-lead-1"
+            job_leads_payload[0]["engagement_id"] = (
+                "66666666-6666-4666-8666-666666666666"
+            )
             gigs_list_payload = [
                 *gigs_list_payload,
                 {
@@ -997,6 +1000,12 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             )
             expect(page.get_by_role("link", name="Discord")).to_have_attribute(
                 "href", "https://discord.com/channels/guild-1/thread-lead-1"
+            )
+
+            page.reload()
+            page.get_by_text("Contract React Build").wait_for()
+            expect(page.get_by_role("link", name="View posted gig")).to_have_attribute(
+                "href", "/dashboard/gigs/66666666-6666-4666-8666-666666666666"
             )
 
             job_leads_payload[0]["status"] = "rejected"

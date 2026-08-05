@@ -268,7 +268,7 @@ type JobLead = {
   posted_at?: string
   created_at?: string
   updated_at?: string
-  posted_gig_url?: string
+  engagement_id?: string
 }
 
 type JobLeadReviewStatus = "pending" | "approved" | "rejected"
@@ -1839,9 +1839,6 @@ function App() {
         },
       )
       const engagementId = String(result.engagement_id || "").trim()
-      const postedGigUrl = engagementId
-        ? `${routes.gigs}/${encodeURIComponent(engagementId)}`
-        : undefined
       setGigLeads((current) =>
         current.map((lead) =>
           lead.id === leadId
@@ -1851,7 +1848,7 @@ function App() {
                 discord_guild_id: result.guild_id || lead.discord_guild_id,
                 discord_channel_id: result.channel_id || lead.discord_channel_id,
                 discord_thread_id: result.thread_id || lead.discord_thread_id,
-                posted_gig_url: postedGigUrl,
+                engagement_id: engagementId || lead.engagement_id,
               }
             : lead,
         ),
@@ -6013,6 +6010,8 @@ function JobLeadListItem({
           lead.discord_guild_id,
         )}/${encodeURIComponent(lead.discord_thread_id)}`
       : ""
+  const engagementId = String(lead.engagement_id || "").trim()
+  const postedGigUrl = engagementId ? `${routes.gigs}/${encodeURIComponent(engagementId)}` : ""
   const contactEmail = lead.contractor_classification?.contact_email
   const commentText = lead.body_normalized || "No lead text captured."
   return (
@@ -6102,10 +6101,10 @@ function JobLeadListItem({
               <ExternalLink className="size-3.5" />
             </a>
           ) : null}
-          {lead.posted_gig_url ? (
+          {postedGigUrl ? (
             <a
               className="inline-flex items-center gap-1 font-extrabold text-primary"
-              href={lead.posted_gig_url}
+              href={postedGigUrl}
             >
               View posted gig
               <ExternalLink className="size-3.5" />
