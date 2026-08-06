@@ -1891,6 +1891,7 @@ def test_elliptical_compound_task_request_uses_the_model_planner() -> None:
     assert response.status == "requires_confirmation"
     assert response.plan is not None
     assert response.plan.planner == "live_model"
+    assert all(action.requires_confirmation for action in response.plan.actions)
     assert [action.arguments["title"] for action in response.plan.actions] == [
         "draft the agenda",
         "book a room",
