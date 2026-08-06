@@ -46,9 +46,10 @@ _WORKFLOW_CLAUSE_SEPARATOR_RE = re.compile(
     re.IGNORECASE,
 )
 _ELLIPTICAL_TASK_CLAUSE_RE = re.compile(
-    r"^\s*(?:another|(?:a\s+)?(?:second|third|fourth)|one\s+more|an\s+additional)\s+task\b",
+    r"^\s*(?:another(?:\s+task)?|(?:a\s+)?(?:second|third|fourth)|one\s+more|an\s+additional)\s+(?:task\b|to\b)",
     re.IGNORECASE,
 )
+_EMAIL_ADDRESS_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 _SHARED_WORKFLOW_VERB_RE = re.compile(
     r"^\s*(?:please\s+)?(?P<verb>"
     r"search|find|list|show|create|open|update|edit|close|assign|add|invite|send|provision"
@@ -235,6 +236,15 @@ class AgentOrchestrator:
                 self._parse_action(clause) is None
                 and self._parse_action(f"{verb} {clause}") is not None
                 for clause in clauses[1:]
+            ):
+                return True
+            if (
+                verb.casefold() == "invite"
+                and "outline" in clauses[0].casefold()
+                and any(
+                    _EMAIL_ADDRESS_RE.fullmatch(clause.strip()) is not None
+                    for clause in clauses[1:]
+                )
             ):
                 return True
         return workflow_count > 0 and any(

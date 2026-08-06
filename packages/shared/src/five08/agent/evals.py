@@ -1112,16 +1112,19 @@ def _evaluate_provider_draft(
                 schema_valid,
             )
         )
-    if expect.actions is not None:
+    expected_actions = expect.actions
+    if expected_actions is None and expected_status == "needs_clarification":
+        expected_actions = []
+    if expected_actions is not None:
         checks.append(
             _check(
                 "provider_draft.action_count",
-                len(expect.actions),
+                len(expected_actions),
                 len(draft.actions),
                 strict=False,
             )
         )
-        for index, expected_action in enumerate(expect.actions):
+        for index, expected_action in enumerate(expected_actions):
             observed_action = (
                 draft.actions[index] if index < len(draft.actions) else None
             )

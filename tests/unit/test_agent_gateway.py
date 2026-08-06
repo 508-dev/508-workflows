@@ -1897,6 +1897,54 @@ def test_elliptical_compound_task_request_uses_the_model_planner() -> None:
     ]
 
 
+def test_pronoun_only_compound_task_request_uses_the_model_planner() -> None:
+    planner_calls: list[dict[str, object]] = []
+
+    class RecordingPlanner:
+        def plan(self, **kwargs: object) -> AgentPlannerResult:
+            planner_calls.append(kwargs)
+            return AgentPlannerResult(
+                draft=PlannerDraft(
+                    status="needs_clarification",
+                    clarification_question="What are the two tasks?",
+                ),
+                model=AgentModelConfig().resolve("fast"),
+                latency_ms=1,
+            )
+
+    request = "Create a task to draft the agenda and another to book a room"
+    response = AgentOrchestrator(planner=RecordingPlanner()).plan(request, _context())
+
+    assert len(planner_calls) == 1
+    assert planner_calls[0]["message"] == request
+    assert response.status == "needs_clarification"
+    assert response.plan is None
+
+
+def test_shared_target_outline_invites_use_the_model_planner() -> None:
+    planner_calls: list[dict[str, object]] = []
+
+    class RecordingPlanner:
+        def plan(self, **kwargs: object) -> AgentPlannerResult:
+            planner_calls.append(kwargs)
+            return AgentPlannerResult(
+                draft=PlannerDraft(
+                    status="needs_clarification",
+                    clarification_question="Should I invite both people?",
+                ),
+                model=AgentModelConfig().resolve("fast"),
+                latency_ms=1,
+            )
+
+    request = "Invite alice@example.com to Outline and bob@example.com"
+    response = AgentOrchestrator(planner=RecordingPlanner()).plan(request, _context())
+
+    assert len(planner_calls) == 1
+    assert planner_calls[0]["message"] == request
+    assert response.status == "needs_clarification"
+    assert response.plan is None
+
+
 def test_shared_verb_compound_workflow_uses_the_model_planner() -> None:
     planner_calls: list[dict[str, object]] = []
 
