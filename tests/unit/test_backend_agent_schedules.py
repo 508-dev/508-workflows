@@ -115,8 +115,18 @@ def _agent_loop_schedule(*, tool_allowlist: list[str]) -> AgentScheduleRecord:
     )
 
 
-def test_agent_loop_creation_persists_an_exact_default_tool_catalog() -> None:
+def test_agent_loop_creation_persists_an_exact_default_tool_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The generic creation surface captures tools now, rather than later."""
+
+    monkeypatch.setattr(api.settings, "github_app_client_id", None)
+    monkeypatch.setattr(api.settings, "github_app_installation_id", None)
+    monkeypatch.setattr(api.settings, "github_app_private_key", None)
+    monkeypatch.setattr(api.settings, "github_api_token", None)
+    monkeypatch.setattr(api.settings, "searxng_base_url", None)
+    monkeypatch.setattr(api.settings, "brave_search_api_key", None)
+    monkeypatch.setattr(api.settings, "firecrawl_api_key", None)
 
     definition = api._agent_schedule_definition_from_fields(
         SimpleNamespace(
@@ -131,11 +141,55 @@ def test_agent_loop_creation_persists_an_exact_default_tool_catalog() -> None:
     assert definition.execution_mode is AgentScheduleExecutionMode.AGENT_LOOP
     assert definition.actions == []
     assert "onboarding_read.get_summary" in definition.tool_allowlist
-    assert "github_issue.search_issues" in definition.tool_allowlist
+    assert "github_issue.search_issues" not in definition.tool_allowlist
+    assert "web_read.search" not in definition.tool_allowlist
+    assert "web_read.extract" not in definition.tool_allowlist
     assert "crm_write.update_contact" not in definition.tool_allowlist
     assert definition.tool_allowlist == api._default_agent_schedule_tool_allowlist(
         ToolRuntimeConfig.from_settings(api.settings)
     )
+
+
+def test_agent_loop_creation_includes_configured_github_and_public_web_search(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Generic schedules expose only configured GitHub and web-read clients."""
+
+    monkeypatch.setattr(api.settings, "github_app_client_id", None)
+    monkeypatch.setattr(api.settings, "github_app_installation_id", None)
+    monkeypatch.setattr(api.settings, "github_app_private_key", None)
+    monkeypatch.setattr(api.settings, "github_api_token", "github-token")
+    monkeypatch.setattr(api.settings, "agent_web_search_provider_order", "searxng")
+    monkeypatch.setattr(api.settings, "searxng_base_url", "https://search.example.test")
+    monkeypatch.setattr(api.settings, "brave_search_api_key", None)
+    monkeypatch.setattr(api.settings, "firecrawl_api_key", None)
+
+    definition = api._agent_schedule_definition_from_fields(
+        SimpleNamespace(
+            prompt="Review configured GitHub issues and public project news.",
+            execution_mode="agent_loop",
+            tool_allowlist=[],
+            channel_id="2000",
+        ),
+        guild_id="1000",
+    )
+
+    assert "github_issue.search_issues" in definition.tool_allowlist
+    assert "web_read.search" in definition.tool_allowlist
+    assert "web_read.extract" not in definition.tool_allowlist
+
+
+def test_default_agent_loop_omits_github_for_an_incomplete_app_configuration() -> None:
+    """A malformed App configuration cannot fall through to a legacy token."""
+
+    tool_allowlist = api._default_agent_schedule_tool_allowlist(
+        ToolRuntimeConfig(
+            github_app_client_id="github-app-client-id",
+            github_api_token="github-token",
+        )
+    )
+
+    assert "github_issue.search_issues" not in tool_allowlist
 
 
 def test_agent_loop_creation_omits_unconfigured_web_extraction(
@@ -163,6 +217,7 @@ def test_agent_loop_creation_includes_configured_web_extraction(
 ) -> None:
     """Configured Firecrawl extraction remains available to generic schedules."""
 
+    monkeypatch.setattr(api.settings, "agent_web_search_provider_order", "firecrawl")
     monkeypatch.setattr(api.settings, "firecrawl_api_key", "firecrawl-key")
 
     definition = api._agent_schedule_definition_from_fields(

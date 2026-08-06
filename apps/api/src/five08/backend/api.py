@@ -9415,7 +9415,53 @@ def _default_agent_schedule_tool_allowlist(
     # A generic schedule should not advertise an optional integration that
     # cannot serve the planner at execution time. Explicit administrator
     # selections remain deliberate and are preserved by the caller.
-    if not str(runtime_config.firecrawl_api_key or "").strip():
+    configured_github_app_values = tuple(
+        str(value or "").strip()
+        for value in (
+            runtime_config.github_app_client_id,
+            runtime_config.github_app_installation_id,
+            runtime_config.github_app_private_key,
+        )
+    )
+    github_app_configured = all(configured_github_app_values)
+    github_token_configured = bool(str(runtime_config.github_api_token or "").strip())
+    # ToolRegistry treats any GitHub App field as an App configuration and
+    # rejects an incomplete set rather than falling through to the legacy token.
+    github_client_configured = github_app_configured or (
+        not any(configured_github_app_values) and github_token_configured
+    )
+    if not github_client_configured:
+        schedule_safe_tools -= {"github_issue.search_issues"}
+
+    web_provider_order = {
+        value.strip().casefold()
+        for value in str(runtime_config.agent_web_search_provider_order or "").split(
+            ","
+        )
+        if value.strip()
+    }
+    web_search_configured = (
+        (
+            "searxng" in web_provider_order
+            and bool(str(runtime_config.searxng_base_url or "").strip())
+        )
+        or (
+            "brave" in web_provider_order
+            and bool(str(runtime_config.brave_search_api_key or "").strip())
+        )
+        or (
+            "firecrawl" in web_provider_order
+            and bool(str(runtime_config.firecrawl_api_key or "").strip())
+        )
+    )
+    if not web_search_configured:
+        schedule_safe_tools -= {"web_read.search"}
+    # Scheduled extraction is intentionally constrained to a URL returned by
+    # the same run's search, so it is usable only when both pieces are live.
+    if (
+        not web_search_configured
+        or not str(runtime_config.firecrawl_api_key or "").strip()
+    ):
         schedule_safe_tools -= {"web_read.extract"}
     if not all(
         str(value or "").strip()
