@@ -45,6 +45,26 @@ def test_job_timeout_requires_room_for_the_worker_hard_deadline() -> None:
         SharedSettings(job_timeout_seconds=5)
 
 
+def test_public_web_deadline_cannot_outlive_response_budget() -> None:
+    with pytest.raises(
+        ValidationError,
+        match="AGENT_PUBLIC_WEB_DEADLINE_SECONDS must not exceed",
+    ):
+        SharedSettings(
+            agent_request_response_budget_seconds=10.0,
+            agent_public_web_deadline_seconds=11.0,
+        )
+
+
+def test_public_web_deadline_may_equal_response_budget() -> None:
+    settings = SharedSettings(
+        agent_request_response_budget_seconds=10.0,
+        agent_public_web_deadline_seconds=10.0,
+    )
+
+    assert settings.agent_public_web_deadline_seconds == 10.0
+
+
 def test_sentry_environment_and_sampling_are_not_env_configurable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

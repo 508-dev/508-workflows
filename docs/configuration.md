@@ -283,7 +283,8 @@ Agent gateway:
   synchronous planning/read request; defaults to `55` seconds and is capped at
   `55` so it stays inside the bot's default 60-second transport timeout.
 - `AGENT_PUBLIC_WEB_DEADLINE_SECONDS`: best-effort per-request budget for the
-  public-web loop; defaults to `50`. Keep it below the response budget. DNS
+  public-web loop; defaults to `50` and must not exceed the response budget.
+  DNS
   and third-party HTTP behavior cannot be force-canceled by the sync adapters,
   but the API will return once the response budget expires.
 - `GITHUB_DEFAULT_REPO`: defaults to `508-dev/todos`.
@@ -330,6 +331,9 @@ Agent gateway:
 - `AGENT_SCHEDULE_API_BASE_URL`, `AGENT_SCHEDULE_API_TIMEOUT_SECONDS`: worker
   handoff to the API-owned agent runtime. The worker uses `API_SHARED_SECRET`
   for this internal call and intentionally does not need model-provider keys.
+  Its timeout must cover the schedule execution window plus 60 seconds for
+  role refresh, summary, and report delivery, while fitting inside the worker
+  job lease.
 - `AGENT_MEMORY_CLEANUP_ENABLED`, `AGENT_MEMORY_CLEANUP_INTERVAL_SECONDS`:
   enqueue a daily-by-default worker sweep of expired durable memory facts. The
   job deletes only expired/deleted rows and reports a count; it never reads or

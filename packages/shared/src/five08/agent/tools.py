@@ -2973,7 +2973,7 @@ def _web_research_client_from_config(config: ToolRuntimeConfig) -> WebResearchCl
         elif provider_name == "firecrawl" and firecrawl is not None:
             search_providers.append(firecrawl)
 
-    if not search_providers:
+    if not search_providers and firecrawl is None:
         raise RuntimeError(
             "No public web search provider is configured. Set SEARXNG_BASE_URL, "
             "BRAVE_SEARCH_API_KEY, or FIRECRAWL_API_KEY."

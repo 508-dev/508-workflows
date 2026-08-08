@@ -27,7 +27,11 @@ from five08.agent.web import (
     normalize_provider_base_url,
     validate_public_https_url,
 )
-from five08.agent.tools import ToolRegistry
+from five08.agent.tools import (
+    ToolRegistry,
+    ToolRuntimeConfig,
+    _web_research_client_from_config,
+)
 from five08.tls import default_ca_bundle_path
 
 
@@ -427,6 +431,18 @@ def test_web_research_client_routes_named_extract_provider() -> None:
         client.extract("https://example.com", provider="test-extract").content
         == "content"
     )
+
+
+def test_firecrawl_only_configuration_allows_public_page_extraction() -> None:
+    client = _web_research_client_from_config(
+        ToolRuntimeConfig(
+            agent_web_search_provider_order="brave",
+            firecrawl_api_key="firecrawl-key",
+        )
+    )
+
+    assert client.search_provider_names == ()
+    assert client.extract_provider_names == ("firecrawl",)
 
 
 def test_provider_transport_and_response_errors_are_typed() -> None:

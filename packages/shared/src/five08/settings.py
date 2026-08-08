@@ -385,6 +385,20 @@ class SharedSettings(BaseSettings):
         return ",".join(normalized)
 
     @model_validator(mode="after")
+    def _validate_agent_request_deadlines(self) -> "SharedSettings":
+        """Prevent a web worker from outliving its caller's response budget."""
+
+        if (
+            self.agent_public_web_deadline_seconds
+            > self.agent_request_response_budget_seconds
+        ):
+            raise ValueError(
+                "AGENT_PUBLIC_WEB_DEADLINE_SECONDS must not exceed "
+                "AGENT_REQUEST_RESPONSE_BUDGET_SECONDS"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _reject_everyone_agent_role_bindings(self) -> "SharedSettings":
         """Reject a guild's ``@everyone`` role as an agent capability grant.
 
