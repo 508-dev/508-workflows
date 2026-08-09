@@ -8,10 +8,14 @@ from pathlib import Path
 import requests
 
 from five08.agent.evals import (
+    AgentEvalModelProfile,
     AgentEvalExpect,
     AgentEvalExpectedAction,
     AgentEvalObserved,
     AgentEvalObservedAction,
+    LivePlannerDraft,
+    _parse_live_planner_json,
+    _response_from_live_draft,
     evaluate_observed,
     load_env_file,
     load_fixtures,
@@ -23,6 +27,52 @@ from five08.agent.evals import (
     run_eval_suite,
     write_report,
 )
+from five08.agent import AgentIdentityContext, AgentModelConfig, AgentOrchestrator
+
+
+def test_live_planner_answer_draft_uses_production_chat_safety_gate() -> None:
+    """Live evals preserve safe answers but reject ungrounded operational ones."""
+
+    context = AgentIdentityContext(
+        discord_user_id="123",
+        organization_id="org-1",
+        guild_id="org-1",
+        roles=["Steering Committee"],
+    )
+    profile = AgentEvalModelProfile(
+        id="test",
+        label="Test",
+        configured=True,
+        agent_model_config=AgentModelConfig(),
+    )
+    draft = _parse_live_planner_json(
+        '{"status":"answer","answer":"A cooperative is member-owned.","actions":[]}'
+    )
+
+    safe_response = _response_from_live_draft(
+        orchestrator=AgentOrchestrator(),
+        draft=draft,
+        message="What is a cooperative?",
+        context=context,
+        profile=profile,
+        parse_error=None,
+    )
+    operational_response = _response_from_live_draft(
+        orchestrator=AgentOrchestrator(),
+        draft=LivePlannerDraft(
+            status="answer",
+            answer="There are three overdue invoices.",
+        ),
+        message="How many invoices are overdue?",
+        context=context,
+        profile=profile,
+        parse_error=None,
+    )
+
+    assert safe_response.status == "executed"
+    assert safe_response.message == "A cooperative is member-owned."
+    assert operational_response.status == "needs_clarification"
+    assert "tool plan" in operational_response.message
 
 
 def test_discord_agent_eval_canonical_suite_passes() -> None:

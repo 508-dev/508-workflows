@@ -323,45 +323,70 @@ def claim_job_for_execution(
     caller that transitions the persisted job to ``running`` may invoke its
     side-effectful handler. A unique lease token fences stale workers from
     recording a later success/retry/dead transition after their claim expires.
+    Reclaiming a stale running lease consumes one retry attempt; the final
+    expired lease becomes terminal rather than looping forever.
     """
 
     lease_seconds = max(1, int(settings.job_timeout_seconds))
     claim_token = f"{worker_name}:{uuid4()}"
     query = """
-        UPDATE jobs
-        SET status = %s,
-            locked_at = NOW(),
-            locked_by = %s,
-            run_after = NULL,
-            last_error = NULL,
-            updated_at = NOW()
-        WHERE id = %s
-          AND (
-              (
-                  status IN (%s, %s)
-                  AND (run_after IS NULL OR run_after <= NOW())
-              )
-              OR (
-                  status = %s
-                  AND (
-                      locked_at IS NULL
-                      OR locked_at <= NOW() - (%s * INTERVAL '1 second')
+        WITH claimed AS (
+            UPDATE jobs
+            SET status = CASE
+                    WHEN status = 'running' AND attempts + 1 >= max_attempts
+                        THEN 'dead'
+                    ELSE 'running'
+                END,
+                attempts = CASE
+                    WHEN status = 'running' AND attempts < max_attempts
+                        THEN attempts + 1
+                    ELSE attempts
+                END,
+                locked_at = CASE
+                    WHEN status = 'running' AND attempts + 1 >= max_attempts
+                        THEN NULL
+                    ELSE NOW()
+                END,
+                locked_by = CASE
+                    WHEN status = 'running' AND attempts + 1 >= max_attempts
+                        THEN NULL
+                    ELSE %s
+                END,
+                run_after = NULL,
+                last_error = CASE
+                    WHEN status = 'running' AND attempts + 1 >= max_attempts
+                        THEN 'execution_lease_expired'
+                    ELSE NULL
+                END,
+                updated_at = NOW()
+            WHERE id = %s
+              AND (
+                  (
+                      status IN (%s, %s)
+                      AND (run_after IS NULL OR run_after <= NOW())
+                  )
+                  OR (
+                      status = 'running'
+                      AND (
+                          locked_at IS NULL
+                          OR locked_at <= NOW() - (%s * INTERVAL '1 second')
+                      )
                   )
               )
-          )
-        RETURNING *;
+            RETURNING *
+        )
+        SELECT * FROM claimed
+        WHERE status = 'running';
     """
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
                 query,
                 (
-                    JobStatus.RUNNING.value,
                     claim_token,
                     job_id,
                     JobStatus.QUEUED.value,
                     JobStatus.FAILED.value,
-                    JobStatus.RUNNING.value,
                     lease_seconds,
                 ),
             )

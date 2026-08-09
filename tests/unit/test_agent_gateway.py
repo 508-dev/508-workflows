@@ -2472,6 +2472,50 @@ def test_public_web_route_rejects_crm_record_identifier_before_provider_call() -
     assert web_client.calls == 0
 
 
+def test_private_identifier_disables_public_web_model_follow_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A safe public read cannot relay unrelated private text to the planner."""
+
+    class FakeWebClient:
+        def __init__(self) -> None:
+            self.extracted_urls: list[str] = []
+
+        def extract(self, url: str) -> WebExtractResult:
+            self.extracted_urls.append(url)
+            return WebExtractResult(
+                provider="firecrawl",
+                url=url,
+                content="Public grant details.",
+            )
+
+    class FailingFollowUpPlanner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def plan_with_observations(self, **_kwargs: object) -> AgentPlannerResult:
+            self.calls += 1
+            raise AssertionError("private request text must not reach model follow-up")
+
+    monkeypatch.setattr(
+        "five08.agent.tools.validate_public_https_url",
+        lambda url: url,
+    )
+    web_client = FakeWebClient()
+    planner = FailingFollowUpPlanner()
+    response = AgentOrchestrator(
+        registry=ToolRegistry(web_client=web_client),
+        planner=planner,
+    ).plan(
+        "Read https://example.com/grants alongside CRM contact contact-123",
+        _context(roles=["Steering Committee"]),
+    )
+
+    assert response.status == "executed"
+    assert web_client.extracted_urls == ["https://example.com/grants"]
+    assert planner.calls == 0
+
+
 @pytest.mark.parametrize(
     "message",
     [
@@ -2775,6 +2819,35 @@ def test_model_only_answer_is_limited_to_safe_chat_and_never_impersonation() -> 
     assert write_like_response.status == "requires_confirmation"
     assert impersonated_response.status == "denied"
     assert "Impersonated" in impersonated_response.message
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "How many invoices are overdue?",
+        "What is the current onboarding status?",
+    ],
+)
+def test_model_only_answer_cannot_claim_operational_status(message: str) -> None:
+    class FakePlanner:
+        def plan(self, **_kwargs: object) -> AgentPlannerResult:
+            return AgentPlannerResult(
+                draft=PlannerDraft(
+                    status="answer",
+                    intent="operational_status",
+                    answer="A model-only operational answer.",
+                ),
+                model=AgentModelConfig().resolve("fast"),
+                latency_ms=1,
+            )
+
+    response = AgentOrchestrator(planner=FakePlanner()).plan(
+        message,
+        _context(roles=["Steering Committee"]),
+    )
+
+    assert response.status == "needs_clarification"
+    assert response.message != "A model-only operational answer."
 
 
 def test_agent_chat_strips_context_for_role_without_context_read_scope() -> None:

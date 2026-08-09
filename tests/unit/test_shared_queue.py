@@ -89,17 +89,18 @@ def test_claim_job_for_execution_uses_one_conditional_update() -> None:
 
     assert claimed is None
     query, parameters = cursor.execute.call_args.args
+    assert "WITH claimed AS" in query
     assert "UPDATE jobs" in query
     assert "status IN" in query
     assert "locked_at <= NOW() - (%s * INTERVAL '1 second')" in query
     assert "RETURNING *" in query
+    assert "attempts = CASE" in query
+    assert "WHERE status = 'running'" in query
     assert parameters == (
-        "running",
         "worker-1:claim-1",
         "job-1",
         "queued",
         "failed",
-        "running",
         600,
     )
 
@@ -144,10 +145,47 @@ def test_claim_job_for_execution_reclaims_an_expired_running_lease() -> None:
     assert claimed.status is JobStatus.RUNNING
     assert claimed.locked_by == "worker-2:fresh-claim"
     query, parameters = cursor.execute.call_args.args
-    assert "status = %s" in query
+    assert "status = 'running'" in query
+    assert "attempts + 1 >= max_attempts" in query
     assert "locked_at IS NULL" in query
     assert "locked_at <= NOW() - (%s * INTERVAL '1 second')" in query
-    assert parameters[-2:] == ("running", 30)
+    assert parameters[-1] == 30
+
+
+def test_claim_job_for_execution_terminally_records_final_expired_lease() -> None:
+    """A final expired lease is dead, not another unbounded execution claim."""
+
+    cursor = MagicMock()
+    cursor.fetchone.return_value = None
+    connection = MagicMock()
+    connection.__enter__.return_value.cursor.return_value.__enter__.return_value = (
+        cursor
+    )
+
+    with (
+        patch("five08.queue.get_postgres_connection", return_value=connection),
+        patch("five08.queue.uuid4", return_value="expired-claim"),
+    ):
+        claimed = claim_job_for_execution(
+            SharedSettings(job_max_attempts=5),
+            "job-expired",
+            worker_name="worker-3",
+        )
+
+    assert claimed is None
+    query, parameters = cursor.execute.call_args.args
+    assert "WHEN status = 'running' AND attempts + 1 >= max_attempts" in query
+    assert "THEN 'dead'" in query
+    assert "'execution_lease_expired'" in query
+    assert "SELECT * FROM claimed" in query
+    assert "WHERE status = 'running'" in query
+    assert parameters == (
+        "worker-3:expired-claim",
+        "job-expired",
+        "queued",
+        "failed",
+        600,
+    )
 
 
 def test_renew_job_execution_lease_fences_updates_to_the_current_worker() -> None:

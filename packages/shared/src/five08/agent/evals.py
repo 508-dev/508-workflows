@@ -15,7 +15,7 @@ from typing import Any, Literal
 from uuid import uuid4
 
 import requests
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from five08.agent.models import (
     AgentContextSnippet,
@@ -291,10 +291,26 @@ class LivePlannerActionDraft(BaseModel):
 class LivePlannerDraft(BaseModel):
     """Structured planner output requested from live models."""
 
-    status: Literal["planned", "needs_clarification"]
+    status: Literal["planned", "needs_clarification", "answer"]
     intent: str | None = None
     clarification_question: str | None = None
+    answer: str | None = Field(default=None, max_length=4000)
     actions: list[LivePlannerActionDraft] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_status_shape(self) -> "LivePlannerDraft":
+        """Keep the live-eval contract aligned with production planner drafts."""
+
+        if self.status == "planned" and not self.actions:
+            raise ValueError("planned drafts require at least one action")
+        if self.status == "needs_clarification" and not self.clarification_question:
+            raise ValueError("clarification drafts require a question")
+        if self.status == "answer":
+            if not self.answer or not self.answer.strip():
+                raise ValueError("answer drafts require an answer")
+            if self.actions:
+                raise ValueError("answer drafts cannot include actions")
+        return self
 
 
 class LivePlannerCallResult(BaseModel):
@@ -1184,18 +1200,57 @@ def _response_from_live_draft(
     profile: AgentEvalModelProfile,
     parse_error: str | None,
 ) -> AgentResponse:
+    # Keep live eval behavior aligned with the production gateway: a caller
+    # without any role-derived agent scope is rejected before a model draft can
+    # become an actionable plan.
+    if not orchestrator.policy.scopes_for_context(context):
+        return AgentResponse(
+            status="denied",
+            message=(
+                "Your current Discord roles do not grant access to agent workflows."
+            ),
+        )
     if draft is None:
         return AgentResponse(
             status="failed",
             message=f"Live planner failed: {parse_error or 'unknown error'}",
         )
-    if draft.status == "needs_clarification" or not draft.actions:
-        question = draft.clarification_question or "What should I do next?"
-        return AgentResponse(
-            status="needs_clarification",
-            message=question,
-            clarification_question=question,
+    resolved_member_agreement = orchestrator._plan_member_agreement_from_crm(
+        message,
+        context,
+        planner="live_model",
+    )
+    if resolved_member_agreement is not None:
+        return resolved_member_agreement
+    if draft.status == "answer":
+        chat_decision = orchestrator.policy.authorize_chat(context=context)
+        if not chat_decision.allowed:
+            return AgentResponse(status="denied", message=chat_decision.reason)
+        if not orchestrator._is_direct_chat_request(message):
+            return AgentResponse(
+                status="needs_clarification",
+                message=(
+                    "I need a tool plan for that request rather than a "
+                    "model-only answer."
+                ),
+                clarification_question="What read-only question or workflow should I run?",
+            )
+        return AgentResponse(status="executed", message=draft.answer or "")
+    if draft.status == "needs_clarification":
+        fallback_action = _deterministic_live_planner_fallback(
+            orchestrator=orchestrator,
+            message=message,
+            context=context,
         )
+        if fallback_action is not None:
+            actions = [fallback_action]
+        else:
+            question = draft.clarification_question or "What should I do next?"
+            return AgentResponse(
+                status="needs_clarification",
+                message=question,
+                clarification_question=question,
+            )
     else:
         actions = [
             AgentToolAction(
@@ -1300,6 +1355,18 @@ def _response_from_live_draft(
         results=results,
         message=orchestrator._execution_message(results),
     )
+
+
+def _deterministic_live_planner_fallback(
+    *,
+    orchestrator: AgentOrchestrator,
+    message: str,
+    context: AgentIdentityContext,
+) -> AgentToolAction | None:
+    action = orchestrator._deterministic_action_for_model_fallback(message, context)
+    if action is not None:
+        action.summary = action.summary or f"Call {action.tool_name}"
+    return action
 
 
 def _live_model_selection(

@@ -91,6 +91,16 @@ _MONTHS = {
 LiteralPlanner = Literal["deterministic_regex", "live_model"]
 _WEB_READ_TOOL_PREFIX = "web_read."
 _MAX_PLANNER_OBSERVATION_CHARS = 12_000
+_OPERATIONAL_STATUS_SIGNAL_RE = re.compile(
+    r"\b(?:how\s+many|how\s+much|current|status|overdue|pending|open|closed|"
+    r"approved|rejected|stale|total|count|number\s+of)\b",
+    re.IGNORECASE,
+)
+_OPERATIONAL_DATA_SUBJECT_RE = re.compile(
+    r"\b(?:invoices?|billing|erp(?:next)?|suppliers?|onboarding|crm|contacts?|"
+    r"members?|tasks?|github|issues?|projects?|database|records?)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -294,7 +304,13 @@ class AgentOrchestrator:
                 )
 
             follow_up = getattr(self.planner, "plan_with_observations", None)
-            can_continue_with_model = callable(follow_up)
+            # The initial public action is deterministic, but its result may
+            # otherwise lead to a follow-up model call that receives the full
+            # request text. Keep any private identifier out of that external
+            # planner boundary while still allowing the safe public read.
+            can_continue_with_model = callable(
+                follow_up
+            ) and not self._has_private_model_identifier(text)
             return self._response_for_actions(
                 actions=[explicit_public_web_action],
                 context=context,
@@ -730,6 +746,10 @@ class AgentOrchestrator:
             normalized,
         ):
             return False
+        if AgentOrchestrator._is_operational_status_request(normalized):
+            # A model must not invent an answer about mutable organization
+            # data. Require a validated read-only tool plan instead.
+            return False
         operation_markers = (
             "create",
             "update",
@@ -755,6 +775,15 @@ class AgentOrchestrator:
         return not any(
             re.search(rf"\b{re.escape(marker)}\b", normalized)
             for marker in operation_markers
+        )
+
+    @staticmethod
+    def _is_operational_status_request(text: str) -> bool:
+        """Recognize data/status questions that need a grounded tool read."""
+
+        return bool(
+            _OPERATIONAL_STATUS_SIGNAL_RE.search(text)
+            and _OPERATIONAL_DATA_SUBJECT_RE.search(text)
         )
 
     def _response_for_action(
