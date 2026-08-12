@@ -26,6 +26,7 @@ from five08.agent.schedules import (
     fail_agent_schedule_run,
     get_agent_schedule,
     get_agent_schedule_run,
+    list_agent_schedule_runs_needing_queue_reconciliation,
     list_stale_agent_schedule_run_delivery_claims,
     mark_agent_schedule_run_delivery_posted,
     mark_agent_schedule_run_delivery_unknown,
@@ -438,6 +439,52 @@ def test_due_schedule_creates_one_catch_up_then_advances_past_now(
         datetime(2026, 7, 29, 9, 0, tzinfo=timezone.utc),
         "schedule-1",
     )
+
+
+def test_queue_reconciliation_includes_an_attached_queued_worker_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A durable queued job remains eligible for safe broker redelivery."""
+
+    now = datetime(2026, 7, 28, 9, 0, tzinfo=timezone.utc)
+    run_row = {
+        "id": "run-1",
+        "schedule_id": "schedule-1",
+        "occurrence_at": now,
+        "trigger": "schedule",
+        "status": "queued",
+        "job_id": "job-1",
+        "started_at": None,
+        "finished_at": None,
+        "output": None,
+        "error": None,
+        "delivery_status": "pending",
+        "delivery_message_id": None,
+        "delivery_claimed_at": None,
+        "execution_token": None,
+        "created_at": now,
+        "updated_at": now,
+        "worker_job_status": "queued",
+        "worker_job_last_error": None,
+    }
+    cursor = _FakeScheduleCursor(schedule_row={}, run_row=run_row)
+    monkeypatch.setattr(
+        schedules,
+        "get_postgres_connection",
+        lambda _settings: _FakeScheduleConnection(cursor),
+    )
+
+    reconciliations = list_agent_schedule_runs_needing_queue_reconciliation(
+        SharedSettings(),
+        limit=25,
+    )
+
+    assert len(reconciliations) == 1
+    assert reconciliations[0].run.id == "run-1"
+    assert reconciliations[0].job_status == "queued"
+    query, params = cursor.calls[0]
+    assert "runs.status = 'queued' AND jobs.status = 'queued'" in query
+    assert params == (25,)
 
 
 def test_claim_can_recover_a_running_schedule_after_its_lease_expires(

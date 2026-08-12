@@ -909,6 +909,40 @@ async def test_schedule_dispatch_reconciles_a_terminal_worker_job(
 
 
 @pytest.mark.asyncio
+async def test_schedule_dispatch_redelivers_an_attached_queued_worker_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A queued row is retried when its original broker delivery was lost."""
+
+    run = _run()
+    reconciliation = SimpleNamespace(
+        run=run,
+        job_status="queued",
+        job_last_error=None,
+    )
+    enqueue_run = AsyncMock()
+    fail_run = Mock()
+    monkeypatch.setattr(
+        api,
+        "list_agent_schedule_runs_needing_queue_reconciliation",
+        Mock(return_value=[reconciliation]),
+    )
+    monkeypatch.setattr(api, "_enqueue_agent_schedule_run", enqueue_run)
+    monkeypatch.setattr(api, "fail_agent_schedule_run", fail_run)
+    monkeypatch.setattr(
+        api,
+        "list_unenqueued_agent_schedule_runs",
+        Mock(return_value=[]),
+    )
+
+    queue = Mock()
+    await api._dispatch_pending_agent_schedule_runs(queue)
+
+    enqueue_run.assert_awaited_once_with(queue, run)
+    fail_run.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_schedule_dispatch_reenqueues_a_run_with_missing_worker_job(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

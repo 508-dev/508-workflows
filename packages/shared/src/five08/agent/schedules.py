@@ -886,11 +886,12 @@ def list_agent_schedule_runs_needing_queue_reconciliation(
     *,
     limit: int = 100,
 ) -> list[AgentScheduleRunQueueReconciliation]:
-    """Find nonterminal runs whose worker job disappeared or became terminal.
+    """Find nonterminal runs whose worker job needs durable recovery.
 
-    A terminal worker job cannot make forward progress by itself.  The API
-    dispatcher can re-enqueue a queued run with a missing reference, or record
-    the terminal worker error against the durable schedule run.
+    A persisted ``queued`` job is not proof that its Redis delivery survived,
+    so the dispatcher may safely redeliver it through the worker's atomic job
+    claim. A missing job reference can be released for re-enqueueing, while a
+    terminal worker job is recorded against the durable schedule run.
     """
 
     bounded_limit = max(1, min(int(limit), 500))
@@ -901,7 +902,11 @@ def list_agent_schedule_runs_needing_queue_reconciliation(
         LEFT JOIN jobs ON jobs.id = runs.job_id
         WHERE runs.status IN ('queued', 'running')
           AND runs.job_id IS NOT NULL
-          AND (jobs.id IS NULL OR jobs.status IN ('dead', 'canceled'))
+          AND (
+              jobs.id IS NULL
+              OR jobs.status IN ('dead', 'canceled')
+              OR (runs.status = 'queued' AND jobs.status = 'queued')
+          )
         ORDER BY runs.created_at ASC
         LIMIT %s
     """

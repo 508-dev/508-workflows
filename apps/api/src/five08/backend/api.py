@@ -9739,6 +9739,20 @@ async def _dispatch_pending_agent_schedule_runs(queue: QueueClient) -> None:
     for reconciliation in reconciliation_needed:
         run = reconciliation.run
         if (
+            reconciliation.job_status == JobStatus.QUEUED.value
+            and run.status is AgentScheduleRunStatus.QUEUED
+        ):
+            # The job row survived but its broker delivery may not have. The
+            # shared worker atomically claims execution, so at-least-once
+            # redelivery cannot run this occurrence's side effect twice.
+            logger.warning(
+                "Redelivering queued worker job for agent schedule run_id=%s job_id=%s",
+                run.id,
+                run.job_id,
+            )
+            await _enqueue_agent_schedule_run(queue, run)
+            continue
+        if (
             reconciliation.job_status is None
             and run.status is AgentScheduleRunStatus.QUEUED
         ):
