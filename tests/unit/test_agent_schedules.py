@@ -54,6 +54,27 @@ def _github_action(**arguments: object) -> AgentScheduleAction:
     )
 
 
+def _legacy_agent_loop_definition_payload() -> dict[str, Any]:
+    """Represent a row written before identifier lookups left model catalogs."""
+
+    return {
+        "version": 1,
+        "prompt": "Inspect the billing queue and report blockers.",
+        "execution_mode": "agent_loop",
+        "actions": [],
+        "tool_allowlist": ["billing_read.get_invoice_summary"],
+        "max_planning_steps": 3,
+        "delivery": {
+            "type": "discord_channel",
+            "guild_id": "1000",
+            "channel_id": "2000",
+        },
+        "max_runtime_seconds": 120,
+        "summary_mode": "deterministic",
+        "sources_are_public": False,
+    }
+
+
 def test_schedule_definition_rejects_model_summary_without_public_classification() -> (
     None
 ):
@@ -133,6 +154,31 @@ def test_agent_loop_definition_requires_a_saved_read_only_catalog() -> None:
             tool_allowlist=["onboarding_read.get_summary"],
             delivery=_delivery(),
         )
+    with pytest.raises(ValidationError, match="identifier lookup tools"):
+        AgentScheduleDefinition(
+            prompt="Inspect invoice status.",
+            execution_mode=AgentScheduleExecutionMode.AGENT_LOOP,
+            tool_allowlist=["billing_read.get_invoice_summary"],
+            delivery=_delivery(),
+        )
+
+
+def test_frozen_schedule_can_retain_an_explicit_identifier_lookup() -> None:
+    """The model-only catalog restriction does not alter deterministic plans."""
+
+    definition = AgentScheduleDefinition(
+        prompt="Report the saved invoice summary.",
+        actions=[
+            AgentScheduleAction(
+                tool_name="billing_read.get_invoice_summary",
+                arguments={"invoice_type": "sales", "invoice_id": "SINV-0001"},
+                summary="Read the saved sales invoice",
+            )
+        ],
+        delivery=_delivery(),
+    )
+
+    assert definition.actions[0].tool_name == "billing_read.get_invoice_summary"
 
 
 def test_agent_schedule_proposal_excludes_delivery_and_capability_controls() -> None:
@@ -439,6 +485,101 @@ def test_due_schedule_creates_one_catch_up_then_advances_past_now(
         datetime(2026, 7, 29, 9, 0, tzinfo=timezone.utc),
         "schedule-1",
     )
+
+
+def test_due_dispatch_loads_legacy_identifier_catalog_without_aborting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A historic schedule stays readable until execution rejects its catalog."""
+
+    now = datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc)
+    overdue = datetime(2026, 7, 28, 9, 0, tzinfo=timezone.utc)
+    schedule_row = {
+        "id": "schedule-1",
+        "organization_id": "1000",
+        "guild_id": "1000",
+        "owner_discord_user_id": "1001",
+        "name": "Legacy invoice report",
+        "cron_expression": "0 9 * * *",
+        "timezone": "UTC",
+        "definition": _legacy_agent_loop_definition_payload(),
+        "allowed_scopes": ["agent:schedule:manage", "billing:invoice:read"],
+        "status": "active",
+        "next_run_at": overdue,
+        "last_run_at": None,
+        "created_at": overdue,
+        "updated_at": overdue,
+    }
+    run_row = {
+        "id": "run-1",
+        "schedule_id": "schedule-1",
+        "occurrence_at": overdue,
+        "trigger": "schedule",
+        "status": "queued",
+        "job_id": None,
+        "started_at": None,
+        "finished_at": None,
+        "output": None,
+        "error": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    cursor = _FakeScheduleCursor(schedule_row=schedule_row, run_row=run_row)
+    monkeypatch.setattr(
+        schedules,
+        "get_postgres_connection",
+        lambda _settings: _FakeScheduleConnection(cursor),
+    )
+
+    runs = create_due_agent_schedule_runs(SharedSettings(), now=now)
+
+    assert [run.id for run in runs] == ["run-1"]
+    loaded = schedules._as_schedule_record(schedule_row)  # noqa: SLF001
+    assert loaded.definition.tool_allowlist == ["billing_read.get_invoice_summary"]
+
+
+def test_legacy_catalog_cannot_be_written_as_a_new_schedule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compatibility deserialization never grants a path to copy it forward."""
+
+    now = datetime(2026, 7, 28, 9, 0, tzinfo=timezone.utc)
+    row = {
+        "id": "schedule-1",
+        "organization_id": "1000",
+        "guild_id": "1000",
+        "owner_discord_user_id": "1001",
+        "name": "Legacy invoice report",
+        "cron_expression": "0 9 * * *",
+        "timezone": "UTC",
+        "definition": _legacy_agent_loop_definition_payload(),
+        "allowed_scopes": ["agent:schedule:manage", "billing:invoice:read"],
+        "status": "active",
+        "next_run_at": now,
+        "last_run_at": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    legacy_definition = schedules._as_schedule_record(row).definition  # noqa: SLF001
+    monkeypatch.setattr(
+        schedules,
+        "get_postgres_connection",
+        lambda _settings: (_ for _ in ()).throw(AssertionError("must not connect")),
+    )
+
+    with pytest.raises(ValidationError, match="identifier lookup tools"):
+        schedules.create_agent_schedule(
+            SharedSettings(),
+            organization_id="1000",
+            guild_id="1000",
+            owner_discord_user_id="1001",
+            name="Copied legacy schedule",
+            cron_expression="0 9 * * *",
+            timezone_name="UTC",
+            definition=legacy_definition,
+            allowed_scopes={"agent:schedule:manage", "billing:invoice:read"},
+            now=now,
+        )
 
 
 def test_queue_reconciliation_includes_an_attached_queued_worker_job(

@@ -60,6 +60,7 @@ class AgentScheduleChannelRequest(BaseModel):
 
     guild_id: str
     channel_id: str
+    owner_discord_user_id: str
 
 
 class PostAgentScheduleReportRequest(BaseModel):
@@ -67,6 +68,7 @@ class PostAgentScheduleReportRequest(BaseModel):
 
     guild_id: str
     channel_id: str
+    owner_discord_user_id: str
     schedule_id: str
     run_id: str
     content: str
@@ -681,8 +683,9 @@ class InternalAPIRoutes:
         *,
         guild_id: str,
         channel_id: str,
+        owner_discord_user_id: str,
     ) -> tuple[discord.abc.Messageable | None, dict[str, Any], int]:
-        """Resolve a report target and prove the bot can safely post there."""
+        """Resolve a report target usable by both its owner and the bot."""
 
         guild = self._resolve_target_guild()
         if guild is None:
@@ -695,6 +698,12 @@ class InternalAPIRoutes:
             return None, {"error": "invalid_channel_id"}, 400
         if normalized_channel_id <= 0:
             return None, {"error": "invalid_channel_id"}, 400
+        try:
+            normalized_owner_id = int(owner_discord_user_id)
+        except (TypeError, ValueError):
+            return None, {"error": "invalid_owner_discord_user_id"}, 400
+        if normalized_owner_id <= 0:
+            return None, {"error": "invalid_owner_discord_user_id"}, 400
 
         channel = self.bot.get_channel(normalized_channel_id)
         if channel is None:
@@ -722,12 +731,31 @@ class InternalAPIRoutes:
         if bot_member is None:
             return None, {"error": "bot_member_unresolved"}, 503
         permissions_for = getattr(channel, "permissions_for", None)
-        if callable(permissions_for):
-            permissions = permissions_for(bot_member)
-            if not bool(getattr(permissions, "view_channel", False)) or not bool(
-                getattr(permissions, "send_messages", False)
-            ):
-                return None, {"error": "missing_channel_send_permission"}, 403
+        if not callable(permissions_for):
+            return None, {"error": "channel_permissions_unavailable"}, 503
+        permissions = permissions_for(bot_member)
+        if not bool(getattr(permissions, "view_channel", False)) or not bool(
+            getattr(permissions, "send_messages", False)
+        ):
+            return None, {"error": "missing_channel_send_permission"}, 403
+        try:
+            owner_member = await guild.fetch_member(normalized_owner_id)
+        except discord.NotFound:
+            return None, {"error": "schedule_owner_not_found"}, 404
+        except discord.Forbidden:
+            return None, {"error": "schedule_owner_lookup_forbidden"}, 403
+        except discord.HTTPException as exc:
+            logger.warning(
+                "Cannot fetch schedule owner %s: %s",
+                normalized_owner_id,
+                exc,
+            )
+            return None, {"error": "schedule_owner_lookup_failed"}, 502
+        owner_permissions = permissions_for(owner_member)
+        if not bool(getattr(owner_permissions, "view_channel", False)) or not bool(
+            getattr(owner_permissions, "send_messages", False)
+        ):
+            return None, {"error": "owner_missing_channel_send_permission"}, 403
 
         return (
             channel,
@@ -748,6 +776,7 @@ class InternalAPIRoutes:
         _channel, result, status_code = await self._resolve_agent_schedule_channel(
             guild_id=payload.guild_id,
             channel_id=payload.channel_id,
+            owner_discord_user_id=payload.owner_discord_user_id,
         )
         return result, status_code
 
@@ -798,6 +827,7 @@ class InternalAPIRoutes:
         ) = await self._resolve_agent_schedule_channel(
             guild_id=payload.guild_id,
             channel_id=payload.channel_id,
+            owner_discord_user_id=payload.owner_discord_user_id,
         )
         if channel is None:
             return {

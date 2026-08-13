@@ -70,7 +70,8 @@ from five08.agent import (
 from five08.agent.memory import contains_sensitive_memory_text
 from five08.agent.privacy import contains_private_agent_identifier
 from five08.agent.schedules import (
-    AGENT_SCHEDULE_ALLOWED_TOOL_NAMES,
+    AGENT_SCHEDULE_AGENT_LOOP_ALLOWED_TOOL_NAMES,
+    AGENT_SCHEDULE_MODEL_ROUTED_IDENTIFIER_TOOL_NAMES,
     AgentScheduleRecord,
     AgentScheduleRunDeliveryStatus,
     AgentScheduleRunRecord,
@@ -122,6 +123,7 @@ from five08.queue import (
     get_postgres_connection,
     get_redis_connection,
     is_postgres_healthy,
+    redeliver_queued_job,
     trusted_sql,
 )
 from five08.backend.auth import (
@@ -400,6 +402,7 @@ _AGENT_SCHEDULE_REPORT_MAX_CHARS = 1_900
 # least that long so a slow-but-live worker is never duplicated, while allowing
 # a later durable retry to recover from a killed API process.
 _AGENT_SCHEDULE_RUNNING_LEASE_SECONDS = 300
+_AGENT_SCHEDULE_QUEUED_JOB_REDELIVERY_BACKOFF_SECONDS = 60.0
 _AGENT_SCHEDULE_LOOP_MAX_ACTIONS_PER_STEP = 2
 _AGENT_SCHEDULE_LOOP_MAX_OBSERVATION_CHARS = 12_000
 _AGENT_SCHEDULE_CRM_TOOL_NAMES = frozenset({"crm_read.search_contacts"})
@@ -1514,6 +1517,7 @@ async def _post_agent_schedule_report_to_bot(
         payload={
             "guild_id": schedule.guild_id,
             "channel_id": schedule.definition.delivery.channel_id,
+            "owner_discord_user_id": schedule.owner_discord_user_id,
             "schedule_id": schedule.id,
             "run_id": run.id,
             "content": content,
@@ -1533,13 +1537,18 @@ async def _validate_agent_schedule_channel_with_bot(
     *,
     guild_id: str,
     channel_id: str,
+    owner_discord_user_id: str,
 ) -> tuple[dict[str, Any], int]:
-    """Prove a report channel is usable before persisting it in a schedule."""
+    """Prove a report channel is usable by its owner before persistence."""
 
     return await _request_agent_schedule_bot_json(
         request,
         path="/internal/agent-schedules/channel",
-        payload={"guild_id": guild_id, "channel_id": channel_id},
+        payload={
+            "guild_id": guild_id,
+            "channel_id": channel_id,
+            "owner_discord_user_id": owner_discord_user_id,
+        },
         timeout_seconds=12.0,
     )
 
@@ -9477,7 +9486,7 @@ def _default_agent_schedule_tool_allowlist(
         )
     ):
         schedule_safe_tools -= _AGENT_SCHEDULE_ERP_TOOL_NAMES
-    return sorted(AGENT_SCHEDULE_ALLOWED_TOOL_NAMES & schedule_safe_tools)
+    return sorted(AGENT_SCHEDULE_AGENT_LOOP_ALLOWED_TOOL_NAMES & schedule_safe_tools)
 
 
 def _agent_schedule_definition_from_fields(
@@ -9742,15 +9751,22 @@ async def _dispatch_pending_agent_schedule_runs(queue: QueueClient) -> None:
             reconciliation.job_status == JobStatus.QUEUED.value
             and run.status is AgentScheduleRunStatus.QUEUED
         ):
-            # The job row survived but its broker delivery may not have. The
-            # shared worker atomically claims execution, so at-least-once
-            # redelivery cannot run this occurrence's side effect twice.
-            logger.warning(
-                "Redelivering queued worker job for agent schedule run_id=%s job_id=%s",
-                run.id,
-                run.job_id,
+            # The job row survived but its broker delivery may not have. A
+            # durable redelivery lease prevents every dispatcher replica from
+            # appending another copy while the worker is unavailable.
+            redelivered = await asyncio.to_thread(
+                redeliver_queued_job,
+                queue,
+                settings=settings,
+                job_id=run.job_id or "",
+                minimum_age_seconds=_AGENT_SCHEDULE_QUEUED_JOB_REDELIVERY_BACKOFF_SECONDS,
             )
-            await _enqueue_agent_schedule_run(queue, run)
+            if redelivered:
+                logger.warning(
+                    "Redelivered queued worker job for agent schedule run_id=%s job_id=%s",
+                    run.id,
+                    run.job_id,
+                )
             continue
         if (
             reconciliation.job_status is None
@@ -9914,6 +9930,8 @@ def _agent_schedule_loop_actions(
         summary = str(getattr(draft_action, "summary", "") or "").strip()
         if tool_name not in allowed_tool_names:
             return None, "scheduled_planner_proposed_unallowed_tool"
+        if tool_name in AGENT_SCHEDULE_MODEL_ROUTED_IDENTIFIER_TOOL_NAMES:
+            return None, "scheduled_planner_identifier_lookup_not_allowed"
         if not isinstance(arguments, dict) or not summary:
             return None, "scheduled_planner_action_invalid"
         if tool_name == "web_read.search":
@@ -10007,6 +10025,18 @@ def _run_agent_schedule_loop(
     data store for private operational data.
     """
 
+    if (
+        set(schedule.definition.tool_allowlist)
+        & AGENT_SCHEDULE_MODEL_ROUTED_IDENTIFIER_TOOL_NAMES
+    ):
+        # Definitions persisted before the creation-time catalog restriction
+        # remain readable for audit and administration, but must never reach
+        # the planner. This is also a defense in depth check for records
+        # written outside the API.
+        return _AgentScheduleLoopOutcome(
+            results=[],
+            error="scheduled_definition_contains_identifier_lookup",
+        )
     if contains_private_agent_identifier(schedule.definition.prompt):
         # Protect schedules created before the creation-time guard was added,
         # or records written outside the API. A private record reference must
@@ -10260,13 +10290,19 @@ def _schedule_model_observation_payload(
             "matching_issue_count": _schedule_count(payload.get("total_count"), issues)
         }
     if tool_name == "crm_read.search_contacts":
-        return {
-            "matching_contact_count": _schedule_count(None, payload.get("contacts"))
-        }
+        return _schedule_list_count_observation(
+            payload,
+            rows_key="contacts",
+            exact_key="matching_contact_count",
+        )
     if tool_name == "billing_read.search_invoices":
         return {
             "invoice_type": _single_line(payload.get("invoice_type"), limit=32),
-            "matching_invoice_count": _schedule_count(None, payload.get("invoices")),
+            **_schedule_list_count_observation(
+                payload,
+                rows_key="invoices",
+                exact_key="matching_invoice_count",
+            ),
         }
     if tool_name == "billing_read.get_invoice_summary":
         invoice = payload.get("invoice")
@@ -10277,9 +10313,11 @@ def _schedule_model_observation_payload(
             "status": _single_line(invoice.get("status"), limit=64),
         }
     if tool_name == "billing_read.search_suppliers":
-        return {
-            "matching_supplier_count": _schedule_count(None, payload.get("suppliers"))
-        }
+        return _schedule_list_count_observation(
+            payload,
+            rows_key="suppliers",
+            exact_key="matching_supplier_count",
+        )
     if tool_name == "erp_read.search_projects":
         projects = payload.get("projects")
         project_rows = projects if isinstance(projects, list) else []
@@ -10293,12 +10331,21 @@ def _schedule_model_observation_payload(
             completion = project.get("percent_complete")
             if isinstance(completion, int | float) and not isinstance(completion, bool):
                 completion_values.append(float(completion))
-        observation: dict[str, Any] = {
-            "matching_project_count": len(project_rows),
-            "status_counts": status_counts,
-        }
+        has_more = payload.get("has_more") is True
+        observation: dict[str, Any] = _schedule_list_count_observation(
+            payload,
+            rows_key="projects",
+            exact_key="matching_project_count",
+        )
+        observation["returned_status_counts" if has_more else "status_counts"] = (
+            status_counts
+        )
         if completion_values:
-            observation["average_percent_complete"] = round(
+            observation[
+                "returned_average_percent_complete"
+                if has_more
+                else "average_percent_complete"
+            ] = round(
                 sum(completion_values) / len(completion_values),
                 1,
             )
@@ -10360,6 +10407,31 @@ def _schedule_count(value: object, fallback: object) -> int:
     if isinstance(value, int) and not isinstance(value, bool):
         return max(0, value)
     return len(fallback) if isinstance(fallback, list) else 0
+
+
+def _schedule_list_count_observation(
+    payload: Mapping[str, Any],
+    *,
+    rows_key: str,
+    exact_key: str,
+) -> dict[str, int]:
+    """Avoid treating a truncated internal list as an exact aggregate."""
+
+    count = _schedule_count(None, payload.get(rows_key))
+    if payload.get("has_more") is True:
+        singular = rows_key[:-1] if rows_key.endswith("s") else rows_key
+        return {
+            f"returned_{singular}_count": count,
+            f"at_least_{exact_key}": count + 1,
+        }
+    return {exact_key: count}
+
+
+def _schedule_list_count_label(payload: Mapping[str, Any], *, rows_key: str) -> str:
+    """Render a list count without claiming a capped result is exhaustive."""
+
+    count = _schedule_count(None, payload.get(rows_key))
+    return f"at least {count + 1}" if payload.get("has_more") is True else str(count)
 
 
 def _schedule_nonnegative_int(value: object) -> int:
@@ -10517,12 +10589,12 @@ def _deterministic_agent_loop_report(
         elif tool_name == "crm_read.search_contacts":
             lines.append(
                 "\nCRM contact search matched "
-                f"{_schedule_count(None, payload.get('contacts'))} contact(s)."
+                f"{_schedule_list_count_label(payload, rows_key='contacts')} contact(s)."
             )
         elif tool_name == "billing_read.search_invoices":
             lines.append(
                 "\nFound "
-                f"{_schedule_count(None, payload.get('invoices'))} "
+                f"{_schedule_list_count_label(payload, rows_key='invoices')} "
                 f"{_single_line(payload.get('invoice_type'), limit=32) or 'ERP'} invoice(s)."
             )
         elif tool_name == "billing_read.get_invoice_summary":
@@ -10535,7 +10607,7 @@ def _deterministic_agent_loop_report(
         elif tool_name == "billing_read.search_suppliers":
             lines.append(
                 "\nSupplier search matched "
-                f"{_schedule_count(None, payload.get('suppliers'))} supplier(s)."
+                f"{_schedule_list_count_label(payload, rows_key='suppliers')} supplier(s)."
             )
         elif tool_name == "erp_read.search_projects":
             projects = payload.get("projects")
@@ -10546,8 +10618,10 @@ def _deterministic_agent_loop_report(
                     continue
                 status = _single_line(project.get("status"), limit=64) or "unknown"
                 status_counts[status] = status_counts.get(status, 0) + 1
+            has_more = payload.get("has_more") is True
             status_suffix = (
                 " ("
+                + ("returned rows: " if has_more else "")
                 + ", ".join(
                     f"{status}: {count}"
                     for status, count in sorted(status_counts.items())
@@ -10557,7 +10631,9 @@ def _deterministic_agent_loop_report(
                 else ""
             )
             lines.append(
-                f"\nERP project search matched {len(project_rows)} project(s){status_suffix}."
+                "\nERP project search matched "
+                f"{_schedule_list_count_label(payload, rows_key='projects')} "
+                f"project(s){status_suffix}."
             )
         elif tool_name == "erp_read.get_project_summary":
             project = payload.get("project")
@@ -10656,6 +10732,8 @@ def _agent_schedule_loop_error_is_non_retryable(error: str) -> bool:
         "scheduled_planner_action_count_invalid",
         "scheduled_planner_action_denied",
         "scheduled_planner_action_invalid",
+        "scheduled_definition_contains_identifier_lookup",
+        "scheduled_planner_identifier_lookup_not_allowed",
         "scheduled_planner_extract_not_from_search",
         "scheduled_planner_follow_up_search_not_allowed",
         "scheduled_planner_multiple_searches_not_allowed",
@@ -11202,6 +11280,7 @@ async def _create_agent_schedule_for_context(
             request,
             guild_id=fresh_context.guild_id or "",
             channel_id=str(payload.channel_id),
+            owner_discord_user_id=fresh_context.discord_user_id,
         )
     except RuntimeError as exc:
         logger.warning("Unable to validate schedule report channel: %s", exc)

@@ -18,7 +18,7 @@ from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from croniter import CroniterBadCronError, CroniterBadDateError, croniter
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
@@ -40,6 +40,22 @@ AGENT_SCHEDULE_ALLOWED_TOOL_NAMES = frozenset(
         "web_read.search",
         "web_read.extract",
     }
+)
+# An agent-loop model may choose only search or aggregate reads.  A record
+# lookup needs an operator-provided identifier, which schedule objectives and
+# observations intentionally never expose to the model.
+AGENT_SCHEDULE_MODEL_ROUTED_IDENTIFIER_TOOL_NAMES = frozenset(
+    {
+        "billing_read.get_invoice_summary",
+        "erp_read.get_project_summary",
+    }
+)
+AGENT_SCHEDULE_AGENT_LOOP_ALLOWED_TOOL_NAMES = (
+    AGENT_SCHEDULE_ALLOWED_TOOL_NAMES
+    - AGENT_SCHEDULE_MODEL_ROUTED_IDENTIFIER_TOOL_NAMES
+)
+_PERSISTED_AGENT_SCHEDULE_DEFINITION_CONTEXT_KEY = (
+    "allow_legacy_identifier_lookup_tools"
 )
 MAX_AGENT_SCHEDULE_ACTIONS = 3
 MAX_AGENT_SCHEDULE_TOOL_ALLOWLIST = 16
@@ -208,7 +224,10 @@ class AgentScheduleDefinition(BaseModel):
         return normalized
 
     @model_validator(mode="after")
-    def _validate_summary_data_boundary(self) -> "AgentScheduleDefinition":
+    def _validate_summary_data_boundary(
+        self,
+        info: ValidationInfo,
+    ) -> "AgentScheduleDefinition":
         if self.version != AGENT_SCHEDULE_DEFINITION_VERSION:
             raise ValueError("unsupported schedule definition version")
         if self.summary_mode == "model_for_public_data" and not self.sources_are_public:
@@ -227,6 +246,23 @@ class AgentScheduleDefinition(BaseModel):
             raise ValueError("agent-loop schedules cannot include frozen actions")
         if not self.tool_allowlist:
             raise ValueError("agent-loop schedules require at least one allowed tool")
+        if (
+            invalid_model_routed_tools := set(self.tool_allowlist)
+            & AGENT_SCHEDULE_MODEL_ROUTED_IDENTIFIER_TOOL_NAMES
+        ):
+            # Existing rows retain their old immutable envelope for audit and
+            # administration. They must load so execution can reject them
+            # before the planner sees the catalog; standard construction and
+            # every new write remain strict.
+            if not bool(
+                (info.context or {}).get(
+                    _PERSISTED_AGENT_SCHEDULE_DEFINITION_CONTEXT_KEY
+                )
+            ):
+                raise ValueError(
+                    "agent-loop schedules cannot include identifier lookup tools: "
+                    + ", ".join(sorted(invalid_model_routed_tools))
+                )
         # The loop may call a model to select tools, but its observations are
         # always a bounded safe projection. The older public-data switch only
         # applies to the legacy GitHub result summarizer.
@@ -460,6 +496,12 @@ def create_agent_schedule(
 ) -> AgentScheduleRecord:
     """Persist one immutable execution envelope and its first due time."""
 
+    # A definition may have been loaded through the legacy-read path below.
+    # Revalidate without that context before it can become a newly persisted
+    # schedule, so retired model-routed lookups cannot be copied forward.
+    definition = AgentScheduleDefinition.model_validate(
+        definition.model_dump(mode="json")
+    )
     normalized_now = _utc_datetime(now or datetime.now(tz=timezone.utc))
     normalized_guild_id = _normalize_discord_snowflake(guild_id)
     normalized_owner_id = _normalize_discord_snowflake(owner_discord_user_id)
@@ -1465,7 +1507,10 @@ def _as_schedule_record(row: dict[str, Any]) -> AgentScheduleRecord:
         name=str(row["name"]),
         cron_expression=str(row["cron_expression"]),
         timezone=str(row["timezone"]),
-        definition=AgentScheduleDefinition.model_validate(definition_payload),
+        definition=AgentScheduleDefinition.model_validate(
+            definition_payload,
+            context={_PERSISTED_AGENT_SCHEDULE_DEFINITION_CONTEXT_KEY: True},
+        ),
         allowed_scopes=frozenset(_normalize_scopes(row.get("allowed_scopes") or [])),
         status=AgentScheduleStatus(str(row["status"])),
         next_run_at=_nullable_utc_datetime(row.get("next_run_at")),

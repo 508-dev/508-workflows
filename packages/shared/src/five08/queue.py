@@ -214,6 +214,47 @@ def get_job(settings: SharedSettings, job_id: str) -> JobRecord | None:
             return _as_record(row)
 
 
+def redeliver_queued_job(
+    queue: QueueClient,
+    *,
+    settings: SharedSettings,
+    job_id: str,
+    minimum_age_seconds: float,
+) -> bool:
+    """Redeliver one queued job after atomically reserving its broker retry.
+
+    A queue adapter is at-least-once, but a persisted queued row does not tell
+    us whether its original broker delivery survived.  ``updated_at`` acts as
+    a durable redelivery lease here: exactly one dispatcher may advance it
+    after the configured backoff window before it publishes another message.
+    A process crash after the reservation is safe--a later dispatcher retries
+    after the same bounded window.
+    """
+
+    normalized_job_id = str(job_id or "").strip()
+    if not normalized_job_id:
+        return False
+    backoff_seconds = max(1.0, float(minimum_age_seconds))
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                UPDATE jobs
+                SET updated_at = NOW()
+                WHERE id = %s
+                  AND status = %s
+                  AND updated_at <= NOW() - (%s * INTERVAL '1 second')
+                RETURNING id, run_after
+                """,
+                (normalized_job_id, JobStatus.QUEUED.value, backoff_seconds),
+            )
+            row = cursor.fetchone()
+    if row is None:
+        return False
+    queue.enqueue(str(row["id"]), run_at=row["run_after"])
+    return True
+
+
 def list_jobs(
     settings: SharedSettings,
     *,

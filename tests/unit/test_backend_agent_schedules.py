@@ -281,7 +281,18 @@ def test_agent_loop_creation_includes_configured_optional_integrations(
     )
 
     assert "crm_read.search_contacts" in definition.tool_allowlist
-    assert api._AGENT_SCHEDULE_ERP_TOOL_NAMES <= set(definition.tool_allowlist)
+    assert {
+        "billing_read.search_invoices",
+        "billing_read.search_suppliers",
+        "erp_read.search_projects",
+    } <= set(definition.tool_allowlist)
+    assert not (
+        set(definition.tool_allowlist)
+        & {
+            "billing_read.get_invoice_summary",
+            "erp_read.get_project_summary",
+        }
+    )
 
 
 def test_frozen_github_schedule_requires_an_allowlisted_repository(
@@ -509,6 +520,59 @@ def test_agent_loop_uses_safe_aggregate_observations_for_private_tools() -> None
     assert observation == {"matching_contact_count": 2}
     assert "private@example.com" not in planner.observations[0]["data_json"]
     assert "Private Person" not in planner.observations[0]["data_json"]
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "payload", "expected"),
+    [
+        (
+            "crm_read.search_contacts",
+            {"contacts": [{}] * 10, "has_more": True},
+            {
+                "returned_contact_count": 10,
+                "at_least_matching_contact_count": 11,
+            },
+        ),
+        (
+            "billing_read.search_invoices",
+            {"invoice_type": "sales", "invoices": [{}] * 10, "has_more": True},
+            {
+                "invoice_type": "sales",
+                "returned_invoice_count": 10,
+                "at_least_matching_invoice_count": 11,
+            },
+        ),
+        (
+            "billing_read.search_suppliers",
+            {"suppliers": [{}] * 10, "has_more": True},
+            {
+                "returned_supplier_count": 10,
+                "at_least_matching_supplier_count": 11,
+            },
+        ),
+        (
+            "erp_read.search_projects",
+            {
+                "projects": [{"status": "Open", "percent_complete": 50}] * 10,
+                "has_more": True,
+            },
+            {
+                "returned_project_count": 10,
+                "at_least_matching_project_count": 11,
+                "returned_status_counts": {"Open": 10},
+                "returned_average_percent_complete": 50.0,
+            },
+        ),
+    ],
+)
+def test_agent_loop_marks_capped_internal_counts_as_partial(
+    tool_name: str,
+    payload: dict[str, object],
+    expected: dict[str, object],
+) -> None:
+    """The model can never mistake a bounded internal list for its total."""
+
+    assert api._schedule_model_observation_payload(tool_name, payload) == expected
 
 
 def test_agent_loop_rejects_an_answer_before_any_scheduled_observation() -> None:
@@ -752,6 +816,80 @@ def test_agent_loop_rejects_invalid_crm_search_before_execution(
     assert api._agent_schedule_loop_error_is_non_retryable(outcome.error)
 
 
+def test_agent_loop_rejects_identifier_lookup_from_a_legacy_catalog() -> None:
+    """An older persisted row cannot let a model invent a record identifier."""
+
+    planner = _LoopPlanner(
+        PlannerDraft(status="answer", answer="unused"),
+        PlannerDraft(status="answer", answer="unused"),
+    )
+    orchestrator = _LoopOrchestrator(planner)
+    schedule = _agent_loop_schedule(tool_allowlist=["onboarding_read.get_summary"])
+    schedule = replace(
+        schedule,
+        definition=schedule.definition.model_copy(
+            update={"tool_allowlist": ["billing_read.get_invoice_summary"]}
+        ),
+    )
+    context = AgentIdentityContext(
+        discord_user_id="1001",
+        organization_id="1000",
+        guild_id="1000",
+        roles=["Admin"],
+    )
+
+    actions, error = api._agent_schedule_loop_actions(
+        orchestrator=cast(AgentOrchestrator, orchestrator),
+        schedule=schedule,
+        context=context,
+        effective_scopes=orchestrator.policy.scopes_for_context(context),
+        draft_actions=[
+            PlannerDraftAction(
+                tool_name="billing_read.get_invoice_summary",
+                arguments={"invoice_type": "sales", "invoice_id": "SINV-0001"},
+                summary="Inspect one invoice",
+            )
+        ],
+        prior_results=[],
+    )
+
+    assert actions is None
+    assert error == "scheduled_planner_identifier_lookup_not_allowed"
+
+
+def test_agent_loop_rejects_a_legacy_identifier_catalog_before_planning() -> None:
+    """A deserialized legacy catalog cannot reach the external planner."""
+
+    planner = Mock()
+    schedule = _agent_loop_schedule(tool_allowlist=["onboarding_read.get_summary"])
+    schedule = replace(
+        schedule,
+        definition=schedule.definition.model_copy(
+            update={"tool_allowlist": ["billing_read.get_invoice_summary"]}
+        ),
+    )
+    context = AgentIdentityContext(
+        discord_user_id="1001",
+        organization_id="1000",
+        guild_id="1000",
+        roles=["Admin"],
+    )
+
+    outcome = api._run_agent_schedule_loop(
+        orchestrator=cast(AgentOrchestrator, SimpleNamespace(planner=planner)),
+        schedule=schedule,
+        run=_run(),
+        context=context,
+        effective_scopes={"agent:schedule:manage", "billing:invoice:read"},
+        deadline_monotonic=1_000_000_000_000.0,
+    )
+
+    assert outcome.error == "scheduled_definition_contains_identifier_lookup"
+    assert outcome.results == []
+    assert api._agent_schedule_loop_error_is_non_retryable(outcome.error)
+    planner.plan.assert_not_called()
+
+
 @pytest.mark.asyncio
 async def test_schedule_loop_uses_its_dedicated_bounded_executor(
     monkeypatch: pytest.MonkeyPatch,
@@ -920,14 +1058,14 @@ async def test_schedule_dispatch_redelivers_an_attached_queued_worker_job(
         job_status="queued",
         job_last_error=None,
     )
-    enqueue_run = AsyncMock()
+    redeliver_job = Mock(return_value=True)
     fail_run = Mock()
     monkeypatch.setattr(
         api,
         "list_agent_schedule_runs_needing_queue_reconciliation",
         Mock(return_value=[reconciliation]),
     )
-    monkeypatch.setattr(api, "_enqueue_agent_schedule_run", enqueue_run)
+    monkeypatch.setattr(api, "redeliver_queued_job", redeliver_job)
     monkeypatch.setattr(api, "fail_agent_schedule_run", fail_run)
     monkeypatch.setattr(
         api,
@@ -938,7 +1076,12 @@ async def test_schedule_dispatch_redelivers_an_attached_queued_worker_job(
     queue = Mock()
     await api._dispatch_pending_agent_schedule_runs(queue)
 
-    enqueue_run.assert_awaited_once_with(queue, run)
+    redeliver_job.assert_called_once_with(
+        queue,
+        settings=api.settings,
+        job_id=run.job_id,
+        minimum_age_seconds=api._AGENT_SCHEDULE_QUEUED_JOB_REDELIVERY_BACKOFF_SECONDS,
+    )
     fail_run.assert_not_called()
 
 

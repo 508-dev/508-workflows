@@ -30,11 +30,13 @@ class FakeERPNextClient(ERPNextClient):
         *,
         fail_invoice_search: bool = False,
         project_error_status: int | None = None,
+        extra_search_rows: bool = False,
     ) -> None:
         self.calls: list[tuple[str, dict[str, object]]] = []
         self.closed = False
         self.fail_invoice_search = fail_invoice_search
         self.project_error_status = project_error_status
+        self.extra_search_rows = extra_search_rows
 
     def close(self) -> None:
         self.closed = True
@@ -58,12 +60,13 @@ class FakeERPNextClient(ERPNextClient):
             raise ERPNextAPIError("ERPNext URL and internal detail must not escape")
         return [
             {
-                "name": "SINV-0001",
+                "name": f"SINV-{index:04d}",
                 "posting_date": "2026-07-01",
                 "docstatus": 1,
                 "owner": "private-owner@example.com",
                 "items": [{"item_code": "private-item"}],
             }
+            for index in range(1, (limit if self.extra_search_rows else 1) + 1)
         ]
 
     def get_invoice(self, doctype: str, name: str) -> dict[str, Any] | None:
@@ -90,13 +93,14 @@ class FakeERPNextClient(ERPNextClient):
         self.calls.append(("search_suppliers", {"query": query, "limit": limit}))
         return [
             {
-                "name": "SUP-001",
+                "name": f"SUP-{index:03d}",
                 "supplier_name": "Acme Supplier",
                 "email_id": "billing@acme.example",
                 "disabled": 0,
                 "is_frozen": 0,
                 "bank_account": "secret-bank",
             }
+            for index in range(1, (limit if self.extra_search_rows else 1) + 1)
         ]
 
     def list_records(
@@ -121,7 +125,7 @@ class FakeERPNextClient(ERPNextClient):
         )
         return [
             {
-                "name": "PROJ-001",
+                "name": f"PROJ-{index:03d}",
                 "project_name": "Atlas",
                 "status": "Open",
                 "customer": "Acme Customer",
@@ -135,6 +139,7 @@ class FakeERPNextClient(ERPNextClient):
                 "modified": "2026-07-01 10:00:00",
                 "users": [{"user": "private-user@example.com"}],
             }
+            for index in range(1, (limit if self.extra_search_rows else 1) + 1)
         ]
 
     def get_project(self, project_id: str) -> dict[str, Any]:
@@ -169,6 +174,7 @@ def _registry(
     configured_organization_id: str | None = "org-508",
     fail_invoice_search: bool = False,
     project_error_status: int | None = None,
+    extra_search_rows: bool = False,
 ) -> tuple[ToolRegistry, list[FakeERPNextClient]]:
     clients: list[FakeERPNextClient] = []
 
@@ -176,6 +182,7 @@ def _registry(
         client = FakeERPNextClient(
             fail_invoice_search=fail_invoice_search,
             project_error_status=project_error_status,
+            extra_search_rows=extra_search_rows,
         )
         clients.append(client)
         return client
@@ -439,16 +446,54 @@ def test_erp_reads_return_whitelisted_summaries_and_close_clients() -> None:
     assert "users" not in projects["projects"][0]
     assert project["project"]["project_id"] == "PROJ-001"
     assert "users" not in project["project"]
+    assert "has_more" not in invoices
+    assert "has_more" not in suppliers
+    assert "has_more" not in projects
     assert all(client.closed for client in clients)
     assert clients[0].calls == [
         (
             "search_invoices",
-            {"doctype": "Sales Invoice", "query": "SINV", "limit": 3},
+            {"doctype": "Sales Invoice", "query": "SINV", "limit": 4},
         )
     ]
     assert clients[3].calls[0][0] == "list_records"
     assert clients[3].calls[0][1]["doctype"] == "Project"
-    assert clients[3].calls[0][1]["limit"] == 2
+    assert clients[3].calls[0][1]["limit"] == 3
+
+
+def test_erp_searches_fetch_one_extra_row_and_mark_truncated_results() -> None:
+    """Only capped responses expose the compatibility-safe truncation signal."""
+
+    registry, clients = _registry(extra_search_rows=True)
+
+    invoices = registry.execute(
+        "billing_read.search_invoices",
+        {"invoice_type": "sales", "query": "SINV", "limit": 2},
+        organization_id="org-508",
+        actor_id="user-1",
+    )
+    suppliers = registry.execute(
+        "billing_read.search_suppliers",
+        {"query": "Acme", "limit": 2},
+        organization_id="org-508",
+        actor_id="user-1",
+    )
+    projects = registry.execute(
+        "erp_read.search_projects",
+        {"query": "Atlas", "limit": 2},
+        organization_id="org-508",
+        actor_id="user-1",
+    )
+
+    assert len(invoices["invoices"]) == 2
+    assert len(suppliers["suppliers"]) == 2
+    assert len(projects["projects"]) == 2
+    assert invoices["has_more"] is True
+    assert suppliers["has_more"] is True
+    assert projects["has_more"] is True
+    assert clients[0].calls[0][1]["limit"] == 3
+    assert clients[1].calls[0][1]["limit"] == 3
+    assert clients[2].calls[0][1]["limit"] == 3
 
 
 @pytest.mark.parametrize(

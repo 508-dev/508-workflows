@@ -1357,17 +1357,23 @@ class ToolRegistry:
                 rows = client.search_invoices(
                     _ERP_INVOICE_DOCTYPES[invoice_type],
                     query=query,
-                    limit=limit,
+                    # Keep one extra row only to distinguish an exact count
+                    # from a truncated result set in scheduled reports.
+                    limit=limit + 1,
                 )
             except ERPNextAPIError:
                 logger.warning("ERP invoice search failed", exc_info=True)
                 raise RuntimeError("ERP lookup is temporarily unavailable") from None
         finally:
             client.close()
-        return {
+        has_more = len(rows) > limit
+        result: dict[str, Any] = {
             "invoice_type": invoice_type,
-            "invoices": [_erp_invoice_search_payload(row) for row in rows],
+            "invoices": [_erp_invoice_search_payload(row) for row in rows[:limit]],
         }
+        if has_more:
+            result["has_more"] = True
+        return result
 
     def _get_erp_invoice_summary(
         self,
@@ -1418,13 +1424,19 @@ class ToolRegistry:
         client = self._erpnext_client(deadline_monotonic=deadline_monotonic)
         try:
             try:
-                rows = client.search_suppliers(query, limit=limit)
+                rows = client.search_suppliers(query, limit=limit + 1)
             except ERPNextAPIError:
                 logger.warning("ERP supplier search failed", exc_info=True)
                 raise RuntimeError("ERP lookup is temporarily unavailable") from None
         finally:
             client.close()
-        return {"suppliers": [_erp_supplier_payload(row) for row in rows]}
+        has_more = len(rows) > limit
+        result: dict[str, Any] = {
+            "suppliers": [_erp_supplier_payload(row) for row in rows[:limit]],
+        }
+        if has_more:
+            result["has_more"] = True
+        return result
 
     def _search_erp_projects(
         self,
@@ -1450,14 +1462,20 @@ class ToolRegistry:
                         ["Project", "name", "like", f"%{query}%"],
                         ["Project", "project_name", "like", f"%{query}%"],
                     ],
-                    limit=limit,
+                    limit=limit + 1,
                 )
             except ERPNextAPIError:
                 logger.warning("ERP project search failed", exc_info=True)
                 raise RuntimeError("ERP lookup is temporarily unavailable") from None
         finally:
             client.close()
-        return {"projects": [_erp_project_summary_payload(row) for row in rows]}
+        has_more = len(rows) > limit
+        result: dict[str, Any] = {
+            "projects": [_erp_project_summary_payload(row) for row in rows[:limit]],
+        }
+        if has_more:
+            result["has_more"] = True
+        return result
 
     def _get_erp_project_summary(
         self,
@@ -2060,7 +2078,9 @@ class ToolRegistry:
             raise ValueError("CRM contact search query is required")
         limit = _positive_int(arguments.get("limit"), default=5, maximum=10)
         contacts = self._crm_repository(deadline_monotonic=deadline_monotonic).search(
-            limit=limit,
+            # The extra row is not returned to the caller; it only preserves
+            # whether a capped aggregate is an exact count.
+            limit=limit + 1,
             select=[
                 "id",
                 "name",
@@ -2071,7 +2091,13 @@ class ToolRegistry:
             ],
             name__contains=query,
         )
-        return {"contacts": [contact.to_dict() for contact in contacts]}
+        has_more = len(contacts) > limit
+        result: dict[str, Any] = {
+            "contacts": [contact.to_dict() for contact in contacts[:limit]],
+        }
+        if has_more:
+            result["has_more"] = True
+        return result
 
     def _update_crm_contact(self, arguments: dict[str, Any]) -> dict[str, Any]:
         contact_id = str(arguments.get("contact_id") or "").strip()

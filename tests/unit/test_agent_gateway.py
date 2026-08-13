@@ -1864,7 +1864,53 @@ def test_admin_can_search_crm_contacts() -> None:
     assert response.status == "executed"
     assert captured["name__contains"] == "Sarah Example"
     assert "name" not in captured
+    assert captured["limit"] == 6
     assert response.results[0].result["contacts"][0]["name"] == "Sarah Example"
+    assert "has_more" not in response.results[0].result
+
+
+def test_crm_search_fetches_one_extra_row_only_when_results_are_capped() -> None:
+    """The truncation signal is explicit without changing exact result payloads."""
+
+    captured: dict[str, object] = {}
+
+    class FakeContact:
+        def __init__(self, identifier: int) -> None:
+            self.identifier = identifier
+
+        def to_dict(self) -> dict[str, object]:
+            return {"id": str(self.identifier), "name": f"Contact {self.identifier}"}
+
+    class FakeRepository:
+        def search(self, **kwargs: object) -> list[FakeContact]:
+            captured.update(kwargs)
+            return [FakeContact(index) for index in range(1, int(kwargs["limit"]) + 1)]
+
+    class FakeRegistry(ToolRegistry):
+        def _crm_repository(
+            self,
+            *,
+            deadline_monotonic: float | None = None,
+        ) -> Any:
+            return FakeRepository()
+
+    registry = FakeRegistry(
+        runtime_config=ToolRuntimeConfig(
+            espo_base_url="https://crm.example.test",
+            espo_api_key="key",
+        )
+    )
+
+    result = registry.execute(
+        "crm_read.search_contacts",
+        {"query": "Contact", "limit": 2},
+        organization_id="org-1",
+        actor_id="123",
+    )
+
+    assert captured["limit"] == 3
+    assert [contact["id"] for contact in result["contacts"]] == ["1", "2"]
+    assert result["has_more"] is True
 
 
 def test_agent_uses_intent_normalizer_after_deterministic_parse_miss() -> None:

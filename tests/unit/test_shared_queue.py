@@ -12,6 +12,7 @@ from five08.queue import (
     mark_job_dead,
     mark_job_retry,
     mark_job_succeeded,
+    redeliver_queued_job,
     renew_job_execution_lease,
 )
 from five08.settings import SharedSettings
@@ -64,6 +65,56 @@ def test_enqueue_job_redelivers_an_existing_queued_job() -> None:
     queue.enqueue.assert_called_once_with("job-1", run_at=None)
     assert result.id == "job-1"
     assert result.created is False
+
+
+def test_redeliver_queued_job_reserves_a_durable_backoff_window() -> None:
+    """Only one dispatcher may republish a queued row during the backoff."""
+
+    cursor = MagicMock()
+    cursor.fetchone.return_value = {"id": "job-1", "run_after": None}
+    connection = MagicMock()
+    connection.__enter__.return_value.cursor.return_value.__enter__.return_value = (
+        cursor
+    )
+    queue = Mock()
+
+    with patch("five08.queue.get_postgres_connection", return_value=connection):
+        redelivered = redeliver_queued_job(
+            queue,
+            settings=SharedSettings(),
+            job_id="job-1",
+            minimum_age_seconds=60,
+        )
+
+    assert redelivered is True
+    query, parameters = cursor.execute.call_args.args
+    assert "AND status = %s" in query
+    assert "updated_at <= NOW() - (%s * INTERVAL '1 second')" in query
+    assert parameters == ("job-1", "queued", 60.0)
+    queue.enqueue.assert_called_once_with("job-1", run_at=None)
+
+
+def test_redeliver_queued_job_does_not_enqueue_without_the_delivery_lease() -> None:
+    """A fresh queued row remains owned by the prior dispatcher attempt."""
+
+    cursor = MagicMock()
+    cursor.fetchone.return_value = None
+    connection = MagicMock()
+    connection.__enter__.return_value.cursor.return_value.__enter__.return_value = (
+        cursor
+    )
+    queue = Mock()
+
+    with patch("five08.queue.get_postgres_connection", return_value=connection):
+        redelivered = redeliver_queued_job(
+            queue,
+            settings=SharedSettings(),
+            job_id="job-1",
+            minimum_age_seconds=60,
+        )
+
+    assert redelivered is False
+    queue.enqueue.assert_not_called()
 
 
 def test_claim_job_for_execution_uses_one_conditional_update() -> None:
