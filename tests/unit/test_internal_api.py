@@ -442,6 +442,70 @@ class TestInternalAPIRoutes:
         guild.fetch_member.assert_awaited_once_with(3000)
 
     @pytest.mark.asyncio
+    async def test_agent_schedule_thread_validation_uses_thread_send_permission_for_bot_and_owner(
+        self,
+        internal_api_routes,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Thread destinations use the Discord thread send bit for both members."""
+
+        monkeypatch.setattr(
+            "five08.discord_bot.utils.internal_api.settings.discord_server_id",
+            "1000",
+        )
+
+        bot_member = object()
+        owner = object()
+        permission_checks: list[object] = []
+
+        class FakeThread:
+            def __init__(self, guild: object) -> None:
+                self.guild = guild
+
+            def permissions_for(self, member: object) -> SimpleNamespace:
+                permission_checks.append(member)
+                return SimpleNamespace(
+                    view_channel=True,
+                    send_messages=False,
+                    send_messages_in_threads=True,
+                )
+
+        guild = SimpleNamespace(
+            id=1000,
+            me=bot_member,
+            fetch_member=AsyncMock(return_value=owner),
+        )
+        internal_api_routes.bot.get_guild.return_value = guild
+        internal_api_routes.bot.get_channel.return_value = FakeThread(guild)
+        monkeypatch.setattr(
+            "five08.discord_bot.utils.internal_api.discord.Thread",
+            FakeThread,
+        )
+        monkeypatch.setattr(
+            "five08.discord_bot.utils.internal_api.discord.abc.Messageable",
+            FakeThread,
+        )
+
+        (
+            result,
+            status_code,
+        ) = await internal_api_routes._validate_agent_schedule_channel(
+            AgentScheduleChannelRequest(
+                guild_id="1000",
+                channel_id="2000",
+                owner_discord_user_id="3000",
+            )
+        )
+
+        assert status_code == 200
+        assert result == {
+            "status": "ready",
+            "guild_id": "1000",
+            "channel_id": "2000",
+        }
+        assert permission_checks == [bot_member, owner]
+
+    @pytest.mark.asyncio
     async def test_agent_schedule_channel_validation_rejects_a_departed_owner(
         self,
         internal_api_routes,

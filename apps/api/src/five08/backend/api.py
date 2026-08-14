@@ -419,18 +419,22 @@ _AGENT_SCHEDULE_ERP_TOOL_NAMES = frozenset(
 # worker thread. Keep the number of such requests bounded while the API has
 # already returned its caller-visible timeout response.
 _AGENT_REQUEST_PLAN_BULKHEAD = threading.BoundedSemaphore(value=4)
-# Scheduled loops can block on a model or an external provider. Keep their
+# Scheduled work can block on a model or an external provider. Keep its
 # threads separate from the default executor used by request/database work and
 # retain a capacity slot until a timed-out synchronous call actually returns.
-_AGENT_SCHEDULE_LOOP_EXECUTOR = ThreadPoolExecutor(
+_AGENT_SCHEDULE_EXECUTOR = ThreadPoolExecutor(
     max_workers=4,
-    thread_name_prefix="agent-schedule-loop",
+    thread_name_prefix="agent-schedule",
 )
-_AGENT_SCHEDULE_LOOP_BULKHEAD = threading.BoundedSemaphore(value=4)
+_AGENT_SCHEDULE_BULKHEAD = threading.BoundedSemaphore(value=4)
 
 
 class AgentRequestPlanCapacityError(RuntimeError):
     """Raised when timed-out synchronous agent work has filled the bulkhead."""
+
+
+class AgentScheduleExecutionCapacityError(RuntimeError):
+    """Raised when bounded scheduled work has no synchronous capacity left."""
 
 
 @dataclass(frozen=True)
@@ -487,28 +491,41 @@ def _run_agent_plan(
         _AGENT_REQUEST_PLAN_BULKHEAD.release()
 
 
-def _run_agent_schedule_loop_with_bulkhead(
-    *,
-    orchestrator: AgentOrchestrator,
-    schedule: AgentScheduleRecord,
-    run: AgentScheduleRunRecord,
-    context: AgentIdentityContext,
-    effective_scopes: set[str],
-    deadline_monotonic: float,
-) -> _AgentScheduleLoopOutcome:
-    """Execute one schedule loop while retaining its isolated capacity slot."""
+def _run_agent_schedule_sync_with_bulkhead(*, callback: Callable[[], Any]) -> Any:
+    """Execute scheduled sync work while retaining its isolated capacity slot."""
 
     try:
-        return _run_agent_schedule_loop(
-            orchestrator=orchestrator,
-            schedule=schedule,
-            run=run,
-            context=context,
-            effective_scopes=effective_scopes,
-            deadline_monotonic=deadline_monotonic,
-        )
+        return callback()
     finally:
-        _AGENT_SCHEDULE_LOOP_BULKHEAD.release()
+        _AGENT_SCHEDULE_BULKHEAD.release()
+
+
+async def _run_agent_schedule_sync_bounded(
+    *,
+    callback: Callable[[], Any],
+    deadline_monotonic: float,
+) -> Any:
+    """Run scheduled synchronous work in its bounded executor through a deadline."""
+
+    if not _AGENT_SCHEDULE_BULKHEAD.acquire(blocking=False):
+        raise AgentScheduleExecutionCapacityError(
+            "scheduled execution capacity is busy"
+        )
+    remaining_seconds = deadline_monotonic - monotonic()
+    if remaining_seconds <= 0:
+        _AGENT_SCHEDULE_BULKHEAD.release()
+        raise TimeoutError("scheduled execution timed out")
+    try:
+        future = asyncio.get_running_loop().run_in_executor(
+            _AGENT_SCHEDULE_EXECUTOR,
+            partial(_run_agent_schedule_sync_with_bulkhead, callback=callback),
+        )
+    except Exception:
+        _AGENT_SCHEDULE_BULKHEAD.release()
+        raise
+    # Shield the executor future: timing out the HTTP request must not cancel
+    # synchronous work and release its capacity slot early.
+    return await asyncio.wait_for(asyncio.shield(future), timeout=remaining_seconds)
 
 
 async def _run_agent_schedule_loop_bounded(
@@ -520,25 +537,12 @@ async def _run_agent_schedule_loop_bounded(
     effective_scopes: set[str],
     deadline_monotonic: float,
 ) -> _AgentScheduleLoopOutcome:
-    """Run a schedule loop in its bounded executor through its hard deadline."""
+    """Run a schedule loop in the bounded scheduled-work executor."""
 
-    if not _AGENT_SCHEDULE_LOOP_BULKHEAD.acquire(blocking=False):
-        return _AgentScheduleLoopOutcome(
-            results=[],
-            error="scheduled_agent_loop_capacity_exceeded",
-        )
-    remaining_seconds = deadline_monotonic - monotonic()
-    if remaining_seconds <= 0:
-        _AGENT_SCHEDULE_LOOP_BULKHEAD.release()
-        return _AgentScheduleLoopOutcome(
-            results=[],
-            error="scheduled_agent_loop_timed_out",
-        )
     try:
-        future = asyncio.get_running_loop().run_in_executor(
-            _AGENT_SCHEDULE_LOOP_EXECUTOR,
-            partial(
-                _run_agent_schedule_loop_with_bulkhead,
+        outcome = await _run_agent_schedule_sync_bounded(
+            callback=partial(
+                _run_agent_schedule_loop,
                 orchestrator=orchestrator,
                 schedule=schedule,
                 run=run,
@@ -546,19 +550,19 @@ async def _run_agent_schedule_loop_bounded(
                 effective_scopes=effective_scopes,
                 deadline_monotonic=deadline_monotonic,
             ),
+            deadline_monotonic=deadline_monotonic,
         )
-    except Exception:
-        _AGENT_SCHEDULE_LOOP_BULKHEAD.release()
-        raise
-    try:
-        # Shield the executor future: timing out the HTTP request must not
-        # cancel the synchronous work and release its capacity slot early.
-        return await asyncio.wait_for(asyncio.shield(future), timeout=remaining_seconds)
+    except AgentScheduleExecutionCapacityError:
+        return _AgentScheduleLoopOutcome(
+            results=[],
+            error="scheduled_agent_loop_capacity_exceeded",
+        )
     except TimeoutError:
         return _AgentScheduleLoopOutcome(
             results=[],
             error="scheduled_agent_loop_timed_out",
         )
+    return cast(_AgentScheduleLoopOutcome, outcome)
 
 
 def _is_authorized_with_secret(
@@ -10946,12 +10950,18 @@ async def _execute_agent_schedule_run(
                 run=run,
                 context=context,
             )
-            results = await asyncio.to_thread(
-                orchestrator.execute_plan,
-                plan,
-                context,
-                effective_scopes=set(schedule.allowed_scopes),
-                deadline_monotonic=deadline,
+            results = cast(
+                list[AgentExecutionResult],
+                await _run_agent_schedule_sync_bounded(
+                    callback=partial(
+                        orchestrator.execute_plan,
+                        plan,
+                        context,
+                        effective_scopes=set(schedule.allowed_scopes),
+                        deadline_monotonic=deadline,
+                    ),
+                    deadline_monotonic=deadline,
+                ),
             )
     except Exception:
         logger.exception("Agent schedule execution failed run_id=%s", run.id)

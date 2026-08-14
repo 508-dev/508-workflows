@@ -891,14 +891,13 @@ def test_agent_loop_rejects_a_legacy_identifier_catalog_before_planning() -> Non
 
 
 @pytest.mark.asyncio
-async def test_schedule_loop_uses_its_dedicated_bounded_executor(
+async def test_scheduled_sync_work_uses_its_dedicated_bounded_executor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A blocked schedule loop cannot occupy the API's default thread pool."""
+    """Blocked scheduled work cannot occupy the API's default thread pool."""
 
-    expected = api._AgentScheduleLoopOutcome(results=[])
+    expected = object()
     invoked = Mock(return_value=expected)
-    monkeypatch.setattr(api, "_run_agent_schedule_loop", invoked)
     event_loop = asyncio.get_running_loop()
     captured: dict[str, object] = {}
 
@@ -914,22 +913,13 @@ async def test_schedule_loop_uses_its_dedicated_bounded_executor(
 
     monkeypatch.setattr(api.asyncio, "get_running_loop", lambda: RecordingLoop())
 
-    outcome = await api._run_agent_schedule_loop_bounded(
-        orchestrator=cast(AgentOrchestrator, SimpleNamespace()),
-        schedule=_agent_loop_schedule(tool_allowlist=["onboarding_read.get_summary"]),
-        run=_run(),
-        context=AgentIdentityContext(
-            discord_user_id="1001",
-            organization_id="1000",
-            guild_id="1000",
-            roles=["Admin"],
-        ),
-        effective_scopes={"agent:schedule:manage"},
+    outcome = await api._run_agent_schedule_sync_bounded(
+        callback=invoked,
         deadline_monotonic=monotonic() + 30,
     )
 
     assert outcome is expected
-    assert captured["executor"] is api._AGENT_SCHEDULE_LOOP_EXECUTOR
+    assert captured["executor"] is api._AGENT_SCHEDULE_EXECUTOR
     invoked.assert_called_once()
 
 
@@ -941,7 +931,7 @@ async def test_schedule_loop_capacity_refuses_another_sync_submission(
 
     bulkhead = Mock()
     bulkhead.acquire.return_value = False
-    monkeypatch.setattr(api, "_AGENT_SCHEDULE_LOOP_BULKHEAD", bulkhead)
+    monkeypatch.setattr(api, "_AGENT_SCHEDULE_BULKHEAD", bulkhead)
 
     outcome = await api._run_agent_schedule_loop_bounded(
         orchestrator=cast(AgentOrchestrator, SimpleNamespace()),
@@ -981,7 +971,7 @@ async def test_schedule_loop_timeout_retains_capacity_until_sync_work_returns(
         finally:
             finished.set()
 
-    monkeypatch.setattr(api, "_AGENT_SCHEDULE_LOOP_BULKHEAD", bulkhead)
+    monkeypatch.setattr(api, "_AGENT_SCHEDULE_BULKHEAD", bulkhead)
     monkeypatch.setattr(api, "_run_agent_schedule_loop", blocked_loop)
 
     outcome = await api._run_agent_schedule_loop_bounded(
@@ -1621,19 +1611,20 @@ async def test_schedule_execution_never_posts_a_report_twice_after_recorded_deli
 
     post_report = AsyncMock(side_effect=AssertionError("must not post twice"))
     complete_run = Mock(return_value=completed_run)
+    run_synchronously = AsyncMock(
+        return_value=[
+            AgentExecutionResult(
+                tool_name="github_issue.search_issues",
+                status="succeeded",
+                result={"issues": []},
+            )
+        ]
+    )
     orchestrator = SimpleNamespace(
         policy=SimpleNamespace(
             scopes_for_context=Mock(return_value=set(schedule.allowed_scopes))
         ),
-        execute_plan=Mock(
-            return_value=[
-                AgentExecutionResult(
-                    tool_name="github_issue.search_issues",
-                    status="succeeded",
-                    result={"issues": []},
-                )
-            ]
-        ),
+        execute_plan=Mock(side_effect=AssertionError("must use bounded worker")),
     )
     monkeypatch.setattr(
         api,
@@ -1647,6 +1638,7 @@ async def test_schedule_execution_never_posts_a_report_twice_after_recorded_deli
     monkeypatch.setattr(api, "_fresh_agent_schedule_context", refreshed_context)
     monkeypatch.setattr(api, "_get_agent_orchestrator", lambda: orchestrator)
     monkeypatch.setattr(api, "_agent_schedule_plan", Mock(return_value=object()))
+    monkeypatch.setattr(api, "_run_agent_schedule_sync_bounded", run_synchronously)
     monkeypatch.setattr(api, "_model_agent_schedule_summary", Mock(return_value=None))
     monkeypatch.setattr(
         api,
@@ -1665,6 +1657,9 @@ async def test_schedule_execution_never_posts_a_report_twice_after_recorded_deli
     assert response["status"] == "succeeded"
     assert response["delivery_status"] == "already_posted"
     post_report.assert_not_awaited()
+    run_synchronously.assert_awaited_once()
+    assert callable(run_synchronously.await_args.kwargs["callback"])
+    orchestrator.execute_plan.assert_not_called()
     assert complete_run.call_args.kwargs["status"] is AgentScheduleRunStatus.SUCCEEDED
     assert (
         complete_run.call_args.kwargs["execution_token"]

@@ -733,9 +733,14 @@ class InternalAPIRoutes:
         permissions_for = getattr(channel, "permissions_for", None)
         if not callable(permissions_for):
             return None, {"error": "channel_permissions_unavailable"}, 503
+        send_permission_name = (
+            "send_messages_in_threads"
+            if isinstance(channel, discord.Thread)
+            else "send_messages"
+        )
         permissions = permissions_for(bot_member)
         if not bool(getattr(permissions, "view_channel", False)) or not bool(
-            getattr(permissions, "send_messages", False)
+            getattr(permissions, send_permission_name, False)
         ):
             return None, {"error": "missing_channel_send_permission"}, 403
         try:
@@ -753,7 +758,7 @@ class InternalAPIRoutes:
             return None, {"error": "schedule_owner_lookup_failed"}, 502
         owner_permissions = permissions_for(owner_member)
         if not bool(getattr(owner_permissions, "view_channel", False)) or not bool(
-            getattr(owner_permissions, "send_messages", False)
+            getattr(owner_permissions, send_permission_name, False)
         ):
             return None, {"error": "owner_missing_channel_send_permission"}, 403
 
