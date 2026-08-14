@@ -10963,6 +10963,27 @@ async def _execute_agent_schedule_run(
                     deadline_monotonic=deadline,
                 ),
             )
+    except (AgentScheduleExecutionCapacityError, TimeoutError) as exc:
+        execution_error = (
+            "scheduled_tool_execution_capacity_exceeded"
+            if isinstance(exc, AgentScheduleExecutionCapacityError)
+            else "scheduled_tool_execution_timed_out"
+        )
+        completed = await asyncio.to_thread(
+            complete_agent_schedule_run,
+            settings,
+            run_id=run.id,
+            execution_token=execution_token,
+            status=AgentScheduleRunStatus.FAILED,
+            error=execution_error,
+        )
+        return {
+            "status": AgentScheduleRunStatus.FAILED.value,
+            "schedule_id": schedule.id,
+            "delivery_status": "not_posted",
+            "error": execution_error,
+            "run": _agent_schedule_run_payload(completed or run),
+        }, 502
     except Exception:
         logger.exception("Agent schedule execution failed run_id=%s", run.id)
         completed = await asyncio.to_thread(

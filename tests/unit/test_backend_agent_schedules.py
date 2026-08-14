@@ -1668,6 +1668,91 @@ async def test_schedule_execution_never_posts_a_report_twice_after_recorded_deli
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("execution_failure", "expected_error"),
+    [
+        (
+            api.AgentScheduleExecutionCapacityError(
+                "scheduled execution capacity is busy"
+            ),
+            "scheduled_tool_execution_capacity_exceeded",
+        ),
+        (
+            TimeoutError("scheduled execution timed out"),
+            "scheduled_tool_execution_timed_out",
+        ),
+    ],
+)
+async def test_frozen_schedule_execution_records_bounded_control_flow_outcomes(
+    monkeypatch: pytest.MonkeyPatch,
+    execution_failure: Exception,
+    expected_error: str,
+) -> None:
+    """Expected bounded-executor limits remain visible to schedule operators."""
+
+    queued_run = _run()
+    running_run = replace(
+        queued_run,
+        status=AgentScheduleRunStatus.RUNNING,
+        started_at=queued_run.occurrence_at,
+    )
+    completed_run = replace(
+        running_run,
+        status=AgentScheduleRunStatus.FAILED,
+        finished_at=running_run.occurrence_at,
+        error=expected_error,
+    )
+    schedule = _schedule()
+    context = AgentIdentityContext(
+        discord_user_id="1001",
+        organization_id="1000",
+        guild_id="1000",
+        roles=["Admin"],
+    )
+
+    async def refreshed_context(*_args: object, **_kwargs: object):
+        return context, None, 200
+
+    complete_run = Mock(return_value=completed_run)
+    bounded_execution = AsyncMock(side_effect=execution_failure)
+    logger_exception = Mock()
+    orchestrator = SimpleNamespace(
+        policy=SimpleNamespace(
+            scopes_for_context=Mock(return_value=set(schedule.allowed_scopes))
+        ),
+        execute_plan=Mock(),
+    )
+    monkeypatch.setattr(api, "get_agent_schedule_run", Mock(return_value=queued_run))
+    monkeypatch.setattr(api, "claim_agent_schedule_run", Mock(return_value=running_run))
+    monkeypatch.setattr(api, "get_agent_schedule", Mock(return_value=schedule))
+    monkeypatch.setattr(api, "_fresh_agent_schedule_context", refreshed_context)
+    monkeypatch.setattr(api, "_get_agent_orchestrator", lambda: orchestrator)
+    monkeypatch.setattr(api, "_agent_schedule_plan", Mock(return_value=object()))
+    monkeypatch.setattr(api, "_run_agent_schedule_sync_bounded", bounded_execution)
+    monkeypatch.setattr(api, "complete_agent_schedule_run", complete_run)
+    monkeypatch.setattr(api.logger, "exception", logger_exception)
+
+    response, status_code = await api._execute_agent_schedule_run(
+        cast(Request, SimpleNamespace()),
+        run_id=queued_run.id,
+    )
+
+    assert status_code == 502
+    assert response["status"] == "failed"
+    assert response["delivery_status"] == "not_posted"
+    assert response["error"] == expected_error
+    bounded_execution.assert_awaited_once()
+    logger_exception.assert_not_called()
+    orchestrator.execute_plan.assert_not_called()
+    complete_run.assert_called_once()
+    assert complete_run.call_args.kwargs["status"] is AgentScheduleRunStatus.FAILED
+    assert complete_run.call_args.kwargs["error"] == expected_error
+    assert (
+        complete_run.call_args.kwargs["execution_token"] == running_run.execution_token
+    )
+
+
+@pytest.mark.asyncio
 async def test_pre_send_bot_failure_releases_delivery_claim_for_worker_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
