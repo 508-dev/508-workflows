@@ -9,10 +9,11 @@ import re
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, Mock, call, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
 
 import pytest
 from fastapi.testclient import TestClient
+from psycopg.types.json import Jsonb
 
 from five08.agent import (
     AgentExecutionResult,
@@ -57,6 +58,34 @@ class _FakePostgresConnection:
 
     def close(self) -> None:
         return None
+
+
+def _pending_confirmation_plan() -> tuple[AgentPlan, AgentIdentityContext]:
+    context = AgentIdentityContext(
+        discord_user_id="123",
+        organization_id="org-1",
+        guild_id="org-1",
+        roles=["Steering Committee"],
+    )
+    plan = AgentPlan(
+        plan_id="pending-plan-1",
+        intent="create_task",
+        planner="deterministic_regex",
+        model_tier="fast",
+        model=AgentModelConfig().resolve("fast"),
+        actions=[
+            AgentToolAction(
+                tool_name="task_write.create_task",
+                arguments={"title": "Update onboarding docs"},
+                summary="Create the onboarding task",
+                requires_confirmation=True,
+            )
+        ],
+        human_summary="Create the onboarding task",
+        requires_confirmation=True,
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+    )
+    return plan, context
 
 
 def test_cached_api_orchestrator_refreshes_policy_from_live_runtime_config(
@@ -1365,6 +1394,104 @@ def test_pending_agent_plan_lock_is_created_per_running_loop(
     second_lock = asyncio.run(get_lock())
 
     assert first_lock is not second_lock
+
+
+@pytest.mark.asyncio
+async def test_pending_agent_plan_defaults_to_the_durable_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Production confirmation storage must not depend on one API process."""
+
+    plan, context = _pending_confirmation_plan()
+    stored: list[tuple[AgentPlan, AgentIdentityContext]] = []
+
+    def store_durably(
+        stored_plan: AgentPlan,
+        stored_context: AgentIdentityContext,
+    ) -> bool:
+        stored.append((stored_plan, stored_context))
+        return True
+
+    monkeypatch.setattr(
+        api, "_PENDING_AGENT_PLANS", api._DurablePendingAgentPlanStore()
+    )
+    monkeypatch.setattr(api, "_store_pending_agent_plan_durably", store_durably)
+
+    assert await api._store_pending_agent_plan(plan, context)
+    assert stored == [(plan, context)]
+
+
+def test_durable_pending_agent_plan_store_uses_a_shared_capacity_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent replicas serialize capacity checks before persisting a plan."""
+
+    plan, context = _pending_confirmation_plan()
+    cursor = MagicMock()
+    cursor.fetchone.side_effect = [
+        {"pending_plan_count": 0},
+        {"pending_plan_count": 0},
+        {"plan_id": plan.plan_id},
+    ]
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.cursor.return_value.__enter__.return_value = cursor
+    monkeypatch.setattr(
+        api,
+        "get_postgres_connection",
+        lambda _settings: connection,
+    )
+
+    assert api._store_pending_agent_plan_durably(plan, context)
+
+    executed = cursor.execute.call_args_list
+    queries = [str(executed_call.args[0]) for executed_call in executed]
+    assert any("pg_advisory_xact_lock" in query for query in queries)
+    assert any("DELETE FROM agent_pending_plans" in query for query in queries)
+    insert_params = next(
+        executed_call.args[1]
+        for executed_call in executed
+        if "INSERT INTO agent_pending_plans" in str(executed_call.args[0])
+    )
+    assert insert_params[:2] == (plan.plan_id, context.discord_user_id)
+    assert isinstance(insert_params[2], Jsonb)
+    assert isinstance(insert_params[3], Jsonb)
+
+
+def test_durable_pending_agent_plan_claim_locks_and_consumes_one_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A confirmation can be loaded after a restart but cannot be claimed twice."""
+
+    plan, context = _pending_confirmation_plan()
+    cursor = MagicMock()
+    cursor.fetchone.return_value = {
+        "plan": plan.model_dump(mode="json"),
+        "original_context": context.model_dump(mode="json"),
+        "owner_discord_user_id": context.discord_user_id,
+        "expires_at": plan.expires_at,
+    }
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.cursor.return_value.__enter__.return_value = cursor
+    monkeypatch.setattr(
+        api,
+        "get_postgres_connection",
+        lambda _settings: connection,
+    )
+
+    status, pending = api._claim_pending_agent_plan_durably(
+        plan.plan_id,
+        discord_user_id=context.discord_user_id,
+    )
+
+    assert status == "claimed"
+    assert pending == (plan, context)
+    queries = [
+        str(executed_call.args[0]) for executed_call in cursor.execute.call_args_list
+    ]
+    assert "FOR UPDATE" in queries[0]
+    assert queries[-1].strip().startswith("DELETE FROM agent_pending_plans")
 
 
 @pytest.mark.asyncio

@@ -3068,8 +3068,6 @@ class AgentOrchestrator:
         cron_expression = str(arguments.get("cron_expression") or "").strip()
         timezone_name = str(arguments.get("timezone") or "").strip()
         prompt = " ".join(str(arguments.get("prompt") or "").split())
-        if len(prompt) > 280:
-            prompt = f"{prompt[:279].rstrip()}…"
         return (
             f'Create recurring report "{name}" in this channel: '
             f"`{cron_expression}` ({timezone_name}). Objective: {prompt}"

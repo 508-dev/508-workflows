@@ -36,6 +36,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 from psycopg import Connection
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 from five08.audit import (
     ActorProvider,
@@ -380,17 +381,27 @@ TALLY_INTAKE_FIELD_LABEL_MAP = {
     "beyond your resume / linkedin, what would you say your primary skills and interests are": "primary_skills_interests",
 }
 
-# Process-local MVP agent tools stay synchronous for Discord button UX. Both the
-# task store and pending plans are non-durable; production task workflows should
-# swap this registry for a persistent task service before multi-worker use.
+# Process-local MVP agent tools stay synchronous for Discord button UX. Pending
+# confirmation plans are persisted below so an API replica or restart cannot
+# lose a user-approved action. A regular dictionary is a unit-test seam; the
+# production sentinel always selects PostgreSQL instead.
 _AGENT_TASK_STORE = InMemoryTaskStore()
 _AGENT_ORCHESTRATOR: AgentOrchestrator | None = None
 _AGENT_ORCHESTRATOR_LOCK = threading.RLock()
-_PENDING_AGENT_PLANS: dict[str, tuple[AgentPlan, AgentIdentityContext]] = {}
+
+
+class _DurablePendingAgentPlanStore(dict[str, tuple[AgentPlan, AgentIdentityContext]]):
+    """Sentinel that prevents production confirmation plans from being local."""
+
+
+_PENDING_AGENT_PLANS: dict[str, tuple[AgentPlan, AgentIdentityContext]] = (
+    _DurablePendingAgentPlanStore()
+)
 _PENDING_AGENT_PLANS_LOCK: asyncio.Lock | None = None
 _PENDING_AGENT_PLANS_LOCK_LOOP: asyncio.AbstractEventLoop | None = None
 _MAX_PENDING_AGENT_PLANS = 1000
 _MAX_PENDING_AGENT_PLANS_PER_ACTOR = 25
+_PENDING_AGENT_PLAN_CAPACITY_LOCK_KEY = "agent_pending_plans:capacity"
 _AGENT_REQUEST_RATE_LIMIT_WINDOW_SECONDS = 60.0
 _AGENT_REQUEST_RATE_LIMIT_MAX_REQUESTS = 10
 _AGENT_REQUEST_TIMESTAMPS: dict[str, list[float]] = {}
@@ -11952,24 +11963,32 @@ def _is_agent_plan_expired(plan: AgentPlan, *, now: datetime | None = None) -> b
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
     comparison_time = now or datetime.now(timezone.utc)
-    return comparison_time > expires_at.astimezone(timezone.utc)
+    return comparison_time >= expires_at.astimezone(timezone.utc)
 
 
 def _cleanup_expired_pending_agent_plans(*, now: datetime | None = None) -> None:
+    """Clean the in-memory test seam; production cleanup happens in PostgreSQL."""
+
+    pending_plans = _PENDING_AGENT_PLANS
+    if isinstance(pending_plans, _DurablePendingAgentPlanStore):
+        return
     comparison_time = now or datetime.now(timezone.utc)
     expired_plan_ids = [
         plan_id
-        for plan_id, (plan, _context) in _PENDING_AGENT_PLANS.items()
+        for plan_id, (plan, _context) in pending_plans.items()
         if _is_agent_plan_expired(plan, now=comparison_time)
     ]
     for plan_id in expired_plan_ids:
-        _PENDING_AGENT_PLANS.pop(plan_id, None)
+        pending_plans.pop(plan_id, None)
 
 
 def _pending_agent_plan_count_for_actor(discord_user_id: str) -> int:
+    pending_plans = _PENDING_AGENT_PLANS
+    if isinstance(pending_plans, _DurablePendingAgentPlanStore):
+        return 0
     return sum(
         1
-        for _plan, context in _PENDING_AGENT_PLANS.values()
+        for _plan, context in pending_plans.values()
         if context.discord_user_id == discord_user_id
     )
 
@@ -12131,19 +12150,165 @@ def _pending_agent_plans_lock() -> asyncio.Lock:
     return _PENDING_AGENT_PLANS_LOCK
 
 
+def _normalized_agent_plan_expiry(expires_at: datetime | None) -> datetime | None:
+    if expires_at is None:
+        return None
+    if expires_at.tzinfo is None:
+        return expires_at.replace(tzinfo=timezone.utc)
+    return expires_at.astimezone(timezone.utc)
+
+
+def _store_pending_agent_plan_durably(
+    plan: AgentPlan,
+    context: AgentIdentityContext,
+) -> bool:
+    """Persist one confirmation plan with replica-safe capacity accounting."""
+
+    now = datetime.now(timezone.utc)
+    expires_at = _normalized_agent_plan_expiry(plan.expires_at)
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            # Counts and insertion must share a transaction-wide lock so two
+            # API replicas cannot both accept the final available plan slot.
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (_PENDING_AGENT_PLAN_CAPACITY_LOCK_KEY,),
+            )
+            cursor.execute(
+                """
+                DELETE FROM agent_pending_plans
+                WHERE expires_at IS NOT NULL AND expires_at <= %s
+                """,
+                (now,),
+            )
+            cursor.execute(
+                "SELECT COUNT(*) AS pending_plan_count FROM agent_pending_plans"
+            )
+            total_row = cursor.fetchone()
+            if total_row is None:
+                raise RuntimeError("pending plan capacity count was unavailable")
+            if int(total_row["pending_plan_count"]) >= _MAX_PENDING_AGENT_PLANS:
+                return False
+
+            cursor.execute(
+                """
+                SELECT COUNT(*) AS pending_plan_count
+                FROM agent_pending_plans
+                WHERE owner_discord_user_id = %s
+                """,
+                (context.discord_user_id,),
+            )
+            actor_row = cursor.fetchone()
+            if actor_row is None:
+                raise RuntimeError("pending actor plan count was unavailable")
+            if (
+                int(actor_row["pending_plan_count"])
+                >= _MAX_PENDING_AGENT_PLANS_PER_ACTOR
+            ):
+                return False
+
+            cursor.execute(
+                """
+                INSERT INTO agent_pending_plans (
+                    plan_id,
+                    owner_discord_user_id,
+                    plan,
+                    original_context,
+                    expires_at
+                ) VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (plan_id) DO NOTHING
+                RETURNING plan_id
+                """,
+                (
+                    plan.plan_id,
+                    context.discord_user_id,
+                    Jsonb(plan.model_dump(mode="json")),
+                    Jsonb(context.model_dump(mode="json")),
+                    expires_at,
+                ),
+            )
+            return cursor.fetchone() is not None
+
+
+def _claim_pending_agent_plan_durably(
+    plan_id: str,
+    *,
+    discord_user_id: str,
+) -> tuple[str, tuple[AgentPlan, AgentIdentityContext] | None]:
+    """Atomically load and consume a persisted confirmation plan."""
+
+    now = datetime.now(timezone.utc)
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                SELECT plan, original_context, owner_discord_user_id, expires_at
+                FROM agent_pending_plans
+                WHERE plan_id = %s
+                FOR UPDATE
+                """,
+                (plan_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return "not_found", None
+
+            try:
+                plan = AgentPlan.model_validate(row["plan"])
+                original_context = AgentIdentityContext.model_validate(
+                    row["original_context"]
+                )
+            except (TypeError, ValidationError, ValueError):
+                # A malformed persisted plan must never become executable or
+                # permanently block its opaque confirmation ID.
+                logger.error("Discarding malformed pending agent plan %s", plan_id)
+                cursor.execute(
+                    "DELETE FROM agent_pending_plans WHERE plan_id = %s",
+                    (plan_id,),
+                )
+                return "not_found", None
+
+            pending = (plan, original_context)
+            if str(row["owner_discord_user_id"]) != discord_user_id:
+                return "actor_mismatch", pending
+
+            stored_expiry = row.get("expires_at")
+            expires_at = (
+                _normalized_agent_plan_expiry(stored_expiry)
+                if isinstance(stored_expiry, datetime)
+                else _normalized_agent_plan_expiry(plan.expires_at)
+            )
+            if expires_at is not None and now > expires_at:
+                cursor.execute(
+                    "DELETE FROM agent_pending_plans WHERE plan_id = %s",
+                    (plan_id,),
+                )
+                return "expired", pending
+
+            cursor.execute(
+                "DELETE FROM agent_pending_plans WHERE plan_id = %s",
+                (plan_id,),
+            )
+            return "claimed", pending
+
+
 async def _store_pending_agent_plan(
     plan: AgentPlan,
     context: AgentIdentityContext,
 ) -> bool:
+    pending_plans = _PENDING_AGENT_PLANS
+    if isinstance(pending_plans, _DurablePendingAgentPlanStore):
+        return await asyncio.to_thread(_store_pending_agent_plan_durably, plan, context)
+
     async with _pending_agent_plans_lock():
         _cleanup_expired_pending_agent_plans()
         if (
-            len(_PENDING_AGENT_PLANS) >= _MAX_PENDING_AGENT_PLANS
+            len(pending_plans) >= _MAX_PENDING_AGENT_PLANS
             or _pending_agent_plan_count_for_actor(context.discord_user_id)
             >= _MAX_PENDING_AGENT_PLANS_PER_ACTOR
         ):
             return False
-        _PENDING_AGENT_PLANS[plan.plan_id] = (plan, context)
+        pending_plans[plan.plan_id] = (plan, context)
         return True
 
 
@@ -12152,9 +12317,17 @@ async def _claim_pending_agent_plan(
     *,
     discord_user_id: str,
 ) -> tuple[str, tuple[AgentPlan, AgentIdentityContext] | None]:
+    pending_plans = _PENDING_AGENT_PLANS
+    if isinstance(pending_plans, _DurablePendingAgentPlanStore):
+        return await asyncio.to_thread(
+            _claim_pending_agent_plan_durably,
+            plan_id,
+            discord_user_id=discord_user_id,
+        )
+
     async with _pending_agent_plans_lock():
         now = datetime.now(timezone.utc)
-        pending = _PENDING_AGENT_PLANS.get(plan_id)
+        pending = pending_plans.get(plan_id)
         if pending is None:
             _cleanup_expired_pending_agent_plans(now=now)
             return "not_found", None
@@ -12165,11 +12338,11 @@ async def _claim_pending_agent_plan(
             return "actor_mismatch", pending
 
         if _is_agent_plan_expired(plan, now=now):
-            _PENDING_AGENT_PLANS.pop(plan_id, None)
+            pending_plans.pop(plan_id, None)
             _cleanup_expired_pending_agent_plans(now=now)
             return "expired", pending
 
-        claimed = _PENDING_AGENT_PLANS.pop(plan_id, pending)
+        claimed = pending_plans.pop(plan_id, pending)
         _cleanup_expired_pending_agent_plans(now=now)
         return "claimed", claimed
 
@@ -12282,7 +12455,29 @@ async def agent_request_handler(request: Request) -> JSONResponse:
         # it never needs raw client-supplied thread text. Do not retain that
         # potentially sensitive/untrusted text for the ten-minute plan window.
         pending_context = payload.context.model_copy(update={"context_snippets": []})
-        stored = await _store_pending_agent_plan(response.plan, pending_context)
+        try:
+            stored = await _store_pending_agent_plan(response.plan, pending_context)
+        except Exception:
+            logger.exception("Unable to persist pending agent confirmation plan")
+            _schedule_agent_audit_event(
+                context=payload.context,
+                action="agent.request",
+                result=AuditResult.ERROR,
+                plan=response.plan,
+                metadata={
+                    "status": "failed",
+                    "reason": "pending_plan_storage_unavailable",
+                    "message_sanitized": _sanitize_agent_audit_message(payload.message),
+                },
+            )
+            response = AgentResponse(
+                status="failed",
+                message=(
+                    "Agent confirmation storage is unavailable. Please try again "
+                    "shortly."
+                ),
+            )
+            return JSONResponse(response.model_dump(mode="json"), status_code=503)
         if not stored:
             _schedule_agent_audit_event(
                 context=payload.context,
@@ -12369,10 +12564,30 @@ async def agent_confirmation_handler(
                 status_code=503,
             )
 
-    claim_status, pending = await _claim_pending_agent_plan(
-        plan_id,
-        discord_user_id=payload.context.discord_user_id,
-    )
+    try:
+        claim_status, pending = await _claim_pending_agent_plan(
+            plan_id,
+            discord_user_id=payload.context.discord_user_id,
+        )
+    except Exception:
+        logger.exception("Unable to load pending agent confirmation plan")
+        _schedule_agent_audit_event(
+            context=payload.context,
+            action="agent.confirmation",
+            result=AuditResult.ERROR,
+            plan=None,
+            metadata={"reason": "pending_plan_storage_unavailable", "plan_id": plan_id},
+        )
+        return JSONResponse(
+            {
+                "status": "failed",
+                "message": (
+                    "Agent confirmation storage is unavailable. Please try again "
+                    "shortly."
+                ),
+            },
+            status_code=503,
+        )
     if pending is None:
         _schedule_agent_audit_event(
             context=payload.context,

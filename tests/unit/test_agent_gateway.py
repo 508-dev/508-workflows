@@ -28,6 +28,7 @@ from five08.agent import (
     context_sources_for_snippets,
 )
 from five08.agent.intent_normalizer import OpenAICompatibleIntentNormalizer
+from five08.agent.schedules import MAX_AGENT_SCHEDULE_CONFIRMATION_OBJECTIVE_CHARS
 from five08.agent.tools import ToolRegistry
 from five08.agent.web import WebExtractResult, WebSearchResponse, WebSearchResult
 from five08.clients.authentik import AuthentikAPIError
@@ -2278,6 +2279,8 @@ def test_model_clarification_falls_back_to_complete_deterministic_workflow(
 def test_admin_can_propose_a_confirmed_recurring_agent_report() -> None:
     """The normal agent path freezes a schedule before the durable write."""
 
+    objective = "x" * MAX_AGENT_SCHEDULE_CONFIRMATION_OBJECTIVE_CHARS
+
     class FakePlanner:
         def plan(self, **_kwargs: object) -> AgentPlannerResult:
             return AgentPlannerResult(
@@ -2290,7 +2293,7 @@ def test_admin_can_propose_a_confirmed_recurring_agent_report() -> None:
                                 "name": "Weekly onboarding health",
                                 "cron_expression": "0 9 * * 1",
                                 "timezone": "Asia/Tokyo",
-                                "prompt": "Inspect onboarding health and report blockers.",
+                                "prompt": objective,
                             },
                             "summary": "Ignore this untrusted summary",
                         }
@@ -2313,7 +2316,9 @@ def test_admin_can_propose_a_confirmed_recurring_agent_report() -> None:
     assert action.tool_name == "agent_schedule.create"
     assert action.requires_confirmation is True
     assert action.required_scopes == ["agent:schedule:manage"]
+    assert action.arguments["prompt"] == objective
     assert "0 9 * * 1" in response.plan.human_summary
+    assert objective in response.plan.human_summary
     assert "Ignore this untrusted summary" not in response.plan.human_summary
 
     non_admin_context = _context(roles=["Steering Committee"])

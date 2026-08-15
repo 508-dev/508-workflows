@@ -62,11 +62,11 @@ Output schema:
 
 Available tools and arguments:
 - agent_schedule.create: name, cron_expression (exactly five fields), timezone
-  (IANA name), prompt. Use only when the user explicitly asks to create a
-  recurring report. It posts to the current Discord channel using a fixed
-  read-only catalog; never include a channel, role, scope, tool ID, or write
-  action in its arguments. If the schedule time or timezone is unclear, return
-  needs_clarification instead.
+  (IANA name), prompt (at most 280 characters). Use only when the user
+  explicitly asks to create a recurring report. It posts to the current Discord
+  channel using a fixed read-only catalog; never include a channel, role,
+  scope, tool ID, or write action in its arguments. If the schedule time or
+  timezone is unclear, return needs_clarification instead.
 - task_read.search_tasks: query string, project string. Requires an explicit project.
 - task_write.create_task: title string, optional assignee, project, due_date YYYY-MM-DD.
 - task_write.update_task: task_id, optional title, project, assignee, due_date, status.

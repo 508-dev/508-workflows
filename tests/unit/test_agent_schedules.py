@@ -31,6 +31,7 @@ from five08.agent.schedules import (
     mark_agent_schedule_run_delivery_posted,
     mark_agent_schedule_run_delivery_unknown,
     release_agent_schedule_run_delivery_claim,
+    resume_agent_schedule,
     validate_agent_schedule_timing,
 )
 from five08.settings import SharedSettings
@@ -206,6 +207,16 @@ def test_agent_schedule_proposal_excludes_delivery_and_capability_controls() -> 
                 "cron_expression": "not cron",
                 "timezone": "UTC",
                 "prompt": "Inspect onboarding health.",
+            }
+        )
+    with pytest.raises(ValidationError, match="at most 280 characters"):
+        AgentScheduleProposal.model_validate(
+            {
+                "name": "Weekly onboarding health",
+                "cron_expression": "0 9 * * 1",
+                "timezone": "UTC",
+                "prompt": "x"
+                * (schedules.MAX_AGENT_SCHEDULE_CONFIRMATION_OBJECTIVE_CHARS + 1),
             }
         )
 
@@ -485,6 +496,68 @@ def test_due_schedule_creates_one_catch_up_then_advances_past_now(
         datetime(2026, 7, 29, 9, 0, tzinfo=timezone.utc),
         "schedule-1",
     )
+
+
+def test_resume_of_an_active_schedule_does_not_move_its_due_occurrence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retrying resume must not skip an already-scheduled active run."""
+
+    now = datetime(2026, 7, 28, 9, 0, tzinfo=timezone.utc)
+    next_run_at = datetime(2026, 7, 29, 9, 0, tzinfo=timezone.utc)
+    schedule_id = "00000000-0000-0000-0000-000000000010"
+    schedule_row = {
+        "id": schedule_id,
+        "organization_id": "1000",
+        "guild_id": "1000",
+        "owner_discord_user_id": "1001",
+        "name": "Daily GitHub report",
+        "cron_expression": "0 9 * * *",
+        "timezone": "UTC",
+        "definition": AgentScheduleDefinition(
+            prompt="Report the open GitHub issues.",
+            actions=[_github_action()],
+            delivery=_delivery(),
+        ).model_dump(mode="json"),
+        "allowed_scopes": ["agent:schedule:manage", "github:issue:read"],
+        "status": "active",
+        "next_run_at": next_run_at,
+        "last_run_at": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    cursor = MagicMock()
+    cursor.fetchone.return_value = schedule_row
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.cursor.return_value.__enter__.return_value = cursor
+    monkeypatch.setattr(
+        schedules,
+        "get_postgres_connection",
+        lambda _settings: connection,
+    )
+    monkeypatch.setattr(
+        schedules,
+        "next_agent_schedule_occurrence",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("active schedules must not be recomputed")
+        ),
+    )
+
+    resumed = resume_agent_schedule(
+        SharedSettings(),
+        schedule_id=schedule_id,
+        guild_id="1000",
+        now=now,
+    )
+
+    assert resumed is not None
+    assert resumed.status is schedules.AgentScheduleStatus.ACTIVE
+    assert resumed.next_run_at == next_run_at
+    queries = [call.args[0] for call in cursor.execute.call_args_list]
+    assert len(queries) == 1
+    assert "FOR UPDATE" in queries[0]
+    assert not any("UPDATE agent_schedules" in query for query in queries)
 
 
 def test_due_dispatch_loads_legacy_identifier_catalog_without_aborting(

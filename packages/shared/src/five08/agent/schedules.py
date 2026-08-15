@@ -62,6 +62,10 @@ MAX_AGENT_SCHEDULE_TOOL_ALLOWLIST = 16
 MAX_AGENT_SCHEDULE_PLANNING_STEPS = 3
 MAX_AGENT_SCHEDULE_OUTPUT_CHARS = 8_000
 MAX_AGENT_SCHEDULE_ERROR_CHARS = 2_000
+# Agent-proposed objectives are rendered verbatim in the confirmation message.
+# Keep the persisted proposal within that reviewable budget instead of hiding a
+# suffix the model supplied from the human who must approve it.
+MAX_AGENT_SCHEDULE_CONFIRMATION_OBJECTIVE_CHARS = 280
 _SCHEDULE_GITHUB_REPOSITORY_QUALIFIER = re.compile(r"\b-?repo\s*:", re.IGNORECASE)
 
 
@@ -108,7 +112,10 @@ class AgentScheduleProposal(BaseModel):
     name: str = Field(min_length=1, max_length=140)
     cron_expression: str = Field(min_length=1, max_length=128)
     timezone: str = Field(min_length=1, max_length=128)
-    prompt: str = Field(min_length=1, max_length=4_000)
+    prompt: str = Field(
+        min_length=1,
+        max_length=MAX_AGENT_SCHEDULE_CONFIRMATION_OBJECTIVE_CHARS,
+    )
 
     @field_validator("name")
     @classmethod
@@ -652,7 +659,11 @@ def resume_agent_schedule(
     guild_id: str,
     now: datetime | None = None,
 ) -> AgentScheduleRecord | None:
-    """Resume a schedule from its next future cron occurrence, never backfill."""
+    """Resume a paused schedule from its next future occurrence, never backfill.
+
+    An already-active schedule is returned unchanged so retrying its control
+    request cannot move or skip its existing due occurrence.
+    """
 
     normalized_guild_id = _normalize_discord_snowflake(guild_id)
     normalized_schedule_id = _normalize_uuid(schedule_id)
@@ -675,6 +686,8 @@ def resume_agent_schedule(
             schedule = _as_schedule_record(row)
             if schedule.status is AgentScheduleStatus.ARCHIVED:
                 return None
+            if schedule.status is AgentScheduleStatus.ACTIVE:
+                return schedule
             next_run_at = next_agent_schedule_occurrence(
                 schedule.cron_expression,
                 schedule.timezone,
