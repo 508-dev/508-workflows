@@ -438,16 +438,16 @@ wheels = [
 
 [[package]]
 name = "cloakbrowser"
-version = "0.4.12"
+version = "0.5.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cryptography" },
     { name = "httpx" },
     { name = "playwright" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/32/0f/085ac9e2ac78b6800d55a59cefc077489a3ec9dd43e31362e9bc06734cfa/cloakbrowser-0.4.12.tar.gz", hash = "sha256:683d150a53cc768f6db6e3e758268d1b2e35144e0b4847336bd8bc71fdcb8baf", size = 5609654, upload-time = "2026-07-18T21:34:24.567Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ea/66/e7986afaa1309881e7174ddb8f579b96b82ebcc43eeb3a2705c1908db296/cloakbrowser-0.5.6.tar.gz", hash = "sha256:47f95a26d8d7bad608598d5af8373149368777a5f3006bc8b17a409c7dd728df", size = 5694461, upload-time = "2026-08-07T22:17:14.735Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/2f/e2/ec81d25a853d9fc0af91827b1ed5b97d0edcd34f3c7c2d1741915994dd53/cloakbrowser-0.4.12-py3-none-any.whl", hash = "sha256:0415acff4aa5f49c18bc9cbd6a65ae806591dfd71ddf5d862238c61cd8471142", size = 107156, upload-time = "2026-07-18T21:34:22.814Z" },
+    { url = "https://files.pythonhosted.org/packages/81/91/0972dbfb475111180c260667bff1220b49b0a513e2d605cf31acc740900d/cloakbrowser-0.5.6-py3-none-any.whl", hash = "sha256:6acd11f110f480d5ef7e01907f7fcf5f30aa09ccb0efbc13a1749b715454b964", size = 125088, upload-time = "2026-08-07T22:17:13.171Z" },
 ]
 
 [[package]]
