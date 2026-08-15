@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 
 import five08.job_leads as job_leads
+import pytest
 from five08.job_leads import JobLeadInput, JobLeadStatus
 
 
@@ -210,7 +211,7 @@ def test_existing_job_lead_external_ids_uses_one_batch_query(monkeypatch) -> Non
 
 
 def test_list_job_leads_filters_pending(monkeypatch) -> None:
-    cursor = _CursorStub(rows=[_lead_row()])
+    cursor = _CursorStub(rows=[_lead_row(engagement_id="engagement-1")])
     _install_connection_stub(monkeypatch, cursor)
 
     result = job_leads.list_job_leads(
@@ -221,6 +222,12 @@ def test_list_job_leads_filters_pending(monkeypatch) -> None:
 
     assert len(result) == 1
     assert result[0].status is JobLeadStatus.PENDING
+    assert result[0].engagement_id == "engagement-1"
+    assert job_leads.job_lead_display_payload(result[0])["engagement_id"] == (
+        "engagement-1"
+    )
+    assert "LEFT JOIN LATERAL" in cursor.executed[0][0]
+    assert "FROM engagements" in cursor.executed[0][0]
     assert cursor.executed[0][1] == ("pending", 5)
 
 
@@ -278,5 +285,58 @@ def test_review_job_lead_uses_exact_id_after_prefix_lookup(monkeypatch) -> None:
     assert cursor.executed[1][1] == (
         "approved",
         "42",
+        "approved",
         "11111111-1111-1111-1111-111111111111",
+        ["pending", "approved"],
     )
+
+
+def test_review_job_lead_restores_rejected_lead_to_pending(monkeypatch) -> None:
+    cursor = _CursorStub(
+        rows=[
+            [_lead_row(status="rejected", reviewed_by_discord_user_id="42")],
+            _lead_row(
+                status="pending", reviewed_by_discord_user_id=None, reviewed_at=None
+            ),
+        ]
+    )
+    _install_connection_stub(monkeypatch, cursor)
+
+    restored = job_leads.review_job_lead(
+        job_leads.SharedSettings(),
+        lead_id="11111111",
+        status=JobLeadStatus.PENDING,
+        reviewer_discord_user_id="42",
+    )
+
+    assert restored is not None
+    assert restored.status is JobLeadStatus.PENDING
+    assert restored.reviewed_by_discord_user_id is None
+    assert restored.reviewed_at is None
+    query, params = cursor.executed[1]
+    assert "status = ANY(%s)" in query
+    assert params == (
+        "pending",
+        None,
+        "pending",
+        "11111111-1111-1111-1111-111111111111",
+        ["rejected"],
+    )
+
+
+def test_review_job_lead_rejects_unknown_status_before_lookup(monkeypatch) -> None:
+    cursor = _CursorStub()
+    _install_connection_stub(monkeypatch, cursor)
+
+    with pytest.raises(
+        ValueError,
+        match="Job lead review status must be pending, approved, or rejected.",
+    ):
+        job_leads.review_job_lead(
+            job_leads.SharedSettings(),
+            lead_id="11111111",
+            status="approve",
+            reviewer_discord_user_id="42",
+        )
+
+    assert cursor.executed == []

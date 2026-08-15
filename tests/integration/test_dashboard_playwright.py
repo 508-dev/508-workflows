@@ -342,7 +342,11 @@ def _job_leads_payload() -> list[dict[str, object]]:
             "source_posted_at": "2026-07-01T16:00:00+00:00",
             "title": "Contract React Build",
             "organization": "Example Co",
-            "body_normalized": "Remote 1099 contractor wanted for React build.",
+            "body_normalized": (
+                "Remote 1099 contractor wanted for React build.\n\n"
+                "The project covers a new workflow, component library work, and a "
+                "small API integration. Please include relevant recent work when you apply."
+            ),
             "posting_type": "part_time_or_full_time",
             "location": "Remote",
             "remote": True,
@@ -373,6 +377,42 @@ def _job_leads_payload() -> list[dict[str, object]]:
             "updated_at": "2026-07-01T16:00:00+00:00",
         }
     ]
+
+
+def _job_lead_scrape_status_payload() -> dict[str, object]:
+    return {
+        "status": "succeeded",
+        "job_id": "job-leads-1",
+        "source": "hackernews_who_is_hiring",
+        "story_id": None,
+        "created_at": "2026-08-04T07:00:00+00:00",
+        "updated_at": "2026-08-04T07:05:00+00:00",
+        "last_error": None,
+        "result": {
+            "source": "hackernews_who_is_hiring",
+            "thread_found": True,
+            "threads": [
+                {
+                    "story_id": 49156683,
+                    "title": "Ask HN: Who is hiring? (August 2026)",
+                    "url": "https://news.ycombinator.com/item?id=49156683",
+                    "created_at": "2026-08-03T15:00:54+00:00",
+                    "comments_reported": 140,
+                }
+            ],
+            "potential_gigs_scraped": 108,
+            "included": 3,
+            "filtered_out": 105,
+            "filter_reasons": {
+                "empty": 0,
+                "seeking_work": 2,
+                "not_contractor_friendly": 103,
+            },
+            "created": 2,
+            "updated": 1,
+            "persisted": 3,
+        },
+    }
 
 
 def _job_channels_payload() -> dict[str, object]:
@@ -430,7 +470,9 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
         detail_requested = threading.Event()
         gig_application_add_requested = threading.Event()
         gig_lead_post_requested = threading.Event()
+        gig_lead_review_requested = threading.Event()
         gig_lead_post_body: dict[str, object] = {}
+        gig_lead_review_body: dict[str, object] = {}
         gig_list_requests: list[str] = []
         gig_detail_requests: list[str] = []
         gigs_list_payload = _gigs_payload()
@@ -590,6 +632,24 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
                 body=json.dumps(job_leads_payload),
             )
 
+        def gig_lead_scrape_status_route(route: Any) -> None:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(_job_lead_scrape_status_payload()),
+            )
+
+        def gig_lead_review_route(route: Any) -> None:
+            gig_lead_review_requested.set()
+            body = route.request.post_data_json
+            gig_lead_review_body.update(body)
+            job_leads_payload[0]["status"] = body["status"]
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(job_leads_payload[0]),
+            )
+
         def job_channels_route(route: Any) -> None:
             route.fulfill(
                 status=200,
@@ -605,6 +665,9 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             job_leads_payload[0]["discord_guild_id"] = "guild-1"
             job_leads_payload[0]["discord_channel_id"] = "channel-1"
             job_leads_payload[0]["discord_thread_id"] = "thread-lead-1"
+            job_leads_payload[0]["engagement_id"] = (
+                "66666666-6666-4666-8666-666666666666"
+            )
             gigs_list_payload = [
                 *gigs_list_payload,
                 {
@@ -635,6 +698,7 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
                         "guild_id": "guild-1",
                         "channel_id": "channel-1",
                         "thread_id": "thread-lead-1",
+                        "engagement_id": "66666666-6666-4666-8666-666666666666",
                         "engagement_status": "recruiting",
                     }
                 ),
@@ -750,10 +814,19 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
         page.route("**/dashboard/api/notifications?*", notifications_route)
         page.route("**/dashboard/api/job-channels", job_channels_route)
         page.route(
+            "**/dashboard/api/gig-leads/scrape-status*", gig_lead_scrape_status_route
+        )
+        page.route(
             re.compile(
                 ".*/dashboard/api/gig-leads/55555555-5555-4555-8555-555555555555/post$"
             ),
             gig_lead_post_route,
+        )
+        page.route(
+            re.compile(
+                ".*/dashboard/api/gig-leads/55555555-5555-4555-8555-555555555555/review$"
+            ),
+            gig_lead_review_route,
         )
         page.route("**/dashboard/api/gig-leads?*", gig_leads_route)
         page.route(
@@ -894,13 +967,56 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             expect(
                 page.get_by_role("link", name="Email hiring@example.com")
             ).to_have_attribute("href", "mailto:hiring@example.com")
+            expect(page.locator("#gigLeadScrapeComments")).to_have_text("140")
+            expect(page.locator("#gigLeadScrapeScanned")).to_have_text("108")
+            expect(page.locator("#gigLeadScrapeIncluded")).to_have_text("3")
+            expect(page.locator("#gigLeadScrapeFiltered")).to_have_text("105")
+            lead_comment = page.locator(
+                "#gigLeadComment-55555555-5555-4555-8555-555555555555"
+            )
+            expect(lead_comment).to_have_class(re.compile("max-h-20"))
+            page.get_by_role("button", name="Show full comment").click()
+            expect(
+                page.get_by_role("button", name="Collapse comment")
+            ).to_have_attribute("aria-expanded", "true")
+            expect(lead_comment).not_to_have_class(re.compile("max-h-20"))
+            expect(lead_comment).to_contain_text("small API integration")
             page.get_by_label("Post as").select_option("recruiting")
             expect(page.get_by_label("Post as")).to_have_value("recruiting")
             page.get_by_role("button", name="Post to Discord").click()
             assert gig_lead_post_requested.wait(timeout=5)
             assert gig_lead_post_body["engagement_status"] == "recruiting"
             assert gig_lead_post_body["tags"] == "Contract,Remote"
-            page.locator("#gigsTab").wait_for()
+            page.get_by_text("Posted lead to Discord; staying on Leads").wait_for()
+            expect(page).to_have_url(f"{dashboard_server}/dashboard/gigs#leads")
+            expect(page.locator("#gigLeadsTab")).to_have_attribute(
+                "aria-pressed", "true"
+            )
+            expect(
+                page.locator("#gigLeadsBody").get_by_text("Posted", exact=True)
+            ).to_be_visible()
+            expect(page.get_by_role("link", name="View posted gig")).to_have_attribute(
+                "href", "/dashboard/gigs/66666666-6666-4666-8666-666666666666"
+            )
+            expect(page.get_by_role("link", name="Discord")).to_have_attribute(
+                "href", "https://discord.com/channels/guild-1/thread-lead-1"
+            )
+
+            page.reload()
+            page.get_by_text("Contract React Build").wait_for()
+            expect(page.get_by_role("link", name="View posted gig")).to_have_attribute(
+                "href", "/dashboard/gigs/66666666-6666-4666-8666-666666666666"
+            )
+
+            job_leads_payload[0]["status"] = "rejected"
+            page.locator("#refreshGigLeads").click()
+            page.get_by_role("button", name="Restore to pending").click()
+            assert gig_lead_review_requested.wait(timeout=5)
+            assert gig_lead_review_body["status"] == "pending"
+            page.get_by_text("Restored lead to pending").wait_for()
+
+            page.locator("#gigsTab").click()
+            expect(page.locator("#gigsTab")).to_have_attribute("aria-pressed", "true")
             expect(page.locator("#gigStatus")).to_have_value("")
             expect(page.get_by_label("Include historical")).not_to_be_checked()
             page.get_by_text("Contract React Build").wait_for()

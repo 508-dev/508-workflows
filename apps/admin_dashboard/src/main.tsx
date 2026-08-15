@@ -268,6 +268,60 @@ type JobLead = {
   posted_at?: string
   created_at?: string
   updated_at?: string
+  engagement_id?: string
+}
+
+type JobLeadReviewStatus = "pending" | "approved" | "rejected"
+
+type JobLeadScrapeThread = {
+  story_id?: number
+  title?: string
+  url?: string
+  created_at?: string | null
+  comments_reported?: number | null
+  potential_gigs_scraped?: number
+  included?: number
+  filtered_out?: number
+  filter_reasons?: {
+    empty?: number
+    seeking_work?: number
+    not_contractor_friendly?: number
+  }
+}
+
+type JobLeadScrapeResult = {
+  source?: string
+  thread_found?: boolean
+  threads?: JobLeadScrapeThread[]
+  potential_gigs_scraped?: number
+  included?: number
+  filtered_out?: number
+  filter_reasons?: JobLeadScrapeThread["filter_reasons"]
+  created?: number
+  updated?: number
+  persisted?: number
+  total?: number
+}
+
+type JobLeadScrapeStatus = {
+  status: string
+  job_id?: string | null
+  source?: string
+  story_id?: number | null
+  created_at?: string | null
+  updated_at?: string | null
+  last_error?: string | null
+  result?: JobLeadScrapeResult | null
+}
+
+type JobLeadPostResult = {
+  status?: string
+  lead_id?: string
+  guild_id?: string
+  channel_id?: string
+  thread_id?: string
+  engagement_id?: string | null
+  engagement_status?: string
 }
 
 type DashboardNotification = {
@@ -875,6 +929,7 @@ function App() {
   const [jobs, setJobs] = useState<Job[]>([])
   const [gigs, setGigs] = useState<Gig[]>([])
   const [gigLeads, setGigLeads] = useState<JobLead[]>([])
+  const [gigLeadScrapeStatus, setGigLeadScrapeStatus] = useState<JobLeadScrapeStatus | null>(null)
   const [jobPostChannels, setJobPostChannels] = useState<JobPostChannel[]>([])
   const [availableJobPostChannels, setAvailableJobPostChannels] = useState<JobPostChannel[]>([])
   const [projects, setProjects] = useState<Project[]>([])
@@ -1093,6 +1148,13 @@ function App() {
     return `/dashboard/api/gig-leads?${params.toString()}`
   }
 
+  function gigLeadScrapeStatusUrl(jobId?: string) {
+    const params = new URLSearchParams()
+    if (jobId) params.set("job_id", jobId)
+    const query = params.toString()
+    return `/dashboard/api/gig-leads/scrape-status${query ? `?${query}` : ""}`
+  }
+
   function jobChannelsUrl(options: { includeAvailable?: boolean } = {}) {
     const params = new URLSearchParams()
     if (options.includeAvailable) params.set("include_available", "true")
@@ -1144,6 +1206,24 @@ function App() {
       showError(error, "Unable to load job leads")
     } finally {
       setBusy("gigLeads", false)
+    }
+  }
+
+  async function fetchGigLeadScrapeStatus(jobId?: string) {
+    return requestJson<JobLeadScrapeStatus>(gigLeadScrapeStatusUrl(jobId))
+  }
+
+  async function loadGigLeadScrapeStatus(jobId?: string) {
+    setBusy("gigLeadScrapeStatus", true)
+    try {
+      const payload = await fetchGigLeadScrapeStatus(jobId)
+      setGigLeadScrapeStatus(payload)
+      return payload
+    } catch (error) {
+      showError(error, "Unable to load HN scrape status")
+      return null
+    } finally {
+      setBusy("gigLeadScrapeStatus", false)
     }
   }
 
@@ -1209,16 +1289,22 @@ function App() {
   async function pollGigLeadSyncJob(jobId: string) {
     for (let attempt = 0; attempt < GIG_LEAD_SYNC_MAX_POLLS; attempt += 1) {
       await new Promise((resolve) => window.setTimeout(resolve, GIG_LEAD_SYNC_POLL_INTERVAL_MS))
-      const detail = await requestJson<JobDetail>(
-        `/dashboard/api/jobs/${encodeURIComponent(jobId)}`,
-      )
+      const detail = await fetchGigLeadScrapeStatus(jobId)
+      setGigLeadScrapeStatus(detail)
       const status = String(detail.status || "")
         .trim()
         .toLowerCase()
       if (!isTerminalJobStatus(status)) continue
 
       if (status === "succeeded") {
-        showToast("HN lead scrape finished; refreshing leads", "ok")
+        const result = detail.result
+        const included = Number(result?.included)
+        const filteredOut = Number(result?.filtered_out)
+        const summary =
+          Number.isFinite(included) && Number.isFinite(filteredOut)
+            ? `: ${included} included, ${filteredOut} filtered out`
+            : ""
+        showToast(`HN lead scrape finished${summary}; refreshing leads`, "ok")
         await loadGigLeads()
         if (view === "jobs") await loadJobs()
         return
@@ -1663,6 +1749,7 @@ function App() {
   async function refreshGigsView() {
     await loadGigs()
     await loadGigLeads()
+    await loadGigLeadScrapeStatus()
     await loadJobPostChannels()
     if (selectedGigId) await loadGigDetail(selectedGigId)
   }
@@ -1671,19 +1758,28 @@ function App() {
     setBusy("gigLeadsSync", true)
     showToast("Queueing HN lead scrape")
     try {
-      const payload = await requestJson<{ job_id?: string; created?: boolean }>(
-        "/dashboard/api/gig-leads/sync",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ source: "hackernews_who_is_hiring" }),
-        },
-      )
+      const payload = await requestJson<{
+        job_id?: string
+        created?: boolean
+        source?: string
+        story_id?: number | null
+      }>("/dashboard/api/gig-leads/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source: "hackernews_who_is_hiring" }),
+      })
       showToast(
         payload.created === false ? "HN lead scrape already queued" : "HN lead scrape queued",
         "ok",
       )
       if (payload.job_id) {
+        setGigLeadScrapeStatus({
+          status: "queued",
+          job_id: payload.job_id,
+          source: payload.source || "hackernews_who_is_hiring",
+          story_id: payload.story_id || null,
+          result: null,
+        })
         try {
           await pollGigLeadSyncJob(payload.job_id)
         } catch (error) {
@@ -1699,7 +1795,7 @@ function App() {
     }
   }
 
-  async function reviewGigLead(leadId: string, nextStatus: "approved" | "rejected") {
+  async function reviewGigLead(leadId: string, nextStatus: JobLeadReviewStatus) {
     setBusy(`gigLead:${leadId}:review`, true)
     try {
       await requestJson<JobLead>(`/dashboard/api/gig-leads/${encodeURIComponent(leadId)}/review`, {
@@ -1707,8 +1803,12 @@ function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ status: nextStatus }),
       })
-      showToast(`${nextStatus === "approved" ? "Approved" : "Rejected"} lead`, "ok")
+      const message =
+        nextStatus === "pending"
+          ? "Restored lead to pending"
+          : `${nextStatus === "approved" ? "Approved" : "Rejected"} lead`
       await loadGigLeads()
+      showToast(message, "ok")
     } catch (error) {
       showError(error, "Unable to review lead")
     } finally {
@@ -1726,7 +1826,7 @@ function App() {
   ) {
     setBusy(`gigLead:${leadId}:post`, true)
     try {
-      await requestJson<{ thread_id?: string }>(
+      const result = await requestJson<JobLeadPostResult>(
         `/dashboard/api/gig-leads/${encodeURIComponent(leadId)}/post`,
         {
           method: "POST",
@@ -1738,12 +1838,22 @@ function App() {
           }),
         },
       )
-      showToast("Posted lead to Discord", "ok")
-      selectGigTab("gigs")
-      setGigStatus("")
-      setGigQuery("")
-      await loadGigLeads()
-      await loadGigs({ status: "", query: "" })
+      const engagementId = String(result.engagement_id || "").trim()
+      setGigLeads((current) =>
+        current.map((lead) =>
+          lead.id === leadId
+            ? {
+                ...lead,
+                status: "posted",
+                discord_guild_id: result.guild_id || lead.discord_guild_id,
+                discord_channel_id: result.channel_id || lead.discord_channel_id,
+                discord_thread_id: result.thread_id || lead.discord_thread_id,
+                engagement_id: engagementId || lead.engagement_id,
+              }
+            : lead,
+        ),
+      )
+      showToast("Posted lead to Discord; staying on Leads", "ok")
     } catch (error) {
       showError(error, "Unable to post lead")
     } finally {
@@ -2404,6 +2514,7 @@ function App() {
     if (view === "gigs") {
       void loadGigs()
       void loadGigLeads()
+      void loadGigLeadScrapeStatus()
       void loadJobPostChannels()
     }
     if (view === "projects") void loadProjects()
@@ -2426,6 +2537,7 @@ function App() {
     if (view === "gigs") {
       void loadGigs()
       void loadGigLeads()
+      void loadGigLeadScrapeStatus()
       void loadJobPostChannels()
     }
     if (view === "projects") void loadProjects()
@@ -2790,6 +2902,7 @@ function App() {
             <GigsView
               gigs={sortedGigs}
               leads={gigLeads}
+              scrapeStatus={gigLeadScrapeStatus}
               jobPostChannels={jobPostChannels}
               selectedGig={selectedGig}
               selectedGigId={selectedGigId}
@@ -5169,9 +5282,184 @@ function ProjectDetailPage(props: {
   )
 }
 
+function jobLeadScrapeStatusTone(status?: string | null): Tone {
+  const normalized = String(status || "")
+    .trim()
+    .toLowerCase()
+  if (normalized === "not_run") return "neutral"
+  if (
+    normalized === "queued" ||
+    normalized === "running" ||
+    normalized === "succeeded" ||
+    normalized === "failed" ||
+    normalized === "dead" ||
+    normalized === "canceled"
+  ) {
+    return normalized
+  }
+  return "neutral"
+}
+
+function scrapeCount(value?: number | null) {
+  return typeof value === "number" && Number.isFinite(value) ? String(value) : "—"
+}
+
+function JobLeadScrapeStatusPanel({
+  status,
+  loading,
+}: {
+  status: JobLeadScrapeStatus | null
+  loading: boolean
+}) {
+  const result = status?.result
+  const threads = Array.isArray(result?.threads) ? result.threads : []
+  const firstThread = threads[0]
+  const hasDiscoveryCounts = typeof result?.thread_found === "boolean"
+  const filterReasons = result?.filter_reasons
+  const filterDetails = [
+    ["empty", filterReasons?.empty],
+    ["seeking work", filterReasons?.seeking_work],
+    ["not contractor-friendly", filterReasons?.not_contractor_friendly],
+  ].filter(([, count]) => typeof count === "number" && count > 0) as Array<[string, number]>
+  const normalizedStatus = String(status?.status || "")
+    .trim()
+    .toLowerCase()
+  const statusLabel =
+    normalizedStatus === "not_run" ? "Not run" : titleCase(normalizedStatus || "Unknown")
+
+  return (
+    <Card id="gigLeadScrapeStatus">
+      <CardHeader>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <CardTitle>Hacker News scrape</CardTitle>
+          <Badge variant={jobLeadScrapeStatusTone(status?.status)}>{statusLabel}</Badge>
+        </div>
+        <span className="text-sm text-muted-foreground">
+          {loading
+            ? "Loading latest scrape status"
+            : status?.updated_at
+              ? `Last updated ${formatDate(status.updated_at)}`
+              : normalizedStatus === "queued"
+                ? "Scrape queued; waiting for a worker."
+                : normalizedStatus === "running"
+                  ? "Scrape is running."
+                  : "No scrape has been recorded in the last year."}
+        </span>
+      </CardHeader>
+      <CardContent className="grid gap-3 text-sm">
+        {normalizedStatus === "not_run" ? (
+          <p className="text-muted-foreground">
+            Run “Scrape HN” to discover the current monthly Who is Hiring thread.
+          </p>
+        ) : null}
+        {status?.last_error ? (
+          <p className="rounded-md border border-red-400/40 bg-red-500/10 p-3 text-red-200">
+            {status.last_error}
+          </p>
+        ) : null}
+        {!hasDiscoveryCounts &&
+        normalizedStatus !== "not_run" &&
+        normalizedStatus !== "succeeded" &&
+        !status?.last_error ? (
+          <p className="text-muted-foreground">
+            The scrape is {normalizedStatus || "in progress"}. Discovery and filtering counts will
+            appear when it finishes.
+          </p>
+        ) : null}
+        {hasDiscoveryCounts ? (
+          <>
+            {result?.thread_found && firstThread ? (
+              <div className="grid gap-1">
+                {firstThread.url ? (
+                  <a
+                    className="inline-flex w-fit items-center gap-1 font-extrabold text-primary"
+                    href={firstThread.url}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    {firstThread.title || `HN thread ${firstThread.story_id}`}
+                    <ExternalLink className="size-3.5" />
+                  </a>
+                ) : (
+                  <strong>{firstThread.title || `HN thread ${firstThread.story_id}`}</strong>
+                )}
+                <span className="text-muted-foreground">
+                  HN #{firstThread.story_id || "unknown"}
+                  {firstThread.created_at ? ` · posted ${formatDate(firstThread.created_at)}` : ""}
+                  {threads.length > 1 ? ` · ${threads.length} threads scanned` : ""}
+                </span>
+              </div>
+            ) : (
+              <p className="text-muted-foreground">
+                No matching monthly Who is Hiring thread was found during this run.
+              </p>
+            )}
+
+            <dl className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
+              <div className="rounded-md border bg-background p-3">
+                <dt className="text-xs font-bold text-muted-foreground">HN comments</dt>
+                <dd id="gigLeadScrapeComments" className="text-lg font-extrabold">
+                  {scrapeCount(firstThread?.comments_reported)}
+                </dd>
+              </div>
+              <div className="rounded-md border bg-background p-3">
+                <dt className="text-xs font-bold text-muted-foreground">Potential gigs scanned</dt>
+                <dd id="gigLeadScrapeScanned" className="text-lg font-extrabold">
+                  {scrapeCount(result?.potential_gigs_scraped)}
+                </dd>
+              </div>
+              <div className="rounded-md border bg-background p-3">
+                <dt className="text-xs font-bold text-muted-foreground">Included</dt>
+                <dd id="gigLeadScrapeIncluded" className="text-lg font-extrabold">
+                  {scrapeCount(result?.included)}
+                </dd>
+              </div>
+              <div className="rounded-md border bg-background p-3">
+                <dt className="text-xs font-bold text-muted-foreground">Filtered out</dt>
+                <dd id="gigLeadScrapeFiltered" className="text-lg font-extrabold">
+                  {scrapeCount(result?.filtered_out)}
+                </dd>
+              </div>
+              <div className="rounded-md border bg-background p-3">
+                <dt className="text-xs font-bold text-muted-foreground">Records changed</dt>
+                <dd id="gigLeadScrapePersisted" className="text-lg font-extrabold">
+                  {scrapeCount(result?.persisted ?? result?.total)}
+                </dd>
+              </div>
+            </dl>
+            {filterDetails.length > 0 ? (
+              <p className="text-muted-foreground">
+                Filtered: {filterDetails.map(([label, count]) => `${count} ${label}`).join(", ")}.
+              </p>
+            ) : null}
+            {result?.thread_found && result.potential_gigs_scraped === 0 ? (
+              <p className="text-muted-foreground">
+                The monthly thread was found, but it has no top-level employer posts yet. Re-run the
+                scrape as posts arrive.
+              </p>
+            ) : null}
+            {typeof result?.created === "number" || typeof result?.updated === "number" ? (
+              <p className="text-muted-foreground">
+                {result.created || 0} created · {result.updated || 0} updated
+              </p>
+            ) : null}
+          </>
+        ) : null}
+        {normalizedStatus === "succeeded" && !hasDiscoveryCounts ? (
+          <p className="text-muted-foreground">
+            This older scrape finished before discovery counts were recorded. Run it again for a
+            full status report.
+          </p>
+        ) : null}
+      </CardContent>
+    </Card>
+  )
+}
+
 function GigsView(props: {
   gigs: Gig[]
   leads: JobLead[]
+  scrapeStatus: JobLeadScrapeStatus | null
   jobPostChannels: JobPostChannel[]
   selectedGig: Gig | null
   selectedGigId: string
@@ -5205,7 +5493,7 @@ function GigsView(props: {
   onAddApplication: (gigId: string, crmProfile: string) => Promise<boolean>
   onUpdateApplicationStatus: (gigId: string, applicationId: string, status: string) => void
   onSyncLeads: () => void
-  onReviewLead: (leadId: string, status: "approved" | "rejected") => void
+  onReviewLead: (leadId: string, status: JobLeadReviewStatus) => void
   onPostLead: (
     leadId: string,
     options?: {
@@ -5384,6 +5672,11 @@ function GigsView(props: {
     return (
       <>
         {filterBar}
+
+        <JobLeadScrapeStatusPanel
+          status={props.scrapeStatus}
+          loading={Boolean(props.loading.gigLeadScrapeStatus)}
+        />
 
         <section className="grid gap-3 md:grid-cols-4" aria-label="Lead summary">
           <Metric id="gigLeadMetricTotal" label="Leads" value={leadCounts.total} />
@@ -5671,7 +5964,7 @@ function JobLeadListItem({
   loading: Record<string, boolean>
   canWrite: boolean
   jobPostChannels: JobPostChannel[]
-  onReviewLead: (leadId: string, status: "approved" | "rejected") => void
+  onReviewLead: (leadId: string, status: JobLeadReviewStatus) => void
   onPostLead: (
     leadId: string,
     options?: {
@@ -5682,6 +5975,7 @@ function JobLeadListItem({
   ) => void
 }) {
   const canDecide = canWrite && (lead.status === "pending" || lead.status === "approved")
+  const canRestore = canWrite && lead.status === "rejected"
   const reviewing = loading[`gigLead:${lead.id}:review`]
   const posting = loading[`gigLead:${lead.id}:post`]
   const canPost = canDecide
@@ -5693,6 +5987,7 @@ function JobLeadListItem({
   const [selectedTags, setSelectedTags] = useState<string[]>(() =>
     defaultJobPostTagNames(lead, selectedChannel),
   )
+  const [showFullComment, setShowFullComment] = useState(false)
   useEffect(() => {
     setChannelId(defaultChannelId)
   }, [defaultChannelId])
@@ -5715,7 +6010,10 @@ function JobLeadListItem({
           lead.discord_guild_id,
         )}/${encodeURIComponent(lead.discord_thread_id)}`
       : ""
+  const engagementId = String(lead.engagement_id || "").trim()
+  const postedGigUrl = engagementId ? `${routes.gigs}/${encodeURIComponent(engagementId)}` : ""
   const contactEmail = lead.contractor_classification?.contact_email
+  const commentText = lead.body_normalized || "No lead text captured."
   return (
     <article className="grid gap-4 rounded-md border bg-background p-4 lg:grid-cols-[minmax(0,1fr)_220px_190px] lg:items-start">
       <div className="min-w-0">
@@ -5734,9 +6032,28 @@ function JobLeadListItem({
             </Badge>
           ))}
         </div>
-        <p className="mt-3 max-h-20 overflow-hidden text-sm text-muted-foreground">
-          {lead.body_normalized || "No lead text captured."}
+        <p
+          id={`gigLeadComment-${lead.id}`}
+          className={cn(
+            "mt-3 whitespace-pre-wrap break-words text-sm text-muted-foreground",
+            !showFullComment && "max-h-20 overflow-hidden",
+          )}
+        >
+          {commentText}
         </p>
+        {lead.body_normalized ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            className="mt-1"
+            aria-expanded={showFullComment}
+            aria-controls={`gigLeadComment-${lead.id}`}
+            onClick={() => setShowFullComment((current) => !current)}
+          >
+            {showFullComment ? "Collapse comment" : "Show full comment"}
+          </Button>
+        ) : null}
         {lead.review_summary ? (
           <p className="mt-2 text-sm font-semibold text-foreground">{lead.review_summary}</p>
         ) : null}
@@ -5781,6 +6098,15 @@ function JobLeadListItem({
               rel="noreferrer"
             >
               Discord
+              <ExternalLink className="size-3.5" />
+            </a>
+          ) : null}
+          {postedGigUrl ? (
+            <a
+              className="inline-flex items-center gap-1 font-extrabold text-primary"
+              href={postedGigUrl}
+            >
+              View posted gig
               <ExternalLink className="size-3.5" />
             </a>
           ) : null}
@@ -5867,15 +6193,27 @@ function JobLeadListItem({
             <Send />
             Post to Discord
           </Button>
-          <Button
-            type="button"
-            variant="outline"
-            disabled={!canDecide || reviewing || posting}
-            onClick={() => onReviewLead(lead.id, "rejected")}
-          >
-            <UserMinus />
-            Reject
-          </Button>
+          {canRestore ? (
+            <Button
+              type="button"
+              variant="outline"
+              disabled={reviewing || posting}
+              onClick={() => onReviewLead(lead.id, "pending")}
+            >
+              <RefreshCw />
+              Restore to pending
+            </Button>
+          ) : (
+            <Button
+              type="button"
+              variant="outline"
+              disabled={!canDecide || reviewing || posting}
+              onClick={() => onReviewLead(lead.id, "rejected")}
+            >
+              <UserMinus />
+              Reject
+            </Button>
+          )}
         </div>
       ) : null}
     </article>

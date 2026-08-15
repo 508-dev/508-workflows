@@ -80,7 +80,7 @@ class DashboardGigStatusRequest(BaseModel):
 class DashboardJobLeadReviewRequest(BaseModel):
     """Payload for reviewing one sourced dashboard job lead."""
 
-    status: Literal["approved", "rejected"]
+    status: Literal["pending", "approved", "rejected"]
 
 
 class DashboardJobLeadPostRequest(BaseModel):

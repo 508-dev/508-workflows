@@ -219,6 +219,44 @@ class HackerNewsThread:
     descendants: int | None = None
 
 
+@dataclass
+class HackerNewsThreadScrapeReport:
+    """Observable collection counts for one monthly HN thread."""
+
+    thread: HackerNewsThread
+    potential_gigs_scraped: int = 0
+    included: int = 0
+    filtered_empty: int = 0
+    filtered_seeking_work: int = 0
+    filtered_not_contractor_friendly: int = 0
+
+    @property
+    def filtered_out(self) -> int:
+        return (
+            self.filtered_empty
+            + self.filtered_seeking_work
+            + self.filtered_not_contractor_friendly
+        )
+
+    def payload(self) -> dict[str, Any]:
+        created_at = self.thread.created_at
+        return {
+            "story_id": self.thread.story_id,
+            "title": self.thread.title,
+            "url": f"https://news.ycombinator.com/item?id={self.thread.story_id}",
+            "created_at": created_at.isoformat() if created_at is not None else None,
+            "comments_reported": self.thread.descendants,
+            "potential_gigs_scraped": self.potential_gigs_scraped,
+            "included": self.included,
+            "filtered_out": self.filtered_out,
+            "filter_reasons": {
+                "empty": self.filtered_empty,
+                "seeking_work": self.filtered_seeking_work,
+                "not_contractor_friendly": self.filtered_not_contractor_friendly,
+            },
+        }
+
+
 class HackerNewsClient:
     """Small HN API client using Algolia for search/tree and Firebase for freshness."""
 
@@ -850,6 +888,7 @@ class HackerNewsWhoIsHiringLeadSource:
         self.story_id = story_id
         self.include_latest = include_latest
         self.include_non_contractor = include_non_contractor
+        self._thread_reports: list[HackerNewsThreadScrapeReport] = []
 
     def discover_threads(self) -> list[HackerNewsThread]:
         if self.story_id is not None:
@@ -867,13 +906,23 @@ class HackerNewsWhoIsHiringLeadSource:
 
     def collect(self) -> list[JobLeadInput]:
         leads: list[JobLeadInput] = []
+        self._thread_reports = []
         for thread in self.discover_threads():
             tree = self.client.get_algolia_item_tree(thread.story_id)
             children = tree.get("children") or []
+            report = HackerNewsThreadScrapeReport(thread=thread)
             for child in children:
                 if not isinstance(child, dict):
                     continue
                 if child.get("parent_id") != thread.story_id:
+                    continue
+                report.potential_gigs_scraped += 1
+                text = html_to_text(child.get("text"))
+                if not text:
+                    report.filtered_empty += 1
+                    continue
+                if _SEEKING_WORK_RE.search(text):
+                    report.filtered_seeking_work += 1
                     continue
                 lead = _lead_from_hn_comment(
                     story_id=thread.story_id,
@@ -882,9 +931,42 @@ class HackerNewsWhoIsHiringLeadSource:
                     classifier=self.classifier,
                     include_non_contractor=self.include_non_contractor,
                 )
-                if lead is not None:
-                    leads.append(lead)
+                if lead is None:
+                    report.filtered_not_contractor_friendly += 1
+                    continue
+                classification = (lead.metadata or {}).get(
+                    "contractor_classification", {}
+                )
+                if classification.get("is_contractor_friendly") is True:
+                    report.included += 1
+                else:
+                    report.filtered_not_contractor_friendly += 1
+                leads.append(lead)
+            self._thread_reports.append(report)
         return leads
+
+    def collection_report(self) -> dict[str, Any]:
+        """Return thread discovery and filtering counts from the last collection."""
+        filter_reasons = {
+            "empty": sum(report.filtered_empty for report in self._thread_reports),
+            "seeking_work": sum(
+                report.filtered_seeking_work for report in self._thread_reports
+            ),
+            "not_contractor_friendly": sum(
+                report.filtered_not_contractor_friendly
+                for report in self._thread_reports
+            ),
+        }
+        return {
+            "thread_found": bool(self._thread_reports),
+            "threads": [report.payload() for report in self._thread_reports],
+            "potential_gigs_scraped": sum(
+                report.potential_gigs_scraped for report in self._thread_reports
+            ),
+            "included": sum(report.included for report in self._thread_reports),
+            "filtered_out": sum(report.filtered_out for report in self._thread_reports),
+            "filter_reasons": filter_reasons,
+        }
 
 
 def build_job_lead_source(
@@ -923,6 +1005,15 @@ def scrape_job_leads(
     updated = 0
     lead_ids: list[str] = []
     leads = adapter.collect()
+    collection_report_factory = getattr(adapter, "collection_report", None)
+    raw_collection_report = (
+        collection_report_factory() if callable(collection_report_factory) else {}
+    )
+    collection_report: dict[str, Any] = {}
+    if isinstance(raw_collection_report, dict):
+        for key, value in raw_collection_report.items():
+            if isinstance(key, str):
+                collection_report[key] = value
     rejected_external_ids = [
         lead.external_id
         for lead in leads
@@ -956,9 +1047,11 @@ def scrape_job_leads(
             updated += 1
     return {
         "source": adapter.source_key,
+        **collection_report,
         "created": created,
         "updated": updated,
         "total": len(lead_ids),
+        "persisted": len(lead_ids),
         "lead_ids": lead_ids,
     }
 
