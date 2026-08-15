@@ -1779,10 +1779,201 @@ def test_task_creation_is_not_rerouted_to_member_agreement_submission() -> None:
     assert response.plan.actions[0].tool_name == "task_write.create_task"
 
 
+def test_explicit_task_creation_does_not_depend_on_model_routing() -> None:
+    planner_calls: list[dict[str, object]] = []
+
+    class RecordingPlanner:
+        def plan(self, **kwargs: object) -> AgentPlannerResult:
+            planner_calls.append(kwargs)
+            return AgentPlannerResult(
+                draft=PlannerDraft(
+                    status="needs_clarification",
+                    clarification_question="What should I do next?",
+                ),
+                model=AgentModelConfig().resolve("fast"),
+                latency_ms=1,
+            )
+
+    response = AgentOrchestrator(planner=RecordingPlanner()).plan(
+        "Create a task to follow up on GitHub issue 123 in project Atlas",
+        _context(),
+    )
+
+    assert planner_calls == []
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    assert response.plan.planner == "deterministic_regex"
+    assert response.plan.actions[0].tool_name == "task_write.create_task"
+    assert response.plan.actions[0].arguments == {
+        "title": "follow up on GitHub issue 123",
+        "project": "Atlas",
+    }
+
+
+def test_compound_deterministic_workflows_use_the_model_planner() -> None:
+    planner_calls: list[dict[str, object]] = []
+
+    class RecordingPlanner:
+        def plan(self, **kwargs: object) -> AgentPlannerResult:
+            planner_calls.append(kwargs)
+            return AgentPlannerResult(
+                draft=PlannerDraft(
+                    status="planned",
+                    intent="invite_and_follow_up",
+                    actions=[
+                        {
+                            "tool_name": "outline_write.invite_user",
+                            "arguments": {"email": "sarah@example.com"},
+                            "summary": "Invite Sarah to Outline",
+                        },
+                        {
+                            "tool_name": "task_write.create_task",
+                            "arguments": {"title": "follow up"},
+                            "summary": "Create a follow-up task",
+                        },
+                    ],
+                ),
+                model=AgentModelConfig().resolve("fast"),
+                latency_ms=1,
+            )
+
+    response = AgentOrchestrator(planner=RecordingPlanner()).plan(
+        "Invite sarah@example.com to Outline and create a task to follow up",
+        _context(roles=["Admin"]),
+    )
+
+    assert len(planner_calls) == 1
+    assert planner_calls[0]["message"] == (
+        "Invite sarah@example.com to Outline and create a task to follow up"
+    )
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    assert response.plan.planner == "live_model"
+    assert [action.tool_name for action in response.plan.actions] == [
+        "outline_write.invite_user",
+        "task_write.create_task",
+    ]
+
+
+def test_elliptical_compound_task_request_uses_the_model_planner() -> None:
+    planner_calls: list[dict[str, object]] = []
+
+    class RecordingPlanner:
+        def plan(self, **kwargs: object) -> AgentPlannerResult:
+            planner_calls.append(kwargs)
+            return AgentPlannerResult(
+                draft=PlannerDraft(
+                    status="planned",
+                    intent="create_tasks",
+                    actions=[
+                        {
+                            "tool_name": "task_write.create_task",
+                            "arguments": {"title": "draft the agenda"},
+                            "summary": "Draft the agenda",
+                        },
+                        {
+                            "tool_name": "task_write.create_task",
+                            "arguments": {"title": "book a room"},
+                            "summary": "Book a room",
+                        },
+                    ],
+                ),
+                model=AgentModelConfig().resolve("fast"),
+                latency_ms=1,
+            )
+
+    response = AgentOrchestrator(planner=RecordingPlanner()).plan(
+        "Create a task to draft the agenda and another task to book a room",
+        _context(),
+    )
+
+    assert len(planner_calls) == 1
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    assert response.plan.planner == "live_model"
+    assert all(action.requires_confirmation for action in response.plan.actions)
+    assert [action.arguments["title"] for action in response.plan.actions] == [
+        "draft the agenda",
+        "book a room",
+    ]
+
+
+def test_pronoun_only_compound_task_request_uses_the_model_planner() -> None:
+    planner_calls: list[dict[str, object]] = []
+
+    class RecordingPlanner:
+        def plan(self, **kwargs: object) -> AgentPlannerResult:
+            planner_calls.append(kwargs)
+            return AgentPlannerResult(
+                draft=PlannerDraft(
+                    status="needs_clarification",
+                    clarification_question="What are the two tasks?",
+                ),
+                model=AgentModelConfig().resolve("fast"),
+                latency_ms=1,
+            )
+
+    request = "Create a task to draft the agenda and another to book a room"
+    response = AgentOrchestrator(planner=RecordingPlanner()).plan(request, _context())
+
+    assert len(planner_calls) == 1
+    assert planner_calls[0]["message"] == request
+    assert response.status == "needs_clarification"
+    assert response.plan is None
+
+
+def test_shared_target_outline_invites_use_the_model_planner() -> None:
+    planner_calls: list[dict[str, object]] = []
+
+    class RecordingPlanner:
+        def plan(self, **kwargs: object) -> AgentPlannerResult:
+            planner_calls.append(kwargs)
+            return AgentPlannerResult(
+                draft=PlannerDraft(
+                    status="needs_clarification",
+                    clarification_question="Should I invite both people?",
+                ),
+                model=AgentModelConfig().resolve("fast"),
+                latency_ms=1,
+            )
+
+    request = "Invite alice@example.com to Outline and bob@example.com"
+    response = AgentOrchestrator(planner=RecordingPlanner()).plan(request, _context())
+
+    assert len(planner_calls) == 1
+    assert planner_calls[0]["message"] == request
+    assert response.status == "needs_clarification"
+    assert response.plan is None
+
+
+def test_shared_verb_compound_workflow_uses_the_model_planner() -> None:
+    planner_calls: list[dict[str, object]] = []
+
+    class RecordingPlanner:
+        def plan(self, **kwargs: object) -> AgentPlannerResult:
+            planner_calls.append(kwargs)
+            return AgentPlannerResult(
+                draft=PlannerDraft(
+                    status="needs_clarification",
+                    clarification_question="Which task and issue details should I use?",
+                ),
+                model=AgentModelConfig().resolve("fast"),
+                latency_ms=1,
+            )
+
+    request = "Search tasks in project Atlas and GitHub issues for onboarding"
+    response = AgentOrchestrator(planner=RecordingPlanner()).plan(request, _context())
+
+    assert len(planner_calls) == 1
+    assert planner_calls[0]["message"] == request
+    assert response.status == "needs_clarification"
+    assert response.plan is None
+
+
 def test_agent_uses_structured_planner_for_multi_action_confirmation() -> None:
     class FakePlanner:
         def plan(self, **kwargs: object) -> AgentPlannerResult:
-            assert kwargs["model_tier"] == "strong"
+            assert kwargs["model_tier"] == "fast"
             return AgentPlannerResult(
                 draft=PlannerDraft(
                     status="planned",
@@ -1812,7 +2003,9 @@ def test_agent_uses_structured_planner_for_multi_action_confirmation() -> None:
 
     orchestrator = AgentOrchestrator(planner=FakePlanner())
 
-    response = orchestrator.plan("Invite Sarah to Outline", _context(roles=["Admin"]))
+    response = orchestrator.plan(
+        "Help Sarah get started at 508", _context(roles=["Admin"])
+    )
 
     assert response.status == "requires_confirmation"
     assert response.plan is not None

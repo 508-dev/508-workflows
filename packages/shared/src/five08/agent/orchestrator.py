@@ -41,6 +41,21 @@ _MONTH_DATE_RE = re.compile(
     r"\s+(\d{1,2})(?:,\s*|\s+)(20\d{2})\b",
     re.IGNORECASE,
 )
+_WORKFLOW_CLAUSE_SEPARATOR_RE = re.compile(
+    r"\s*(?:;|\b(?:and\s+then|and\s+also|then|also|and)\b)\s*",
+    re.IGNORECASE,
+)
+_ELLIPTICAL_TASK_CLAUSE_RE = re.compile(
+    r"^\s*(?:another(?:\s+task)?|(?:a\s+)?(?:second|third|fourth)|one\s+more|an\s+additional)\s+(?:task\b|to\b)",
+    re.IGNORECASE,
+)
+_EMAIL_ADDRESS_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
+_SHARED_WORKFLOW_VERB_RE = re.compile(
+    r"^\s*(?:please\s+)?(?P<verb>"
+    r"search|find|list|show|create|open|update|edit|close|assign|add|invite|send|provision"
+    r")\b",
+    re.IGNORECASE,
+)
 _WEEKDAYS = {
     "monday": 0,
     "tuesday": 1,
@@ -108,11 +123,7 @@ class AgentOrchestrator:
 
     def plan(self, message: str, context: AgentIdentityContext) -> AgentResponse:
         text = message.strip()
-        loaded_context = self.context_loader.load(
-            context=context,
-            bounds=self.context_bounds,
-        )
-        context = context.model_copy(update={"context_snippets": loaded_context})
+        context = self._load_request_context(context)
         if not text:
             return AgentResponse(
                 status="needs_clarification",
@@ -120,21 +131,17 @@ class AgentOrchestrator:
                 clarification_question="What task or project action should I take?",
             )
 
-        resolved_member_agreement = self._plan_member_agreement_from_crm(
-            text,
-            context,
-            planner="deterministic_regex",
-        )
-        if resolved_member_agreement is not None:
-            return resolved_member_agreement
+        deterministic_response = self._plan_deterministic_workflow(text, context)
+        if deterministic_response is not None:
+            return deterministic_response
 
+        planner: LiteralPlanner = "deterministic_regex"
+        planning_text = text
+        action: AgentToolAction | None = None
         planned_response = self._plan_with_model(text, context)
         if planned_response is not None:
             return planned_response
 
-        planner: LiteralPlanner = "deterministic_regex"
-        planning_text = text
-        action = self._parse_action(text)
         if action is None and not re.search(
             r"\bcreate\s+(?:a\s+)?task\b", text, re.IGNORECASE
         ):
@@ -159,6 +166,101 @@ class AgentOrchestrator:
                     "Try asking me to manage a task, GitHub issue, CRM contact, or member account."
                 ),
             )
+        return self._response_for_deterministic_action(
+            action=action,
+            context=context,
+            planning_text=planning_text,
+            planner=planner,
+        )
+
+    def _load_request_context(
+        self, context: AgentIdentityContext
+    ) -> AgentIdentityContext:
+        """Load bounded request context before deterministic or model planning."""
+
+        loaded_context = self.context_loader.load(
+            context=context,
+            bounds=self.context_bounds,
+        )
+        return context.model_copy(update={"context_snippets": loaded_context})
+
+    def _plan_deterministic_workflow(
+        self,
+        text: str,
+        context: AgentIdentityContext,
+    ) -> AgentResponse | None:
+        """Return the production response for an explicitly recognized workflow."""
+
+        if self._has_multiple_deterministic_workflows(text):
+            return None
+
+        resolved_member_agreement = self._plan_member_agreement_from_crm(
+            text,
+            context,
+            planner="deterministic_regex",
+        )
+        if resolved_member_agreement is not None:
+            return resolved_member_agreement
+
+        action = self._parse_action(text)
+        if action is not None:
+            return self._response_for_deterministic_action(
+                action=action,
+                context=context,
+                planning_text=text,
+                planner="deterministic_regex",
+            )
+        return None
+
+    def _has_multiple_deterministic_workflows(self, text: str) -> bool:
+        """Avoid collapsing separate or elliptical commands into one regex action."""
+
+        clauses = [
+            clause
+            for clause in _WORKFLOW_CLAUSE_SEPARATOR_RE.split(text)
+            if clause.strip()
+        ]
+        workflow_count = sum(
+            self._parse_action(clause) is not None
+            or self._extract_member_agreement_recipient(clause) is not None
+            for clause in clauses
+        )
+        if workflow_count > 1:
+            return True
+        shared_verb_match = (
+            _SHARED_WORKFLOW_VERB_RE.match(clauses[0]) if clauses else None
+        )
+        if shared_verb_match is not None:
+            verb = shared_verb_match.group("verb")
+            if any(
+                self._parse_action(clause) is None
+                and self._parse_action(f"{verb} {clause}") is not None
+                for clause in clauses[1:]
+            ):
+                return True
+            if (
+                verb.casefold() == "invite"
+                and "outline" in clauses[0].casefold()
+                and any(
+                    _EMAIL_ADDRESS_RE.fullmatch(clause.strip()) is not None
+                    for clause in clauses[1:]
+                )
+            ):
+                return True
+        return workflow_count > 0 and any(
+            _ELLIPTICAL_TASK_CLAUSE_RE.match(clause) for clause in clauses
+        )
+
+    def _response_for_deterministic_action(
+        self,
+        *,
+        action: AgentToolAction,
+        context: AgentIdentityContext,
+        planning_text: str,
+        planner: LiteralPlanner,
+    ) -> AgentResponse:
+        """Plan a known workflow before asking a model to infer an intent."""
+
         if action.tool_name == "task_read.search_tasks" and not action.arguments.get(
             "project"
         ):

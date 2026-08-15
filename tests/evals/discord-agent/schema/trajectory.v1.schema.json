@@ -47,6 +47,7 @@
       "additionalProperties": false
     },
     "expect": { "type": "object" },
+    "provider_expect": { "type": "object" },
     "known_failure": {
       "type": "object",
       "required": ["reason"],

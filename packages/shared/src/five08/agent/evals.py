@@ -168,6 +168,7 @@ class AgentEvalFixture(BaseModel):
     seed: AgentEvalSeed = Field(default_factory=AgentEvalSeed)
     request: AgentEvalRequest
     expect: AgentEvalExpect
+    provider_expect: AgentEvalExpect | None = None
     known_failure: AgentEvalKnownFailure | None = None
 
 
@@ -233,6 +234,13 @@ class AgentEvalCheck(BaseModel):
     observed: Any = None
 
 
+class AgentEvalProviderDraftProbe(BaseModel):
+    """Semantic quality of a live provider draft, separate from execution."""
+
+    status: Literal["passed", "failed", "parse_failed"]
+    checks: list[AgentEvalCheck] = Field(default_factory=list)
+
+
 class AgentEvalScenarioResult(BaseModel):
     """One fixture's observed output and check list."""
 
@@ -242,6 +250,7 @@ class AgentEvalScenarioResult(BaseModel):
     known_failure: AgentEvalKnownFailure | None = None
     checks: list[AgentEvalCheck]
     observed: AgentEvalObserved
+    provider_draft: AgentEvalProviderDraftProbe | None = None
 
 
 class AgentEvalReport(BaseModel):
@@ -469,14 +478,16 @@ def run_live_planner_eval_suite(
         )
         if time_to_first_turn_ms is None:
             time_to_first_turn_ms = _elapsed_ms(suite_started)
-        if result.status == "failed":
+        if result.status == "failed" or _provider_draft_failed(result):
             retry_result = run_fixture_with_live_planner(
                 fixture=fixture,
                 profile=profile,
                 timeout_seconds=timeout_seconds,
             )
             retries += 1
-            if retry_result.status != "failed":
+            if retry_result.status != "failed" and not _provider_draft_failed(
+                retry_result
+            ):
                 result = retry_result
         scenario_results.append(result)
     passed = sum(1 for result in scenario_results if result.status == "passed")
@@ -486,6 +497,18 @@ def run_live_planner_eval_suite(
     )
     parse_successes = sum(
         1 for result in scenario_results if result.observed.parse_success is True
+    )
+    provider_draft_failures = sum(
+        1
+        for result in scenario_results
+        if result.provider_draft is not None
+        and result.provider_draft.status != "passed"
+    )
+    provider_draft_parse_failures = sum(
+        1
+        for result in scenario_results
+        if result.provider_draft is not None
+        and result.provider_draft.status == "parse_failed"
     )
     latencies = _scenario_latencies(scenario_results)
     return AgentEvalReport(
@@ -505,8 +528,11 @@ def run_live_planner_eval_suite(
             "parse_successes": parse_successes,
             "parse_failures": len(scenario_results) - parse_successes,
             "parse_success_rate": _rate(parse_successes, len(scenario_results)),
-            "bad_plans": failed,
-            "bad_plan_rate": _rate(failed, len(scenario_results)),
+            "provider_draft_failures": provider_draft_failures,
+            "provider_draft_parse_failures": provider_draft_parse_failures,
+            "bad_plans": provider_draft_failures,
+            "bad_plan_rate": _rate(provider_draft_failures, len(scenario_results)),
+            "production_failures": failed,
             "avg_latency_ms": _average_int(latencies),
             "max_latency_ms": max(latencies) if latencies else None,
             "estimated_cost_usd": _sum_estimated_costs(scenario_results),
@@ -514,6 +540,14 @@ def run_live_planner_eval_suite(
             "retries": retries,
         },
         scenarios=scenario_results,
+    )
+
+
+def _provider_draft_failed(result: AgentEvalScenarioResult) -> bool:
+    """Return whether the provider probe failed independently of production."""
+
+    return (
+        result.provider_draft is not None and result.provider_draft.status != "passed"
     )
 
 
@@ -611,20 +645,36 @@ def run_fixture_with_live_planner(
         model_config=profile.agent_model_config,
     )
     message = fixture.request.current_message()
+    context = orchestrator._load_request_context(context)
+    deterministic_response = orchestrator._plan_deterministic_workflow(
+        message.strip(), context
+    )
+
+    # Probe the provider even for deterministic routes so its raw semantic
+    # quality remains observable, but always execute the production routing
+    # boundary before and independently of that call.
     call = _call_live_planner(
         profile=profile,
         fixture=fixture,
         message=message,
         timeout_seconds=timeout_seconds,
     )
-    response = _response_from_live_draft(
-        orchestrator=orchestrator,
-        draft=call.draft,
-        message=message,
-        context=context,
-        profile=profile,
-        parse_error=call.error,
+    provider_draft = _evaluate_provider_draft(
+        fixture.provider_expect or fixture.expect,
+        call,
+        registry=orchestrator.registry,
     )
+    if deterministic_response is not None:
+        response = deterministic_response
+    else:
+        response = _response_from_live_draft(
+            orchestrator=orchestrator,
+            draft=call.draft,
+            message=message,
+            context=context,
+            profile=profile,
+            parse_error=call.error,
+        )
     observed = observe_response(
         fixture=fixture,
         message=message,
@@ -637,7 +687,7 @@ def run_fixture_with_live_planner(
         estimated_cost_usd=call.estimated_cost_usd,
     )
     checks = evaluate_observed(fixture.expect, observed, strict=False)
-    if not call.parse_success:
+    if deterministic_response is None and not call.parse_success:
         checks.append(
             AgentEvalCheck(
                 name="live_planner.parse_success",
@@ -661,6 +711,7 @@ def run_fixture_with_live_planner(
         known_failure=fixture.known_failure,
         checks=checks,
         observed=observed,
+        provider_draft=provider_draft,
     )
 
 
@@ -806,6 +857,7 @@ def _call_live_planner(
     timeout_seconds: float,
 ) -> LivePlannerCallResult:
     started = time.perf_counter()
+    raw_output: str | None = None
     try:
         if profile.live_provider == "anthropic":
             raw_output, token_usage, estimated_cost_usd = _call_anthropic_live_planner(
@@ -836,7 +888,7 @@ def _call_live_planner(
         )
     except Exception as exc:
         return LivePlannerCallResult(
-            raw_output=None,
+            raw_output=raw_output,
             latency_ms=_elapsed_ms(started),
             parse_success=False,
             error=str(exc),
@@ -987,6 +1039,140 @@ def _parse_live_planner_json(raw_output: str) -> LivePlannerDraft:
         return LivePlannerDraft.model_validate(normalized)
 
 
+def _evaluate_provider_draft(
+    expect: AgentEvalExpect,
+    call: LivePlannerCallResult,
+    *,
+    registry: ToolRegistry,
+) -> AgentEvalProviderDraftProbe:
+    """Evaluate raw provider semantics without conflating them with execution."""
+
+    checks = [
+        _check(
+            "provider_draft.parse_success",
+            True,
+            call.parse_success,
+        )
+    ]
+    if not call.parse_success or call.draft is None:
+        return AgentEvalProviderDraftProbe(status="parse_failed", checks=checks)
+
+    draft = call.draft
+    expected_status = (
+        "needs_clarification" if expect.status == "needs_clarification" else "planned"
+    )
+    checks.append(
+        _check(
+            "provider_draft.status",
+            expected_status,
+            draft.status,
+        )
+    )
+    checks.append(
+        _check_optional(
+            "provider_draft.intent",
+            expect.intent,
+            draft.intent,
+            strict=False,
+        )
+    )
+    checks.append(
+        _check_optional(
+            "provider_draft.clarification_question",
+            expect.clarification_question,
+            draft.clarification_question,
+            strict=False,
+        )
+    )
+    if expected_status == "needs_clarification":
+        checks.append(
+            _check(
+                "provider_draft.clarification_question_present",
+                True,
+                bool(
+                    draft.clarification_question
+                    and draft.clarification_question.strip()
+                ),
+            )
+        )
+    for index, observed_action in enumerate(draft.actions):
+        try:
+            registry.validate_planner_action(
+                observed_action.tool_name,
+                observed_action.arguments,
+            )
+        except ValueError:
+            schema_valid = False
+        else:
+            schema_valid = True
+        checks.append(
+            _check(
+                f"provider_draft.actions[{index}].schema_valid",
+                True,
+                schema_valid,
+            )
+        )
+    expected_actions = expect.actions
+    if expected_actions is None and expected_status == "needs_clarification":
+        expected_actions = []
+    if expected_actions is not None:
+        checks.append(
+            _check(
+                "provider_draft.action_count",
+                len(expected_actions),
+                len(draft.actions),
+                strict=False,
+            )
+        )
+        for index, expected_action in enumerate(expected_actions):
+            observed_action = (
+                draft.actions[index] if index < len(draft.actions) else None
+            )
+            prefix = f"provider_draft.actions[{index}]"
+            if observed_action is None:
+                checks.append(
+                    AgentEvalCheck(
+                        name=f"{prefix}.present",
+                        passed=False,
+                        expected=expected_action.model_dump(mode="json"),
+                        observed=None,
+                    )
+                )
+                continue
+            checks.append(
+                _check(
+                    f"{prefix}.tool_name",
+                    expected_action.tool_name,
+                    observed_action.tool_name,
+                    strict=True,
+                )
+            )
+            if expected_action.arguments is not None:
+                checks.append(
+                    _check(
+                        f"{prefix}.arguments",
+                        expected_action.arguments,
+                        observed_action.arguments,
+                        strict=False,
+                    )
+                )
+            if expected_action.arguments_contains is not None:
+                for key, value in expected_action.arguments_contains.items():
+                    checks.append(
+                        _check(
+                            f"{prefix}.arguments.{key}",
+                            value,
+                            observed_action.arguments.get(key),
+                            strict=False,
+                        )
+                    )
+    checks = [check for check in checks if check.name]
+    return AgentEvalProviderDraftProbe(
+        status="passed" if all(check.passed for check in checks) else "failed",
+        checks=checks,
+    )
+
+
 def _response_from_live_draft(
     *,
     orchestrator: AgentOrchestrator,
@@ -1001,27 +1187,13 @@ def _response_from_live_draft(
             status="failed",
             message=f"Live planner failed: {parse_error or 'unknown error'}",
         )
-    resolved_member_agreement = orchestrator._plan_member_agreement_from_crm(
-        message,
-        context,
-        planner="live_model",
-    )
-    if resolved_member_agreement is not None:
-        return resolved_member_agreement
     if draft.status == "needs_clarification" or not draft.actions:
-        fallback_action = _deterministic_live_planner_fallback(
-            orchestrator=orchestrator,
-            message=message,
+        question = draft.clarification_question or "What should I do next?"
+        return AgentResponse(
+            status="needs_clarification",
+            message=question,
+            clarification_question=question,
         )
-        if fallback_action is not None:
-            actions = [fallback_action]
-        else:
-            question = draft.clarification_question or "What should I do next?"
-            return AgentResponse(
-                status="needs_clarification",
-                message=question,
-                clarification_question=question,
-            )
     else:
         actions = [
             AgentToolAction(
@@ -1126,114 +1298,6 @@ def _response_from_live_draft(
         results=results,
         message=orchestrator._execution_message(results),
     )
-
-
-def _deterministic_live_planner_fallback(
-    *,
-    orchestrator: AgentOrchestrator,
-    message: str,
-) -> AgentToolAction | None:
-    action = orchestrator._parse_action(message)
-    if action is None:
-        return None
-    if action.tool_name != "task_read.search_tasks":
-        return None
-    if orchestrator.registry.get(action.tool_name) is None:
-        return None
-    if _live_action_clarification(orchestrator, action) is not None:
-        return None
-    action.summary = action.summary or f"Call {action.tool_name}"
-    return action
-
-
-def _live_action_clarification(
-    orchestrator: AgentOrchestrator,
-    action: AgentToolAction,
-) -> str | None:
-    """Return a clarification question for malformed live-drafted actions."""
-    args = action.arguments
-    tool_name = action.tool_name
-    if tool_name == "task_read.search_tasks":
-        if not _non_empty_arg(args, "project"):
-            return "Which project should I search?"
-        return None
-    if tool_name == "task_write.create_task":
-        if not _non_empty_arg(args, "title"):
-            return "What should the task be?"
-        return None
-    if tool_name == "task_write.update_task":
-        if not _non_empty_arg(args, "task_id"):
-            return "Which task should I update?"
-        if not any(
-            _non_empty_arg(args, key)
-            for key in ("title", "project", "assignee", "due_date", "status")
-        ):
-            return "What should I change on that task?"
-        return None
-    if tool_name == "github_issue.search_issues":
-        if not _non_empty_arg(args, "query"):
-            return "What GitHub issues should I search for?"
-        if not _non_empty_arg(args, "repository") and not _non_empty_text(
-            orchestrator.registry.runtime_config.github_default_repo
-        ):
-            return "Which GitHub repository should I search?"
-        return None
-    if tool_name == "github_issue.create_issue":
-        if not _non_empty_arg(args, "title"):
-            return "What should be the title of the GitHub issue?"
-        if not _non_empty_arg(args, "repository") and not _non_empty_text(
-            orchestrator.registry.runtime_config.github_default_repo
-        ):
-            return "Which GitHub repository should I create the issue in?"
-        return None
-    if tool_name == "crm_read.search_contacts":
-        if not _non_empty_arg(args, "query"):
-            return "Who should I look up?"
-        return None
-    if tool_name == "crm_write.update_contact":
-        if not _non_empty_arg(args, "contact_id"):
-            return "Which CRM contact should I update?"
-        updates = args.get("updates")
-        if not isinstance(updates, dict) or not updates:
-            return "What should I update on that CRM contact?"
-        return None
-    if tool_name == "docuseal_write.create_member_agreement_submission":
-        if not _non_empty_arg(args, "submitter_email"):
-            return "What email address should I use for the member agreement?"
-        return None
-    if tool_name == "mail_write.create_mailbox":
-        if not _non_empty_arg(args, "local_part"):
-            return "What mailbox should I create?"
-        if not _non_empty_arg(args, "backup_email"):
-            return "What backup email should I use?"
-        if not _non_empty_arg(args, "name"):
-            return "What display name should I use?"
-    if tool_name == "sso_write.create_user":
-        if not _has_contact_reference(args):
-            return "Which CRM contact should I create the SSO user for?"
-        return None
-    if tool_name == "outline_write.invite_user":
-        if not _non_empty_arg(args, "email") and not _has_contact_reference(args):
-            return "Who should I invite to Outline?"
-        return None
-    if tool_name == "account_write.create_user_accounts":
-        if not _has_contact_reference(args):
-            return "Which CRM contact should I create accounts for?"
-        if not _non_empty_arg(args, "mailbox_username"):
-            return "What 508 mailbox username should I create?"
-    return None
-
-
-def _non_empty_arg(args: dict[str, Any], key: str) -> bool:
-    return _non_empty_text(args.get(key))
-
-
-def _has_contact_reference(args: dict[str, Any]) -> bool:
-    return _non_empty_arg(args, "contact_id") or _non_empty_arg(args, "contact_query")
-
-
-def _non_empty_text(value: Any) -> bool:
-    return isinstance(value, str) and bool(value.strip())
 
 
 def _live_model_selection(
@@ -1519,7 +1583,10 @@ def render_markdown_report(report: AgentEvalReport) -> str:
             "time_to_first_turn_ms",
             "parse_success_rate",
             "parse_failures",
+            "provider_draft_failures",
+            "provider_draft_parse_failures",
             "bad_plan_rate",
+            "production_failures",
             "avg_latency_ms",
             "max_latency_ms",
             "estimated_cost_usd",
@@ -1532,19 +1599,27 @@ def render_markdown_report(report: AgentEvalReport) -> str:
     lines.extend(
         [
             "",
-            "| Scenario | Status | Failed checks | Latency ms | Parse |",
-            "| --- | --- | --- | --- | --- |",
+            "| Scenario | Production | Provider draft | Production failed checks | Provider draft failures | Latency ms | Parse |",
+            "| --- | --- | --- | --- | --- | --- | --- |",
         ]
     )
     for scenario in report.scenarios:
         failed_checks = [check.name for check in scenario.checks if not check.passed]
+        provider_draft = scenario.provider_draft
+        provider_failures = (
+            [check.name for check in provider_draft.checks if not check.passed]
+            if provider_draft is not None
+            else []
+        )
         lines.append(
             "| "
             + " | ".join(
                 [
                     scenario.fixture_id,
                     scenario.status,
+                    provider_draft.status if provider_draft is not None else "-",
                     ", ".join(failed_checks) if failed_checks else "-",
+                    ", ".join(provider_failures) if provider_failures else "-",
                     str(scenario.observed.latency_ms or "-"),
                     str(scenario.observed.parse_success)
                     if scenario.observed.parse_success is not None
@@ -1568,6 +1643,12 @@ def render_trace_report(report: AgentEvalReport) -> str:
     ]
     for scenario in report.scenarios:
         failed_checks = [check for check in scenario.checks if not check.passed]
+        provider_draft = scenario.provider_draft
+        provider_failures = (
+            [check for check in provider_draft.checks if not check.passed]
+            if provider_draft is not None
+            else []
+        )
         lines.extend(
             [
                 f"## {scenario.fixture_id}",
@@ -1599,6 +1680,36 @@ def render_trace_report(report: AgentEvalReport) -> str:
         lines.extend(
             [
                 "",
+                "### Provider Draft Probe",
+                "",
+            ]
+        )
+        if provider_draft is None:
+            lines.append("- not run")
+        else:
+            lines.append(f"- Status: `{provider_draft.status}`")
+            lines.append(
+                "- Raw output: "
+                + (
+                    "available in observed JSON"
+                    if scenario.observed.raw_model_output
+                    else "-"
+                )
+            )
+            if provider_failures:
+                for check in provider_failures:
+                    lines.extend(
+                        [
+                            f"- `{check.name}`",
+                            f"  - expected: `{_compact_json(check.expected)}`",
+                            f"  - observed: `{_compact_json(check.observed)}`",
+                        ]
+                    )
+            else:
+                lines.append("- Semantic mismatches: none")
+        lines.extend(
+            [
+                "",
                 "### Actions",
                 "",
             ]
@@ -1627,6 +1738,12 @@ def render_ctrf_report(report: AgentEvalReport) -> dict[str, Any]:
     tests: list[dict[str, Any]] = []
     for scenario in report.scenarios:
         failed_checks = [check.name for check in scenario.checks if not check.passed]
+        provider_draft = scenario.provider_draft
+        provider_failures = (
+            [check.name for check in provider_draft.checks if not check.passed]
+            if provider_draft is not None
+            else []
+        )
         status = (
             "passed" if scenario.status in {"passed", "known_failure"} else "failed"
         )
@@ -1639,6 +1756,10 @@ def render_ctrf_report(report: AgentEvalReport) -> dict[str, Any]:
                 "suite": ["discord-agent", report.suite, report.model],
                 "tags": scenario.observed.tags,
                 "rawStatus": scenario.status,
+                "providerDraftStatus": (
+                    provider_draft.status if provider_draft is not None else None
+                ),
+                "providerDraftFailures": provider_failures,
                 "filePath": f"tests/evals/discord-agent/fixtures/v1/{scenario.fixture_id}.json",
             }
         )
