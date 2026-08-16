@@ -2,7 +2,12 @@
 
 from unittest.mock import MagicMock, patch
 
-from five08.audit import get_discord_user_id_for_contact, upsert_person_discord_link
+from five08.audit import (
+    PersonRecord,
+    get_discord_user_id_for_contact,
+    upsert_person,
+    upsert_person_discord_link,
+)
 
 
 def _mock_connection(row: dict[str, object] | None) -> MagicMock:
@@ -65,6 +70,31 @@ def test_upsert_person_discord_link_updates_local_people_cache() -> None:
         "123456789",
         "mootester117",
     )
+
+
+def test_upsert_person_persists_profile_summary() -> None:
+    """The CRM description cache must be available to blurb draft context."""
+    settings = MagicMock()
+    connection = _mock_connection({"id": "person-1"})
+
+    with patch("five08.audit.get_postgres_connection") as mock_get_connection:
+        mock_get_connection.return_value.__enter__.return_value = connection
+        mock_get_connection.return_value.__exit__.return_value = None
+
+        result = upsert_person(
+            settings,
+            PersonRecord(
+                crm_contact_id="contact-1",
+                name="Moo Tester",
+                profile_summary="Backend engineer focused on integrations.",
+            ),
+        )
+
+    assert result == "person-1"
+    cursor = connection.cursor.return_value.__enter__.return_value
+    query, params = cursor.execute.call_args.args
+    assert "profile_summary" in query
+    assert params[17] == "Backend engineer focused on integrations."
 
 
 def test_get_discord_user_id_for_contact_ignores_cached_no_discord() -> None:

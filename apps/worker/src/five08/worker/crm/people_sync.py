@@ -35,7 +35,7 @@ class EspoPeopleSyncClient:
             "addressCountry,addressCity,addressState,cTimezone,cSeniority,"
             "cMemberAgreementSignedAt,cOnboardingState,cOnboarder,"
             "cOnboardingUpdatedAt,"
-            f"{LINKEDIN_FIELD},skills,cSkillAttrs,resumeIds,resumeNames"
+            f"{LINKEDIN_FIELD},description,skills,cSkillAttrs,resumeIds,resumeNames"
         )
         raw = self.api.request(
             "GET",
@@ -197,6 +197,7 @@ class PeopleSyncProcessor:
             timezone=_text_or_none(raw_contact.get("cTimezone")),
             seniority=_text_or_none(raw_contact.get("cSeniority")),
             linkedin=self._coerce_linkedin(raw_contact),
+            profile_summary=_text_or_none(raw_contact.get("description")),
             skills=skills,
             skill_attrs=skill_attrs,
             latest_resume_id=latest_resume_id,

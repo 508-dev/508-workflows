@@ -7,6 +7,7 @@ import hmac
 import json
 import re
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, Mock, call, patch
 
@@ -6849,6 +6850,397 @@ def test_dashboard_gig_detail_returns_visible_gig_by_id(client: TestClient) -> N
         engagement_id="11111111-1111-4111-8111-111111111111",
         limit=1,
     )
+
+
+def test_dashboard_save_general_blurb_from_application_uses_candidate_identity(
+    client: TestClient,
+) -> None:
+    session = _dashboard_write_session()
+    target = SimpleNamespace(
+        person_id="person-candidate-1",
+        crm_contact_id="contact-candidate-1",
+        discord_user_id="candidate-discord-1",
+    )
+    saved = {
+        "id": "blurb-1",
+        "scope": "general",
+        "text": "Candidate-written profile summary.",
+        "author_kind": "candidate_attributed",
+        "source": "dashboard",
+        "status": "approved",
+    }
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api.resolve_candidate_blurb_target",
+            return_value=target,
+        ) as resolve_target,
+        patch("five08.backend.api.viewer_can_update_engagement", return_value=True),
+        patch(
+            "five08.backend.api.save_candidate_blurb",
+            return_value=saved,
+        ) as save_blurb,
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ),
+    ):
+        response = client.post(
+            "/dashboard/api/gigs/11111111-1111-4111-8111-111111111111/"
+            "applications/22222222-2222-4222-8222-222222222222/blurbs",
+            json={
+                "text": "Candidate-written profile summary.",
+                "scope": "general",
+                "author_kind": "candidate_attributed",
+                "source": "dashboard",
+                "status": "approved",
+                "generation_metadata": {"skill_id": "candidate_blurb_draft"},
+                "replaces_blurb_id": "33333333-3333-4333-8333-333333333333",
+            },
+        )
+
+    assert response.status_code == 201
+    assert response.json() == saved
+    resolve_target.assert_called_once_with(
+        api.settings,
+        engagement_id="11111111-1111-4111-8111-111111111111",
+        application_id="22222222-2222-4222-8222-222222222222",
+    )
+    save_blurb.assert_called_once_with(
+        api.settings,
+        text="Candidate-written profile summary.",
+        author_kind="candidate_attributed",
+        source="dashboard",
+        status="approved",
+        metadata={"skill_id": "candidate_blurb_draft"},
+        replaces_blurb_id="33333333-3333-4333-8333-333333333333",
+        submitted_by_discord_user_id="steering-1",
+        person_id="person-candidate-1",
+        crm_contact_id="contact-candidate-1",
+        discord_user_id="candidate-discord-1",
+    )
+
+
+def test_dashboard_draft_gig_blurb_returns_reviewable_structured_draft(
+    client: TestClient,
+) -> None:
+    session = _dashboard_write_session()
+    draft = {
+        "text": "Taylor is a backend engineer with relevant experience.",
+        "supporting_facts": ["Python", "Postgres"],
+        "missing_facts": ["Current availability"],
+        "metadata": {"skill_id": "candidate_blurb_draft"},
+    }
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api.draft_candidate_blurb",
+            return_value=draft,
+        ) as draft_blurb,
+        patch("five08.backend.api.viewer_can_update_engagement", return_value=True),
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ),
+    ):
+        response = client.post(
+            "/dashboard/api/gigs/11111111-1111-4111-8111-111111111111/"
+            "applications/22222222-2222-4222-8222-222222222222/blurbs/draft",
+            json={"scope": "gig"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == draft
+    draft_blurb.assert_called_once_with(
+        api.settings,
+        engagement_id="11111111-1111-4111-8111-111111111111",
+        application_id="22222222-2222-4222-8222-222222222222",
+    )
+
+
+def test_dashboard_save_blurb_returns_reloadable_conflict_for_stale_version(
+    client: TestClient,
+) -> None:
+    session = _dashboard_write_session()
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api.save_candidate_blurb",
+            side_effect=api.CandidateBlurbConflictError(
+                "replaces_blurb_id is no longer the current version."
+            ),
+        ),
+    ):
+        response = client.post(
+            "/dashboard/api/people/contact-candidate-1/blurbs",
+            json={
+                "text": "Updated candidate blurb.",
+                "scope": "general",
+                "author_kind": "candidate_attributed",
+                "source": "dashboard",
+                "status": "approved",
+                "replaces_blurb_id": "33333333-3333-4333-8333-333333333333",
+            },
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {"error": "blurb_conflict"}
+
+
+def test_dashboard_person_blurb_list_maps_unknown_candidate_to_not_found(
+    client: TestClient,
+) -> None:
+    """A bad person target is a stable 404 rather than an internal error."""
+    session = _dashboard_write_session()
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api.list_candidate_blurbs",
+            side_effect=api.CandidateBlurbNotFoundError("missing"),
+        ),
+    ):
+        response = client.get("/dashboard/api/people/contact-missing/blurbs")
+
+    assert response.status_code == 404
+    assert response.json() == {"error": "candidate_not_found"}
+
+
+def test_dashboard_application_blurb_rejects_non_gig_engagement(
+    client: TestClient,
+) -> None:
+    """Application routes retain the dashboard's pending-gig boundary."""
+    session = _dashboard_write_session()
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api.resolve_candidate_blurb_target",
+            return_value=SimpleNamespace(
+                person_id="person-1",
+                crm_contact_id="contact-1",
+                discord_user_id="discord-1",
+            ),
+        ),
+        patch("five08.backend.api.viewer_can_update_engagement", return_value=False),
+        patch("five08.backend.api.save_candidate_blurb") as save_blurb,
+    ):
+        response = client.post(
+            "/dashboard/api/gigs/11111111-1111-4111-8111-111111111111/"
+            "applications/22222222-2222-4222-8222-222222222222/blurbs",
+            json={
+                "text": "Candidate-provided blurb.",
+                "scope": "gig",
+                "author_kind": "candidate_attributed",
+                "source": "dashboard",
+                "status": "approved",
+            },
+        )
+
+    assert response.status_code == 404
+    assert response.json() == {"error": "gig_not_found"}
+    save_blurb.assert_not_called()
+
+
+async def test_dashboard_gig_blurb_enrichment_batches_application_histories() -> None:
+    """One bounded store call replaces per-application blurb lookups."""
+    gig = {
+        "id": "11111111-1111-4111-8111-111111111111",
+        "applications": [
+            {
+                "id": "22222222-2222-4222-8222-222222222222",
+                "person_id": "person-1",
+                "crm_contact_id": "contact-1",
+            },
+            {"id": "not-a-uuid", "crm_contact_id": "contact-2"},
+        ],
+    }
+    batch_rows = [
+        {
+            "id": "general-1",
+            "scope": "general",
+            "person_id": "person-1",
+            "crm_contact_id": "contact-1",
+            "application_id": None,
+        },
+        {
+            "id": "unattached-1",
+            "scope": "gig",
+            "person_id": "person-unattached",
+            "application_id": None,
+        },
+    ]
+
+    with (
+        patch(
+            "five08.backend.api.list_engagement_candidate_blurbs_batch",
+            return_value=batch_rows,
+        ) as batch,
+        patch("five08.backend.api.list_candidate_blurbs") as legacy_list,
+    ):
+        result = await api._dashboard_enrich_gig_candidate_blurbs(gig)
+
+    batch.assert_called_once_with(
+        api.settings,
+        engagement_id="11111111-1111-4111-8111-111111111111",
+        person_ids=["person-1"],
+        crm_contact_ids=["contact-1", "contact-2"],
+        discord_user_ids=[],
+        current_only=False,
+    )
+    legacy_list.assert_not_called()
+    assert result["applications"][0]["blurbs"] == [batch_rows[0]]
+    assert result["applications"][1]["blurbs"] == []
+    assert result["candidate_blurbs"] == [batch_rows[1]]
+
+
+def test_dashboard_person_blurbs_require_steering_access(client: TestClient) -> None:
+    session = api.AuthSession(
+        subject="member-1",
+        email="member@508.dev",
+        display_name="Member User",
+        groups=["Member"],
+        is_admin=False,
+        id_token="",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with patch(
+        "five08.backend.api._current_session",
+        new_callable=AsyncMock,
+        return_value=("session-1", session),
+    ):
+        response = client.get("/dashboard/api/people/contact-candidate-1/blurbs")
+
+    assert response.status_code == 403
+    assert response.json() == {"error": "steering_required"}
+
+
+def test_dashboard_unattached_gig_blurb_uses_visible_gig_and_never_an_application(
+    client: TestClient,
+) -> None:
+    session = _dashboard_write_session()
+    target = SimpleNamespace(
+        person_id="person-candidate-1",
+        crm_contact_id="contact-candidate-1",
+        discord_user_id="candidate-discord-1",
+    )
+    saved = {
+        "id": "blurb-2",
+        "scope": "gig",
+        "text": "Candidate shared this directly.",
+        "author_kind": "candidate_attributed",
+        "source": "dashboard",
+        "status": "approved",
+    }
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api.viewer_can_update_engagement", return_value=True
+        ) as can_update,
+        patch(
+            "five08.backend.api.resolve_candidate_blurb_target",
+            return_value=target,
+        ),
+        patch(
+            "five08.backend.api.save_candidate_blurb",
+            return_value=saved,
+        ) as save_blurb,
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ),
+    ):
+        response = client.post(
+            "/dashboard/api/gigs/11111111-1111-4111-8111-111111111111/blurbs",
+            json={
+                "text": "Candidate shared this directly.",
+                "scope": "gig",
+                "author_kind": "candidate_attributed",
+                "source": "dashboard",
+                "status": "approved",
+                "discord_user_id": "candidate-discord-1",
+            },
+        )
+
+    assert response.status_code == 201
+    assert response.json() == saved
+    can_update.assert_called_once_with(
+        api.settings,
+        engagement_id="11111111-1111-4111-8111-111111111111",
+        viewer_discord_user_id="steering-1",
+        include_all=True,
+    )
+    save_blurb.assert_called_once_with(
+        api.settings,
+        text="Candidate shared this directly.",
+        engagement_id="11111111-1111-4111-8111-111111111111",
+        author_kind="candidate_attributed",
+        source="dashboard",
+        status="approved",
+        metadata=None,
+        replaces_blurb_id=None,
+        submitted_by_discord_user_id="steering-1",
+        person_id="person-candidate-1",
+        crm_contact_id="contact-candidate-1",
+        discord_user_id="candidate-discord-1",
+    )
+
+
+def test_dashboard_draft_blurb_reports_insufficient_context(client: TestClient) -> None:
+    session = _dashboard_write_session()
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api.draft_candidate_blurb",
+            side_effect=RuntimeError(
+                "Not enough candidate profile or candidate-provided blurb context to draft safely."
+            ),
+        ),
+        patch("five08.backend.api.viewer_can_update_engagement", return_value=True),
+    ):
+        response = client.post(
+            "/dashboard/api/gigs/11111111-1111-4111-8111-111111111111/"
+            "applications/22222222-2222-4222-8222-222222222222/blurbs/draft",
+            json={"scope": "gig"},
+        )
+
+    assert response.status_code == 422
+    assert response.json() == {"error": "insufficient_candidate_context"}
 
 
 def test_dashboard_gig_detail_returns_404_for_hidden_or_missing_gig(

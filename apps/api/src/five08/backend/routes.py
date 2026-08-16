@@ -35,6 +35,8 @@ class BackendRouteSurface(Protocol):
     dashboard_assign_onboarder_handler: RouteHandler
     dashboard_audit_events_handler: RouteHandler
     dashboard_bulk_update_projects_handler: RouteHandler
+    dashboard_candidate_blurb_draft_handler: RouteHandler
+    dashboard_candidate_blurbs_handler: RouteHandler
     dashboard_configuration_handler: RouteHandler
     dashboard_create_project_handler: RouteHandler
     dashboard_erpnext_account_managers_handler: RouteHandler
@@ -42,6 +44,8 @@ class BackendRouteSurface(Protocol):
     dashboard_erpnext_cost_centers_handler: RouteHandler
     dashboard_erpnext_customers_handler: RouteHandler
     dashboard_gig_detail_handler: RouteHandler
+    dashboard_gig_candidate_blurb_draft_handler: RouteHandler
+    dashboard_gig_candidate_blurbs_handler: RouteHandler
     dashboard_gigs_handler: RouteHandler
     dashboard_handler: RouteHandler
     dashboard_job_lead_scrape_status_handler: RouteHandler
@@ -117,6 +121,10 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
     dashboard_assign_onboarder_handler = api.dashboard_assign_onboarder_handler
     dashboard_audit_events_handler = api.dashboard_audit_events_handler
     dashboard_bulk_update_projects_handler = api.dashboard_bulk_update_projects_handler
+    dashboard_candidate_blurb_draft_handler = (
+        api.dashboard_candidate_blurb_draft_handler
+    )
+    dashboard_candidate_blurbs_handler = api.dashboard_candidate_blurbs_handler
     dashboard_configuration_handler = api.dashboard_configuration_handler
     dashboard_create_project_handler = api.dashboard_create_project_handler
     dashboard_erpnext_account_managers_handler = (
@@ -126,6 +134,10 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
     dashboard_erpnext_cost_centers_handler = api.dashboard_erpnext_cost_centers_handler
     dashboard_erpnext_customers_handler = api.dashboard_erpnext_customers_handler
     dashboard_gig_detail_handler = api.dashboard_gig_detail_handler
+    dashboard_gig_candidate_blurb_draft_handler = (
+        api.dashboard_gig_candidate_blurb_draft_handler
+    )
+    dashboard_gig_candidate_blurbs_handler = api.dashboard_gig_candidate_blurbs_handler
     dashboard_gigs_handler = api.dashboard_gigs_handler
     dashboard_handler = api.dashboard_handler
     dashboard_delete_job_channel_handler = api.dashboard_delete_job_channel_handler
@@ -244,6 +256,36 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
         "/dashboard/api/gigs/{engagement_id}",
         dashboard_gig_detail_handler,
         methods=["GET"],
+    )
+    app.add_api_route(
+        "/dashboard/api/people/{crm_contact_id}/blurbs",
+        dashboard_candidate_blurbs_handler,
+        methods=["GET", "POST"],
+    )
+    app.add_api_route(
+        "/dashboard/api/people/{crm_contact_id}/blurbs/draft",
+        dashboard_candidate_blurb_draft_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/dashboard/api/gigs/{engagement_id}/applications/{application_id}/blurbs",
+        dashboard_candidate_blurbs_handler,
+        methods=["GET", "POST"],
+    )
+    app.add_api_route(
+        "/dashboard/api/gigs/{engagement_id}/applications/{application_id}/blurbs/draft",
+        dashboard_candidate_blurb_draft_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/dashboard/api/gigs/{engagement_id}/blurbs",
+        dashboard_gig_candidate_blurbs_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/dashboard/api/gigs/{engagement_id}/blurbs/draft",
+        dashboard_gig_candidate_blurb_draft_handler,
+        methods=["POST"],
     )
     app.add_api_route(
         "/dashboard/api/gig-leads",

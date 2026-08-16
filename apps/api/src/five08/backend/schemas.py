@@ -213,6 +213,48 @@ class DashboardGigApplicationCreateRequest(BaseModel):
     crm_profile: str = Field(min_length=1, max_length=500)
 
 
+class DashboardCandidateBlurbSaveRequest(BaseModel):
+    """Payload for saving a reusable or gig-scoped candidate blurb."""
+
+    text: str = Field(min_length=1, max_length=4_000)
+    scope: Literal["general", "gig"] = "general"
+    author_kind: Literal["candidate", "candidate_attributed", "team", "ai"] = (
+        "candidate_attributed"
+    )
+    source: Literal[
+        "dashboard",
+        "discord_message",
+        "discord_command",
+        "discord_dm_paste",
+        "ai",
+    ] = "dashboard"
+    status: Literal["draft", "approved"] = "approved"
+    generation_metadata: dict[str, Any] | None = None
+    replaces_blurb_id: str | None = Field(default=None, max_length=64)
+
+
+class DashboardCandidateBlurbDraftRequest(BaseModel):
+    """Optional controls for a candidate blurb draft request."""
+
+    scope: Literal["general", "gig"] = "general"
+
+
+class DashboardGigCandidateBlurbSaveRequest(DashboardCandidateBlurbSaveRequest):
+    """Save a gig blurb for a candidate who has no application yet."""
+
+    person_id: str | None = Field(default=None, max_length=255)
+    crm_contact_id: str | None = Field(default=None, max_length=255)
+    discord_user_id: str | None = Field(default=None, max_length=255)
+
+
+class DashboardGigCandidateBlurbDraftRequest(DashboardCandidateBlurbDraftRequest):
+    """Draft a gig blurb for a candidate who has no application yet."""
+
+    person_id: str | None = Field(default=None, max_length=255)
+    crm_contact_id: str | None = Field(default=None, max_length=255)
+    discord_user_id: str | None = Field(default=None, max_length=255)
+
+
 class DashboardConfigurationUpdateRequest(BaseModel):
     """Payload for updating one admin-managed configuration value."""
 

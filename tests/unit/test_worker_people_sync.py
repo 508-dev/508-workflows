@@ -18,6 +18,7 @@ def test_list_contact_page_requests_address_state() -> None:
     assert "cOnboardingState" in request_params["select"]
     assert "cOnboarder" in request_params["select"]
     assert "cOnboardingUpdatedAt" in request_params["select"]
+    assert "description" in request_params["select"]
 
 
 def test_to_person_record_parses_discord_snapshot_fields() -> None:
@@ -37,6 +38,7 @@ def test_to_person_record_parses_discord_snapshot_fields() -> None:
             "cOnboardingState": "Selected",
             "cOnboarder": "michael",
             "cOnboardingUpdatedAt": "2026-05-08 10:03:00",
+            "description": "Backend engineer focused on reliable integrations.",
         }
     )
 
@@ -50,6 +52,9 @@ def test_to_person_record_parses_discord_snapshot_fields() -> None:
     assert person.onboarding_state == "Selected"
     assert person.onboarder == "michael"
     assert person.onboarding_updated_at is not None
+    assert (
+        person.profile_summary == "Backend engineer focused on reliable integrations."
+    )
 
 
 def test_email_falls_back_to_email_address_data() -> None:

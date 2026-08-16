@@ -67,6 +67,7 @@ class PersonRecord:
     timezone: str | None = None
     seniority: str | None = None
     linkedin: str | None = None
+    profile_summary: str | None = None
     skills: list[str] | None = None
     skill_attrs: dict[str, int] | None = None
     latest_resume_id: str | None = None
@@ -151,6 +152,7 @@ def upsert_person(settings: SharedSettings, person: PersonRecord) -> str:
             timezone,
             seniority,
             linkedin,
+            profile_summary,
             skills,
             skill_attrs,
             latest_resume_id,
@@ -163,7 +165,7 @@ def upsert_person(settings: SharedSettings, person: PersonRecord) -> str:
             %s, %s, %s, %s, %s,
             %s, %s, %s, %s, %s,
             %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s, %s,
             %s, %s, %s, %s, %s
         )
         ON CONFLICT (crm_contact_id) DO UPDATE
@@ -183,6 +185,7 @@ def upsert_person(settings: SharedSettings, person: PersonRecord) -> str:
             timezone = EXCLUDED.timezone,
             seniority = EXCLUDED.seniority,
             linkedin = EXCLUDED.linkedin,
+            profile_summary = EXCLUDED.profile_summary,
             skills = EXCLUDED.skills,
             skill_attrs = EXCLUDED.skill_attrs,
             latest_resume_id = EXCLUDED.latest_resume_id,
@@ -219,6 +222,7 @@ def upsert_person(settings: SharedSettings, person: PersonRecord) -> str:
                     _normalize_text(person.timezone),
                     _normalize_text(person.seniority),
                     _normalize_text(person.linkedin),
+                    _normalize_text(person.profile_summary),
                     skills,
                     Jsonb(skill_attrs),
                     _normalize_text(person.latest_resume_id),
