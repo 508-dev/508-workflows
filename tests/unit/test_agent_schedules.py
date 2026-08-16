@@ -313,9 +313,10 @@ class _FakeScheduleCursor:
         *,
         schedule_row: dict[str, Any],
         run_row: dict[str, Any],
+        schedule_rows: list[dict[str, Any]] | None = None,
     ) -> None:
         self.calls: list[tuple[str, tuple[Any, ...] | None]] = []
-        self._schedule_row = schedule_row
+        self._schedule_rows = schedule_rows or [schedule_row]
         self._run_row = run_row
         self._current_query = ""
 
@@ -333,7 +334,7 @@ class _FakeScheduleCursor:
         if "FROM agent_schedule_runs AS runs" in self._current_query:
             return [self._run_row]
         if "FROM agent_schedules" in self._current_query:
-            return [self._schedule_row]
+            return list(self._schedule_rows)
         return []
 
     def fetchone(self) -> dict[str, Any] | None:
@@ -347,6 +348,8 @@ class _FakeScheduleCursor:
 class _FakeScheduleConnection:
     def __init__(self, cursor: _FakeScheduleCursor) -> None:
         self._cursor = cursor
+        self.transaction_calls = 0
+        self.rolled_back_transactions = 0
 
     def __enter__(self) -> "_FakeScheduleConnection":
         return self
@@ -356,6 +359,23 @@ class _FakeScheduleConnection:
 
     def cursor(self, **_kwargs: object) -> _FakeScheduleCursor:
         return self._cursor
+
+    def transaction(self) -> "_FakeScheduleTransaction":
+        self.transaction_calls += 1
+        return _FakeScheduleTransaction(self)
+
+
+class _FakeScheduleTransaction:
+    def __init__(self, connection: _FakeScheduleConnection) -> None:
+        self._connection = connection
+
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, exc_type: object, *_args: object) -> None:
+        if exc_type is not None:
+            self._connection.rolled_back_transactions += 1
+        return None
 
 
 class _ManualRunCursor:
@@ -496,6 +516,96 @@ def test_due_schedule_creates_one_catch_up_then_advances_past_now(
         datetime(2026, 7, 29, 9, 0, tzinfo=timezone.utc),
         "schedule-1",
     )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("definition", None), ("cron_expression", "not cron")],
+    ids=["definition", "cron"],
+)
+def test_due_dispatch_pauses_a_corrupt_schedule_and_dispatches_its_sibling(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: object,
+) -> None:
+    """One invalid persisted schedule cannot block the remaining due rows."""
+
+    now = datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc)
+    overdue = datetime(2026, 7, 28, 9, 0, tzinfo=timezone.utc)
+    healthy_schedule = {
+        "id": "schedule-healthy",
+        "organization_id": "1000",
+        "guild_id": "1000",
+        "owner_discord_user_id": "1001",
+        "name": "Daily GitHub report",
+        "cron_expression": "0 9 * * *",
+        "timezone": "UTC",
+        "definition": AgentScheduleDefinition(
+            prompt="Report the open GitHub issues.",
+            actions=[_github_action()],
+            delivery=_delivery(),
+        ).model_dump(mode="json"),
+        "allowed_scopes": ["agent:schedule:manage", "github:issue:read"],
+        "status": "active",
+        "next_run_at": overdue,
+        "last_run_at": None,
+        "created_at": overdue,
+        "updated_at": overdue,
+    }
+    run_row = {
+        "id": "run-healthy",
+        "schedule_id": "schedule-healthy",
+        "occurrence_at": overdue,
+        "trigger": "schedule",
+        "status": "queued",
+        "job_id": None,
+        "started_at": None,
+        "finished_at": None,
+        "output": None,
+        "error": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    cursor = _FakeScheduleCursor(
+        schedule_row={},
+        schedule_rows=[
+            {
+                **healthy_schedule,
+                "id": "schedule-corrupt",
+                field: value,
+            },
+            healthy_schedule,
+        ],
+        run_row=run_row,
+    )
+    connection = _FakeScheduleConnection(cursor)
+    monkeypatch.setattr(
+        schedules,
+        "get_postgres_connection",
+        lambda _settings: connection,
+    )
+
+    runs = create_due_agent_schedule_runs(SharedSettings(), now=now)
+
+    assert [run.id for run in runs] == ["run-healthy"]
+    assert connection.transaction_calls == 2
+    assert connection.rolled_back_transactions == 1
+    pause_params = next(
+        params
+        for query, params in cursor.calls
+        if "SET status = %s" in query and params is not None
+    )
+    assert pause_params == (
+        schedules.AgentScheduleStatus.PAUSED.value,
+        "schedule-corrupt",
+    )
+    inserted_schedule_ids: list[object] = []
+    for query, params in cursor.calls:
+        if "INSERT INTO agent_schedule_runs" not in query:
+            continue
+        assert params is not None
+        inserted_schedule_ids.append(params[1])
+    assert inserted_schedule_ids == ["schedule-healthy"]
 
 
 def test_resume_of_an_active_schedule_does_not_move_its_due_occurrence(

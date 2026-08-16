@@ -12,18 +12,29 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
+import logging
 import re
 from typing import Any, Literal
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from croniter import CroniterBadCronError, CroniterBadDateError, croniter
-from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from five08.queue import get_postgres_connection
 from five08.settings import SharedSettings
+
+
+logger = logging.getLogger(__name__)
 
 
 AGENT_SCHEDULE_DEFINITION_VERSION = 1
@@ -871,45 +882,81 @@ def create_due_agent_schedule_runs(
             )
             rows = cursor.fetchall()
             for row in rows:
-                schedule = _as_schedule_record(row)
-                occurrence_at = _utc_datetime(schedule.next_run_at or normalized_now)
-                next_run_at = next_agent_schedule_occurrence(
-                    schedule.cron_expression,
-                    schedule.timezone,
-                    after=normalized_now,
-                )
-                cursor.execute(
-                    """
-                    UPDATE agent_schedules
-                    SET next_run_at = %s,
-                        updated_at = NOW()
-                    WHERE id = %s
-                    """,
-                    (next_run_at, schedule.id),
-                )
-                cursor.execute(
-                    """
-                    INSERT INTO agent_schedule_runs (
-                        id,
+                try:
+                    # The outer transaction holds all claimed row locks.  A nested
+                    # psycopg transaction is therefore a savepoint, so one bad
+                    # persisted schedule cannot poison its healthy siblings.
+                    with conn.transaction():
+                        schedule = _as_schedule_record(row)
+                        occurrence_at = _utc_datetime(
+                            schedule.next_run_at or normalized_now
+                        )
+                        next_run_at = next_agent_schedule_occurrence(
+                            schedule.cron_expression,
+                            schedule.timezone,
+                            after=normalized_now,
+                        )
+                        cursor.execute(
+                            """
+                            UPDATE agent_schedules
+                            SET next_run_at = %s,
+                                updated_at = NOW()
+                            WHERE id = %s
+                            """,
+                            (next_run_at, schedule.id),
+                        )
+                        cursor.execute(
+                            """
+                            INSERT INTO agent_schedule_runs (
+                                id,
+                                schedule_id,
+                                occurrence_at,
+                                trigger,
+                                status
+                            ) VALUES (%s, %s, %s, %s, %s)
+                            ON CONFLICT (schedule_id, occurrence_at) DO NOTHING
+                            RETURNING *
+                            """,
+                            (
+                                str(uuid4()),
+                                schedule.id,
+                                occurrence_at,
+                                AgentScheduleRunTrigger.SCHEDULE.value,
+                                AgentScheduleRunStatus.QUEUED.value,
+                            ),
+                        )
+                        run_row = cursor.fetchone()
+                        if run_row is not None:
+                            created.append(_as_schedule_run_record(run_row))
+                except (
+                    AttributeError,
+                    KeyError,
+                    TypeError,
+                    ValueError,
+                    ValidationError,
+                ) as exc:
+                    schedule_id = row.get("id")
+                    if schedule_id is None:
+                        raise
+                    # A persistent validation error cannot self-heal and, if left
+                    # active, can monopolize the due-row limit forever.  Pausing
+                    # retains the schedule for operator inspection without
+                    # letting it block later schedules.
+                    cursor.execute(
+                        """
+                        UPDATE agent_schedules
+                        SET status = %s,
+                            next_run_at = NULL,
+                            updated_at = NOW()
+                        WHERE id = %s
+                        """,
+                        (AgentScheduleStatus.PAUSED.value, schedule_id),
+                    )
+                    logger.warning(
+                        "Paused corrupt due agent schedule id=%s validation_error=%s",
                         schedule_id,
-                        occurrence_at,
-                        trigger,
-                        status
-                    ) VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (schedule_id, occurrence_at) DO NOTHING
-                    RETURNING *
-                    """,
-                    (
-                        str(uuid4()),
-                        schedule.id,
-                        occurrence_at,
-                        AgentScheduleRunTrigger.SCHEDULE.value,
-                        AgentScheduleRunStatus.QUEUED.value,
-                    ),
-                )
-                run_row = cursor.fetchone()
-                if run_row is not None:
-                    created.append(_as_schedule_run_record(run_row))
+                        type(exc).__name__,
+                    )
     return created
 
 
