@@ -402,6 +402,7 @@ _PENDING_AGENT_PLANS_LOCK_LOOP: asyncio.AbstractEventLoop | None = None
 _MAX_PENDING_AGENT_PLANS = 1000
 _MAX_PENDING_AGENT_PLANS_PER_ACTOR = 25
 _PENDING_AGENT_PLAN_CAPACITY_LOCK_KEY = "agent_pending_plans:capacity"
+_PENDING_AGENT_PLAN_CLEANUP_INTERVAL_SECONDS = 60
 _AGENT_REQUEST_RATE_LIMIT_WINDOW_SECONDS = 60.0
 _AGENT_REQUEST_RATE_LIMIT_MAX_REQUESTS = 10
 _AGENT_REQUEST_TIMESTAMPS: dict[str, list[float]] = {}
@@ -1110,6 +1111,17 @@ async def _agent_memory_cleanup_scheduler(app: FastAPI) -> None:
         except Exception:
             logger.exception("Failed scheduling expired agent memory cleanup job")
         await asyncio.sleep(interval_seconds)
+
+
+async def _pending_agent_plan_cleanup_scheduler() -> None:
+    """Remove abandoned durable confirmations even while the API is idle."""
+
+    while True:
+        try:
+            await asyncio.to_thread(_purge_expired_pending_agent_plans_durably)
+        except Exception:
+            logger.exception("Failed purging expired durable agent confirmation plans")
+        await asyncio.sleep(_PENDING_AGENT_PLAN_CLEANUP_INTERVAL_SECONDS)
 
 
 async def _email_resume_scheduler() -> None:
@@ -12158,6 +12170,24 @@ def _normalized_agent_plan_expiry(expires_at: datetime | None) -> datetime | Non
     return expires_at.astimezone(timezone.utc)
 
 
+def _purge_expired_pending_agent_plans_durably(
+    *,
+    now: datetime | None = None,
+) -> None:
+    """Delete expired confirmation payloads without waiting for another request."""
+
+    comparison_time = _normalized_agent_plan_expiry(now) or datetime.now(timezone.utc)
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                DELETE FROM agent_pending_plans
+                WHERE expires_at IS NOT NULL AND expires_at <= %s
+                """,
+                (comparison_time,),
+            )
+
+
 def _store_pending_agent_plan_durably(
     plan: AgentPlan,
     context: AgentIdentityContext,
@@ -13477,6 +13507,15 @@ async def _lifespan(app: FastAPI) -> Any:
     app.state.discord_admin_verifier = DiscordAdminVerifier(settings)
     app.state.http_client = httpx.AsyncClient(follow_redirects=False)
 
+    if app.state.postgres_migrations_ok:
+        app.state.pending_agent_plan_cleanup_task = asyncio.create_task(
+            _pending_agent_plan_cleanup_scheduler()
+        )
+    else:
+        logger.warning(
+            "Pending agent-plan cleanup disabled because Postgres migrations failed"
+        )
+
     crm_sync_skip_reason = _crm_sync_scheduler_skip_reason()
     if crm_sync_skip_reason is None:
         app.state.crm_sync_task = asyncio.create_task(_crm_sync_scheduler(app))
@@ -13524,6 +13563,12 @@ async def _lifespan(app: FastAPI) -> Any:
     try:
         yield
     finally:
+        if hasattr(app.state, "pending_agent_plan_cleanup_task"):
+            task = app.state.pending_agent_plan_cleanup_task
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
         if hasattr(app.state, "crm_sync_task"):
             task = app.state.crm_sync_task
             task.cancel()

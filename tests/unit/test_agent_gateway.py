@@ -3011,6 +3011,28 @@ def test_planner_argument_gate_keeps_memory_provenance_server_derived() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("scope_type", "visibility"),
+    [("user", "project"), ("project", "private"), ("org", "project")],
+)
+def test_planner_argument_gate_requires_visibility_matching_memory_scope(
+    scope_type: str,
+    visibility: str,
+) -> None:
+    registry = ToolRegistry()
+
+    with pytest.raises(ValueError, match="memory_visibility_must_match_scope"):
+        registry.validate_planner_action(
+            "memory_write.remember_fact",
+            {
+                "scope_type": scope_type,
+                "visibility": visibility,
+                "key": "timezone",
+                "value_json": {"text": "UTC"},
+            },
+        )
+
+
 def test_planner_requires_trusted_context_for_project_memory_reads() -> None:
     class FakePlanner:
         def plan(self, **_kwargs: object) -> AgentPlannerResult:

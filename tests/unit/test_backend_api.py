@@ -1458,6 +1458,54 @@ def test_durable_pending_agent_plan_store_uses_a_shared_capacity_guard(
     assert isinstance(insert_params[3], Jsonb)
 
 
+def test_durable_pending_agent_plan_cleanup_deletes_expired_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Expired confirmation payloads are purged without a new plan request."""
+
+    now = datetime(2026, 8, 17, 9, 0, tzinfo=timezone.utc)
+    cursor = MagicMock()
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.cursor.return_value.__enter__.return_value = cursor
+    monkeypatch.setattr(
+        api,
+        "get_postgres_connection",
+        lambda _settings: connection,
+    )
+
+    api._purge_expired_pending_agent_plans_durably(now=now)
+
+    cursor.execute.assert_called_once()
+    query, params = cursor.execute.call_args.args
+    assert "DELETE FROM agent_pending_plans" in query
+    assert "expires_at IS NOT NULL AND expires_at <= %s" in query
+    assert params == (now,)
+
+
+@pytest.mark.asyncio
+async def test_pending_agent_plan_cleanup_scheduler_purges_before_waiting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The idle cleanup loop runs a durable purge before each interval."""
+
+    purges: list[None] = []
+
+    def purge() -> None:
+        purges.append(None)
+
+    async def cancel_on_sleep(_seconds: float) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(api, "_purge_expired_pending_agent_plans_durably", purge)
+    monkeypatch.setattr(api.asyncio, "sleep", cancel_on_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await api._pending_agent_plan_cleanup_scheduler()
+
+    assert purges == [None]
+
+
 def test_durable_pending_agent_plan_claim_locks_and_consumes_one_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -379,9 +379,16 @@ class _FakeScheduleTransaction:
 
 
 class _ManualRunCursor:
-    def __init__(self, rows: list[dict[str, Any] | None]) -> None:
+    def __init__(
+        self,
+        rows: list[dict[str, Any] | None],
+        *,
+        recent_manual_run: dict[str, Any] | None = None,
+    ) -> None:
         self.calls: list[tuple[str, tuple[Any, ...] | None]] = []
         self._rows = rows
+        self._recent_manual_run = recent_manual_run
+        self._current_query = ""
 
     def __enter__(self) -> "_ManualRunCursor":
         return self
@@ -391,8 +398,23 @@ class _ManualRunCursor:
 
     def execute(self, query: str, params: tuple[Any, ...] | None = None) -> None:
         self.calls.append((query, params))
+        self._current_query = query
 
     def fetchone(self) -> dict[str, Any] | None:
+        if (
+            "FROM agent_schedule_runs" in self._current_query
+            and self._recent_manual_run is not None
+        ):
+            if (
+                "status IN ('queued', 'running')" in self._current_query
+                and self._recent_manual_run["status"]
+                not in {
+                    AgentScheduleRunStatus.QUEUED.value,
+                    AgentScheduleRunStatus.RUNNING.value,
+                }
+            ):
+                return None
+            return self._recent_manual_run
         return self._rows.pop(0)
 
 
@@ -454,6 +476,66 @@ def test_manual_run_requests_coalesce_within_the_schedule_cooldown(
     assert not any(
         "INSERT INTO agent_schedule_runs" in query for query, _ in cursor.calls
     )
+
+
+def test_manual_run_creates_a_replacement_after_a_terminal_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cooldown coalescing must not suppress a retry after a failed delivery."""
+
+    now = datetime(2026, 7, 28, 9, 0, tzinfo=timezone.utc)
+    schedule_id = "00000000-0000-0000-0000-000000000010"
+    terminal_run = {
+        "id": "00000000-0000-0000-0000-000000000011",
+        "schedule_id": schedule_id,
+        "occurrence_at": now,
+        "trigger": "manual",
+        "status": AgentScheduleRunStatus.FAILED.value,
+        "job_id": "job-1",
+        "started_at": now,
+        "finished_at": now,
+        "output": None,
+        "error": "report_delivery_outcome_unknown",
+        "delivery_status": AgentScheduleRunDeliveryStatus.UNKNOWN.value,
+        "delivery_message_id": None,
+        "delivery_claimed_at": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    replacement_run = {
+        **terminal_run,
+        "id": "00000000-0000-0000-0000-000000000012",
+        "status": AgentScheduleRunStatus.QUEUED.value,
+        "job_id": None,
+        "started_at": None,
+        "finished_at": None,
+        "error": None,
+        "delivery_status": AgentScheduleRunDeliveryStatus.PENDING.value,
+    }
+    cursor = _ManualRunCursor(
+        [{"id": schedule_id}, replacement_run],
+        recent_manual_run=terminal_run,
+    )
+    monkeypatch.setattr(
+        schedules,
+        "get_postgres_connection",
+        lambda _settings: _ManualRunConnection(cursor),
+    )
+
+    result = create_manual_agent_schedule_run(
+        SharedSettings(),
+        schedule_id=schedule_id,
+        guild_id="1000",
+        now=now,
+    )
+
+    assert result is not None
+    assert result.created is True
+    assert result.run.id == replacement_run["id"]
+    recent_query = next(
+        query for query, _ in cursor.calls if "FROM agent_schedule_runs" in query
+    )
+    assert "status IN ('queued', 'running')" in recent_query
 
 
 def test_due_schedule_creates_one_catch_up_then_advances_past_now(

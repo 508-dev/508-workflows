@@ -810,6 +810,7 @@ def create_manual_agent_schedule_run(
                 WHERE schedule_id = %s
                   AND trigger = %s
                   AND occurrence_at >= %s
+                  AND status IN ('queued', 'running')
                 ORDER BY occurrence_at DESC
                 LIMIT 1
                 """,

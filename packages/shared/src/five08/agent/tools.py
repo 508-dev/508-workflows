@@ -917,6 +917,12 @@ class ToolRegistry:
                 raise ValueError("unsupported_crm_update_fields")
         if tool_name == "crm_read.search_contacts":
             _validate_crm_contact_search_arguments(arguments)
+        if tool_name == "memory_write.remember_fact":
+            scope_type = _memory_scope_type(arguments.get("scope_type"), default="user")
+            _memory_visibility_for_scope(
+                arguments.get("visibility"),
+                scope_type=scope_type,
+            )
         if tool_name == "agent_schedule.create":
             try:
                 AgentScheduleProposal.model_validate(arguments)
@@ -1788,9 +1794,9 @@ class ToolRegistry:
             raise ValueError("Memory key is required")
         if not isinstance(value, dict) or not value:
             raise ValueError("Memory value_json object is required")
-        visibility = _memory_visibility(
+        visibility = _memory_visibility_for_scope(
             arguments.get("visibility"),
-            default="private" if scope_type == "user" else scope_type,
+            scope_type=scope_type,
         )
         fact = self.memory_store.remember_fact(
             organization_id=tenant_id,
@@ -3389,6 +3395,23 @@ def _memory_visibility(value: Any, *, default: str) -> MemoryVisibility:
     if normalized not in {"private", "project", "org"}:
         raise ValueError("Memory visibility must be private, project, or org")
     return normalized  # type: ignore[return-value]
+
+
+def _memory_visibility_for_scope(
+    value: Any,
+    *,
+    scope_type: MemoryScopeType,
+) -> MemoryVisibility:
+    expected_visibility: dict[MemoryScopeType, MemoryVisibility] = {
+        "user": "private",
+        "project": "project",
+        "org": "org",
+    }
+    expected = expected_visibility[scope_type]
+    visibility = _memory_visibility(value, default=expected)
+    if visibility != expected:
+        raise ValueError("memory_visibility_must_match_scope")
+    return visibility
 
 
 def _memory_scope_id(
