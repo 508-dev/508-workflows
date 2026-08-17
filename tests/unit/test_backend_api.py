@@ -235,6 +235,31 @@ def test_lifespan_keeps_health_degraded_when_migrations_fail(
     assert payload["postgres_migrations_ok"] is False
 
 
+def test_lifespan_starts_pending_agent_plan_cleanup_after_migrations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Idle confirmation cleanup starts independently of schedule dispatch."""
+
+    cleanup_scheduler = AsyncMock()
+    monkeypatch.setattr(api, "get_redis_connection", lambda _settings: _HealthyRedis())
+    monkeypatch.setattr(api, "run_job_migrations", Mock())
+    monkeypatch.setattr(
+        api,
+        "get_postgres_connection",
+        lambda _settings: _FakePostgresConnection(),
+    )
+    monkeypatch.setattr(api, "build_queue_client", Mock(return_value=Mock()))
+    monkeypatch.setattr(api, "_pending_agent_plan_cleanup_scheduler", cleanup_scheduler)
+    monkeypatch.setattr(api.settings, "crm_sync_enabled", False)
+    monkeypatch.setattr(api.settings, "newsletter_sync_enabled", False)
+    monkeypatch.setattr(api.settings, "email_resume_intake_enabled", False)
+    monkeypatch.setattr(api.settings, "agent_schedule_enabled", False)
+    monkeypatch.setattr(api.settings, "agent_memory_cleanup_enabled", False)
+
+    with TestClient(api.create_app(run_lifespan=True)):
+        cleanup_scheduler.assert_called_once_with()
+
+
 async def test_postgres_health_handles_missing_connection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
