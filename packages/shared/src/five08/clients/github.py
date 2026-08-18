@@ -34,6 +34,7 @@ class GitHubTokenProvider(Protocol):
         *,
         repositories: Sequence[str] | None = None,
         permissions: Mapping[str, str] | None = None,
+        deadline_monotonic: float | None = None,
     ) -> str:
         """Return a token for the requested repository and permission scope."""
 
@@ -63,8 +64,9 @@ class StaticGitHubTokenProvider:
         *,
         repositories: Sequence[str] | None = None,
         permissions: Mapping[str, str] | None = None,
+        deadline_monotonic: float | None = None,
     ) -> str:
-        del repositories, permissions
+        del repositories, permissions, deadline_monotonic
         return self._token
 
     def invalidate(
@@ -110,6 +112,7 @@ class GitHubAppTokenProvider:
         *,
         repositories: Sequence[str] | None = None,
         permissions: Mapping[str, str] | None = None,
+        deadline_monotonic: float | None = None,
     ) -> str:
         """Return a cached valid token or mint one restricted to this operation."""
 
@@ -130,7 +133,11 @@ class GitHubAppTokenProvider:
             try:
                 timeout_seconds = clamp_timeout_seconds(
                     self.timeout_seconds,
-                    deadline_monotonic=self.deadline_monotonic,
+                    deadline_monotonic=(
+                        deadline_monotonic
+                        if deadline_monotonic is not None
+                        else self.deadline_monotonic
+                    ),
                 )
             except DeadlineExceeded as exc:
                 raise GitHubAPIError("GitHub token request deadline exceeded") from exc
@@ -523,6 +530,7 @@ class GitHubClient:
             token = self.token_provider.get_token(
                 repositories=repositories,
                 permissions=permissions,
+                deadline_monotonic=self.deadline_monotonic,
             )
             try:
                 timeout_seconds = clamp_timeout_seconds(

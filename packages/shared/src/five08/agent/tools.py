@@ -14,12 +14,17 @@ from typing import Any
 from psycopg import connect
 from psycopg.rows import dict_row
 
-from five08.agent.memory import InMemoryMemoryStore, MemoryStore
+from five08.agent.memory import (
+    InMemoryMemoryStore,
+    MemoryStore,
+    validate_memory_value_for_persistence,
+)
 from five08.agent.models import (
     MemoryFact,
     MemoryScopeType,
     MemoryVisibility,
     RiskLevel,
+    validate_memory_fact_key,
 )
 from five08.agent.privacy import contains_private_agent_identifier
 from five08.agent.schedules import AgentScheduleProposal
@@ -32,6 +37,8 @@ from five08.agent.web import (
     WebSearchProvider,
     validate_public_https_url,
     validate_public_https_url_shape,
+    validate_web_search_limit,
+    validate_web_search_query,
 )
 from five08.clients.authentik import AuthentikAPIError, AuthentikClient
 from five08.clients.docuseal import create_member_agreement_submission
@@ -923,6 +930,7 @@ class ToolRegistry:
                 arguments.get("visibility"),
                 scope_type=scope_type,
             )
+            _validate_memory_write_arguments(arguments)
         if tool_name == "agent_schedule.create":
             try:
                 AgentScheduleProposal.model_validate(arguments)
@@ -931,7 +939,7 @@ class ToolRegistry:
         if tool_name in _ERP_READ_TOOL_NAMES:
             _validate_erp_read_arguments(tool_name, arguments)
         if tool_name == "web_read.search":
-            _validate_public_web_query(str(arguments.get("query") or ""))
+            _validate_planner_web_search_arguments(arguments)
         if tool_name == "web_read.extract":
             try:
                 validate_public_https_url_shape(str(arguments.get("url") or ""))
@@ -1788,12 +1796,11 @@ class ToolRegistry:
             raise ValueError(
                 "Org memory writes are disabled until scoped org memory reads are available"
             )
-        key = str(arguments.get("key") or "").strip()
+        key = validate_memory_fact_key(arguments.get("key"))
         value = arguments.get("value_json")
-        if not key:
-            raise ValueError("Memory key is required")
         if not isinstance(value, dict) or not value:
             raise ValueError("Memory value_json object is required")
+        validate_memory_value_for_persistence(value)
         visibility = _memory_visibility_for_scope(
             arguments.get("visibility"),
             scope_type=scope_type,
@@ -1860,17 +1867,6 @@ class ToolRegistry:
             assert installation_id is not None
             assert private_key is not None
             provider_config = (client_id, installation_id, private_key)
-            if deadline_monotonic is not None:
-                provider = GitHubAppTokenProvider(
-                    client_id=client_id,
-                    installation_id=installation_id,
-                    private_key=private_key.replace("\\n", "\n"),
-                    deadline_monotonic=deadline_monotonic,
-                )
-                return GitHubClient(
-                    token_provider=provider,
-                    deadline_monotonic=deadline_monotonic,
-                )
             if (
                 self._github_app_provider is None
                 or self._github_app_provider_config != provider_config
@@ -3052,6 +3048,31 @@ def _validate_public_web_query(query: str) -> None:
         raise PermissionError(
             "Public web search queries cannot contain internal record identifiers"
         )
+
+
+def _validate_memory_write_arguments(arguments: dict[str, Any]) -> None:
+    """Reject values a memory store would deterministically refuse on confirm."""
+
+    validate_memory_fact_key(arguments.get("key"))
+    value_json = arguments.get("value_json")
+    if not isinstance(value_json, dict) or not value_json:
+        raise ValueError("Memory value_json object is required")
+    validate_memory_value_for_persistence(value_json)
+
+
+def _validate_planner_web_search_arguments(arguments: dict[str, Any]) -> None:
+    """Apply web-provider bounds before a model proposal becomes a schedule."""
+
+    query = arguments.get("query")
+    if not isinstance(query, str):
+        raise ValueError("Web search query must be text")
+    try:
+        normalized_query = validate_web_search_query(query)
+        _validate_public_web_query(normalized_query)
+        if "limit" in arguments:
+            validate_web_search_limit(arguments["limit"])
+    except WebResearchValidationError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 def _validate_erp_read_arguments(

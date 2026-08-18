@@ -39,6 +39,22 @@ MAX_MEMORY_VALUE_JSON_BYTES = 8_192
 MAX_MEMORY_VALUE_JSON_DEPTH = 4
 MAX_MEMORY_VALUE_JSON_ITEMS = 50
 MAX_MEMORY_VALUE_JSON_STRING_LENGTH = 2_048
+MAX_MEMORY_FACT_KEY_CHARS = 128
+
+
+def validate_memory_fact_key(value: object) -> str:
+    """Normalize a durable-memory key before it reaches a store."""
+
+    if not isinstance(value, str):
+        raise ValueError("Memory key must be text")
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError("Memory key is required")
+    if len(normalized) > MAX_MEMORY_FACT_KEY_CHARS:
+        raise ValueError(
+            f"Memory key must be at most {MAX_MEMORY_FACT_KEY_CHARS} characters"
+        )
+    return normalized
 
 
 def validate_memory_value_json(value_json: dict[str, Any]) -> dict[str, Any]:
@@ -146,7 +162,7 @@ class MemoryFact(BaseModel):
     organization_id: str = Field(min_length=1, max_length=128)
     scope_type: MemoryScopeType
     scope_id: str
-    key: str = Field(min_length=1, max_length=128)
+    key: str = Field(min_length=1, max_length=MAX_MEMORY_FACT_KEY_CHARS)
     value_json: dict[str, Any]
     visibility: MemoryVisibility
     source_type: AgentContextSourceType
@@ -167,6 +183,11 @@ class MemoryFact(BaseModel):
         if not normalized:
             raise ValueError("organization_id is required")
         return normalized
+
+    @field_validator("key", mode="before")
+    @classmethod
+    def _normalize_key(cls, value: object) -> str:
+        return validate_memory_fact_key(value)
 
     @field_validator("value_json")
     @classmethod
@@ -285,6 +306,17 @@ class AgentExecutionResult(BaseModel):
     error: str | None = None
 
 
+class AgentResponsePlannerMetadata(BaseModel):
+    """Audit-only planner selection retained when a response has no action plan."""
+
+    operation_id: str | None = None
+    intent: str | None = None
+    planner: Literal["deterministic_regex", "live_model"]
+    model_tier: ModelTier
+    model: AgentModelSelection
+    context_sources: list[AgentContextSource] = Field(default_factory=list)
+
+
 class AgentResponse(BaseModel):
     """Gateway response returned to Discord clients."""
 
@@ -300,3 +332,10 @@ class AgentResponse(BaseModel):
     results: list[AgentExecutionResult] = Field(default_factory=list)
     message: str
     clarification_question: str | None = None
+    # Direct model answers have no action plan, but the API still needs the
+    # model selection for its audit record. This stays out of the client
+    # response because it is operational metadata rather than chat content.
+    planner_metadata: AgentResponsePlannerMetadata | None = Field(
+        default=None,
+        exclude=True,
+    )

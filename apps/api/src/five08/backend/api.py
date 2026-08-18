@@ -2260,9 +2260,24 @@ def _sanitize_agent_improvement_message(message: str) -> str:
     return sanitized[:256]
 
 
+_MEMORY_WRITE_AUDIT_INTENT_RE = re.compile(
+    r"\b(?:remember|forget)\b"
+    r"|\b(?:save|store)\s+(?:(?:that|this|my|our)\b|(?:a|an)\s+(?:memory|fact)\b)",
+    re.IGNORECASE,
+)
+
+
+def _is_memory_write_audit_request(message: str) -> bool:
+    """Fail closed when an early audit exit precedes memory-action planning."""
+
+    return bool(_MEMORY_WRITE_AUDIT_INTENT_RE.search(message))
+
+
 def _sanitize_agent_audit_message(message: str) -> str:
     """Keep credentials and other high-risk values out of agent audit records."""
 
+    if _is_memory_write_audit_request(message):
+        return "[memory write request redacted]"
     if contains_sensitive_memory_text(message):
         return "[sensitive agent request redacted]"
     return _sanitize_agent_improvement_message(message)
@@ -2273,32 +2288,39 @@ def _agent_request_audit_metadata(
     message: str,
     response: AgentResponse,
 ) -> dict[str, Any]:
+    plan = response.plan
+    planner_metadata = plan or response.planner_metadata
     metadata: dict[str, Any] = {
         "status": response.status,
-        "intent": response.plan.intent if response.plan else None,
-        "planner": response.plan.planner if response.plan else None,
-        "operation_id": response.plan.operation_id if response.plan else None,
-        "model": response.plan.model.model if response.plan else None,
-        "model_tier": response.plan.model_tier if response.plan else None,
+        "intent": planner_metadata.intent if planner_metadata is not None else None,
+        "planner": planner_metadata.planner if planner_metadata is not None else None,
+        "operation_id": (
+            planner_metadata.operation_id if planner_metadata is not None else None
+        ),
+        "model": (
+            planner_metadata.model.model if planner_metadata is not None else None
+        ),
+        "model_tier": (
+            planner_metadata.model_tier if planner_metadata is not None else None
+        ),
         "model_source_tier": (
-            response.plan.model.source_tier if response.plan else None
+            planner_metadata.model.source_tier if planner_metadata is not None else None
         ),
         "action_names": (
-            [action.tool_name for action in response.plan.actions]
-            if response.plan
-            else []
+            [action.tool_name for action in plan.actions] if plan is not None else []
         ),
         "tool_outcomes": [
             {"tool_name": result.tool_name, "status": result.status}
             for result in response.results
         ],
-        "context_sources": (
-            [source.model_dump(mode="json") for source in response.plan.context_sources]
-            if response.plan
-            else []
-        ),
+        "context_sources": [
+            source.model_dump(mode="json")
+            for source in (
+                planner_metadata.context_sources if planner_metadata is not None else []
+            )
+        ],
         "requires_confirmation": (
-            response.plan.requires_confirmation if response.plan else False
+            plan.requires_confirmation if plan is not None else False
         ),
     }
     if (
@@ -2314,8 +2336,8 @@ def _agent_request_audit_metadata(
             }
         )
         return metadata
-    if response.plan is not None and any(
-        action.tool_name.startswith("memory_write.") for action in response.plan.actions
+    if plan is not None and any(
+        action.tool_name.startswith("memory_write.") for action in plan.actions
     ):
         # A forgotten fact must not remain recoverable from a second durable
         # audit copy. Keep the action name/outcome above, but never its value.
@@ -11811,6 +11833,7 @@ async def dashboard_agent_schedules_handler(request: Request) -> JSONResponse:
             list_agent_schedules,
             settings,
             guild_id=guild_id,
+            include_archived=True,
         )
         delivery_attention = await asyncio.to_thread(
             list_stale_agent_schedule_run_delivery_claims,

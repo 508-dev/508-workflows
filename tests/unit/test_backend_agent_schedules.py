@@ -1879,7 +1879,8 @@ async def test_dashboard_lists_stale_delivery_claims_for_operator_attention(
     stale_claims = Mock(return_value=[stale_run])
     monkeypatch.setattr(api, "_dashboard_session_or_error", dashboard_session)
     monkeypatch.setattr(api, "_configured_agent_schedule_guild_id", lambda: "1000")
-    monkeypatch.setattr(api, "list_agent_schedules", Mock(return_value=[]))
+    list_schedules = Mock(return_value=[])
+    monkeypatch.setattr(api, "list_agent_schedules", list_schedules)
     monkeypatch.setattr(
         api,
         "list_stale_agent_schedule_run_delivery_claims",
@@ -1894,6 +1895,10 @@ async def test_dashboard_lists_stale_delivery_claims_for_operator_attention(
     payload = json.loads(response.body)
     assert payload["delivery_attention"][0]["id"] == stale_run.id
     assert payload["delivery_attention"][0]["delivery_status"] == "claimed"
+    assert list_schedules.call_args.kwargs == {
+        "guild_id": "1000",
+        "include_archived": True,
+    }
     assert stale_claims.call_args.kwargs["guild_id"] == "1000"
 
 

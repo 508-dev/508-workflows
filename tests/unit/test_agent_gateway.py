@@ -2867,6 +2867,11 @@ def test_model_only_answer_is_limited_to_safe_chat_and_never_impersonation() -> 
 
     assert safe_response.status == "executed"
     assert safe_response.message == "A concise answer."
+    assert safe_response.planner_metadata is not None
+    assert safe_response.planner_metadata.intent == "general_question"
+    assert safe_response.planner_metadata.planner == "live_model"
+    assert safe_response.planner_metadata.model.model == "gpt-4.1-mini"
+    assert "planner_metadata" not in safe_response.model_dump(mode="json")
     assert write_like_response.status == "requires_confirmation"
     assert impersonated_response.status == "denied"
     assert "Impersonated" in impersonated_response.message
@@ -3031,6 +3036,77 @@ def test_planner_argument_gate_requires_visibility_matching_memory_scope(
                 "value_json": {"text": "UTC"},
             },
         )
+
+
+@pytest.mark.parametrize(
+    ("key", "value_json", "error"),
+    [
+        ("k" * 129, {"text": "UTC"}, "at most 128 characters"),
+        ("timezone", {"text": "x" * 2_049}, "overlong string"),
+        (
+            "timezone",
+            {"api_key": "not-even-a-real-key"},
+            "secrets, credentials, payment data",
+        ),
+    ],
+)
+def test_planner_argument_gate_validates_memory_values_before_confirmation(
+    key: str,
+    value_json: dict[str, str],
+    error: str,
+) -> None:
+    registry = ToolRegistry()
+
+    with pytest.raises(ValueError, match=error):
+        registry.validate_planner_action(
+            "memory_write.remember_fact",
+            {
+                "scope_type": "user",
+                "visibility": "private",
+                "key": key,
+                "value_json": value_json,
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    ("query", "limit", "error"),
+    [
+        ("x" * 401, 5, "at most 400 characters"),
+        (" ".join(["word"] * 51), 5, "at most 50 words"),
+        ("current grants", 11, "between 1 and 10"),
+    ],
+)
+def test_planner_argument_gate_rejects_out_of_bounds_web_searches(
+    query: str,
+    limit: int,
+    error: str,
+) -> None:
+    registry = ToolRegistry()
+
+    with pytest.raises(ValueError, match=error):
+        registry.validate_planner_action(
+            "web_read.search",
+            {"query": query, "limit": limit},
+        )
+
+
+def test_deadline_bound_github_clients_share_the_app_token_provider() -> None:
+    registry = ToolRegistry(
+        runtime_config=ToolRuntimeConfig(
+            github_app_client_id="app-client-id",
+            github_app_installation_id="123",
+            github_app_private_key="private-key",
+        )
+    )
+
+    first = registry._github_client(deadline_monotonic=100.0)
+    second = registry._github_client(deadline_monotonic=110.0)
+
+    assert first.token_provider is second.token_provider
+    assert first.token_provider is registry._github_app_provider
+    assert first.deadline_monotonic == 100.0
+    assert second.deadline_monotonic == 110.0
 
 
 def test_planner_requires_trusted_context_for_project_memory_reads() -> None:

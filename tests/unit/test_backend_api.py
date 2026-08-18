@@ -22,6 +22,7 @@ from five08.agent import (
     AgentOrchestrator,
     AgentPlan,
     AgentResponse,
+    AgentResponsePlannerMetadata,
     AgentToolAction,
     InMemoryTaskStore,
     ToolRegistry,
@@ -1269,6 +1270,78 @@ def test_agent_request_audit_redacts_memory_write_values() -> None:
 
     assert metadata["message_sanitized"] == "[memory write request redacted]"
     assert "Private Street" not in str(metadata)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Remember that my accommodation is 123 Private Street.",
+        "Forget memory fact fact-12345678",
+        "Store my accommodation preference for later.",
+    ],
+)
+def test_agent_audit_sanitizer_redacts_memory_write_intent_before_planning(
+    message: str,
+) -> None:
+    assert api._sanitize_agent_audit_message(message) == (
+        "[memory write request redacted]"
+    )
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_memory_request_redacts_preplanning_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The rate limiter must not retain an ordinary memory value in its audit."""
+
+    monkeypatch.setattr(api.settings, "environment", "test")
+    monkeypatch.setattr(api.settings, "api_shared_secret", "api-secret")
+    monkeypatch.setattr(api, "_agent_request_rate_limited", lambda _user_id: True)
+    audit = Mock()
+    monkeypatch.setattr(api, "_schedule_agent_audit_event", audit)
+    request = _agent_request_with_secret(
+        "api-secret",
+        body=json.dumps(
+            {
+                "message": "Remember that my accommodation is 123 Private Street.",
+                "context": {"discord_user_id": "123"},
+            }
+        ).encode(),
+    )
+
+    response = await api.agent_request_handler(request)
+
+    assert response.status_code == 429
+    assert audit.call_args.kwargs["metadata"]["message_sanitized"] == (
+        "[memory write request redacted]"
+    )
+
+
+def test_agent_request_audit_keeps_direct_answer_planner_metadata() -> None:
+    model = AgentModelConfig().resolve("fast")
+    response = AgentResponse(
+        status="executed",
+        message="A concise answer.",
+        planner_metadata=AgentResponsePlannerMetadata(
+            operation_id="op-123",
+            intent="general_question",
+            planner="live_model",
+            model_tier=model.tier,
+            model=model,
+        ),
+    )
+
+    metadata = api._agent_request_audit_metadata(
+        message="What is a cooperative?",
+        response=response,
+    )
+
+    assert metadata["intent"] == "general_question"
+    assert metadata["planner"] == "live_model"
+    assert metadata["operation_id"] == "op-123"
+    assert metadata["model"] == model.model
+    assert metadata["model_tier"] == "fast"
+    assert "planner_metadata" not in response.model_dump(mode="json")
 
 
 def test_agent_request_rejects_oversized_message(

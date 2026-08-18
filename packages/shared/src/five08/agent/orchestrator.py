@@ -17,6 +17,7 @@ from five08.agent.models import (
     AgentModelSelection,
     AgentPlan,
     AgentResponse,
+    AgentResponsePlannerMetadata,
     AgentToolAction,
     MemoryVisibility,
     ModelTier,
@@ -660,6 +661,17 @@ class AgentOrchestrator:
             return AgentResponse(
                 status="executed",
                 message=draft.answer or "",
+                planner_metadata=AgentResponsePlannerMetadata(
+                    operation_id=context.operation_id,
+                    intent=draft.intent or "direct_answer",
+                    planner="live_model",
+                    model_tier=result.model.tier,
+                    model=result.model,
+                    context_sources=context_sources_for_snippets(
+                        context=context,
+                        snippets=context.context_snippets,
+                    ),
+                ),
             )
 
         actions = [

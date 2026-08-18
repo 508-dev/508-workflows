@@ -619,6 +619,18 @@ def _normalize_limit(limit: int) -> int:
     return limit
 
 
+def validate_web_search_query(query: str) -> str:
+    """Validate a planner-proposed search query without contacting a provider."""
+
+    return _normalize_query(query)
+
+
+def validate_web_search_limit(limit: int) -> int:
+    """Validate a planner-proposed result cap without contacting a provider."""
+
+    return _normalize_limit(limit)
+
+
 def _optional_bounded_text(value: str | None, *, max_chars: int) -> str | None:
     if value is None:
         return None

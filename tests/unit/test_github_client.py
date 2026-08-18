@@ -44,6 +44,38 @@ def test_github_client_clamps_timeout_to_execution_deadline(
     assert mock_request.call_args.kwargs["timeout"] == 5.0
 
 
+def test_github_client_passes_its_deadline_to_the_token_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Provider:
+        def __init__(self) -> None:
+            self.deadlines: list[float | None] = []
+
+        def get_token(
+            self,
+            *,
+            repositories: object = None,
+            permissions: object = None,
+            deadline_monotonic: float | None = None,
+        ) -> str:
+            del repositories, permissions
+            self.deadlines.append(deadline_monotonic)
+            return "token"
+
+        def invalidate(self, **_kwargs: object) -> None:
+            return None
+
+    provider = Provider()
+    monkeypatch.setattr(deadlines, "monotonic", lambda: 100.0)
+    client = GitHubClient(token_provider=provider, deadline_monotonic=105.0)
+
+    with patch("five08.clients.github.requests.request") as mock_request:
+        mock_request.return_value = _FakeResponse()
+        client.get_issue(repository="508-dev/508-workflows", issue_number=1)
+
+    assert provider.deadlines == [105.0]
+
+
 class _Response:
     def __init__(self, *, status_code: int, payload: object) -> None:
         self.status_code = status_code
@@ -122,7 +154,9 @@ def test_github_client_refreshes_provider_once_after_unauthorized_response(
             *,
             repositories: object = None,
             permissions: object = None,
+            deadline_monotonic: float | None = None,
         ) -> str:
+            del deadline_monotonic
             self.requests.append((repositories, permissions))
             return self.tokens.pop(0)
 
@@ -173,7 +207,9 @@ def test_github_projects_use_organization_projects_permission(
             *,
             repositories: object = None,
             permissions: object = None,
+            deadline_monotonic: float | None = None,
         ) -> str:
+            del deadline_monotonic
             self.requests.append((repositories, permissions))
             return "token"
 
