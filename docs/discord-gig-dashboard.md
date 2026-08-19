@@ -46,6 +46,13 @@ The default is `part_time`. Forum tags on a post can override the channel
 default, so a part-time channel can still carry posts that are open to full-time
 candidates.
 
+`#unqualified-leads` is a separate holding forum for externally sourced leads.
+It is configured by `DISCORD_UNQUALIFIED_LEADS_FORUM_CHANNEL`, which defaults to
+`unqualified-leads` and accepts either the exact forum name or its Discord ID.
+Do not register this forum with `/register-jobs-channel` or include it in
+`DISCORD_DEFAULT_JOB_FORUM_CHANNELS`: staging posts there intentionally create
+neither a gig record nor automatic candidate matches.
+
 ## Dashboard Access
 
 `GET /dashboard/api/gigs` returns only `pending_gig` rows.
@@ -63,6 +70,14 @@ The Gigs page can scrape employer posts from Hacker News “Who is hiring?”
 threads into a review queue. Each lead shows an explicit employment type such
 as `Full-time`, `Part-time / contract`, or `Full-time or part-time / contract`,
 plus whether the result came from the LLM classifier or keyword fallback.
+
+**Post to #unqualified-leads** is the default screening path: it creates a
+holding thread without matching candidates. It is optional, however; an
+operator may **Qualify lead** directly from the dashboard and then **Promote to
+Discord**. Promotion always creates a fresh thread in a registered gigs forum.
+Discord forum threads cannot be moved between forums, so a staged lead is
+reposted from its source content; only the promoted thread becomes a dashboard
+gig and is eligible for automatic matching.
 
 The Leads tab retains the latest scrape result so operators can confirm that a
 monthly thread was found. It links to the discovered HN thread and reports HN's

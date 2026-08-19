@@ -3973,7 +3973,7 @@ def test_dashboard_job_lead_scrape_status_reports_not_run(client: TestClient) ->
     }
 
 
-def test_dashboard_review_job_lead_approves_with_discord_reviewer(
+def test_dashboard_review_job_lead_approves_without_holding_thread(
     client: TestClient,
 ) -> None:
     session = _dashboard_write_session()
@@ -4226,6 +4226,53 @@ def test_dashboard_sync_job_leads_rejects_unsupported_source(
     mock_enqueue.assert_not_called()
 
 
+def test_dashboard_stage_job_lead_posts_to_holding_forum(
+    client: TestClient,
+) -> None:
+    session = _dashboard_write_session()
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._stage_job_lead_to_discord",
+            new_callable=AsyncMock,
+            return_value=(
+                {
+                    "status": "staged",
+                    "lead_id": "lead-1",
+                    "guild_id": "guild-1",
+                    "channel_id": "unqualified-1",
+                    "thread_id": "thread-unqualified-1",
+                },
+                200,
+            ),
+        ) as mock_stage,
+        patch("five08.backend.api.insert_audit_event") as mock_insert,
+    ):
+        response = client.post("/dashboard/api/gig-leads/lead-1/stage", json={})
+
+    assert response.status_code == 200
+    assert response.json()["thread_id"] == "thread-unqualified-1"
+    assert mock_stage.await_count == 1
+    assert mock_stage.await_args.kwargs == {
+        "lead_id": "lead-1",
+        "reviewer_discord_user_id": "steering-1",
+    }
+    audit_payload = mock_insert.call_args.args[1]
+    assert audit_payload.action == "job_leads.stage"
+    assert audit_payload.resource_id == "lead-1"
+    assert audit_payload.metadata == {
+        "lead_id": "lead-1",
+        "guild_id": "guild-1",
+        "channel_id": "unqualified-1",
+        "thread_id": "thread-unqualified-1",
+    }
+
+
 def test_dashboard_post_job_lead_posts_approved_lead_to_discord(
     client: TestClient,
 ) -> None:
@@ -4275,7 +4322,7 @@ def test_dashboard_post_job_lead_posts_approved_lead_to_discord(
     }
     audit_payload = mock_insert.call_args.args[1]
     assert audit_payload.source == api.AuditSource.ADMIN_DASHBOARD
-    assert audit_payload.action == "job_leads.post"
+    assert audit_payload.action == "job_leads.promote"
     assert audit_payload.result == api.AuditResult.SUCCESS
     assert audit_payload.actor_provider == api.ActorProvider.DISCORD
     assert audit_payload.actor_subject == "steering-1"
@@ -4334,7 +4381,7 @@ async def test_post_job_lead_to_discord_maps_bot_auth_failure(
 
     assert status_code == 502
     assert payload == {"error": "bot_auth_failed"}
-    assert http_client.post.await_args.kwargs["json"]["approve_before_post"] is True
+    assert "approve_before_post" not in http_client.post.await_args.kwargs["json"]
     assert http_client.post.await_args.kwargs["json"]["engagement_status"] == "lead"
 
 

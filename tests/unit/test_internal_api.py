@@ -14,6 +14,7 @@ from five08.discord_bot.utils.internal_api import (
     InternalAPIRoutes,
     MemberAgreementRoleRequest,
     PostJobLeadRequest,
+    StageJobLeadRequest,
 )
 
 
@@ -144,7 +145,6 @@ class TestInternalAPIRoutes:
                 reviewer_discord_user_id="admin-1",
                 channel_id="channel-1",
                 tags="Remote",
-                approve_before_post=True,
                 engagement_status="recruiting",
             )
         )
@@ -156,9 +156,39 @@ class TestInternalAPIRoutes:
             reviewer_discord_user_id="admin-1",
             channel_id="channel-1",
             tags="Remote",
-            approve_before_post=True,
             engagement_status=EngagementStatus.RECRUITING,
-            reason="Dashboard approved job lead",
+            reason="Dashboard promoted qualified job lead",
+        )
+
+    @pytest.mark.asyncio
+    async def test_stage_job_lead_delegates_to_jobs_cog(self, internal_api_routes):
+        """Internal lead staging should reuse the jobs cog holding-forum flow."""
+        jobs_cog = Mock()
+        jobs_cog.stage_job_lead_to_discord = AsyncMock(
+            return_value=(
+                {
+                    "status": "staged",
+                    "lead_id": "lead-1",
+                    "thread_id": "thread-1",
+                },
+                200,
+            )
+        )
+        internal_api_routes.bot.get_cog.return_value = jobs_cog
+
+        result, status_code = await internal_api_routes._stage_job_lead(
+            StageJobLeadRequest(
+                lead_id="lead-1",
+                reviewer_discord_user_id="admin-1",
+            )
+        )
+
+        assert status_code == 200
+        assert result["thread_id"] == "thread-1"
+        jobs_cog.stage_job_lead_to_discord.assert_awaited_once_with(
+            lead_id="lead-1",
+            reviewer_discord_user_id="admin-1",
+            reason="Dashboard staged unqualified job lead",
         )
 
     @pytest.mark.asyncio

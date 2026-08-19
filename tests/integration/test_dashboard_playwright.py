@@ -981,13 +981,22 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             ).to_have_attribute("aria-expanded", "true")
             expect(lead_comment).not_to_have_class(re.compile("max-h-20"))
             expect(lead_comment).to_contain_text("small API integration")
+            expect(
+                page.get_by_role("button", name="Post to #unqualified-leads")
+            ).to_be_visible()
+            page.get_by_role("button", name="Qualify lead").click()
+            assert gig_lead_review_requested.wait(timeout=5)
+            assert gig_lead_review_body["status"] == "approved"
+            page.get_by_text("Qualified lead").wait_for()
             page.get_by_label("Post as").select_option("recruiting")
             expect(page.get_by_label("Post as")).to_have_value("recruiting")
-            page.get_by_role("button", name="Post to Discord").click()
+            page.get_by_role("button", name="Promote to Discord").click()
             assert gig_lead_post_requested.wait(timeout=5)
             assert gig_lead_post_body["engagement_status"] == "recruiting"
             assert gig_lead_post_body["tags"] == "Contract,Remote"
-            page.get_by_text("Posted lead to Discord; staying on Leads").wait_for()
+            page.get_by_text(
+                "Promoted qualified lead to Discord; staying on Leads"
+            ).wait_for()
             expect(page).to_have_url(f"{dashboard_server}/dashboard/gigs#leads")
             expect(page.locator("#gigLeadsTab")).to_have_attribute(
                 "aria-pressed", "true"
@@ -1010,6 +1019,8 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
 
             job_leads_payload[0]["status"] = "rejected"
             page.locator("#refreshGigLeads").click()
+            gig_lead_review_requested.clear()
+            gig_lead_review_body.clear()
             page.get_by_role("button", name="Restore to pending").click()
             assert gig_lead_review_requested.wait(timeout=5)
             assert gig_lead_review_body["status"] == "pending"

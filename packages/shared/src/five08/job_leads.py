@@ -80,6 +80,10 @@ class JobLead:
     created_at: datetime
     updated_at: datetime
     engagement_id: str | None = None
+    staged_discord_guild_id: str | None = None
+    staged_discord_channel_id: str | None = None
+    staged_discord_thread_id: str | None = None
+    staged_at: datetime | None = None
 
 
 def job_lead_classification(lead: JobLead | dict[str, Any]) -> dict[str, Any]:
@@ -181,6 +185,10 @@ def job_lead_display_payload(lead: JobLead | dict[str, Any]) -> dict[str, Any]:
             "posted_at": lead.posted_at,
             "created_at": lead.created_at,
             "updated_at": lead.updated_at,
+            "staged_discord_guild_id": lead.staged_discord_guild_id,
+            "staged_discord_channel_id": lead.staged_discord_channel_id,
+            "staged_discord_thread_id": lead.staged_discord_thread_id,
+            "staged_at": lead.staged_at,
         }
     raw_engagement_id = (
         lead.get("engagement_id") if isinstance(lead, dict) else lead.engagement_id
@@ -244,6 +252,16 @@ def _as_lead(row: dict[str, Any]) -> JobLead:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         engagement_id=str(row.get("engagement_id") or "").strip() or None,
+        staged_discord_guild_id=(
+            str(row.get("staged_discord_guild_id") or "").strip() or None
+        ),
+        staged_discord_channel_id=(
+            str(row.get("staged_discord_channel_id") or "").strip() or None
+        ),
+        staged_discord_thread_id=(
+            str(row.get("staged_discord_thread_id") or "").strip() or None
+        ),
+        staged_at=row.get("staged_at"),
     )
 
 
@@ -471,7 +489,7 @@ def review_job_lead(
     status: JobLeadStatus | str,
     reviewer_discord_user_id: str,
 ) -> JobLead | None:
-    """Review a lead or restore a rejected lead to the pending queue."""
+    """Qualify a lead, reject a lead, or restore it to the pending queue."""
     try:
         normalized_status = (
             status
@@ -523,6 +541,38 @@ def review_job_lead(
                     existing.id,
                     allowed_source_statuses,
                 ),
+            )
+            row = cursor.fetchone()
+    return _as_lead(row) if row is not None else None
+
+
+def mark_job_lead_staged(
+    settings: SharedSettings,
+    *,
+    lead_id: str,
+    guild_id: str,
+    channel_id: str,
+    thread_id: str,
+) -> JobLead | None:
+    """Record a pending lead's unqualified Discord holding thread."""
+    query = """
+        UPDATE job_leads
+        SET
+            staged_discord_guild_id = %s,
+            staged_discord_channel_id = %s,
+            staged_discord_thread_id = %s,
+            staged_at = NOW(),
+            updated_at = NOW()
+        WHERE id = %s
+          AND status = 'pending'
+          AND staged_discord_thread_id IS NULL
+        RETURNING *
+    """
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                query,
+                (guild_id, channel_id, thread_id, lead_id),
             )
             row = cursor.fetchone()
     return _as_lead(row) if row is not None else None

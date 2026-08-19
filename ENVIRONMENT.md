@@ -159,6 +159,7 @@ Pydantic import errors.
 - `Optional`: `BACKEND_API_BASE_URL` (default: `http://127.0.0.1:8090`; `./scripts/dev.sh` overrides it to the worktree web/API port, Compose injects `http://web:8090`)
 - `Optional`: `HEALTHCHECK_PORT` (host-run `./scripts/dev.sh` ignores `.env` for this key and defaults to `CONDUCTOR_PORT + 6` inside Conductor, otherwise a deterministic per-worktree value near `30000 + WORKTREE_ENV_SLOT`; export it in your shell only when you intentionally want a fixed port, and avoid browser-unsafe ports such as `5060`)
 - `Optional`: `DISCORD_DEFAULT_JOB_FORUM_CHANNELS` (default: `gigs:part_time,fulltime-roles:full_time`; comma-separated `forum-name:posting_type` list auto-registered and backfilled on bot startup)
+- `Optional`: `DISCORD_UNQUALIFIED_LEADS_FORUM_CHANNEL` (default: `unqualified-leads`; exact holding-forum name or Discord channel ID for optionally screening sourced leads; it must not be registered for job matching)
 - Note: bot message chunking follows Discord's 2000 character limit in code.
 
 ## Discord Agent Gateway

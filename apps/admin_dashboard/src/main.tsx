@@ -269,6 +269,10 @@ type JobLead = {
   created_at?: string
   updated_at?: string
   engagement_id?: string
+  staged_discord_guild_id?: string
+  staged_discord_channel_id?: string
+  staged_discord_thread_id?: string
+  staged_at?: string
 }
 
 type JobLeadReviewStatus = "pending" | "approved" | "rejected"
@@ -1798,21 +1802,63 @@ function App() {
   async function reviewGigLead(leadId: string, nextStatus: JobLeadReviewStatus) {
     setBusy(`gigLead:${leadId}:review`, true)
     try {
-      await requestJson<JobLead>(`/dashboard/api/gig-leads/${encodeURIComponent(leadId)}/review`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: nextStatus }),
-      })
+      const reviewedLead = await requestJson<JobLead>(
+        `/dashboard/api/gig-leads/${encodeURIComponent(leadId)}/review`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: nextStatus }),
+        },
+      )
       const message =
         nextStatus === "pending"
           ? "Restored lead to pending"
-          : `${nextStatus === "approved" ? "Approved" : "Rejected"} lead`
-      await loadGigLeads()
+          : `${nextStatus === "approved" ? "Qualified" : "Rejected"} lead`
+      if (nextStatus === "approved") {
+        setGigLeads((current) =>
+          current.map((lead) => (lead.id === leadId ? { ...lead, ...reviewedLead } : lead)),
+        )
+      } else {
+        await loadGigLeads()
+      }
       showToast(message, "ok")
     } catch (error) {
       showError(error, "Unable to review lead")
     } finally {
       setBusy(`gigLead:${leadId}:review`, false)
+    }
+  }
+
+  async function stageGigLead(leadId: string) {
+    setBusy(`gigLead:${leadId}:stage`, true)
+    try {
+      const result = await requestJson<{
+        lead_id?: string
+        guild_id?: string
+        channel_id?: string
+        thread_id?: string
+        staged_at?: string
+      }>(`/dashboard/api/gig-leads/${encodeURIComponent(leadId)}/stage`, {
+        method: "POST",
+      })
+      setGigLeads((current) =>
+        current.map((lead) =>
+          lead.id === leadId
+            ? {
+                ...lead,
+                staged_discord_guild_id: result.guild_id || lead.staged_discord_guild_id,
+                staged_discord_channel_id: result.channel_id || lead.staged_discord_channel_id,
+                staged_discord_thread_id: result.thread_id || lead.staged_discord_thread_id,
+                staged_at: result.staged_at || lead.staged_at,
+              }
+            : lead,
+        ),
+      )
+      showToast("Posted lead to #unqualified-leads for qualification", "ok")
+    } catch (error) {
+      showError(error, "Unable to stage lead")
+    } finally {
+      setBusy(`gigLead:${leadId}:stage`, false)
     }
   }
 
@@ -1853,7 +1899,7 @@ function App() {
             : lead,
         ),
       )
-      showToast("Posted lead to Discord; staying on Leads", "ok")
+      showToast("Promoted qualified lead to Discord; staying on Leads", "ok")
     } catch (error) {
       showError(error, "Unable to post lead")
     } finally {
@@ -2918,7 +2964,7 @@ function App() {
               contactedReminderDays={contactedReminderDays}
               canWrite={can("gigs:write")}
               canSearchCandidates={can("people:read")}
-              canManageLeads={can("people:read")}
+              canManageLeads={can("gigs:write")}
               canIncludeHistorical={can("people:read")}
               crmContactUrl={crmContactUrl}
               crmAttachmentUrl={crmAttachmentUrl}
@@ -2937,6 +2983,7 @@ function App() {
               onUpdateApplicationStatus={updateGigApplicationStatus}
               onSyncLeads={syncGigLeads}
               onReviewLead={reviewGigLead}
+              onStageLead={stageGigLead}
               onPostLead={postGigLead}
             />
           ) : null}
@@ -5494,6 +5541,7 @@ function GigsView(props: {
   onUpdateApplicationStatus: (gigId: string, applicationId: string, status: string) => void
   onSyncLeads: () => void
   onReviewLead: (leadId: string, status: JobLeadReviewStatus) => void
+  onStageLead: (leadId: string) => void
   onPostLead: (
     leadId: string,
     options?: {
@@ -5568,7 +5616,7 @@ function GigsView(props: {
               onChange={(event) => props.setLeadStatus(event.target.value)}
             >
               <option value="pending">Pending</option>
-              <option value="approved">Approved</option>
+              <option value="approved">Qualified</option>
               <option value="rejected">Rejected</option>
               <option value="posted">Posted</option>
               <option value="all">All statuses</option>
@@ -5681,7 +5729,7 @@ function GigsView(props: {
         <section className="grid gap-3 md:grid-cols-4" aria-label="Lead summary">
           <Metric id="gigLeadMetricTotal" label="Leads" value={leadCounts.total} />
           <Metric id="gigLeadMetricPending" label="Pending" value={leadCounts.pending} />
-          <Metric id="gigLeadMetricApproved" label="Approved" value={leadCounts.approved} />
+          <Metric id="gigLeadMetricApproved" label="Qualified" value={leadCounts.approved} />
           <Metric id="gigLeadMetricPosted" label="Posted" value={leadCounts.posted} />
         </section>
 
@@ -5705,6 +5753,7 @@ function GigsView(props: {
                 canWrite={props.canManageLeads}
                 jobPostChannels={props.jobPostChannels}
                 onReviewLead={props.onReviewLead}
+                onStageLead={props.onStageLead}
                 onPostLead={props.onPostLead}
               />
             ))}
@@ -5952,12 +6001,19 @@ function jobLeadClassificationLabel(lead: JobLead) {
   return postingType ? postingTypeLabel : lead.review_summary || "Classification unavailable"
 }
 
+function jobLeadWorkflowStatusLabel(lead: JobLead) {
+  if (lead.status === "pending" && lead.staged_discord_thread_id) return "Staged"
+  if (lead.status === "approved") return "Qualified"
+  return titleCase(lead.status)
+}
+
 function JobLeadListItem({
   lead,
   loading,
   canWrite,
   jobPostChannels,
   onReviewLead,
+  onStageLead,
   onPostLead,
 }: {
   lead: JobLead
@@ -5965,6 +6021,7 @@ function JobLeadListItem({
   canWrite: boolean
   jobPostChannels: JobPostChannel[]
   onReviewLead: (leadId: string, status: JobLeadReviewStatus) => void
+  onStageLead: (leadId: string) => void
   onPostLead: (
     leadId: string,
     options?: {
@@ -5974,11 +6031,15 @@ function JobLeadListItem({
     },
   ) => void
 }) {
-  const canDecide = canWrite && (lead.status === "pending" || lead.status === "approved")
+  const isStaged = Boolean(lead.staged_discord_thread_id)
+  const canStage = canWrite && lead.status === "pending" && !isStaged
+  const canQualify = canWrite && lead.status === "pending"
+  const canPromote = canWrite && lead.status === "approved"
+  const canReject = canWrite && (lead.status === "pending" || lead.status === "approved")
   const canRestore = canWrite && lead.status === "rejected"
   const reviewing = loading[`gigLead:${lead.id}:review`]
+  const staging = loading[`gigLead:${lead.id}:stage`]
   const posting = loading[`gigLead:${lead.id}:post`]
-  const canPost = canDecide
   const defaultChannelId = defaultJobPostChannelId(lead, jobPostChannels)
   const [engagementStatus, setEngagementStatus] = useState<"lead" | "recruiting">("lead")
   const engagementStatusRef = useRef<HTMLSelectElement>(null)
@@ -6010,6 +6071,12 @@ function JobLeadListItem({
           lead.discord_guild_id,
         )}/${encodeURIComponent(lead.discord_thread_id)}`
       : ""
+  const stagedDiscordUrl =
+    lead.staged_discord_guild_id && lead.staged_discord_thread_id
+      ? `https://discord.com/channels/${encodeURIComponent(
+          lead.staged_discord_guild_id,
+        )}/${encodeURIComponent(lead.staged_discord_thread_id)}`
+      : ""
   const engagementId = String(lead.engagement_id || "").trim()
   const postedGigUrl = engagementId ? `${routes.gigs}/${encodeURIComponent(engagementId)}` : ""
   const contactEmail = lead.contractor_classification?.contact_email
@@ -6019,7 +6086,7 @@ function JobLeadListItem({
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2">
           <strong className="text-base">{lead.title || "Untitled lead"}</strong>
-          <Badge variant={jobLeadStatusTone(lead.status)}>{titleCase(lead.status)}</Badge>
+          <Badge variant={jobLeadStatusTone(lead.status)}>{jobLeadWorkflowStatusLabel(lead)}</Badge>
           {lead.remote ? <Badge variant="queued">Remote</Badge> : null}
           <Badge variant="neutral">{jobLeadClassificationLabel(lead)}</Badge>
         </div>
@@ -6101,6 +6168,17 @@ function JobLeadListItem({
               <ExternalLink className="size-3.5" />
             </a>
           ) : null}
+          {stagedDiscordUrl ? (
+            <a
+              className="inline-flex items-center gap-1 font-extrabold text-primary"
+              href={stagedDiscordUrl}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Unqualified thread
+              <ExternalLink className="size-3.5" />
+            </a>
+          ) : null}
           {postedGigUrl ? (
             <a
               className="inline-flex items-center gap-1 font-extrabold text-primary"
@@ -6124,96 +6202,120 @@ function JobLeadListItem({
       </div>
       {canWrite ? (
         <div className="grid gap-2">
-          <Label>
-            Post as
-            <Select
-              value={engagementStatus}
-              ref={engagementStatusRef}
-              disabled={!canPost || posting || reviewing}
-              onChange={(event) =>
-                setEngagementStatus(event.target.value === "recruiting" ? "recruiting" : "lead")
-              }
-            >
-              <option value="lead">Lead</option>
-              <option value="recruiting">Recruiting</option>
-            </Select>
-          </Label>
-          {jobPostChannels.length > 0 ? (
-            <Label>
-              Channel
-              <Select
-                value={channelId}
-                disabled={!canPost || posting || reviewing}
-                onChange={(event) => setChannelId(event.target.value)}
-              >
-                {jobPostChannels.map((channel) => (
-                  <option key={channel.channel_id} value={channel.channel_id}>
-                    {jobPostChannelLabel(channel)}
-                  </option>
-                ))}
-              </Select>
-            </Label>
-          ) : null}
-          {selectedChannel?.available_tags?.length ? (
-            <fieldset className="grid gap-1.5">
-              <legend className="text-xs font-bold text-muted-foreground">
-                Tags{selectedChannel.requires_tag ? " (required)" : ""}
-              </legend>
-              <div className="flex flex-wrap gap-1.5">
-                {selectedChannel.available_tags.map((tag) => (
-                  <label
-                    key={tag.id || tag.name}
-                    className="inline-flex min-h-8 items-center gap-1.5 rounded-md border px-2 text-xs font-bold text-muted-foreground"
+          {canPromote ? (
+            <>
+              <Label>
+                Post as
+                <Select
+                  value={engagementStatus}
+                  ref={engagementStatusRef}
+                  disabled={posting || reviewing || staging}
+                  onChange={(event) =>
+                    setEngagementStatus(event.target.value === "recruiting" ? "recruiting" : "lead")
+                  }
+                >
+                  <option value="lead">Lead</option>
+                  <option value="recruiting">Recruiting</option>
+                </Select>
+              </Label>
+              {jobPostChannels.length > 0 ? (
+                <Label>
+                  Channel
+                  <Select
+                    value={channelId}
+                    disabled={posting || reviewing || staging}
+                    onChange={(event) => setChannelId(event.target.value)}
                   >
-                    <input
-                      type="checkbox"
-                      checked={selectedTags.includes(tag.name)}
-                      disabled={!canPost || posting || reviewing}
-                      onChange={() => toggleSelectedTag(tag.name)}
-                    />
-                    {tag.name}
-                  </label>
-                ))}
-              </div>
-            </fieldset>
+                    {jobPostChannels.map((channel) => (
+                      <option key={channel.channel_id} value={channel.channel_id}>
+                        {jobPostChannelLabel(channel)}
+                      </option>
+                    ))}
+                  </Select>
+                </Label>
+              ) : null}
+              {selectedChannel?.available_tags?.length ? (
+                <fieldset className="grid gap-1.5">
+                  <legend className="text-xs font-bold text-muted-foreground">
+                    Tags{selectedChannel.requires_tag ? " (required)" : ""}
+                  </legend>
+                  <div className="flex flex-wrap gap-1.5">
+                    {selectedChannel.available_tags.map((tag) => (
+                      <label
+                        key={tag.id || tag.name}
+                        className="inline-flex min-h-8 items-center gap-1.5 rounded-md border px-2 text-xs font-bold text-muted-foreground"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={selectedTags.includes(tag.name)}
+                          disabled={posting || reviewing || staging}
+                          onChange={() => toggleSelectedTag(tag.name)}
+                        />
+                        {tag.name}
+                      </label>
+                    ))}
+                  </div>
+                </fieldset>
+              ) : null}
+              <Button
+                type="button"
+                disabled={posting || reviewing || staging || requiredTagMissing}
+                onClick={() => {
+                  const selectedStatus =
+                    engagementStatusRef.current?.value === "recruiting" ? "recruiting" : "lead"
+                  onPostLead(lead.id, {
+                    channelId,
+                    engagementStatus: selectedStatus,
+                    tags: selectedTags,
+                  })
+                }}
+              >
+                <Send />
+                Promote to Discord
+              </Button>
+            </>
           ) : null}
-          <Button
-            type="button"
-            disabled={!canPost || posting || reviewing || requiredTagMissing}
-            onClick={() => {
-              const selectedStatus =
-                engagementStatusRef.current?.value === "recruiting" ? "recruiting" : "lead"
-              onPostLead(lead.id, {
-                channelId,
-                engagementStatus: selectedStatus,
-                tags: selectedTags,
-              })
-            }}
-          >
-            <Send />
-            Post to Discord
-          </Button>
+          {canStage ? (
+            <Button
+              type="button"
+              disabled={staging || reviewing || posting}
+              onClick={() => onStageLead(lead.id)}
+            >
+              <Send />
+              Post to #unqualified-leads
+            </Button>
+          ) : null}
+          {canQualify ? (
+            <Button
+              type="button"
+              disabled={staging || reviewing || posting}
+              onClick={() => onReviewLead(lead.id, "approved")}
+            >
+              <ShieldCheck />
+              Qualify lead
+            </Button>
+          ) : null}
           {canRestore ? (
             <Button
               type="button"
               variant="outline"
-              disabled={reviewing || posting}
+              disabled={reviewing || posting || staging}
               onClick={() => onReviewLead(lead.id, "pending")}
             >
               <RefreshCw />
               Restore to pending
             </Button>
-          ) : (
+          ) : canReject ? (
             <Button
               type="button"
               variant="outline"
-              disabled={!canDecide || reviewing || posting}
+              disabled={reviewing || posting || staging}
               onClick={() => onReviewLead(lead.id, "rejected")}
             >
               <UserMinus />
               Reject
             </Button>
-          )}
+          ) : null}
         </div>
       ) : null}
     </article>

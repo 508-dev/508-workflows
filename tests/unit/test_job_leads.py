@@ -87,6 +87,10 @@ def _lead_row(**overrides: object) -> dict:
         "discord_channel_id": None,
         "discord_thread_id": None,
         "posted_at": None,
+        "staged_discord_guild_id": None,
+        "staged_discord_channel_id": None,
+        "staged_discord_thread_id": None,
+        "staged_at": None,
         "created_at": now,
         "updated_at": now,
     }
@@ -186,6 +190,10 @@ def test_update_existing_job_lead_never_inserts(monkeypatch) -> None:
         "discord_channel_id",
         "discord_thread_id",
         "posted_at",
+        "staged_discord_guild_id",
+        "staged_discord_channel_id",
+        "staged_discord_thread_id",
+        "staged_at",
     ):
         assert preserved_column not in assigned_columns
     assert params[-2:] == ("hackernews_who_is_hiring", "48392586")
@@ -259,7 +267,7 @@ def test_display_payload_explains_employment_type_and_contact() -> None:
     )
 
 
-def test_review_job_lead_uses_exact_id_after_prefix_lookup(monkeypatch) -> None:
+def test_review_job_lead_can_qualify_without_holding_thread(monkeypatch) -> None:
     cursor = _CursorStub(
         rows=[
             [_lead_row()],
@@ -289,6 +297,7 @@ def test_review_job_lead_uses_exact_id_after_prefix_lookup(monkeypatch) -> None:
         "11111111-1111-1111-1111-111111111111",
         ["pending", "approved"],
     )
+    assert "staged_discord_thread_id" not in cursor.executed[1][0]
 
 
 def test_review_job_lead_restores_rejected_lead_to_pending(monkeypatch) -> None:
@@ -321,6 +330,72 @@ def test_review_job_lead_restores_rejected_lead_to_pending(monkeypatch) -> None:
         "pending",
         "11111111-1111-1111-1111-111111111111",
         ["rejected"],
+    )
+
+
+def test_mark_job_lead_staged_records_optional_holding_thread(monkeypatch) -> None:
+    cursor = _CursorStub(
+        rows=[
+            _lead_row(
+                staged_discord_guild_id="123",
+                staged_discord_channel_id="456",
+                staged_discord_thread_id="789",
+                staged_at=datetime(2026, 7, 6, tzinfo=timezone.utc),
+            )
+        ]
+    )
+    _install_connection_stub(monkeypatch, cursor)
+
+    staged = job_leads.mark_job_lead_staged(
+        job_leads.SharedSettings(),
+        lead_id="11111111-1111-1111-1111-111111111111",
+        guild_id="123",
+        channel_id="456",
+        thread_id="789",
+    )
+
+    assert staged is not None
+    assert staged.staged_discord_thread_id == "789"
+    query, params = cursor.executed[0]
+    assert "status = 'pending'" in query
+    assert "staged_discord_thread_id IS NULL" in query
+    assert params == ("123", "456", "789", "11111111-1111-1111-1111-111111111111")
+
+
+def test_mark_job_lead_posted_allows_direct_qualified_promotion(monkeypatch) -> None:
+    cursor = _CursorStub(
+        rows=[
+            _lead_row(
+                status="posted",
+                reviewed_by_discord_user_id="42",
+                discord_guild_id="123",
+                discord_channel_id="456",
+                discord_thread_id="789",
+            )
+        ]
+    )
+    _install_connection_stub(monkeypatch, cursor)
+
+    posted = job_leads.mark_job_lead_posted(
+        job_leads.SharedSettings(),
+        lead_id="11111111-1111-1111-1111-111111111111",
+        reviewer_discord_user_id="42",
+        guild_id="123",
+        channel_id="456",
+        thread_id="789",
+    )
+
+    assert posted is not None
+    assert posted.status is JobLeadStatus.POSTED
+    query, params = cursor.executed[0]
+    assert "status = 'approved'" in query
+    assert "staged_discord_thread_id" not in query
+    assert params == (
+        "42",
+        "123",
+        "456",
+        "789",
+        "11111111-1111-1111-1111-111111111111",
     )
 
 
