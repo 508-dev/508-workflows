@@ -16,6 +16,7 @@ from dataclasses import dataclass, is_dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Literal, cast
 from urllib.parse import urljoin, urlsplit
+from uuid import uuid4
 
 import discord
 from discord import app_commands
@@ -72,6 +73,8 @@ from five08.job_leads import (
     list_job_leads,
     mark_job_lead_posted,
     mark_job_lead_staged,
+    release_job_lead_staging_reservation,
+    reserve_job_lead_staging,
     review_job_lead,
 )
 from five08.job_match import (
@@ -461,6 +464,34 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         name = str(raw_name or "").strip().casefold()
         return re.sub(r"[-_]+", " ", name)
 
+    def _is_unqualified_leads_forum(
+        self,
+        channel: object,
+        *,
+        guild: discord.Guild | None = None,
+    ) -> bool:
+        """Return whether a forum is the configured staging-only holding forum."""
+        configured_target = str(
+            settings.discord_unqualified_leads_forum_channel or ""
+        ).strip()
+        if not configured_target:
+            return False
+
+        if configured_target.isdecimal():
+            return str(getattr(channel, "id", "")) == configured_target
+        if self._normalized_channel_name(channel) != self._normalized_channel_name(
+            configured_target
+        ):
+            return False
+
+        configured_guild = self._resolve_configured_guild()
+        channel_guild = getattr(channel, "guild", None) or guild
+        if configured_guild is not None and channel_guild is not None:
+            return str(getattr(channel_guild, "id", "")) == str(
+                getattr(configured_guild, "id", "")
+            )
+        return True
+
     @classmethod
     def _default_job_forum_channel_configs(cls) -> dict[str, JobPostingType]:
         """Configured startup forum names and their default posting types."""
@@ -542,6 +573,14 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             return discovered_ids
 
         for channel in guild_channels:
+            if self._is_unqualified_leads_forum(channel, guild=guild):
+                logger.info(
+                    "Skipping staging-only holding forum from default job registration "
+                    "guild=%s channel=%s",
+                    guild.id,
+                    getattr(channel, "id", "unknown"),
+                )
+                continue
             posting_type = self._default_job_forum_posting_type(channel)
             if posting_type is None:
                 continue
@@ -2270,6 +2309,12 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         source: str,
     ) -> None:
         """Best-effort persistence for dashboard gig/candidate visibility."""
+        if self._is_unqualified_leads_forum(thread.parent, guild=thread.guild):
+            logger.warning(
+                "Skipping engagement match persistence for staging-only holding thread=%s",
+                thread.id,
+            )
+            return
         try:
             thread_name = str(getattr(thread, "name", "") or "")
             starter_id = getattr(starter, "id", None) or thread.id
@@ -2869,6 +2914,13 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                     channel_id,
                 )
                 continue
+            if self._is_unqualified_leads_forum(channel_obj, guild=guild):
+                logger.warning(
+                    "Skipping staging-only holding forum from job backfill guild=%s channel=%s",
+                    guild.id,
+                    channel_id,
+                )
+                continue
             channel_indexed, channel_failed = await self._sync_job_forum_channel(
                 channel_obj,
                 source=source,
@@ -3400,6 +3452,8 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         parent = thread.parent
         if guild is None or not isinstance(parent, discord.ForumChannel):
             return
+        if self._is_unqualified_leads_forum(parent, guild=guild):
+            return
         if not await self._refresh_jobs_channel_cache_if_missing(guild.id):
             return
 
@@ -3443,6 +3497,8 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         guild = thread.guild
         parent = thread.parent
         if guild is None or not isinstance(parent, discord.ForumChannel):
+            return
+        if self._is_unqualified_leads_forum(parent, guild=guild):
             return
         if not await self._refresh_jobs_channel_cache_if_missing(guild.id):
             return
@@ -3803,6 +3859,12 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         channel_id: str | None = None,
     ) -> tuple[discord.ForumChannel | None, dict[str, Any] | None, int]:
         if channel is not None:
+            if self._is_unqualified_leads_forum(channel):
+                return (
+                    None,
+                    {"error": "unqualified_leads_forum_not_promotion_target"},
+                    403,
+                )
             return channel, None, 200
         if channel_id:
             try:
@@ -3819,6 +3881,12 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 return None, {"error": "guild_not_found"}, 404
             if resolved.guild.id != configured_guild.id:
                 return None, {"error": "job_forum_wrong_guild"}, 403
+            if self._is_unqualified_leads_forum(resolved, guild=resolved.guild):
+                return (
+                    None,
+                    {"error": "unqualified_leads_forum_not_promotion_target"},
+                    403,
+                )
             try:
                 await self._refresh_jobs_channel_cache(resolved.guild.id)
                 await self._register_default_job_forum_channels(resolved.guild)
@@ -3860,6 +3928,8 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         for candidate_id in candidate_ids:
             resolved, error, status_code = await self._fetch_forum_channel(candidate_id)
             if resolved is not None:
+                if self._is_unqualified_leads_forum(resolved, guild=guild):
+                    continue
                 return resolved, None, 200
             if status_code >= 500:
                 return None, error, status_code
@@ -3918,6 +3988,43 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             return None, {"error": "unqualified_leads_forum_registered"}, 409
         return channel, None, 200
 
+    async def _cleanup_failed_job_lead_staging(
+        self,
+        *,
+        lead_id: str,
+        reservation_token: str,
+        thread: object | None = None,
+    ) -> None:
+        """Delete an unsaved holding thread and release this attempt's reservation."""
+        delete_thread = cast(
+            Callable[..., Awaitable[None]] | None,
+            getattr(thread, "delete", None),
+        )
+        if delete_thread is not None:
+            try:
+                await delete_thread(
+                    reason="Deleting unqualified lead thread after staging persistence failed"
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed deleting unsaved unqualified lead thread lead_id=%s: %s",
+                    lead_id,
+                    exc,
+                )
+        try:
+            await asyncio.to_thread(
+                release_job_lead_staging_reservation,
+                settings,
+                lead_id=lead_id,
+                reservation_token=reservation_token,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed releasing unqualified lead staging reservation lead_id=%s: %s",
+                lead_id,
+                exc,
+            )
+
     async def stage_job_lead_to_discord(
         self,
         *,
@@ -3962,13 +4069,43 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         if target_channel is None:
             return cast(dict[str, Any], error), status_code
 
-        applied_tags = self._resolve_job_lead_forum_tags(target_channel, lead, None)
-        content = (
-            "⚠️ **Unqualified lead — do not treat as an active gig.**\n"
-            "Review and qualify it in the dashboard before promoting it to a gigs forum.\n\n"
-            f"{self._format_job_lead_thread_content(lead)}"
-        )
-        thread_title = f"[UNQUALIFIED] {lead.title}"
+        reservation_token = str(uuid4())
+        try:
+            reserved = await asyncio.to_thread(
+                reserve_job_lead_staging,
+                settings,
+                lead_id=lead.id,
+                reservation_token=reservation_token,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed reserving sourced job lead %s for staging: %s", lead.id, exc
+            )
+            return {"error": "job_lead_stage_reservation_failed"}, 502
+        if reserved is None:
+            return {
+                "error": "job_lead_staging_in_progress",
+                "lead_id": lead.id,
+            }, 409
+
+        try:
+            applied_tags = self._resolve_job_lead_forum_tags(target_channel, lead, None)
+            content = self._truncate_job_lead_text(
+                "⚠️ **Unqualified lead — do not treat as an active gig.**\n"
+                "Review and qualify it in the dashboard before promoting it to a gigs forum.\n\n"
+                f"{self._format_job_lead_thread_content(reserved)}",
+                settings.discord_sendmsg_character_limit,
+            )
+            thread_title = f"[UNQUALIFIED] {lead.title}"
+        except Exception as exc:
+            logger.warning(
+                "Failed preparing sourced job lead %s for staging: %s", lead.id, exc
+            )
+            await self._cleanup_failed_job_lead_staging(
+                lead_id=lead.id,
+                reservation_token=reservation_token,
+            )
+            return {"error": "unqualified_leads_thread_prepare_failed"}, 502
         try:
             created = await target_channel.create_thread(
                 name=self._truncate_job_lead_text(thread_title, 100),
@@ -3978,28 +4115,58 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 reason=f"{reason} by {reviewer}",
             )
         except discord.Forbidden:
+            await self._cleanup_failed_job_lead_staging(
+                lead_id=lead.id,
+                reservation_token=reservation_token,
+            )
             return {"error": "unqualified_leads_thread_create_forbidden"}, 403
         except discord.HTTPException as exc:
             logger.warning("Failed staging sourced job lead %s: %s", lead.id, exc)
+            await self._cleanup_failed_job_lead_staging(
+                lead_id=lead.id,
+                reservation_token=reservation_token,
+            )
+            return {"error": "unqualified_leads_thread_create_failed"}, 502
+        except Exception as exc:
+            logger.warning("Failed staging sourced job lead %s: %s", lead.id, exc)
+            await self._cleanup_failed_job_lead_staging(
+                lead_id=lead.id,
+                reservation_token=reservation_token,
+            )
             return {"error": "unqualified_leads_thread_create_failed"}, 502
 
         thread = getattr(created, "thread", created)
         thread_id = str(getattr(thread, "id", ""))
         if not thread_id:
+            await self._cleanup_failed_job_lead_staging(
+                lead_id=lead.id,
+                reservation_token=reservation_token,
+                thread=thread,
+            )
             return {
                 "error": "unqualified_leads_thread_id_missing",
                 "lead_id": lead.id,
             }, 502
 
-        staged = await asyncio.to_thread(
-            mark_job_lead_staged,
-            settings,
-            lead_id=lead.id,
-            guild_id=str(target_channel.guild.id),
-            channel_id=str(target_channel.id),
-            thread_id=thread_id,
-        )
+        try:
+            staged = await asyncio.to_thread(
+                mark_job_lead_staged,
+                settings,
+                lead_id=lead.id,
+                reservation_token=reservation_token,
+                guild_id=str(target_channel.guild.id),
+                channel_id=str(target_channel.id),
+                thread_id=thread_id,
+            )
+        except Exception as exc:
+            logger.warning("Failed saving staged sourced job lead %s: %s", lead.id, exc)
+            staged = None
         if staged is None:
+            await self._cleanup_failed_job_lead_staging(
+                lead_id=lead.id,
+                reservation_token=reservation_token,
+                thread=thread,
+            )
             return {
                 "error": "job_lead_stage_marker_failed",
                 "lead_id": lead.id,
@@ -4011,6 +4178,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             "lead_id": staged.id,
             "guild_id": staged.staged_discord_guild_id,
             "channel_id": staged.staged_discord_channel_id,
+            "channel_name": str(getattr(target_channel, "name", "")).strip() or None,
             "thread_id": staged.staged_discord_thread_id,
             "staged_at": staged.staged_at.isoformat()
             if staged.staged_at is not None
@@ -4372,6 +4540,23 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         if target_channel is None:
             await interaction.response.send_message(
                 "⚠️ Choose a forum channel or run this inside one of its post threads.",
+                ephemeral=True,
+            )
+            return
+        if self._is_unqualified_leads_forum(target_channel, guild=guild):
+            self._audit_command_safe(
+                interaction=interaction,
+                action="crm.register_jobs_channel",
+                result="error",
+                metadata={
+                    "stage": "unqualified_leads_holding_forum",
+                    "guild_id": str(guild.id),
+                    "channel_id": str(target_channel.id),
+                },
+            )
+            await interaction.response.send_message(
+                "⚠️ The configured holding forum cannot be registered for automatic "
+                "job matching.",
                 ephemeral=True,
             )
             return
@@ -4975,6 +5160,26 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             return
 
         thread: discord.Thread = interaction.channel
+        parent = thread.parent
+        if not isinstance(parent, discord.ForumChannel):
+            return
+        if self._is_unqualified_leads_forum(parent, guild=thread.guild):
+            self._audit_command_safe(
+                interaction=interaction,
+                action="crm.match_candidates",
+                result="error",
+                metadata={
+                    "stage": "unqualified_leads_holding_forum",
+                    "thread_id": str(thread.id),
+                    "channel_id": str(parent.id),
+                },
+            )
+            await interaction.response.send_message(
+                "⚠️ Candidate matching is unavailable in the holding forum. "
+                "Qualify and promote this lead to a gigs forum first.",
+                ephemeral=True,
+            )
+            return
         starter = thread.starter_message
         fetch_error = None
         if starter is None:

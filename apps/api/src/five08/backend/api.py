@@ -1769,6 +1769,7 @@ async def _session_payload(session: AuthSession) -> dict[str, Any]:
         "display_name": session.display_name,
         "groups": session.groups,
         "is_admin": session.is_admin,
+        "can_manage_leads": _session_has_steering_access(session),
         "permissions": sorted(await _session_dashboard_permissions_async(session)),
         "expires_at": session.expires_at,
         "actor_provider": session.actor_provider,

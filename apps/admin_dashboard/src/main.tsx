@@ -91,6 +91,7 @@ type User = {
   actor_provider?: string
   crm_contact_id?: string
   crm_base_url?: string
+  can_manage_leads?: boolean
   permissions?: string[]
 }
 
@@ -1836,6 +1837,7 @@ function App() {
         lead_id?: string
         guild_id?: string
         channel_id?: string
+        channel_name?: string
         thread_id?: string
         staged_at?: string
       }>(`/dashboard/api/gig-leads/${encodeURIComponent(leadId)}/stage`, {
@@ -1854,7 +1856,15 @@ function App() {
             : lead,
         ),
       )
-      showToast("Posted lead to #unqualified-leads for qualification", "ok")
+      const holdingForum = String(result.channel_name || "")
+        .replace(/^#/, "")
+        .trim()
+      showToast(
+        holdingForum
+          ? `Posted lead to #${holdingForum} for qualification`
+          : "Posted lead to the holding forum for qualification",
+        "ok",
+      )
     } catch (error) {
       showError(error, "Unable to stage lead")
     } finally {
@@ -2964,7 +2974,7 @@ function App() {
               contactedReminderDays={contactedReminderDays}
               canWrite={can("gigs:write")}
               canSearchCandidates={can("people:read")}
-              canManageLeads={can("gigs:write")}
+              canManageLeads={Boolean(user?.can_manage_leads)}
               canIncludeHistorical={can("people:read")}
               crmContactUrl={crmContactUrl}
               crmAttachmentUrl={crmAttachmentUrl}
@@ -6175,7 +6185,7 @@ function JobLeadListItem({
               target="_blank"
               rel="noreferrer"
             >
-              Unqualified thread
+              Holding thread
               <ExternalLink className="size-3.5" />
             </a>
           ) : null}
@@ -6282,7 +6292,7 @@ function JobLeadListItem({
               onClick={() => onStageLead(lead.id)}
             >
               <Send />
-              Post to #unqualified-leads
+              Post to holding forum
             </Button>
           ) : null}
           {canQualify ? (

@@ -525,6 +525,8 @@ def review_job_lead(
             status = %s,
             reviewed_by_discord_user_id = %s,
             reviewed_at = CASE WHEN %s = 'pending' THEN NULL ELSE NOW() END,
+            staging_reservation_token = NULL,
+            staging_reserved_at = NULL,
             updated_at = NOW()
         WHERE id = %s
           AND status = ANY(%s)
@@ -550,11 +552,12 @@ def mark_job_lead_staged(
     settings: SharedSettings,
     *,
     lead_id: str,
+    reservation_token: str,
     guild_id: str,
     channel_id: str,
     thread_id: str,
 ) -> JobLead | None:
-    """Record a pending lead's unqualified Discord holding thread."""
+    """Finalize a reserved pending lead's unqualified Discord holding thread."""
     query = """
         UPDATE job_leads
         SET
@@ -562,20 +565,80 @@ def mark_job_lead_staged(
             staged_discord_channel_id = %s,
             staged_discord_thread_id = %s,
             staged_at = NOW(),
+            staging_reservation_token = NULL,
+            staging_reserved_at = NULL,
             updated_at = NOW()
         WHERE id = %s
           AND status = 'pending'
           AND staged_discord_thread_id IS NULL
+          AND staging_reservation_token = %s
         RETURNING *
     """
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
                 query,
-                (guild_id, channel_id, thread_id, lead_id),
+                (guild_id, channel_id, thread_id, lead_id, reservation_token),
             )
             row = cursor.fetchone()
     return _as_lead(row) if row is not None else None
+
+
+def reserve_job_lead_staging(
+    settings: SharedSettings,
+    *,
+    lead_id: str,
+    reservation_token: str,
+) -> JobLead | None:
+    """Atomically claim a pending lead before creating its Discord holding thread."""
+    token = reservation_token.strip()
+    if not token:
+        raise ValueError("Job lead staging reservation token is required.")
+    query = """
+        UPDATE job_leads
+        SET
+            staging_reservation_token = %s,
+            staging_reserved_at = NOW(),
+            updated_at = NOW()
+        WHERE id = %s
+          AND status = 'pending'
+          AND staged_discord_thread_id IS NULL
+          AND staging_reservation_token IS NULL
+        RETURNING *
+    """
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(query, (token, lead_id))
+            row = cursor.fetchone()
+    return _as_lead(row) if row is not None else None
+
+
+def release_job_lead_staging_reservation(
+    settings: SharedSettings,
+    *,
+    lead_id: str,
+    reservation_token: str,
+) -> bool:
+    """Release this attempt's staging reservation after no holding thread is saved."""
+    token = reservation_token.strip()
+    if not token:
+        return False
+    query = """
+        UPDATE job_leads
+        SET
+            staging_reservation_token = NULL,
+            staging_reserved_at = NULL,
+            updated_at = NOW()
+        WHERE id = %s
+          AND staged_discord_thread_id IS NULL
+          AND staging_reservation_token = %s
+        RETURNING id
+    """
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(query, (lead_id, token))
+            row = cursor.fetchone()
+    return row is not None
 
 
 def mark_job_lead_posted(

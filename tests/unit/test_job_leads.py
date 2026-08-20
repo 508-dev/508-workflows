@@ -91,6 +91,8 @@ def _lead_row(**overrides: object) -> dict:
         "staged_discord_channel_id": None,
         "staged_discord_thread_id": None,
         "staged_at": None,
+        "staging_reservation_token": None,
+        "staging_reserved_at": None,
         "created_at": now,
         "updated_at": now,
     }
@@ -194,6 +196,8 @@ def test_update_existing_job_lead_never_inserts(monkeypatch) -> None:
         "staged_discord_channel_id",
         "staged_discord_thread_id",
         "staged_at",
+        "staging_reservation_token",
+        "staging_reserved_at",
     ):
         assert preserved_column not in assigned_columns
     assert params[-2:] == ("hackernews_who_is_hiring", "48392586")
@@ -298,6 +302,7 @@ def test_review_job_lead_can_qualify_without_holding_thread(monkeypatch) -> None
         ["pending", "approved"],
     )
     assert "staged_discord_thread_id" not in cursor.executed[1][0]
+    assert "staging_reservation_token = NULL" in cursor.executed[1][0]
 
 
 def test_review_job_lead_restores_rejected_lead_to_pending(monkeypatch) -> None:
@@ -333,7 +338,45 @@ def test_review_job_lead_restores_rejected_lead_to_pending(monkeypatch) -> None:
     )
 
 
-def test_mark_job_lead_staged_records_optional_holding_thread(monkeypatch) -> None:
+def test_reserve_job_lead_staging_claims_pending_lead_atomically(monkeypatch) -> None:
+    cursor = _CursorStub(rows=[_lead_row(staging_reservation_token="attempt-1")])
+    _install_connection_stub(monkeypatch, cursor)
+
+    reserved = job_leads.reserve_job_lead_staging(
+        job_leads.SharedSettings(),
+        lead_id="11111111-1111-1111-1111-111111111111",
+        reservation_token="attempt-1",
+    )
+
+    assert reserved is not None
+    query, params = cursor.executed[0]
+    assert "staging_reservation_token = %s" in query
+    assert "staging_reservation_token IS NULL" in query
+    assert "staged_discord_thread_id IS NULL" in query
+    assert params == ("attempt-1", "11111111-1111-1111-1111-111111111111")
+
+
+def test_release_job_lead_staging_reservation_only_releases_own_attempt(
+    monkeypatch,
+) -> None:
+    cursor = _CursorStub(rows=[{"id": "11111111-1111-1111-1111-111111111111"}])
+    _install_connection_stub(monkeypatch, cursor)
+
+    released = job_leads.release_job_lead_staging_reservation(
+        job_leads.SharedSettings(),
+        lead_id="11111111-1111-1111-1111-111111111111",
+        reservation_token="attempt-1",
+    )
+
+    assert released is True
+    query, params = cursor.executed[0]
+    assert "staging_reservation_token = NULL" in query
+    assert "staging_reservation_token = %s" in query
+    assert "staged_discord_thread_id IS NULL" in query
+    assert params == ("11111111-1111-1111-1111-111111111111", "attempt-1")
+
+
+def test_mark_job_lead_staged_records_reserved_holding_thread(monkeypatch) -> None:
     cursor = _CursorStub(
         rows=[
             _lead_row(
@@ -349,6 +392,7 @@ def test_mark_job_lead_staged_records_optional_holding_thread(monkeypatch) -> No
     staged = job_leads.mark_job_lead_staged(
         job_leads.SharedSettings(),
         lead_id="11111111-1111-1111-1111-111111111111",
+        reservation_token="attempt-1",
         guild_id="123",
         channel_id="456",
         thread_id="789",
@@ -359,7 +403,14 @@ def test_mark_job_lead_staged_records_optional_holding_thread(monkeypatch) -> No
     query, params = cursor.executed[0]
     assert "status = 'pending'" in query
     assert "staged_discord_thread_id IS NULL" in query
-    assert params == ("123", "456", "789", "11111111-1111-1111-1111-111111111111")
+    assert "staging_reservation_token = %s" in query
+    assert params == (
+        "123",
+        "456",
+        "789",
+        "11111111-1111-1111-1111-111111111111",
+        "attempt-1",
+    )
 
 
 def test_mark_job_lead_posted_allows_direct_qualified_promotion(monkeypatch) -> None:

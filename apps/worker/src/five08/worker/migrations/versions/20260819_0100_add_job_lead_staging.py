@@ -12,7 +12,7 @@ depends_on = None
 
 
 def upgrade() -> None:
-    """Store unqualified-lead staging threads separately from promoted gigs."""
+    """Store unqualified-lead staging threads and their creation reservations."""
     op.add_column(
         "job_leads",
         sa.Column("staged_discord_guild_id", sa.Text(), nullable=True),
@@ -29,10 +29,20 @@ def upgrade() -> None:
         "job_leads",
         sa.Column("staged_at", sa.DateTime(timezone=True), nullable=True),
     )
+    op.add_column(
+        "job_leads",
+        sa.Column("staging_reservation_token", sa.Text(), nullable=True),
+    )
+    op.add_column(
+        "job_leads",
+        sa.Column("staging_reserved_at", sa.DateTime(timezone=True), nullable=True),
+    )
 
 
 def downgrade() -> None:
-    """Remove sourced-lead holding-thread metadata."""
+    """Remove sourced-lead holding-thread metadata and reservations."""
+    op.drop_column("job_leads", "staging_reserved_at")
+    op.drop_column("job_leads", "staging_reservation_token")
     op.drop_column("job_leads", "staged_at")
     op.drop_column("job_leads", "staged_discord_thread_id")
     op.drop_column("job_leads", "staged_discord_channel_id")

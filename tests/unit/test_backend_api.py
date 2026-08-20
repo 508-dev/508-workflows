@@ -2102,6 +2102,7 @@ def test_dashboard_me_member_session_only_gets_gig_permissions(
 
     assert response.status_code == 200
     assert response.json()["permissions"] == ["gigs:read", "gigs:write"]
+    assert response.json()["can_manage_leads"] is False
 
 
 def test_dashboard_me_member_on_project_gets_project_read_permission(

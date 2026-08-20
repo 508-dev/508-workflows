@@ -292,19 +292,23 @@ async def test_post_job_lead_to_discord_posts_qualified_lead_without_holding_thr
 
 async def test_stage_job_lead_to_discord_creates_holding_thread_without_gig() -> None:
     guild = SimpleNamespace(id=123)
+    events: list[str] = []
+
+    async def create_thread(**_kwargs: object) -> SimpleNamespace:
+        events.append("create_thread")
+        return SimpleNamespace(
+            thread=SimpleNamespace(id=789),
+            message=SimpleNamespace(id=790),
+        )
+
     channel = SimpleNamespace(
         id=456,
         name="unqualified-leads",
         guild=guild,
         available_tags=[],
-        create_thread=AsyncMock(
-            return_value=SimpleNamespace(
-                thread=SimpleNamespace(id=789),
-                message=SimpleNamespace(id=790),
-            )
-        ),
+        create_thread=AsyncMock(side_effect=create_thread),
     )
-    lead = _make_job_lead(status=JobLeadStatus.PENDING)
+    lead = _make_job_lead(status=JobLeadStatus.PENDING, body_normalized="x" * 4000)
     staged = _make_job_lead(
         status=JobLeadStatus.PENDING,
         staged_discord_guild_id="123",
@@ -317,7 +321,13 @@ async def test_stage_job_lead_to_discord_creates_holding_thread_without_gig() ->
 
     with (
         patch.object(jobs_module, "get_job_lead", return_value=lead),
+        patch.object(
+            jobs_module,
+            "reserve_job_lead_staging",
+            side_effect=lambda *_args, **_kwargs: events.append("reserve") or lead,
+        ) as reserve,
         patch.object(jobs_module, "mark_job_lead_staged", return_value=staged) as mark,
+        patch.object(jobs_module, "uuid4", return_value="reservation-1"),
         patch.object(jobs_module, "upsert_discord_engagement") as upsert_engagement,
         patch.object(jobs_module, "add_engagement_event") as add_event,
     ):
@@ -332,28 +342,122 @@ async def test_stage_job_lead_to_discord_creates_holding_thread_without_gig() ->
         "lead_id": lead.id,
         "guild_id": "123",
         "channel_id": "456",
+        "channel_name": "unqualified-leads",
         "thread_id": "789",
         "staged_at": lead.created_at.isoformat(),
     }
+    reserve.assert_called_once_with(
+        jobs_module.settings,
+        lead_id=lead.id,
+        reservation_token="reservation-1",
+    )
     mark.assert_called_once_with(
         jobs_module.settings,
         lead_id=lead.id,
+        reservation_token="reservation-1",
         guild_id="123",
         channel_id="456",
         thread_id="789",
     )
+    assert events == ["reserve", "create_thread"]
     thread_kwargs = channel.create_thread.await_args.kwargs
     assert thread_kwargs["name"].startswith("[UNQUALIFIED] ")
+    assert thread_kwargs["content"].startswith("⚠️ **Unqualified lead")
     assert "do not treat as an active gig" in thread_kwargs["content"]
+    assert (
+        len(thread_kwargs["content"])
+        <= jobs_module.settings.discord_sendmsg_character_limit
+    )
     upsert_engagement.assert_not_called()
     add_event.assert_not_called()
 
 
+async def test_stage_job_lead_does_not_create_thread_without_reservation() -> None:
+    guild = SimpleNamespace(id=123)
+    channel = SimpleNamespace(
+        id=456,
+        name="unqualified-leads",
+        guild=guild,
+        available_tags=[],
+        create_thread=AsyncMock(),
+    )
+    lead = _make_job_lead(status=JobLeadStatus.PENDING)
+    cog = JobsCog(Mock())
+    cog._resolve_unqualified_leads_forum = AsyncMock(return_value=(channel, None, 200))
+
+    with (
+        patch.object(jobs_module, "get_job_lead", return_value=lead),
+        patch.object(jobs_module, "reserve_job_lead_staging", return_value=None),
+        patch.object(jobs_module, "mark_job_lead_staged") as mark,
+    ):
+        result, status_code = await cog.stage_job_lead_to_discord(
+            lead_id=lead.id,
+            reviewer_discord_user_id="42",
+        )
+
+    assert status_code == 409
+    assert result == {"error": "job_lead_staging_in_progress", "lead_id": lead.id}
+    channel.create_thread.assert_not_awaited()
+    mark.assert_not_called()
+
+
+async def test_stage_job_lead_deletes_thread_and_releases_reservation_when_save_loses_race() -> (
+    None
+):
+    guild = SimpleNamespace(id=123)
+    thread = SimpleNamespace(id=789, delete=AsyncMock())
+    channel = SimpleNamespace(
+        id=456,
+        name="unqualified-leads",
+        guild=guild,
+        available_tags=[],
+        create_thread=AsyncMock(
+            return_value=SimpleNamespace(thread=thread, message=SimpleNamespace(id=790))
+        ),
+    )
+    lead = _make_job_lead(status=JobLeadStatus.PENDING)
+    cog = JobsCog(Mock())
+    cog._resolve_unqualified_leads_forum = AsyncMock(return_value=(channel, None, 200))
+
+    with (
+        patch.object(jobs_module, "get_job_lead", return_value=lead),
+        patch.object(jobs_module, "reserve_job_lead_staging", return_value=lead),
+        patch.object(jobs_module, "mark_job_lead_staged", return_value=None),
+        patch.object(
+            jobs_module, "release_job_lead_staging_reservation", return_value=True
+        ) as release,
+        patch.object(jobs_module, "uuid4", return_value="reservation-1"),
+    ):
+        result, status_code = await cog.stage_job_lead_to_discord(
+            lead_id=lead.id,
+            reviewer_discord_user_id="42",
+        )
+
+    assert status_code == 502
+    assert result == {
+        "error": "job_lead_stage_marker_failed",
+        "lead_id": lead.id,
+        "thread_id": "789",
+    }
+    thread.delete.assert_awaited_once()
+    release.assert_called_once_with(
+        jobs_module.settings,
+        lead_id=lead.id,
+        reservation_token="reservation-1",
+    )
+
+
 async def test_unqualified_leads_forum_cannot_be_registered_for_matching() -> None:
     guild = SimpleNamespace(id=123)
-    channel = SimpleNamespace(id=456, guild=guild)
+    channel = SimpleNamespace(id=456, name="unqualified-leads", guild=guild)
+    interaction = SimpleNamespace(
+        guild=guild,
+        channel=channel,
+        user=SimpleNamespace(roles=[SimpleNamespace(name="Steering Committee")]),
+        response=SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
     cog = JobsCog(Mock())
-    cog._jobs_channels_by_guild[123] = {456}
 
     with (
         patch.object(
@@ -362,19 +466,105 @@ async def test_unqualified_leads_forum_cannot_be_registered_for_matching() -> No
             "456",
         ),
         patch.object(cog, "_resolve_configured_guild", return_value=guild),
-        patch.object(
-            cog,
-            "_fetch_forum_channel",
-            new_callable=AsyncMock,
-            return_value=(channel, None, 200),
-        ),
-        patch.object(cog, "_refresh_jobs_channel_cache", new_callable=AsyncMock),
+        patch.object(jobs_module, "register_job_post_channel") as register,
+        patch.object(cog, "_audit_command_safe") as audit,
     ):
-        resolved, error, status_code = await cog._resolve_unqualified_leads_forum()
+        await JobsCog.register_jobs_channel.callback(cog, interaction, channel)
 
-    assert resolved is None
-    assert error == {"error": "unqualified_leads_forum_registered"}
-    assert status_code == 409
+    interaction.response.defer.assert_not_awaited()
+    interaction.response.send_message.assert_awaited_once()
+    assert (
+        "cannot be registered" in interaction.response.send_message.await_args.args[0]
+    )
+    register.assert_not_called()
+    audit.assert_called_once()
+
+
+def test_startup_skips_unqualified_leads_forum_from_default_registration(
+    monkeypatch,
+) -> None:
+    class FakeForumChannel:
+        def __init__(self, channel_id: int, name: str, guild: object) -> None:
+            self.id = channel_id
+            self.name = name
+            self.guild = guild
+
+    guild = SimpleNamespace(id=123)
+    channel = FakeForumChannel(456, "unqualified-leads", guild)
+    guild.channels = [channel]
+    cog = JobsCog(Mock())
+    cog._resolve_configured_guild = Mock(return_value=guild)
+    to_thread = AsyncMock()
+    monkeypatch.setattr(jobs_module.discord, "ForumChannel", FakeForumChannel)
+    monkeypatch.setattr(
+        jobs_module.settings,
+        "discord_unqualified_leads_forum_channel",
+        "456",
+    )
+    monkeypatch.setattr(
+        jobs_module.settings,
+        "discord_default_job_forum_channels",
+        "unqualified-leads:part_time",
+    )
+
+    with patch.object(jobs_module.asyncio, "to_thread", to_thread):
+        discovered = asyncio.run(cog._register_default_job_forum_channels(guild))
+
+    assert discovered == set()
+    to_thread.assert_not_awaited()
+
+
+async def test_match_candidates_rejects_holding_forum_without_persisting_match(
+    monkeypatch,
+) -> None:
+    class FakeForumChannel:
+        def __init__(self, channel_id: int, guild: object) -> None:
+            self.id = channel_id
+            self.name = "unqualified-leads"
+            self.guild = guild
+
+    class FakeThread:
+        def __init__(self, parent: object, guild: object) -> None:
+            self.id = 789
+            self.parent = parent
+            self.guild = guild
+            self.starter_message = None
+
+    guild = SimpleNamespace(id=123)
+    parent = FakeForumChannel(456, guild)
+    thread = FakeThread(parent, guild)
+    interaction = SimpleNamespace(
+        channel=thread,
+        guild=guild,
+        user=SimpleNamespace(id=42, roles=[SimpleNamespace(name="Member")]),
+        response=SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+    cog = JobsCog(Mock())
+    cog._resolve_configured_guild = Mock(return_value=guild)
+    persist = AsyncMock()
+    monkeypatch.setattr(jobs_module.discord, "ForumChannel", FakeForumChannel)
+    monkeypatch.setattr(jobs_module.discord, "Thread", FakeThread)
+    monkeypatch.setattr(
+        jobs_module.settings,
+        "discord_unqualified_leads_forum_channel",
+        "456",
+    )
+
+    with (
+        patch.object(cog, "_persist_thread_engagement_match", persist),
+        patch.object(cog, "_audit_command_safe") as audit,
+    ):
+        await JobsCog.match_candidates.callback(cog, interaction)
+
+    interaction.response.defer.assert_not_awaited()
+    interaction.response.send_message.assert_awaited_once()
+    assert (
+        "unavailable in the holding forum"
+        in interaction.response.send_message.await_args.args[0]
+    )
+    persist.assert_not_awaited()
+    audit.assert_called_once()
 
 
 def test_job_lead_forum_tags_select_required_fallback() -> None:
