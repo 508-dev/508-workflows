@@ -352,8 +352,14 @@ def test_reserve_job_lead_staging_claims_pending_lead_atomically(monkeypatch) ->
     query, params = cursor.executed[0]
     assert "staging_reservation_token = %s" in query
     assert "staging_reservation_token IS NULL" in query
+    assert "staging_reserved_at IS NULL" in query
+    assert "staging_reserved_at < NOW() - (%s * INTERVAL '1 second')" in query
     assert "staged_discord_thread_id IS NULL" in query
-    assert params == ("attempt-1", "11111111-1111-1111-1111-111111111111")
+    assert params == (
+        "attempt-1",
+        "11111111-1111-1111-1111-111111111111",
+        job_leads.JOB_LEAD_STAGING_RESERVATION_TTL_SECONDS,
+    )
 
 
 def test_release_job_lead_staging_reservation_only_releases_own_attempt(

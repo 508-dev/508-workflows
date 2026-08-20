@@ -16,6 +16,9 @@ from five08.queue import get_postgres_connection, trusted_sql
 from five08.settings import SharedSettings
 
 
+JOB_LEAD_STAGING_RESERVATION_TTL_SECONDS = 15 * 60
+
+
 class JobLeadStatus(StrEnum):
     """Review states for externally sourced job leads."""
 
@@ -590,7 +593,7 @@ def reserve_job_lead_staging(
     lead_id: str,
     reservation_token: str,
 ) -> JobLead | None:
-    """Atomically claim a pending lead before creating its Discord holding thread."""
+    """Atomically claim a pending lead, reclaiming abandoned reservations."""
     token = reservation_token.strip()
     if not token:
         raise ValueError("Job lead staging reservation token is required.")
@@ -603,12 +606,19 @@ def reserve_job_lead_staging(
         WHERE id = %s
           AND status = 'pending'
           AND staged_discord_thread_id IS NULL
-          AND staging_reservation_token IS NULL
+          AND (
+              staging_reservation_token IS NULL
+              OR staging_reserved_at IS NULL
+              OR staging_reserved_at < NOW() - (%s * INTERVAL '1 second')
+          )
         RETURNING *
     """
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
-            cursor.execute(query, (token, lead_id))
+            cursor.execute(
+                query,
+                (token, lead_id, JOB_LEAD_STAGING_RESERVATION_TTL_SECONDS),
+            )
             row = cursor.fetchone()
     return _as_lead(row) if row is not None else None
 
