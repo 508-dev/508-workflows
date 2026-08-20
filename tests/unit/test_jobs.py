@@ -250,9 +250,15 @@ async def test_post_job_lead_to_discord_posts_qualified_lead_without_holding_thr
         discord_thread_id="789",
     )
     cog = JobsCog(Mock())
+    cog._resolve_configured_guild = Mock(return_value=guild)
+    cog._jobs_channels_by_guild[123] = {456}
 
     with (
         patch.object(jobs_module, "get_job_lead", return_value=lead),
+        patch.object(cog, "_refresh_jobs_channel_cache", new_callable=AsyncMock),
+        patch.object(
+            cog, "_register_default_job_forum_channels", new_callable=AsyncMock
+        ),
         patch.object(jobs_module, "mark_job_lead_posted", return_value=posted) as mark,
         patch.object(
             jobs_module,
@@ -514,6 +520,50 @@ def test_startup_skips_unqualified_leads_forum_from_default_registration(
     to_thread.assert_not_awaited()
 
 
+async def test_list_registered_job_post_forums_omits_holding_forum(
+    monkeypatch,
+) -> None:
+    class FakeForumChannel:
+        def __init__(self, channel_id: int, name: str, guild: object) -> None:
+            self.id = channel_id
+            self.name = name
+            self.guild = guild
+            self.available_tags = []
+
+    guild = SimpleNamespace(id=123)
+    holding_forum = FakeForumChannel(456, "unqualified-leads", guild)
+    gigs_forum = FakeForumChannel(789, "gigs", guild)
+    guild.channels = [holding_forum, gigs_forum]
+    cog = JobsCog(Mock())
+    cog._resolve_configured_guild = Mock(return_value=guild)
+    monkeypatch.setattr(jobs_module.discord, "ForumChannel", FakeForumChannel)
+    monkeypatch.setattr(
+        jobs_module.settings,
+        "discord_unqualified_leads_forum_channel",
+        "456",
+    )
+
+    with patch.object(cog, "_refresh_jobs_channel_cache", new_callable=AsyncMock):
+        result, status_code = await cog.list_registered_job_post_forums(
+            register_defaults=False
+        )
+
+    assert status_code == 200
+    assert result == {
+        "channels": [],
+        "available_channels": [
+            {
+                "channel_id": "789",
+                "channel_name": "gigs",
+                "posting_type": "unknown",
+                "requires_tag": False,
+                "available_tags": [],
+                "registered": False,
+            }
+        ],
+    }
+
+
 async def test_match_candidates_rejects_holding_forum_without_persisting_match(
     monkeypatch,
 ) -> None:
@@ -608,6 +658,38 @@ async def test_resolve_job_lead_post_channel_requires_registered_explicit_channe
         channel, result, status_code = await cog._resolve_job_lead_post_channel(
             _make_job_lead(),
             channel_id="456",
+        )
+
+    assert channel is None
+    assert status_code == 403
+    assert result == {"error": "job_forum_not_registered"}
+
+
+async def test_resolve_job_lead_post_channel_requires_registered_command_channel(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(jobs_module.settings, "discord_server_id", "123")
+
+    class FakeForumChannel:
+        id = 456
+        guild = SimpleNamespace(id=123)
+
+    bot = Mock()
+    bot.guilds = []
+    bot.get_guild.return_value = FakeForumChannel.guild
+    cog = JobsCog(bot)
+    cog._jobs_channels_by_guild[123] = set()
+    monkeypatch.setattr(jobs_module.discord, "ForumChannel", FakeForumChannel)
+
+    with (
+        patch.object(cog, "_refresh_jobs_channel_cache", new_callable=AsyncMock),
+        patch.object(
+            cog, "_register_default_job_forum_channels", new_callable=AsyncMock
+        ),
+    ):
+        channel, result, status_code = await cog._resolve_job_lead_post_channel(
+            _make_job_lead(),
+            channel=FakeForumChannel(),
         )
 
     assert channel is None

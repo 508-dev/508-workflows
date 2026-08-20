@@ -4307,6 +4307,28 @@ def _valid_discord_channel_id_or_none(channel_id: str) -> str | None:
     return normalized
 
 
+async def _dashboard_job_forum_is_available(
+    request: Request,
+    *,
+    channel_id: str,
+) -> bool | None:
+    """Return whether the bot exposes this forum as a safe registration target."""
+    live_channels = await _list_job_channels_from_bot(
+        request,
+        register_defaults=False,
+    )
+    if live_channels is None:
+        return None
+    available_channels = live_channels.get("available_channels")
+    if not isinstance(available_channels, list):
+        return None
+    return any(
+        isinstance(candidate, Mapping)
+        and str(candidate.get("channel_id") or "").strip() == channel_id
+        for candidate in available_channels
+    )
+
+
 async def dashboard_update_job_channel_handler(
     request: Request,
     channel_id: str,
@@ -4369,6 +4391,32 @@ async def dashboard_update_job_channel_handler(
             metadata={"error": "discord_server_not_configured"},
         )
         return JSONResponse({"error": "discord_server_not_configured"}, status_code=409)
+
+    forum_available = await _dashboard_job_forum_is_available(
+        request,
+        channel_id=normalized_channel_id,
+    )
+    if forum_available is None:
+        await _audit_dashboard_job_channel_change(
+            session,
+            result=AuditResult.ERROR,
+            channel_id=normalized_channel_id,
+            action="job_channel.update",
+            metadata={"error": "job_forum_validation_unavailable"},
+        )
+        return JSONResponse(
+            {"error": "job_forum_validation_unavailable"},
+            status_code=503,
+        )
+    if not forum_available:
+        await _audit_dashboard_job_channel_change(
+            session,
+            result=AuditResult.ERROR,
+            channel_id=normalized_channel_id,
+            action="job_channel.update",
+            metadata={"error": "job_forum_not_available"},
+        )
+        return JSONResponse({"error": "job_forum_not_available"}, status_code=403)
 
     try:
         created = await asyncio.to_thread(

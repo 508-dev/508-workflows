@@ -4473,6 +4473,55 @@ def test_dashboard_job_channels_prefers_live_discord_tag_metadata(
     list_channels.assert_not_called()
 
 
+def test_dashboard_job_channel_rejects_forum_omitted_by_bot(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(api.settings, "discord_server_id", "guild-1")
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="validated",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._list_job_channels_from_bot",
+            new_callable=AsyncMock,
+            return_value={
+                "channels": [],
+                "available_channels": [{"channel_id": "789", "channel_name": "gigs"}],
+            },
+        ) as list_channels,
+        patch("five08.backend.api.register_job_post_channel") as register,
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as audit,
+    ):
+        response = client.put(
+            "/dashboard/api/job-channels/456",
+            json={"posting_type": "part_time"},
+        )
+
+    assert response.status_code == 403
+    assert response.json() == {"error": "job_forum_not_available"}
+    list_channels.assert_awaited_once()
+    assert list_channels.await_args.kwargs == {"register_defaults": False}
+    register.assert_not_called()
+    assert audit.await_args.kwargs["metadata"]["error"] == "job_forum_not_available"
+
+
 async def test_post_job_lead_to_discord_requires_bot_endpoint(
     monkeypatch: pytest.MonkeyPatch,
     app: api.FastAPI,

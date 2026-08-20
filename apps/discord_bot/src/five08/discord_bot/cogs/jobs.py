@@ -3789,6 +3789,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                     channel
                     for channel in guild_channels
                     if isinstance(channel, discord.ForumChannel)
+                    and not self._is_unqualified_leads_forum(channel, guild=guild)
                 ),
                 key=lambda channel: str(getattr(channel, "name", "")).casefold(),
             )
@@ -3799,6 +3800,8 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             if resolved is None:
                 if status_code >= 500:
                     return cast(dict[str, Any], error), status_code
+                continue
+            if self._is_unqualified_leads_forum(resolved, guild=guild):
                 continue
             channels.append(
                 self._job_post_channel_metadata(
@@ -3851,6 +3854,38 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             return None, {"error": "job_channel_is_not_forum"}, 400
         return channel, None, 200
 
+    async def _validate_registered_job_lead_post_channel(
+        self,
+        channel: discord.ForumChannel,
+    ) -> tuple[discord.ForumChannel | None, dict[str, Any] | None, int]:
+        """Validate that a promotion target is a registered forum in this guild."""
+        configured_guild = self._resolve_configured_guild()
+        if configured_guild is None:
+            return None, {"error": "guild_not_found"}, 404
+        channel_guild = getattr(channel, "guild", None)
+        if channel_guild is None or str(channel_guild.id) != str(configured_guild.id):
+            return None, {"error": "job_forum_wrong_guild"}, 403
+        if self._is_unqualified_leads_forum(channel, guild=channel_guild):
+            return (
+                None,
+                {"error": "unqualified_leads_forum_not_promotion_target"},
+                403,
+            )
+        try:
+            await self._refresh_jobs_channel_cache(channel_guild.id)
+            await self._register_default_job_forum_channels(channel_guild)
+        except Exception as exc:
+            logger.warning(
+                "Failed validating registered jobs channel guild=%s channel=%s: %s",
+                channel_guild.id,
+                channel.id,
+                exc,
+            )
+            return None, {"error": "jobs_channel_cache_failed"}, 502
+        if not self._is_jobs_channel_registered(channel_guild.id, channel.id):
+            return None, {"error": "job_forum_not_registered"}, 403
+        return channel, None, 200
+
     async def _resolve_job_lead_post_channel(
         self,
         lead: JobLead,
@@ -3859,13 +3894,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         channel_id: str | None = None,
     ) -> tuple[discord.ForumChannel | None, dict[str, Any] | None, int]:
         if channel is not None:
-            if self._is_unqualified_leads_forum(channel):
-                return (
-                    None,
-                    {"error": "unqualified_leads_forum_not_promotion_target"},
-                    403,
-                )
-            return channel, None, 200
+            return await self._validate_registered_job_lead_post_channel(channel)
         if channel_id:
             try:
                 parsed_channel_id = int(channel_id)
@@ -3876,31 +3905,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             )
             if resolved is None:
                 return None, error, status_code
-            configured_guild = self._resolve_configured_guild()
-            if configured_guild is None:
-                return None, {"error": "guild_not_found"}, 404
-            if resolved.guild.id != configured_guild.id:
-                return None, {"error": "job_forum_wrong_guild"}, 403
-            if self._is_unqualified_leads_forum(resolved, guild=resolved.guild):
-                return (
-                    None,
-                    {"error": "unqualified_leads_forum_not_promotion_target"},
-                    403,
-                )
-            try:
-                await self._refresh_jobs_channel_cache(resolved.guild.id)
-                await self._register_default_job_forum_channels(resolved.guild)
-            except Exception as exc:
-                logger.warning(
-                    "Failed validating registered jobs channel guild=%s channel=%s: %s",
-                    resolved.guild.id,
-                    resolved.id,
-                    exc,
-                )
-                return None, {"error": "jobs_channel_cache_failed"}, 502
-            if not self._is_jobs_channel_registered(resolved.guild.id, resolved.id):
-                return None, {"error": "job_forum_not_registered"}, 403
-            return resolved, None, 200
+            return await self._validate_registered_job_lead_post_channel(resolved)
 
         guild = self._resolve_configured_guild()
         if guild is None:
