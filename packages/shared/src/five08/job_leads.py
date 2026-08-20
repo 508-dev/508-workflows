@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -17,6 +19,7 @@ from five08.settings import SharedSettings
 
 
 JOB_LEAD_STAGING_RESERVATION_TTL_SECONDS = 15 * 60
+_STAGING_SOURCE_FINGERPRINT_METADATA_KEY = "_staging_source_fingerprint"
 
 
 class JobLeadStatus(StrEnum):
@@ -223,6 +226,51 @@ def _as_utc(value: datetime | None) -> datetime | None:
     return value.astimezone(timezone.utc)
 
 
+def _job_lead_staging_source_fingerprint(
+    lead: JobLeadInput,
+    *,
+    posting_type: JobPostingType,
+    tags: list[str],
+) -> str:
+    """Return a stable fingerprint of source fields rendered in a holding thread."""
+    source_payload = {
+        "apply_url": lead.apply_url,
+        "body_normalized": lead.body_normalized,
+        "location": lead.location,
+        "organization": lead.organization,
+        "posting_type": posting_type.value,
+        "remote": lead.remote,
+        "source_url": lead.source_url,
+        "tags": tags,
+        "title": lead.title.strip() or "Untitled job lead",
+    }
+    encoded = json.dumps(
+        source_payload,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _job_lead_metadata_with_staging_source_fingerprint(
+    lead: JobLeadInput,
+    *,
+    posting_type: JobPostingType,
+    tags: list[str],
+) -> dict[str, Any]:
+    """Attach the current holding-thread source fingerprint to lead metadata."""
+    metadata = dict(lead.metadata or {})
+    metadata[_STAGING_SOURCE_FINGERPRINT_METADATA_KEY] = (
+        _job_lead_staging_source_fingerprint(
+            lead,
+            posting_type=posting_type,
+            tags=tags,
+        )
+    )
+    return metadata
+
+
 def _as_lead(row: dict[str, Any]) -> JobLead:
     tags = row.get("tags") or []
     metadata = row.get("metadata") or {}
@@ -276,6 +324,11 @@ def upsert_job_lead(
     posting_type = normalize_job_posting_type(lead.posting_type)
     source_posted_at = _as_utc(lead.source_posted_at)
     tags = sorted({tag.strip().casefold() for tag in lead.tags or [] if tag.strip()})
+    metadata = _job_lead_metadata_with_staging_source_fingerprint(
+        lead,
+        posting_type=posting_type,
+        tags=tags,
+    )
     query = """
         INSERT INTO job_leads (
             id,
@@ -315,6 +368,48 @@ def upsert_job_lead(
             tags = EXCLUDED.tags,
             confidence = GREATEST(job_leads.confidence, EXCLUDED.confidence),
             metadata = job_leads.metadata || EXCLUDED.metadata,
+            staged_discord_guild_id = CASE
+                WHEN job_leads.status = 'pending'
+                    AND (job_leads.metadata ->> '_staging_source_fingerprint')
+                        IS DISTINCT FROM (EXCLUDED.metadata ->> '_staging_source_fingerprint')
+                THEN NULL
+                ELSE job_leads.staged_discord_guild_id
+            END,
+            staged_discord_channel_id = CASE
+                WHEN job_leads.status = 'pending'
+                    AND (job_leads.metadata ->> '_staging_source_fingerprint')
+                        IS DISTINCT FROM (EXCLUDED.metadata ->> '_staging_source_fingerprint')
+                THEN NULL
+                ELSE job_leads.staged_discord_channel_id
+            END,
+            staged_discord_thread_id = CASE
+                WHEN job_leads.status = 'pending'
+                    AND (job_leads.metadata ->> '_staging_source_fingerprint')
+                        IS DISTINCT FROM (EXCLUDED.metadata ->> '_staging_source_fingerprint')
+                THEN NULL
+                ELSE job_leads.staged_discord_thread_id
+            END,
+            staged_at = CASE
+                WHEN job_leads.status = 'pending'
+                    AND (job_leads.metadata ->> '_staging_source_fingerprint')
+                        IS DISTINCT FROM (EXCLUDED.metadata ->> '_staging_source_fingerprint')
+                THEN NULL
+                ELSE job_leads.staged_at
+            END,
+            staging_reservation_token = CASE
+                WHEN job_leads.status = 'pending'
+                    AND (job_leads.metadata ->> '_staging_source_fingerprint')
+                        IS DISTINCT FROM (EXCLUDED.metadata ->> '_staging_source_fingerprint')
+                THEN NULL
+                ELSE job_leads.staging_reservation_token
+            END,
+            staging_reserved_at = CASE
+                WHEN job_leads.status = 'pending'
+                    AND (job_leads.metadata ->> '_staging_source_fingerprint')
+                        IS DISTINCT FROM (EXCLUDED.metadata ->> '_staging_source_fingerprint')
+                THEN NULL
+                ELSE job_leads.staging_reserved_at
+            END,
             updated_at = NOW()
         WHERE job_leads.status IN ('pending', 'rejected')
         RETURNING id::text, (xmax = 0) AS inserted
@@ -341,7 +436,7 @@ def upsert_job_lead(
                     lead.apply_url,
                     tags,
                     float(max(0.0, min(1.0, lead.confidence))),
-                    Jsonb(lead.metadata or {}),
+                    Jsonb(metadata),
                 ),
             )
             row = cursor.fetchone()
@@ -358,7 +453,16 @@ def update_existing_job_lead(
     posting_type = normalize_job_posting_type(lead.posting_type)
     source_posted_at = _as_utc(lead.source_posted_at)
     tags = sorted({tag.strip().casefold() for tag in lead.tags or [] if tag.strip()})
+    metadata = _job_lead_metadata_with_staging_source_fingerprint(
+        lead,
+        posting_type=posting_type,
+        tags=tags,
+    )
+    staging_source_fingerprint = str(metadata[_STAGING_SOURCE_FINGERPRINT_METADATA_KEY])
     query = """
+        WITH incoming AS (
+            SELECT %s::text AS staging_source_fingerprint
+        )
         UPDATE job_leads
         SET source_url = %s,
             source_posted_at = COALESCE(%s, source_posted_at),
@@ -373,7 +477,50 @@ def update_existing_job_lead(
             tags = %s,
             confidence = GREATEST(confidence, %s),
             metadata = metadata || %s,
+            staged_discord_guild_id = CASE
+                WHEN job_leads.status = 'pending'
+                    AND (job_leads.metadata ->> '_staging_source_fingerprint')
+                        IS DISTINCT FROM incoming.staging_source_fingerprint
+                THEN NULL
+                ELSE job_leads.staged_discord_guild_id
+            END,
+            staged_discord_channel_id = CASE
+                WHEN job_leads.status = 'pending'
+                    AND (job_leads.metadata ->> '_staging_source_fingerprint')
+                        IS DISTINCT FROM incoming.staging_source_fingerprint
+                THEN NULL
+                ELSE job_leads.staged_discord_channel_id
+            END,
+            staged_discord_thread_id = CASE
+                WHEN job_leads.status = 'pending'
+                    AND (job_leads.metadata ->> '_staging_source_fingerprint')
+                        IS DISTINCT FROM incoming.staging_source_fingerprint
+                THEN NULL
+                ELSE job_leads.staged_discord_thread_id
+            END,
+            staged_at = CASE
+                WHEN job_leads.status = 'pending'
+                    AND (job_leads.metadata ->> '_staging_source_fingerprint')
+                        IS DISTINCT FROM incoming.staging_source_fingerprint
+                THEN NULL
+                ELSE job_leads.staged_at
+            END,
+            staging_reservation_token = CASE
+                WHEN job_leads.status = 'pending'
+                    AND (job_leads.metadata ->> '_staging_source_fingerprint')
+                        IS DISTINCT FROM incoming.staging_source_fingerprint
+                THEN NULL
+                ELSE job_leads.staging_reservation_token
+            END,
+            staging_reserved_at = CASE
+                WHEN job_leads.status = 'pending'
+                    AND (job_leads.metadata ->> '_staging_source_fingerprint')
+                        IS DISTINCT FROM incoming.staging_source_fingerprint
+                THEN NULL
+                ELSE job_leads.staging_reserved_at
+            END,
             updated_at = NOW()
+        FROM incoming
         WHERE source_key = %s
           AND external_id = %s
           AND status IN ('pending', 'rejected')
@@ -384,6 +531,7 @@ def update_existing_job_lead(
             cursor.execute(
                 query,
                 (
+                    staging_source_fingerprint,
                     lead.source_url,
                     source_posted_at,
                     lead.title.strip() or "Untitled job lead",
@@ -396,7 +544,7 @@ def update_existing_job_lead(
                     lead.apply_url,
                     tags,
                     float(max(0.0, min(1.0, lead.confidence))),
-                    Jsonb(lead.metadata or {}),
+                    Jsonb(metadata),
                     lead.source_key,
                     lead.external_id,
                 ),

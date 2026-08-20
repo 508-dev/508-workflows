@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import five08.job_leads as job_leads
@@ -125,8 +126,84 @@ def test_upsert_job_lead_preserves_review_state_on_conflict(monkeypatch) -> None
     assert "ON CONFLICT (source_key, external_id) DO UPDATE" in query
     assert "WHERE job_leads.status IN ('pending', 'rejected')" in query
     assert "apply_url = EXCLUDED.apply_url" in query
-    assert "status =" not in query.split("DO UPDATE SET", 1)[1]
+    assert "\n            status =" not in query.split("DO UPDATE SET", 1)[1]
+    for staging_column in (
+        "staged_discord_guild_id",
+        "staged_discord_channel_id",
+        "staged_discord_thread_id",
+        "staged_at",
+        "staging_reservation_token",
+        "staging_reserved_at",
+    ):
+        assert f"{staging_column} = CASE" in query
+    assert "_staging_source_fingerprint" in query
     assert params[15] == ["1099", "contract-to-hire"]
+    assert params[-1].obj[
+        job_leads._STAGING_SOURCE_FINGERPRINT_METADATA_KEY
+    ] == job_leads._job_lead_staging_source_fingerprint(
+        JobLeadInput(
+            source_key="hackernews_who_is_hiring",
+            source_type="hackernews",
+            external_id="48392586",
+            source_url="https://news.ycombinator.com/item?id=48392586",
+            title="CO-Ver | Fullstack | 1099 Contract-to-Hire",
+            body_raw="raw",
+            body_normalized="normalized",
+            tags=["Contract-to-Hire", "1099"],
+            confidence=0.65,
+        ),
+        posting_type=job_leads.JobPostingType.PART_TIME,
+        tags=["1099", "contract-to-hire"],
+    )
+
+
+def test_staging_source_fingerprint_tracks_holding_thread_content() -> None:
+    base = JobLeadInput(
+        source_key="hackernews_who_is_hiring",
+        source_type="hackernews",
+        external_id="48392586",
+        source_url="https://news.ycombinator.com/item?id=48392586",
+        title="Contract role",
+        body_raw="raw",
+        body_normalized="Original description",
+        organization="508 Dev",
+        location="Remote",
+        remote=True,
+        apply_url="https://example.com/apply",
+        tags=["remote", "contract"],
+        metadata={"source_observed_at": "2026-08-20T00:00:00Z"},
+    )
+    same_thread_content = replace(
+        base,
+        metadata={"source_observed_at": "2026-08-20T01:00:00Z"},
+    )
+    changed_thread_content = replace(
+        base,
+        body_normalized="Corrected description",
+    )
+
+    fingerprint = job_leads._job_lead_staging_source_fingerprint(
+        base,
+        posting_type=job_leads.JobPostingType.PART_TIME,
+        tags=["contract", "remote"],
+    )
+
+    assert (
+        job_leads._job_lead_staging_source_fingerprint(
+            same_thread_content,
+            posting_type=job_leads.JobPostingType.PART_TIME,
+            tags=["contract", "remote"],
+        )
+        == fingerprint
+    )
+    assert (
+        job_leads._job_lead_staging_source_fingerprint(
+            changed_thread_content,
+            posting_type=job_leads.JobPostingType.PART_TIME,
+            tags=["contract", "remote"],
+        )
+        != fingerprint
+    )
 
 
 def test_upsert_job_lead_skips_reviewed_conflict(monkeypatch) -> None:
@@ -175,6 +252,8 @@ def test_update_existing_job_lead_never_inserts(monkeypatch) -> None:
     query, params = cursor.executed[0]
     assert "UPDATE job_leads" in query
     assert "INSERT" not in query
+    assert "WITH incoming AS" in query
+    assert "FROM incoming" in query
     assert "status IN ('pending', 'rejected')" in query
     assert "apply_url = %s" in query
     assert "apply_url = COALESCE" not in query
@@ -192,6 +271,9 @@ def test_update_existing_job_lead_never_inserts(monkeypatch) -> None:
         "discord_channel_id",
         "discord_thread_id",
         "posted_at",
+    ):
+        assert preserved_column not in assigned_columns
+    for staging_column in (
         "staged_discord_guild_id",
         "staged_discord_channel_id",
         "staged_discord_thread_id",
@@ -199,7 +281,10 @@ def test_update_existing_job_lead_never_inserts(monkeypatch) -> None:
         "staging_reservation_token",
         "staging_reserved_at",
     ):
-        assert preserved_column not in assigned_columns
+        assert f"{staging_column} = CASE" in query
+    assert (
+        params[0] == params[-3].obj[job_leads._STAGING_SOURCE_FINGERPRINT_METADATA_KEY]
+    )
     assert params[-2:] == ("hackernews_who_is_hiring", "48392586")
 
 
