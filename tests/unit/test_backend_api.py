@@ -2249,7 +2249,7 @@ def test_dashboard_me_returns_crm_linked_admin_session(client: TestClient) -> No
         subject="123456789",
         email="admin@508.dev",
         display_name="Discord Admin",
-        groups=["discord_admin"],
+        groups=["Admin"],
         is_admin=True,
         id_token="id-token-1",
         expires_at=4_102_444_800,
@@ -2269,6 +2269,7 @@ def test_dashboard_me_returns_crm_linked_admin_session(client: TestClient) -> No
     assert response.json()["actor_provider"] == api.ActorProvider.DISCORD.value
     assert response.json()["crm_base_url"] == api._crm_base_url()
     assert "jobs:write" in response.json()["permissions"]
+    assert response.json()["can_manage_leads"] is True
 
 
 def test_dashboard_me_normalizes_crm_api_base_url(

@@ -57,7 +57,7 @@ def dashboard_server() -> Iterator[str]:
         subject="123456789",
         email="admin@508.dev",
         display_name="Discord Admin",
-        groups=["discord_admin"],
+        groups=["Admin"],
         is_admin=True,
         id_token="id-token-1",
         expires_at=4_102_444_800,
