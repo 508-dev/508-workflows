@@ -228,7 +228,7 @@ def test_in_memory_rejects_overlong_value_before_storing() -> None:
     assert _list_user_facts(store) == []
 
 
-def test_in_memory_list_has_a_deterministic_bounded_result_set() -> None:
+def test_in_memory_list_keeps_the_newest_bounded_result_set_chronologically() -> None:
     start = datetime(2026, 7, 28, 9, 0, tzinfo=timezone.utc)
     facts = [
         _fact(
@@ -243,7 +243,7 @@ def test_in_memory_list_has_a_deterministic_bounded_result_set() -> None:
     listed = _list_user_facts(store, now=start)
 
     assert len(listed) == MAX_MEMORY_FACTS_PER_LIST
-    assert [fact.id for fact in listed] == [fact.id for fact in facts[:-1]]
+    assert [fact.id for fact in listed] == [fact.id for fact in facts[1:]]
 
 
 def test_in_memory_purge_is_tenant_scoped_and_removes_expired_or_deleted_rows() -> None:

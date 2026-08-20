@@ -307,7 +307,7 @@ class AgentExecutionResult(BaseModel):
 
 
 class AgentResponsePlannerMetadata(BaseModel):
-    """Audit-only planner selection retained when a response has no action plan."""
+    """Audit-only planner selection retained with the final agent response."""
 
     operation_id: str | None = None
     intent: str | None = None
@@ -332,9 +332,9 @@ class AgentResponse(BaseModel):
     results: list[AgentExecutionResult] = Field(default_factory=list)
     message: str
     clarification_question: str | None = None
-    # Direct model answers have no action plan, but the API still needs the
-    # model selection for its audit record. This stays out of the client
-    # response because it is operational metadata rather than chat content.
+    # Direct model answers and planner-generated follow-up summaries need this
+    # provenance for audit records. It stays out of the client response because
+    # it is operational metadata rather than chat content.
     planner_metadata: AgentResponsePlannerMetadata | None = Field(
         default=None,
         exclude=True,

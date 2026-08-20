@@ -931,6 +931,7 @@ class AgentOrchestrator:
         if all(result.status == "succeeded" for result in results):
             continued = self._continue_public_web_planning_loop(
                 actions=actions,
+                plan=plan,
                 results=all_results,
                 context=context,
                 planning_text=planning_text,
@@ -958,6 +959,7 @@ class AgentOrchestrator:
         self,
         *,
         actions: list[AgentToolAction],
+        plan: AgentPlan,
         results: list[AgentExecutionResult],
         context: AgentIdentityContext,
         planning_text: str,
@@ -1040,8 +1042,16 @@ class AgentOrchestrator:
         if draft.status == "answer":
             return AgentResponse(
                 status="executed",
+                plan=plan,
                 results=results,
                 message=draft.answer or self._execution_message(results),
+                planner_metadata=AgentResponsePlannerMetadata(
+                    operation_id=context.operation_id,
+                    intent=draft.intent or plan.intent,
+                    planner="live_model",
+                    model_tier=result.model.tier,
+                    model=result.model,
+                ),
             )
 
         next_actions = [

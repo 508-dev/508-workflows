@@ -2677,6 +2677,7 @@ def test_public_web_planning_loop_uses_only_web_observations() -> None:
 
     planner = FakePlanner()
     context = _context(roles=["Steering Committee"])
+    context.operation_id = "public-web-summary-op"
     context.context_snippets = [
         AgentContextSnippet(
             source_type="request",
@@ -2692,6 +2693,16 @@ def test_public_web_planning_loop_uses_only_web_observations() -> None:
 
     assert response.status == "executed"
     assert response.message == "The current public grant is open."
+    assert response.plan is not None
+    assert response.plan.operation_id == "public-web-summary-op"
+    assert response.plan.intent == "search_public_web"
+    assert response.plan.planner == "live_model"
+    assert response.planner_metadata is not None
+    assert response.planner_metadata.operation_id == "public-web-summary-op"
+    assert response.planner_metadata.intent == "grant_summary"
+    assert response.planner_metadata.planner == "live_model"
+    assert response.planner_metadata.model_tier == "fast"
+    assert response.planner_metadata.model.model == "gpt-4.1-mini"
     assert planner.follow_up_context is not None
     assert planner.follow_up_context.context_snippets == []
     assert len(planner.observations) == 1

@@ -314,9 +314,12 @@ class InMemoryMemoryStore:
                 and (include_deleted or fact.deleted_at is None)
                 and not _fact_is_expired(fact, now=comparison_time)
             ]
-            return sorted(facts, key=lambda fact: (fact.created_at, fact.id))[
-                :MAX_MEMORY_FACTS_PER_LIST
-            ]
+            newest_facts = sorted(
+                facts,
+                key=lambda fact: (fact.created_at, fact.id),
+                reverse=True,
+            )[:MAX_MEMORY_FACTS_PER_LIST]
+            return list(reversed(newest_facts))
 
     def forget_fact(
         self,
