@@ -19,6 +19,7 @@ from five08.settings import SharedSettings
 
 
 JOB_LEAD_STAGING_RESERVATION_TTL_SECONDS = 15 * 60
+_STAGING_CLEANUP_REQUIRED_METADATA_KEY = "_staging_cleanup_required"
 _STAGING_SOURCE_FINGERPRINT_METADATA_KEY = "_staging_source_fingerprint"
 
 
@@ -227,7 +228,7 @@ def _as_utc(value: datetime | None) -> datetime | None:
 
 
 def _job_lead_staging_source_fingerprint(
-    lead: JobLeadInput,
+    lead: JobLead | JobLeadInput,
     *,
     posting_type: JobPostingType,
     tags: list[str],
@@ -251,6 +252,28 @@ def _job_lead_staging_source_fingerprint(
         sort_keys=True,
     ).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def job_lead_staging_source_fingerprint(lead: JobLead | JobLeadInput) -> str:
+    """Return the normalized source fingerprint for a holding-thread payload."""
+    posting_type = normalize_job_posting_type(lead.posting_type)
+    tags = sorted({tag.strip().casefold() for tag in lead.tags or [] if tag.strip()})
+    return _job_lead_staging_source_fingerprint(
+        lead,
+        posting_type=posting_type,
+        tags=tags,
+    )
+
+
+def job_lead_staging_recovery_details(lead: JobLead) -> dict[str, str | None] | None:
+    """Return orphaned holding-thread details that require manual cleanup."""
+    raw_recovery = lead.metadata.get(_STAGING_CLEANUP_REQUIRED_METADATA_KEY)
+    if not isinstance(raw_recovery, dict):
+        return None
+    return {
+        key: str(raw_recovery.get(key) or "").strip() or None
+        for key in ("guild_id", "channel_id", "thread_id")
+    }
 
 
 def _job_lead_metadata_with_staging_source_fingerprint(
@@ -369,42 +392,42 @@ def upsert_job_lead(
             confidence = GREATEST(job_leads.confidence, EXCLUDED.confidence),
             metadata = job_leads.metadata || EXCLUDED.metadata,
             staged_discord_guild_id = CASE
-                WHEN job_leads.status = 'pending'
+                WHEN job_leads.status IN ('pending', 'rejected')
                     AND (job_leads.metadata ->> '_staging_source_fingerprint')
                         IS DISTINCT FROM (EXCLUDED.metadata ->> '_staging_source_fingerprint')
                 THEN NULL
                 ELSE job_leads.staged_discord_guild_id
             END,
             staged_discord_channel_id = CASE
-                WHEN job_leads.status = 'pending'
+                WHEN job_leads.status IN ('pending', 'rejected')
                     AND (job_leads.metadata ->> '_staging_source_fingerprint')
                         IS DISTINCT FROM (EXCLUDED.metadata ->> '_staging_source_fingerprint')
                 THEN NULL
                 ELSE job_leads.staged_discord_channel_id
             END,
             staged_discord_thread_id = CASE
-                WHEN job_leads.status = 'pending'
+                WHEN job_leads.status IN ('pending', 'rejected')
                     AND (job_leads.metadata ->> '_staging_source_fingerprint')
                         IS DISTINCT FROM (EXCLUDED.metadata ->> '_staging_source_fingerprint')
                 THEN NULL
                 ELSE job_leads.staged_discord_thread_id
             END,
             staged_at = CASE
-                WHEN job_leads.status = 'pending'
+                WHEN job_leads.status IN ('pending', 'rejected')
                     AND (job_leads.metadata ->> '_staging_source_fingerprint')
                         IS DISTINCT FROM (EXCLUDED.metadata ->> '_staging_source_fingerprint')
                 THEN NULL
                 ELSE job_leads.staged_at
             END,
             staging_reservation_token = CASE
-                WHEN job_leads.status = 'pending'
+                WHEN job_leads.status IN ('pending', 'rejected')
                     AND (job_leads.metadata ->> '_staging_source_fingerprint')
                         IS DISTINCT FROM (EXCLUDED.metadata ->> '_staging_source_fingerprint')
                 THEN NULL
                 ELSE job_leads.staging_reservation_token
             END,
             staging_reserved_at = CASE
-                WHEN job_leads.status = 'pending'
+                WHEN job_leads.status IN ('pending', 'rejected')
                     AND (job_leads.metadata ->> '_staging_source_fingerprint')
                         IS DISTINCT FROM (EXCLUDED.metadata ->> '_staging_source_fingerprint')
                 THEN NULL
@@ -478,42 +501,42 @@ def update_existing_job_lead(
             confidence = GREATEST(confidence, %s),
             metadata = metadata || %s,
             staged_discord_guild_id = CASE
-                WHEN job_leads.status = 'pending'
+                WHEN job_leads.status IN ('pending', 'rejected')
                     AND (job_leads.metadata ->> '_staging_source_fingerprint')
                         IS DISTINCT FROM incoming.staging_source_fingerprint
                 THEN NULL
                 ELSE job_leads.staged_discord_guild_id
             END,
             staged_discord_channel_id = CASE
-                WHEN job_leads.status = 'pending'
+                WHEN job_leads.status IN ('pending', 'rejected')
                     AND (job_leads.metadata ->> '_staging_source_fingerprint')
                         IS DISTINCT FROM incoming.staging_source_fingerprint
                 THEN NULL
                 ELSE job_leads.staged_discord_channel_id
             END,
             staged_discord_thread_id = CASE
-                WHEN job_leads.status = 'pending'
+                WHEN job_leads.status IN ('pending', 'rejected')
                     AND (job_leads.metadata ->> '_staging_source_fingerprint')
                         IS DISTINCT FROM incoming.staging_source_fingerprint
                 THEN NULL
                 ELSE job_leads.staged_discord_thread_id
             END,
             staged_at = CASE
-                WHEN job_leads.status = 'pending'
+                WHEN job_leads.status IN ('pending', 'rejected')
                     AND (job_leads.metadata ->> '_staging_source_fingerprint')
                         IS DISTINCT FROM incoming.staging_source_fingerprint
                 THEN NULL
                 ELSE job_leads.staged_at
             END,
             staging_reservation_token = CASE
-                WHEN job_leads.status = 'pending'
+                WHEN job_leads.status IN ('pending', 'rejected')
                     AND (job_leads.metadata ->> '_staging_source_fingerprint')
                         IS DISTINCT FROM incoming.staging_source_fingerprint
                 THEN NULL
                 ELSE job_leads.staging_reservation_token
             END,
             staging_reserved_at = CASE
-                WHEN job_leads.status = 'pending'
+                WHEN job_leads.status IN ('pending', 'rejected')
                     AND (job_leads.metadata ->> '_staging_source_fingerprint')
                         IS DISTINCT FROM incoming.staging_source_fingerprint
                 THEN NULL
@@ -704,11 +727,15 @@ def mark_job_lead_staged(
     *,
     lead_id: str,
     reservation_token: str,
+    source_fingerprint: str,
     guild_id: str,
     channel_id: str,
     thread_id: str,
 ) -> JobLead | None:
     """Finalize a reserved pending lead's unqualified Discord holding thread."""
+    fingerprint = source_fingerprint.strip()
+    if not fingerprint:
+        raise ValueError("Job lead staging source fingerprint is required.")
     query = """
         UPDATE job_leads
         SET
@@ -716,6 +743,9 @@ def mark_job_lead_staged(
             staged_discord_channel_id = %s,
             staged_discord_thread_id = %s,
             staged_at = NOW(),
+            metadata = metadata || jsonb_build_object(
+                '_staging_source_fingerprint', %s::text
+            ),
             staging_reservation_token = NULL,
             staging_reserved_at = NULL,
             updated_at = NOW()
@@ -729,7 +759,14 @@ def mark_job_lead_staged(
         with conn.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
                 query,
-                (guild_id, channel_id, thread_id, lead_id, reservation_token),
+                (
+                    guild_id,
+                    channel_id,
+                    thread_id,
+                    fingerprint,
+                    lead_id,
+                    reservation_token,
+                ),
             )
             row = cursor.fetchone()
     return _as_lead(row) if row is not None else None
@@ -754,6 +791,7 @@ def reserve_job_lead_staging(
         WHERE id = %s
           AND status = 'pending'
           AND staged_discord_thread_id IS NULL
+          AND metadata -> '_staging_cleanup_required' IS NULL
           AND (
               staging_reservation_token IS NULL
               OR staging_reserved_at IS NULL
@@ -795,6 +833,40 @@ def release_job_lead_staging_reservation(
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
             cursor.execute(query, (lead_id, token))
+            row = cursor.fetchone()
+    return row is not None
+
+
+def record_job_lead_staging_cleanup_required(
+    settings: SharedSettings,
+    *,
+    lead_id: str,
+    guild_id: str,
+    channel_id: str,
+    thread_id: str | None,
+) -> bool:
+    """Record an orphaned holding thread before permitting another staging attempt."""
+    recovery_metadata = Jsonb(
+        {
+            _STAGING_CLEANUP_REQUIRED_METADATA_KEY: {
+                "guild_id": guild_id.strip() or None,
+                "channel_id": channel_id.strip() or None,
+                "thread_id": thread_id.strip() if thread_id else None,
+            }
+        }
+    )
+    query = """
+        UPDATE job_leads
+        SET
+            metadata = metadata || %s,
+            updated_at = NOW()
+        WHERE id = %s
+          AND status IN ('pending', 'rejected')
+        RETURNING id
+    """
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(query, (recovery_metadata, lead_id))
             row = cursor.fetchone()
     return row is not None
 

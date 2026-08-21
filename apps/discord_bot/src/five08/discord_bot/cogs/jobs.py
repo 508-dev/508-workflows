@@ -70,9 +70,12 @@ from five08.job_leads import (
     get_job_lead,
     JobLead,
     JobLeadStatus,
+    job_lead_staging_recovery_details,
+    job_lead_staging_source_fingerprint,
     list_job_leads,
     mark_job_lead_posted,
     mark_job_lead_staged,
+    record_job_lead_staging_cleanup_required,
     release_job_lead_staging_reservation,
     reserve_job_lead_staging,
     review_job_lead,
@@ -3999,23 +4002,57 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         lead_id: str,
         reservation_token: str,
         thread: object | None = None,
+        target_channel: discord.ForumChannel | None = None,
     ) -> None:
         """Delete an unsaved holding thread and release this attempt's reservation."""
         delete_thread = cast(
             Callable[..., Awaitable[None]] | None,
             getattr(thread, "delete", None),
         )
+        deletion_failed = thread is not None and delete_thread is None
+        if deletion_failed:
+            logger.warning(
+                "Cannot delete unsaved unqualified lead thread lead_id=%s: no delete method",
+                lead_id,
+            )
         if delete_thread is not None:
             try:
                 await delete_thread(
                     reason="Deleting unqualified lead thread after staging persistence failed"
                 )
             except Exception as exc:
+                deletion_failed = True
                 logger.warning(
                     "Failed deleting unsaved unqualified lead thread lead_id=%s: %s",
                     lead_id,
                     exc,
                 )
+        if deletion_failed:
+            thread_id = str(getattr(thread, "id", "")).strip() or None
+            guild_id = str(getattr(getattr(target_channel, "guild", None), "id", ""))
+            channel_id = str(getattr(target_channel, "id", ""))
+            try:
+                recovery_recorded = await asyncio.to_thread(
+                    record_job_lead_staging_cleanup_required,
+                    settings,
+                    lead_id=lead_id,
+                    guild_id=guild_id,
+                    channel_id=channel_id,
+                    thread_id=thread_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed recording unqualified lead staging recovery state lead_id=%s: %s",
+                    lead_id,
+                    exc,
+                )
+                return
+            if not recovery_recorded:
+                logger.warning(
+                    "Could not record unqualified lead staging recovery state lead_id=%s",
+                    lead_id,
+                )
+                return
         try:
             await asyncio.to_thread(
                 release_job_lead_staging_reservation,
@@ -4063,6 +4100,13 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 "lead_id": lead.id,
                 "thread_id": lead.staged_discord_thread_id,
             }, 409
+        recovery_details = job_lead_staging_recovery_details(lead)
+        if recovery_details is not None:
+            return {
+                "error": "job_lead_staging_recovery_required",
+                "lead_id": lead.id,
+                **recovery_details,
+            }, 409
         if lead.status is not JobLeadStatus.PENDING:
             return {"error": "job_lead_not_pending", "lead_id": lead.id}, 409
 
@@ -4094,14 +4138,18 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             }, 409
 
         try:
-            applied_tags = self._resolve_job_lead_forum_tags(target_channel, lead, None)
+            applied_tags = self._resolve_job_lead_forum_tags(
+                target_channel,
+                reserved,
+                None,
+            )
             content = self._truncate_job_lead_text(
                 "⚠️ **Unqualified lead — do not treat as an active gig.**\n"
                 "Review and qualify it in the dashboard before promoting it to a gigs forum.\n\n"
                 f"{self._format_job_lead_thread_content(reserved)}",
                 settings.discord_sendmsg_character_limit,
             )
-            thread_title = f"[UNQUALIFIED] {lead.title}"
+            thread_title = f"[UNQUALIFIED] {reserved.title}"
         except Exception as exc:
             logger.warning(
                 "Failed preparing sourced job lead %s for staging: %s", lead.id, exc
@@ -4147,6 +4195,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 lead_id=lead.id,
                 reservation_token=reservation_token,
                 thread=thread,
+                target_channel=target_channel,
             )
             return {
                 "error": "unqualified_leads_thread_id_missing",
@@ -4159,6 +4208,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 settings,
                 lead_id=lead.id,
                 reservation_token=reservation_token,
+                source_fingerprint=job_lead_staging_source_fingerprint(reserved),
                 guild_id=str(target_channel.guild.id),
                 channel_id=str(target_channel.id),
                 thread_id=thread_id,
@@ -4171,6 +4221,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 lead_id=lead.id,
                 reservation_token=reservation_token,
                 thread=thread,
+                target_channel=target_channel,
             )
             return {
                 "error": "job_lead_stage_marker_failed",

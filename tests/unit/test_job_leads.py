@@ -137,6 +137,7 @@ def test_upsert_job_lead_preserves_review_state_on_conflict(monkeypatch) -> None
     ):
         assert f"{staging_column} = CASE" in query
     assert "_staging_source_fingerprint" in query
+    assert query.count("WHEN job_leads.status IN ('pending', 'rejected')") == 6
     assert params[15] == ["1099", "contract-to-hire"]
     assert params[-1].obj[
         job_leads._STAGING_SOURCE_FINGERPRINT_METADATA_KEY
@@ -282,6 +283,7 @@ def test_update_existing_job_lead_never_inserts(monkeypatch) -> None:
         "staging_reserved_at",
     ):
         assert f"{staging_column} = CASE" in query
+    assert query.count("WHEN job_leads.status IN ('pending', 'rejected')") == 6
     assert (
         params[0] == params[-3].obj[job_leads._STAGING_SOURCE_FINGERPRINT_METADATA_KEY]
     )
@@ -440,6 +442,7 @@ def test_reserve_job_lead_staging_claims_pending_lead_atomically(monkeypatch) ->
     assert "staging_reserved_at IS NULL" in query
     assert "staging_reserved_at < NOW() - (%s * INTERVAL '1 second')" in query
     assert "staged_discord_thread_id IS NULL" in query
+    assert "metadata -> '_staging_cleanup_required' IS NULL" in query
     assert params == (
         "attempt-1",
         "11111111-1111-1111-1111-111111111111",
@@ -484,6 +487,7 @@ def test_mark_job_lead_staged_records_reserved_holding_thread(monkeypatch) -> No
         job_leads.SharedSettings(),
         lead_id="11111111-1111-1111-1111-111111111111",
         reservation_token="attempt-1",
+        source_fingerprint="source-fingerprint",
         guild_id="123",
         channel_id="456",
         thread_id="789",
@@ -495,13 +499,62 @@ def test_mark_job_lead_staged_records_reserved_holding_thread(monkeypatch) -> No
     assert "status = 'pending'" in query
     assert "staged_discord_thread_id IS NULL" in query
     assert "staging_reservation_token = %s" in query
+    assert "metadata = metadata || jsonb_build_object" in query
     assert params == (
         "123",
         "456",
         "789",
+        "source-fingerprint",
         "11111111-1111-1111-1111-111111111111",
         "attempt-1",
     )
+
+
+def test_record_job_lead_staging_cleanup_required_blocks_restaging(monkeypatch) -> None:
+    cursor = _CursorStub(rows=[{"id": "11111111-1111-1111-1111-111111111111"}])
+    _install_connection_stub(monkeypatch, cursor)
+
+    recorded = job_leads.record_job_lead_staging_cleanup_required(
+        job_leads.SharedSettings(),
+        lead_id="11111111-1111-1111-1111-111111111111",
+        guild_id="123",
+        channel_id="456",
+        thread_id="789",
+    )
+
+    assert recorded is True
+    query, params = cursor.executed[0]
+    assert "metadata = metadata || %s" in query
+    assert "status IN ('pending', 'rejected')" in query
+    assert "staged_discord_thread_id IS NULL" not in query
+    assert params[0].obj == {
+        job_leads._STAGING_CLEANUP_REQUIRED_METADATA_KEY: {
+            "guild_id": "123",
+            "channel_id": "456",
+            "thread_id": "789",
+        }
+    }
+    assert params[1] == "11111111-1111-1111-1111-111111111111"
+
+
+def test_job_lead_staging_recovery_details_returns_orphaned_thread_metadata() -> None:
+    lead = job_leads._as_lead(
+        _lead_row(
+            metadata={
+                job_leads._STAGING_CLEANUP_REQUIRED_METADATA_KEY: {
+                    "guild_id": " 123 ",
+                    "channel_id": "456",
+                    "thread_id": "789",
+                }
+            }
+        )
+    )
+
+    assert job_leads.job_lead_staging_recovery_details(lead) == {
+        "guild_id": "123",
+        "channel_id": "456",
+        "thread_id": "789",
+    }
 
 
 def test_mark_job_lead_posted_allows_direct_qualified_promotion(monkeypatch) -> None:

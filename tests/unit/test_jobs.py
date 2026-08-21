@@ -311,10 +311,23 @@ async def test_stage_job_lead_to_discord_creates_holding_thread_without_gig() ->
         id=456,
         name="unqualified-leads",
         guild=guild,
-        available_tags=[],
+        available_tags=[SimpleNamespace(name="Current")],
         create_thread=AsyncMock(side_effect=create_thread),
     )
-    lead = _make_job_lead(status=JobLeadStatus.PENDING, body_normalized="x" * 4000)
+    lead = _make_job_lead(
+        status=JobLeadStatus.PENDING,
+        title="Stale title",
+        body_normalized="Stale description",
+        tags=["stale"],
+        remote=False,
+    )
+    reserved = _make_job_lead(
+        status=JobLeadStatus.PENDING,
+        title="Current title",
+        body_normalized="Current description\n" + "x" * 4000,
+        tags=["current"],
+        remote=True,
+    )
     staged = _make_job_lead(
         status=JobLeadStatus.PENDING,
         staged_discord_guild_id="123",
@@ -330,9 +343,14 @@ async def test_stage_job_lead_to_discord_creates_holding_thread_without_gig() ->
         patch.object(
             jobs_module,
             "reserve_job_lead_staging",
-            side_effect=lambda *_args, **_kwargs: events.append("reserve") or lead,
+            side_effect=lambda *_args, **_kwargs: events.append("reserve") or reserved,
         ) as reserve,
         patch.object(jobs_module, "mark_job_lead_staged", return_value=staged) as mark,
+        patch.object(
+            jobs_module,
+            "job_lead_staging_source_fingerprint",
+            return_value="current-source-fingerprint",
+        ) as fingerprint,
         patch.object(jobs_module, "uuid4", return_value="reservation-1"),
         patch.object(jobs_module, "upsert_discord_engagement") as upsert_engagement,
         patch.object(jobs_module, "add_engagement_event") as add_event,
@@ -361,19 +379,24 @@ async def test_stage_job_lead_to_discord_creates_holding_thread_without_gig() ->
         jobs_module.settings,
         lead_id=lead.id,
         reservation_token="reservation-1",
+        source_fingerprint="current-source-fingerprint",
         guild_id="123",
         channel_id="456",
         thread_id="789",
     )
+    fingerprint.assert_called_once_with(reserved)
     assert events == ["reserve", "create_thread"]
     thread_kwargs = channel.create_thread.await_args.kwargs
-    assert thread_kwargs["name"].startswith("[UNQUALIFIED] ")
+    assert thread_kwargs["name"].startswith("[UNQUALIFIED] Current title")
     assert thread_kwargs["content"].startswith("⚠️ **Unqualified lead")
     assert "do not treat as an active gig" in thread_kwargs["content"]
+    assert "Current description" in thread_kwargs["content"]
+    assert "Stale description" not in thread_kwargs["content"]
     assert (
         len(thread_kwargs["content"])
         <= jobs_module.settings.discord_sendmsg_character_limit
     )
+    assert [tag.name for tag in thread_kwargs["applied_tags"]] == ["Current"]
     upsert_engagement.assert_not_called()
     add_event.assert_not_called()
 
@@ -405,6 +428,41 @@ async def test_stage_job_lead_does_not_create_thread_without_reservation() -> No
     assert result == {"error": "job_lead_staging_in_progress", "lead_id": lead.id}
     channel.create_thread.assert_not_awaited()
     mark.assert_not_called()
+
+
+async def test_stage_job_lead_requires_orphan_recovery_before_reserving() -> None:
+    lead = _make_job_lead(
+        status=JobLeadStatus.PENDING,
+        metadata={
+            "_staging_cleanup_required": {
+                "guild_id": "123",
+                "channel_id": "456",
+                "thread_id": "789",
+            }
+        },
+    )
+    cog = JobsCog(Mock())
+    cog._resolve_unqualified_leads_forum = AsyncMock()
+
+    with (
+        patch.object(jobs_module, "get_job_lead", return_value=lead),
+        patch.object(jobs_module, "reserve_job_lead_staging") as reserve,
+    ):
+        result, status_code = await cog.stage_job_lead_to_discord(
+            lead_id=lead.id,
+            reviewer_discord_user_id="42",
+        )
+
+    assert status_code == 409
+    assert result == {
+        "error": "job_lead_staging_recovery_required",
+        "lead_id": lead.id,
+        "guild_id": "123",
+        "channel_id": "456",
+        "thread_id": "789",
+    }
+    cog._resolve_unqualified_leads_forum.assert_not_awaited()
+    reserve.assert_not_called()
 
 
 async def test_stage_job_lead_deletes_thread_and_releases_reservation_when_save_loses_race() -> (
@@ -451,6 +509,115 @@ async def test_stage_job_lead_deletes_thread_and_releases_reservation_when_save_
         lead_id=lead.id,
         reservation_token="reservation-1",
     )
+
+
+async def test_stage_job_lead_records_recovery_before_releasing_orphaned_thread() -> (
+    None
+):
+    guild = SimpleNamespace(id=123)
+    thread = SimpleNamespace(
+        id=789,
+        delete=AsyncMock(side_effect=RuntimeError("Discord unavailable")),
+    )
+    channel = SimpleNamespace(
+        id=456,
+        name="unqualified-leads",
+        guild=guild,
+        available_tags=[],
+        create_thread=AsyncMock(
+            return_value=SimpleNamespace(thread=thread, message=SimpleNamespace(id=790))
+        ),
+    )
+    lead = _make_job_lead(status=JobLeadStatus.PENDING)
+    cog = JobsCog(Mock())
+    cog._resolve_unqualified_leads_forum = AsyncMock(return_value=(channel, None, 200))
+
+    with (
+        patch.object(jobs_module, "get_job_lead", return_value=lead),
+        patch.object(jobs_module, "reserve_job_lead_staging", return_value=lead),
+        patch.object(jobs_module, "mark_job_lead_staged", return_value=None),
+        patch.object(
+            jobs_module,
+            "record_job_lead_staging_cleanup_required",
+            return_value=True,
+        ) as record_recovery,
+        patch.object(
+            jobs_module, "release_job_lead_staging_reservation", return_value=True
+        ) as release,
+        patch.object(jobs_module, "uuid4", return_value="reservation-1"),
+    ):
+        result, status_code = await cog.stage_job_lead_to_discord(
+            lead_id=lead.id,
+            reviewer_discord_user_id="42",
+        )
+
+    assert status_code == 502
+    assert result == {
+        "error": "job_lead_stage_marker_failed",
+        "lead_id": lead.id,
+        "thread_id": "789",
+    }
+    thread.delete.assert_awaited_once()
+    record_recovery.assert_called_once_with(
+        jobs_module.settings,
+        lead_id=lead.id,
+        guild_id="123",
+        channel_id="456",
+        thread_id="789",
+    )
+    release.assert_called_once_with(
+        jobs_module.settings,
+        lead_id=lead.id,
+        reservation_token="reservation-1",
+    )
+
+
+async def test_stage_job_lead_keeps_reservation_when_orphan_recovery_cannot_be_recorded() -> (
+    None
+):
+    guild = SimpleNamespace(id=123)
+    thread = SimpleNamespace(
+        id=789,
+        delete=AsyncMock(side_effect=RuntimeError("Discord unavailable")),
+    )
+    channel = SimpleNamespace(
+        id=456,
+        name="unqualified-leads",
+        guild=guild,
+        available_tags=[],
+        create_thread=AsyncMock(
+            return_value=SimpleNamespace(thread=thread, message=SimpleNamespace(id=790))
+        ),
+    )
+    lead = _make_job_lead(status=JobLeadStatus.PENDING)
+    cog = JobsCog(Mock())
+    cog._resolve_unqualified_leads_forum = AsyncMock(return_value=(channel, None, 200))
+
+    with (
+        patch.object(jobs_module, "get_job_lead", return_value=lead),
+        patch.object(jobs_module, "reserve_job_lead_staging", return_value=lead),
+        patch.object(jobs_module, "mark_job_lead_staged", return_value=None),
+        patch.object(
+            jobs_module,
+            "record_job_lead_staging_cleanup_required",
+            return_value=False,
+        ) as record_recovery,
+        patch.object(jobs_module, "release_job_lead_staging_reservation") as release,
+        patch.object(jobs_module, "uuid4", return_value="reservation-1"),
+    ):
+        result, status_code = await cog.stage_job_lead_to_discord(
+            lead_id=lead.id,
+            reviewer_discord_user_id="42",
+        )
+
+    assert status_code == 502
+    assert result == {
+        "error": "job_lead_stage_marker_failed",
+        "lead_id": lead.id,
+        "thread_id": "789",
+    }
+    record_recovery.assert_called_once()
+    release.assert_not_called()
 
 
 async def test_unqualified_leads_forum_cannot_be_registered_for_matching() -> None:
