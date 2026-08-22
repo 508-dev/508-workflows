@@ -79,6 +79,12 @@ Discord forum threads cannot be moved between forums, so a staged lead is
 reposted from its source content; only the promoted thread becomes a dashboard
 gig and is eligible for automatic matching.
 
+If Discord creates a holding thread but its database marker cannot be saved and
+the bot cannot delete that orphaned thread, the lead is intentionally blocked
+from restaging. Delete the orphaned thread in Discord, then use **Clear holding
+recovery block** on the lead in the dashboard. This Steering-only action clears
+only the recovery block and is audited; it does not qualify or promote the lead.
+
 The Leads tab retains the latest scrape result so operators can confirm that a
 monthly thread was found. It links to the discovered HN thread and reports HN's
 comment count, direct top-level posts scanned as potential gigs, included leads,

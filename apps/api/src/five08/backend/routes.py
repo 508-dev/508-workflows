@@ -35,6 +35,7 @@ class BackendRouteSurface(Protocol):
     dashboard_assign_onboarder_handler: RouteHandler
     dashboard_audit_events_handler: RouteHandler
     dashboard_bulk_update_projects_handler: RouteHandler
+    dashboard_clear_job_lead_staging_recovery_handler: RouteHandler
     dashboard_configuration_handler: RouteHandler
     dashboard_create_project_handler: RouteHandler
     dashboard_erpnext_account_managers_handler: RouteHandler
@@ -118,6 +119,9 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
     dashboard_assign_onboarder_handler = api.dashboard_assign_onboarder_handler
     dashboard_audit_events_handler = api.dashboard_audit_events_handler
     dashboard_bulk_update_projects_handler = api.dashboard_bulk_update_projects_handler
+    dashboard_clear_job_lead_staging_recovery_handler = (
+        api.dashboard_clear_job_lead_staging_recovery_handler
+    )
     dashboard_configuration_handler = api.dashboard_configuration_handler
     dashboard_create_project_handler = api.dashboard_create_project_handler
     dashboard_erpnext_account_managers_handler = (
@@ -280,6 +284,11 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
     app.add_api_route(
         "/dashboard/api/gig-leads/{lead_id}/review",
         dashboard_review_job_lead_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/dashboard/api/gig-leads/{lead_id}/staging-recovery/clear",
+        dashboard_clear_job_lead_staging_recovery_handler,
         methods=["POST"],
     )
     app.add_api_route(

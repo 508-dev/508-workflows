@@ -58,6 +58,7 @@ from five08.agent import (
 from five08.clients.espo import EspoAPIError, EspoClient
 from five08.logging import configure_observability
 from five08.job_leads import (
+    clear_job_lead_staging_cleanup_required,
     job_lead_display_payload,
     JobLeadStatus,
     list_job_leads,
@@ -134,6 +135,7 @@ from five08.backend.schemas import (
     DashboardJobChannelUpdateRequest,
     DashboardJobLeadPostRequest,
     DashboardJobLeadReviewRequest,
+    DashboardJobLeadStagingRecoveryClearRequest,
     DashboardJobLeadSyncRequest,
     DashboardOnboardingEmailDraftRequest,
     DashboardOnboardingEmailSendRequest,
@@ -4397,6 +4399,12 @@ async def dashboard_update_job_channel_handler(
         channel_id=normalized_channel_id,
     )
     if forum_available is None:
+        logger.warning(
+            "Refusing dashboard job-channel update because forum validation is unavailable "
+            "guild=%s channel=%s",
+            guild_id,
+            normalized_channel_id,
+        )
         await _audit_dashboard_job_channel_change(
             session,
             result=AuditResult.ERROR,
@@ -4667,6 +4675,61 @@ async def dashboard_review_job_lead_handler(
         },
     )
     return JSONResponse(jsonable_encoder(job_lead_display_payload(lead)))
+
+
+async def dashboard_clear_job_lead_staging_recovery_handler(
+    request: Request,
+    lead_id: str,
+) -> JSONResponse:
+    """Clear a holding-thread recovery block after an operator removes the orphan."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_GIGS_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+    steering_error = _dashboard_steering_or_error(session)
+    if steering_error is not None:
+        return steering_error
+
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+
+    try:
+        payload = DashboardJobLeadStagingRecoveryClearRequest.model_validate(
+            await request.json()
+        )
+    except Exception:
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
+
+    if not payload.orphan_deleted:
+        return JSONResponse({"error": "orphan_deletion_required"}, status_code=400)
+
+    cleared = await asyncio.to_thread(
+        clear_job_lead_staging_cleanup_required,
+        settings,
+        lead_id=lead_id,
+    )
+    if cleared is None:
+        return JSONResponse(
+            {"error": "job_lead_staging_recovery_not_found"},
+            status_code=409,
+        )
+
+    actor_provider, actor_subject = _session_audit_actor(session)
+    await _write_auth_audit_event(
+        action="job_leads.staging_recovery.clear",
+        result=AuditResult.SUCCESS,
+        actor_subject=actor_subject,
+        actor_display_name=session.display_name,
+        actor_provider=actor_provider,
+        resource_type="job_lead",
+        resource_id=cleared.id,
+        metadata={"lead_id": cleared.id, "orphan_deleted": payload.orphan_deleted},
+    )
+    return JSONResponse(jsonable_encoder(job_lead_display_payload(cleared)))
 
 
 async def dashboard_stage_job_lead_handler(

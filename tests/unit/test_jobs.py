@@ -430,6 +430,47 @@ async def test_stage_job_lead_does_not_create_thread_without_reservation() -> No
     mark.assert_not_called()
 
 
+async def test_stage_job_lead_logs_forbidden_holding_forum_context() -> None:
+    class FakeForbidden(Exception):
+        pass
+
+    guild = SimpleNamespace(id=123)
+    channel = SimpleNamespace(
+        id=456,
+        name="unqualified-leads",
+        guild=guild,
+        available_tags=[],
+        create_thread=AsyncMock(side_effect=FakeForbidden("missing permission")),
+    )
+    lead = _make_job_lead(status=JobLeadStatus.PENDING)
+    cog = JobsCog(Mock())
+    cog._resolve_unqualified_leads_forum = AsyncMock(return_value=(channel, None, 200))
+
+    with (
+        patch.object(jobs_module, "get_job_lead", return_value=lead),
+        patch.object(jobs_module, "reserve_job_lead_staging", return_value=lead),
+        patch.object(jobs_module.discord, "Forbidden", FakeForbidden),
+        patch.object(
+            cog, "_cleanup_failed_job_lead_staging", new_callable=AsyncMock
+        ) as cleanup,
+        patch.object(jobs_module, "logger") as logger,
+    ):
+        result, status_code = await cog.stage_job_lead_to_discord(
+            lead_id=lead.id,
+            reviewer_discord_user_id="42",
+        )
+
+    assert status_code == 403
+    assert result == {"error": "unqualified_leads_thread_create_forbidden"}
+    cleanup.assert_awaited_once()
+    logger.warning.assert_called_once()
+    assert logger.warning.call_args.args[:3] == (
+        "Forbidden staging unqualified lead thread lead_id=%s channel_id=%s: %s",
+        lead.id,
+        456,
+    )
+
+
 async def test_stage_job_lead_requires_orphan_recovery_before_reserving() -> None:
     lead = _make_job_lead(
         status=JobLeadStatus.PENDING,
@@ -830,6 +871,38 @@ async def test_resolve_job_lead_post_channel_requires_registered_explicit_channe
     assert channel is None
     assert status_code == 403
     assert result == {"error": "job_forum_not_registered"}
+
+
+async def test_resolve_job_lead_post_channel_rejects_registered_holding_forum(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(jobs_module.settings, "discord_server_id", "123")
+    monkeypatch.setattr(
+        jobs_module.settings,
+        "discord_unqualified_leads_forum_channel",
+        "456",
+    )
+
+    class FakeForumChannel:
+        id = 456
+        guild = SimpleNamespace(id=123)
+
+    bot = Mock()
+    bot.guilds = []
+    bot.get_channel.return_value = FakeForumChannel()
+    bot.get_guild.return_value = FakeForumChannel.guild
+    cog = JobsCog(bot)
+    cog._jobs_channels_by_guild[123] = {456}
+    monkeypatch.setattr(jobs_module.discord, "ForumChannel", FakeForumChannel)
+
+    channel, result, status_code = await cog._resolve_job_lead_post_channel(
+        _make_job_lead(),
+        channel_id="456",
+    )
+
+    assert channel is None
+    assert status_code == 403
+    assert result == {"error": "unqualified_leads_forum_not_promotion_target"}
 
 
 async def test_resolve_job_lead_post_channel_requires_registered_command_channel(

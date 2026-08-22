@@ -7,6 +7,7 @@ import hmac
 import json
 import re
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, Mock, call, patch
 
@@ -4275,6 +4276,48 @@ def test_dashboard_stage_job_lead_posts_to_holding_forum(
     }
 
 
+def test_dashboard_clear_job_lead_staging_recovery_requires_manual_reconciliation(
+    client: TestClient,
+) -> None:
+    session = _dashboard_write_session()
+    cleared = SimpleNamespace(id="lead-1")
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api.clear_job_lead_staging_cleanup_required",
+            return_value=cleared,
+        ) as clear_recovery,
+        patch(
+            "five08.backend.api.job_lead_display_payload",
+            return_value={"id": "lead-1", "status": "pending"},
+        ),
+        patch("five08.backend.api.insert_audit_event") as mock_insert,
+    ):
+        rejected = client.post(
+            "/dashboard/api/gig-leads/lead-1/staging-recovery/clear",
+            json={"orphan_deleted": False},
+        )
+        response = client.post(
+            "/dashboard/api/gig-leads/lead-1/staging-recovery/clear",
+            json={"orphan_deleted": True},
+        )
+
+    assert rejected.status_code == 400
+    assert rejected.json() == {"error": "invalid_payload"}
+    assert response.status_code == 200
+    assert response.json() == {"id": "lead-1", "status": "pending"}
+    clear_recovery.assert_called_once_with(api.settings, lead_id="lead-1")
+    audit_payload = mock_insert.call_args.args[1]
+    assert audit_payload.action == "job_leads.staging_recovery.clear"
+    assert audit_payload.resource_id == "lead-1"
+    assert audit_payload.metadata == {"lead_id": "lead-1", "orphan_deleted": True}
+
+
 def test_dashboard_post_job_lead_posts_approved_lead_to_discord(
     client: TestClient,
 ) -> None:
@@ -4520,6 +4563,56 @@ def test_dashboard_job_channel_rejects_forum_omitted_by_bot(
     assert list_channels.await_args.kwargs == {"register_defaults": False}
     register.assert_not_called()
     assert audit.await_args.kwargs["metadata"]["error"] == "job_forum_not_available"
+
+
+def test_dashboard_job_channel_fails_closed_when_forum_validation_is_unavailable(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(api.settings, "discord_server_id", "guild-1")
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="validated",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._list_job_channels_from_bot",
+            new_callable=AsyncMock,
+            return_value=None,
+        ) as list_channels,
+        patch("five08.backend.api.register_job_post_channel") as register,
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as audit,
+        patch("five08.backend.api.logger") as logger,
+    ):
+        response = client.put(
+            "/dashboard/api/job-channels/456",
+            json={"posting_type": "part_time"},
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {"error": "job_forum_validation_unavailable"}
+    list_channels.assert_awaited_once()
+    assert list_channels.await_args.kwargs == {"register_defaults": False}
+    register.assert_not_called()
+    logger.warning.assert_called_once()
+    assert audit.await_args.kwargs["metadata"]["error"] == (
+        "job_forum_validation_unavailable"
+    )
 
 
 async def test_post_job_lead_to_discord_requires_bot_endpoint(

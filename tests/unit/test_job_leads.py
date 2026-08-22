@@ -60,6 +60,12 @@ def _install_connection_stub(monkeypatch, cursor: _CursorStub) -> None:
     monkeypatch.setattr(job_leads, "get_postgres_connection", lambda _: _conn())
 
 
+def _single_jsonb_param(params: tuple) -> dict:
+    jsonb_values = [value.obj for value in params if isinstance(value, job_leads.Jsonb)]
+    assert len(jsonb_values) == 1
+    return jsonb_values[0]
+
+
 def _lead_row(**overrides: object) -> dict:
     now = datetime(2026, 7, 6, tzinfo=timezone.utc)
     row = {
@@ -102,7 +108,7 @@ def _lead_row(**overrides: object) -> dict:
 
 
 def test_upsert_job_lead_preserves_review_state_on_conflict(monkeypatch) -> None:
-    cursor = _CursorStub(rows=[{"id": "lead-1", "inserted": False}])
+    cursor = _CursorStub(rows=[_lead_row(id="lead-1", inserted=False)])
     _install_connection_stub(monkeypatch, cursor)
 
     lead_id, created = job_leads.upsert_job_lead(
@@ -126,7 +132,7 @@ def test_upsert_job_lead_preserves_review_state_on_conflict(monkeypatch) -> None
     assert "ON CONFLICT (source_key, external_id) DO UPDATE" in query
     assert "WHERE job_leads.status IN ('pending', 'rejected')" in query
     assert "apply_url = EXCLUDED.apply_url" in query
-    assert "\n            status =" not in query.split("DO UPDATE SET", 1)[1]
+    assert "status =" not in query.split("DO UPDATE SET", 1)[1]
     for staging_column in (
         "staged_discord_guild_id",
         "staged_discord_channel_id",
@@ -136,26 +142,17 @@ def test_upsert_job_lead_preserves_review_state_on_conflict(monkeypatch) -> None
         "staging_reserved_at",
     ):
         assert f"{staging_column} = CASE" in query
-    assert "_staging_source_fingerprint" in query
+    assert "metadata ->> '_staging_source_fingerprint'" not in query
+    assert "COALESCE(EXCLUDED.organization, job_leads.organization)" in query
+    assert "COALESCE(EXCLUDED.location, job_leads.location)" in query
+    assert "COALESCE(EXCLUDED.remote, job_leads.remote)" in query
     assert query.count("WHEN job_leads.status IN ('pending', 'rejected')") == 6
-    assert params[15] == ["1099", "contract-to-hire"]
-    assert params[-1].obj[
+    assert [value for value in params if value == ["1099", "contract-to-hire"]]
+    assert (
         job_leads._STAGING_SOURCE_FINGERPRINT_METADATA_KEY
-    ] == job_leads._job_lead_staging_source_fingerprint(
-        JobLeadInput(
-            source_key="hackernews_who_is_hiring",
-            source_type="hackernews",
-            external_id="48392586",
-            source_url="https://news.ycombinator.com/item?id=48392586",
-            title="CO-Ver | Fullstack | 1099 Contract-to-Hire",
-            body_raw="raw",
-            body_normalized="normalized",
-            tags=["Contract-to-Hire", "1099"],
-            confidence=0.65,
-        ),
-        posting_type=job_leads.JobPostingType.PART_TIME,
-        tags=["1099", "contract-to-hire"],
+        not in _single_jsonb_param(params)
     )
+    assert len(cursor.executed) == 2
 
 
 def test_staging_source_fingerprint_tracks_holding_thread_content() -> None:
@@ -207,6 +204,107 @@ def test_staging_source_fingerprint_tracks_holding_thread_content() -> None:
     )
 
 
+def test_upsert_seeds_staging_fingerprint_from_coalesced_persisted_values(
+    monkeypatch,
+) -> None:
+    persisted_row = _lead_row(
+        id="lead-1",
+        metadata={},
+        staged_discord_guild_id="123",
+        staged_discord_channel_id="456",
+        staged_discord_thread_id="789",
+        organization="CO-Ver",
+        location="Remote US",
+        remote=True,
+        inserted=False,
+    )
+    cursor = _CursorStub(rows=[persisted_row])
+    _install_connection_stub(monkeypatch, cursor)
+    incoming = JobLeadInput(
+        source_key="hackernews_who_is_hiring",
+        source_type="hackernews",
+        external_id="48392586",
+        source_url="https://news.ycombinator.com/item?id=48392586",
+        title="CO-Ver | Fullstack | 1099 Contract-to-Hire",
+        body_raw="raw",
+        body_normalized="normalized",
+        organization=None,
+        location=None,
+        remote=None,
+        apply_url="https://example.com",
+        tags=["1099", "contract-to-hire"],
+        confidence=0.65,
+    )
+
+    lead_id, created = job_leads.upsert_job_lead(job_leads.SharedSettings(), incoming)
+
+    assert lead_id == "lead-1"
+    assert created is False
+    assert (
+        "COALESCE(EXCLUDED.organization, job_leads.organization)"
+        in cursor.executed[0][0]
+    )
+    assert "COALESCE(EXCLUDED.location, job_leads.location)" in cursor.executed[0][0]
+    assert "COALESCE(EXCLUDED.remote, job_leads.remote)" in cursor.executed[0][0]
+    persisted_fingerprint = job_leads.job_lead_staging_source_fingerprint(
+        job_leads._as_lead(persisted_row)
+    )
+    assert persisted_fingerprint != job_leads.job_lead_staging_source_fingerprint(
+        incoming
+    )
+    seed_query, seed_params = cursor.executed[1]
+    assert "metadata = metadata || jsonb_build_object" in seed_query
+    assert seed_params == (persisted_fingerprint, "lead-1")
+
+
+def test_refresh_seeds_staging_fingerprint_from_coalesced_persisted_values(
+    monkeypatch,
+) -> None:
+    persisted_row = _lead_row(
+        id="lead-1",
+        metadata={},
+        staged_discord_guild_id="123",
+        staged_discord_channel_id="456",
+        staged_discord_thread_id="789",
+        organization="CO-Ver",
+        location="Remote US",
+        remote=True,
+    )
+    cursor = _CursorStub(rows=[persisted_row])
+    _install_connection_stub(monkeypatch, cursor)
+    incoming = JobLeadInput(
+        source_key="hackernews_who_is_hiring",
+        source_type="hackernews",
+        external_id="48392586",
+        source_url="https://news.ycombinator.com/item?id=48392586",
+        title="CO-Ver | Fullstack | 1099 Contract-to-Hire",
+        body_raw="raw",
+        body_normalized="normalized",
+        organization=None,
+        location=None,
+        remote=None,
+        apply_url="https://example.com",
+        tags=["1099", "contract-to-hire"],
+        confidence=0.65,
+    )
+
+    lead_id = job_leads.update_existing_job_lead(job_leads.SharedSettings(), incoming)
+
+    assert lead_id == "lead-1"
+    assert (
+        "COALESCE(incoming.organization, job_leads.organization)"
+        in cursor.executed[0][0]
+    )
+    assert "COALESCE(incoming.location, job_leads.location)" in cursor.executed[0][0]
+    assert "COALESCE(incoming.remote, job_leads.remote)" in cursor.executed[0][0]
+    persisted_fingerprint = job_leads.job_lead_staging_source_fingerprint(
+        job_leads._as_lead(persisted_row)
+    )
+    seed_query, seed_params = cursor.executed[1]
+    assert "metadata = metadata || jsonb_build_object" in seed_query
+    assert seed_params == (persisted_fingerprint, "lead-1")
+
+
 def test_upsert_job_lead_skips_reviewed_conflict(monkeypatch) -> None:
     cursor = _CursorStub()
     _install_connection_stub(monkeypatch, cursor)
@@ -229,7 +327,7 @@ def test_upsert_job_lead_skips_reviewed_conflict(monkeypatch) -> None:
 
 
 def test_update_existing_job_lead_never_inserts(monkeypatch) -> None:
-    cursor = _CursorStub(rows=[{"id": "lead-1"}])
+    cursor = _CursorStub(rows=[_lead_row(id="lead-1")])
     _install_connection_stub(monkeypatch, cursor)
 
     lead_id = job_leads.update_existing_job_lead(
@@ -256,7 +354,7 @@ def test_update_existing_job_lead_never_inserts(monkeypatch) -> None:
     assert "WITH incoming AS" in query
     assert "FROM incoming" in query
     assert "status IN ('pending', 'rejected')" in query
-    assert "apply_url = %s" in query
+    assert "apply_url = incoming.apply_url" in query
     assert "apply_url = COALESCE" not in query
     update_clause = query.split("SET", 1)[1].split("WHERE", 1)[0]
     assigned_columns = {
@@ -284,10 +382,20 @@ def test_update_existing_job_lead_never_inserts(monkeypatch) -> None:
     ):
         assert f"{staging_column} = CASE" in query
     assert query.count("WHEN job_leads.status IN ('pending', 'rejected')") == 6
+    assert "metadata ->> '_staging_source_fingerprint'" not in query
+    assert "COALESCE(incoming.organization, job_leads.organization)" in query
+    assert "COALESCE(incoming.location, job_leads.location)" in query
+    assert "COALESCE(incoming.remote, job_leads.remote)" in query
     assert (
-        params[0] == params[-3].obj[job_leads._STAGING_SOURCE_FINGERPRINT_METADATA_KEY]
+        job_leads._STAGING_SOURCE_FINGERPRINT_METADATA_KEY
+        not in _single_jsonb_param(params)
     )
-    assert params[-2:] == ("hackernews_who_is_hiring", "48392586")
+    assert ("hackernews_who_is_hiring", "48392586") == tuple(
+        value
+        for value in params
+        if isinstance(value, str) and value in {"hackernews_who_is_hiring", "48392586"}
+    )
+    assert len(cursor.executed) == 2
 
 
 def test_existing_job_lead_external_ids_uses_one_batch_query(monkeypatch) -> None:
@@ -555,6 +663,42 @@ def test_job_lead_staging_recovery_details_returns_orphaned_thread_metadata() ->
         "channel_id": "456",
         "thread_id": "789",
     }
+    assert job_leads.job_lead_display_payload(lead)["staging_recovery"] == {
+        "guild_id": "123",
+        "channel_id": "456",
+        "thread_id": "789",
+    }
+
+
+def test_clear_job_lead_staging_cleanup_required_releases_reconciled_lead(
+    monkeypatch,
+) -> None:
+    cursor = _CursorStub(
+        rows=[
+            _lead_row(
+                metadata={"source": "hackernews"},
+                status="pending",
+            )
+        ]
+    )
+    _install_connection_stub(monkeypatch, cursor)
+
+    cleared = job_leads.clear_job_lead_staging_cleanup_required(
+        job_leads.SharedSettings(),
+        lead_id="11111111-1111-1111-1111-111111111111",
+    )
+
+    assert cleared is not None
+    assert cleared.id == "11111111-1111-1111-1111-111111111111"
+    query, params = cursor.executed[0]
+    assert "metadata = metadata - %s::text" in query
+    assert "metadata ? %s::text" in query
+    assert "status IN ('pending', 'rejected')" in query
+    assert params == (
+        job_leads._STAGING_CLEANUP_REQUIRED_METADATA_KEY,
+        "11111111-1111-1111-1111-111111111111",
+        job_leads._STAGING_CLEANUP_REQUIRED_METADATA_KEY,
+    )
 
 
 def test_mark_job_lead_posted_allows_direct_qualified_promotion(monkeypatch) -> None:

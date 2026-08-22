@@ -274,6 +274,11 @@ type JobLead = {
   staged_discord_channel_id?: string
   staged_discord_thread_id?: string
   staged_at?: string
+  staging_recovery?: {
+    guild_id?: string | null
+    channel_id?: string | null
+    thread_id?: string | null
+  }
 }
 
 type JobLeadReviewStatus = "pending" | "approved" | "rejected"
@@ -1872,6 +1877,35 @@ function App() {
     }
   }
 
+  async function clearGigLeadStagingRecovery(leadId: string) {
+    const confirmed = window.confirm(
+      "Only continue after deleting the orphaned holding thread in Discord. Clear its recovery block?",
+    )
+    if (!confirmed) return
+
+    setBusy(`gigLead:${leadId}:stagingRecovery`, true)
+    try {
+      const lead = await requestJson<JobLead>(
+        `/dashboard/api/gig-leads/${encodeURIComponent(leadId)}/staging-recovery/clear`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ orphan_deleted: true }),
+        },
+      )
+      setGigLeads((current) =>
+        current.map((currentLead) =>
+          currentLead.id === leadId ? { ...currentLead, ...lead } : currentLead,
+        ),
+      )
+      showToast("Cleared the holding-thread recovery block", "ok")
+    } catch (error) {
+      showError(error, "Unable to clear the staging recovery block")
+    } finally {
+      setBusy(`gigLead:${leadId}:stagingRecovery`, false)
+    }
+  }
+
   async function postGigLead(
     leadId: string,
     options: {
@@ -2994,6 +3028,7 @@ function App() {
               onSyncLeads={syncGigLeads}
               onReviewLead={reviewGigLead}
               onStageLead={stageGigLead}
+              onClearStagingRecovery={clearGigLeadStagingRecovery}
               onPostLead={postGigLead}
             />
           ) : null}
@@ -5552,6 +5587,7 @@ function GigsView(props: {
   onSyncLeads: () => void
   onReviewLead: (leadId: string, status: JobLeadReviewStatus) => void
   onStageLead: (leadId: string) => void
+  onClearStagingRecovery: (leadId: string) => void
   onPostLead: (
     leadId: string,
     options?: {
@@ -5764,6 +5800,7 @@ function GigsView(props: {
                 jobPostChannels={props.jobPostChannels}
                 onReviewLead={props.onReviewLead}
                 onStageLead={props.onStageLead}
+                onClearStagingRecovery={props.onClearStagingRecovery}
                 onPostLead={props.onPostLead}
               />
             ))}
@@ -6024,6 +6061,7 @@ function JobLeadListItem({
   jobPostChannels,
   onReviewLead,
   onStageLead,
+  onClearStagingRecovery,
   onPostLead,
 }: {
   lead: JobLead
@@ -6032,6 +6070,7 @@ function JobLeadListItem({
   jobPostChannels: JobPostChannel[]
   onReviewLead: (leadId: string, status: JobLeadReviewStatus) => void
   onStageLead: (leadId: string) => void
+  onClearStagingRecovery: (leadId: string) => void
   onPostLead: (
     leadId: string,
     options?: {
@@ -6042,13 +6081,16 @@ function JobLeadListItem({
   ) => void
 }) {
   const isStaged = Boolean(lead.staged_discord_thread_id)
-  const canStage = canWrite && lead.status === "pending" && !isStaged
+  const stagingRecovery = lead.staging_recovery
+  const hasStagingRecovery = Boolean(stagingRecovery)
+  const canStage = canWrite && lead.status === "pending" && !isStaged && !hasStagingRecovery
   const canQualify = canWrite && lead.status === "pending"
   const canPromote = canWrite && lead.status === "approved"
   const canReject = canWrite && (lead.status === "pending" || lead.status === "approved")
   const canRestore = canWrite && lead.status === "rejected"
   const reviewing = loading[`gigLead:${lead.id}:review`]
   const staging = loading[`gigLead:${lead.id}:stage`]
+  const clearingStagingRecovery = loading[`gigLead:${lead.id}:stagingRecovery`]
   const posting = loading[`gigLead:${lead.id}:post`]
   const defaultChannelId = defaultJobPostChannelId(lead, jobPostChannels)
   const [engagementStatus, setEngagementStatus] = useState<"lead" | "recruiting">("lead")
@@ -6189,6 +6231,12 @@ function JobLeadListItem({
               <ExternalLink className="size-3.5" />
             </a>
           ) : null}
+          {hasStagingRecovery ? (
+            <span className="font-semibold text-destructive">
+              Staging blocked until the orphaned holding thread
+              {stagingRecovery?.thread_id ? ` ${stagingRecovery.thread_id}` : ""} is removed.
+            </span>
+          ) : null}
           {postedGigUrl ? (
             <a
               className="inline-flex items-center gap-1 font-extrabold text-primary"
@@ -6269,7 +6317,9 @@ function JobLeadListItem({
               ) : null}
               <Button
                 type="button"
-                disabled={posting || reviewing || staging || requiredTagMissing}
+                disabled={
+                  posting || reviewing || staging || clearingStagingRecovery || requiredTagMissing
+                }
                 onClick={() => {
                   const selectedStatus =
                     engagementStatusRef.current?.value === "recruiting" ? "recruiting" : "lead"
@@ -6288,17 +6338,28 @@ function JobLeadListItem({
           {canStage ? (
             <Button
               type="button"
-              disabled={staging || reviewing || posting}
+              disabled={staging || reviewing || posting || clearingStagingRecovery}
               onClick={() => onStageLead(lead.id)}
             >
               <Send />
               Post to holding forum
             </Button>
           ) : null}
+          {hasStagingRecovery ? (
+            <Button
+              type="button"
+              variant="outline"
+              disabled={clearingStagingRecovery || reviewing || staging || posting}
+              onClick={() => onClearStagingRecovery(lead.id)}
+            >
+              <RefreshCw />
+              Clear holding recovery block
+            </Button>
+          ) : null}
           {canQualify ? (
             <Button
               type="button"
-              disabled={staging || reviewing || posting}
+              disabled={staging || reviewing || posting || clearingStagingRecovery}
               onClick={() => onReviewLead(lead.id, "approved")}
             >
               <ShieldCheck />
@@ -6309,7 +6370,7 @@ function JobLeadListItem({
             <Button
               type="button"
               variant="outline"
-              disabled={reviewing || posting || staging}
+              disabled={reviewing || posting || staging || clearingStagingRecovery}
               onClick={() => onReviewLead(lead.id, "pending")}
             >
               <RefreshCw />
@@ -6319,7 +6380,7 @@ function JobLeadListItem({
             <Button
               type="button"
               variant="outline"
-              disabled={reviewing || posting || staging}
+              disabled={reviewing || posting || staging || clearingStagingRecovery}
               onClick={() => onReviewLead(lead.id, "rejected")}
             >
               <UserMinus />

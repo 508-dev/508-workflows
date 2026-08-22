@@ -23,6 +23,37 @@ _STAGING_CLEANUP_REQUIRED_METADATA_KEY = "_staging_cleanup_required"
 _STAGING_SOURCE_FINGERPRINT_METADATA_KEY = "_staging_source_fingerprint"
 
 
+def _job_lead_staging_source_changed_sql(
+    *,
+    persisted: str,
+    incoming: str,
+) -> str:
+    """Return the SQL predicate for holding-thread content changes.
+
+    `organization`, `location`, and `remote` intentionally compare the incoming
+    value after the same COALESCE merge used by the source update.  A scraper
+    omitting one of those optional fields therefore does not invalidate an
+    otherwise unchanged staged thread.
+    """
+    return f"""
+        {persisted}.source_url IS DISTINCT FROM {incoming}.source_url
+        OR {persisted}.title IS DISTINCT FROM {incoming}.title
+        OR {persisted}.organization IS DISTINCT FROM COALESCE(
+            {incoming}.organization, {persisted}.organization
+        )
+        OR {persisted}.body_normalized IS DISTINCT FROM {incoming}.body_normalized
+        OR {persisted}.posting_type IS DISTINCT FROM {incoming}.posting_type
+        OR {persisted}.location IS DISTINCT FROM COALESCE(
+            {incoming}.location, {persisted}.location
+        )
+        OR {persisted}.remote IS DISTINCT FROM COALESCE(
+            {incoming}.remote, {persisted}.remote
+        )
+        OR {persisted}.apply_url IS DISTINCT FROM {incoming}.apply_url
+        OR {persisted}.tags IS DISTINCT FROM {incoming}.tags
+    """
+
+
 class JobLeadStatus(StrEnum):
     """Review states for externally sourced job leads."""
 
@@ -205,6 +236,11 @@ def job_lead_display_payload(lead: JobLead | dict[str, Any]) -> dict[str, Any]:
         payload["engagement_id"] = engagement_id
     else:
         payload.pop("engagement_id", None)
+    staging_recovery = job_lead_staging_recovery_details(lead)
+    if staging_recovery is not None:
+        payload["staging_recovery"] = staging_recovery
+    else:
+        payload.pop("staging_recovery", None)
     payload["contractor_classification"] = job_lead_classification(lead)
     payload["review_summary"] = format_job_lead_review_summary(lead)
     return payload
@@ -265,9 +301,16 @@ def job_lead_staging_source_fingerprint(lead: JobLead | JobLeadInput) -> str:
     )
 
 
-def job_lead_staging_recovery_details(lead: JobLead) -> dict[str, str | None] | None:
+def job_lead_staging_recovery_details(
+    lead: JobLead | dict[str, Any],
+) -> dict[str, str | None] | None:
     """Return orphaned holding-thread details that require manual cleanup."""
-    raw_recovery = lead.metadata.get(_STAGING_CLEANUP_REQUIRED_METADATA_KEY)
+    metadata = lead.get("metadata") if isinstance(lead, dict) else lead.metadata
+    raw_recovery = (
+        metadata.get(_STAGING_CLEANUP_REQUIRED_METADATA_KEY)
+        if isinstance(metadata, dict)
+        else None
+    )
     if not isinstance(raw_recovery, dict):
         return None
     return {
@@ -276,22 +319,29 @@ def job_lead_staging_recovery_details(lead: JobLead) -> dict[str, str | None] | 
     }
 
 
-def _job_lead_metadata_with_staging_source_fingerprint(
-    lead: JobLeadInput,
-    *,
-    posting_type: JobPostingType,
-    tags: list[str],
-) -> dict[str, Any]:
-    """Attach the current holding-thread source fingerprint to lead metadata."""
+def _job_lead_source_metadata(lead: JobLeadInput) -> dict[str, Any]:
+    """Return external source metadata without internal staging-state keys."""
     metadata = dict(lead.metadata or {})
-    metadata[_STAGING_SOURCE_FINGERPRINT_METADATA_KEY] = (
-        _job_lead_staging_source_fingerprint(
-            lead,
-            posting_type=posting_type,
-            tags=tags,
-        )
-    )
+    metadata.pop(_STAGING_CLEANUP_REQUIRED_METADATA_KEY, None)
+    metadata.pop(_STAGING_SOURCE_FINGERPRINT_METADATA_KEY, None)
     return metadata
+
+
+def _seed_job_lead_staging_source_fingerprint(cursor: Any, lead: JobLead) -> None:
+    """Persist the fingerprint computed from this post-merge database row."""
+    fingerprint = job_lead_staging_source_fingerprint(lead)
+    if lead.metadata.get(_STAGING_SOURCE_FINGERPRINT_METADATA_KEY) == fingerprint:
+        return
+    query = """
+        UPDATE job_leads
+        SET
+            metadata = metadata || jsonb_build_object(
+                '_staging_source_fingerprint', %s::text
+            ),
+            updated_at = NOW()
+        WHERE id = %s
+    """
+    cursor.execute(query, (fingerprint, lead.id))
 
 
 def _as_lead(row: dict[str, Any]) -> JobLead:
@@ -347,12 +397,12 @@ def upsert_job_lead(
     posting_type = normalize_job_posting_type(lead.posting_type)
     source_posted_at = _as_utc(lead.source_posted_at)
     tags = sorted({tag.strip().casefold() for tag in lead.tags or [] if tag.strip()})
-    metadata = _job_lead_metadata_with_staging_source_fingerprint(
-        lead,
-        posting_type=posting_type,
-        tags=tags,
+    metadata = _job_lead_source_metadata(lead)
+    staging_source_changed = _job_lead_staging_source_changed_sql(
+        persisted="job_leads",
+        incoming="EXCLUDED",
     )
-    query = """
+    query = f"""
         INSERT INTO job_leads (
             id,
             status,
@@ -393,54 +443,48 @@ def upsert_job_lead(
             metadata = job_leads.metadata || EXCLUDED.metadata,
             staged_discord_guild_id = CASE
                 WHEN job_leads.status IN ('pending', 'rejected')
-                    AND (job_leads.metadata ->> '_staging_source_fingerprint')
-                        IS DISTINCT FROM (EXCLUDED.metadata ->> '_staging_source_fingerprint')
+                    AND ({staging_source_changed})
                 THEN NULL
                 ELSE job_leads.staged_discord_guild_id
             END,
             staged_discord_channel_id = CASE
                 WHEN job_leads.status IN ('pending', 'rejected')
-                    AND (job_leads.metadata ->> '_staging_source_fingerprint')
-                        IS DISTINCT FROM (EXCLUDED.metadata ->> '_staging_source_fingerprint')
+                    AND ({staging_source_changed})
                 THEN NULL
                 ELSE job_leads.staged_discord_channel_id
             END,
             staged_discord_thread_id = CASE
                 WHEN job_leads.status IN ('pending', 'rejected')
-                    AND (job_leads.metadata ->> '_staging_source_fingerprint')
-                        IS DISTINCT FROM (EXCLUDED.metadata ->> '_staging_source_fingerprint')
+                    AND ({staging_source_changed})
                 THEN NULL
                 ELSE job_leads.staged_discord_thread_id
             END,
             staged_at = CASE
                 WHEN job_leads.status IN ('pending', 'rejected')
-                    AND (job_leads.metadata ->> '_staging_source_fingerprint')
-                        IS DISTINCT FROM (EXCLUDED.metadata ->> '_staging_source_fingerprint')
+                    AND ({staging_source_changed})
                 THEN NULL
                 ELSE job_leads.staged_at
             END,
             staging_reservation_token = CASE
                 WHEN job_leads.status IN ('pending', 'rejected')
-                    AND (job_leads.metadata ->> '_staging_source_fingerprint')
-                        IS DISTINCT FROM (EXCLUDED.metadata ->> '_staging_source_fingerprint')
+                    AND ({staging_source_changed})
                 THEN NULL
                 ELSE job_leads.staging_reservation_token
             END,
             staging_reserved_at = CASE
                 WHEN job_leads.status IN ('pending', 'rejected')
-                    AND (job_leads.metadata ->> '_staging_source_fingerprint')
-                        IS DISTINCT FROM (EXCLUDED.metadata ->> '_staging_source_fingerprint')
+                    AND ({staging_source_changed})
                 THEN NULL
                 ELSE job_leads.staging_reserved_at
             END,
             updated_at = NOW()
         WHERE job_leads.status IN ('pending', 'rejected')
-        RETURNING id::text, (xmax = 0) AS inserted
+        RETURNING job_leads.*, (xmax = 0) AS inserted
     """
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
-                query,
+                trusted_sql(query),
                 (
                     lead_id,
                     lead.source_key,
@@ -463,9 +507,11 @@ def upsert_job_lead(
                 ),
             )
             row = cursor.fetchone()
-    if row is None:
-        return None, False
-    return str(row["id"]), bool(row["inserted"])
+            if row is None:
+                return None, False
+            persisted = _as_lead(row)
+            _seed_job_lead_staging_source_fingerprint(cursor, persisted)
+    return persisted.id, bool(row["inserted"])
 
 
 def update_existing_job_lead(
@@ -476,85 +522,92 @@ def update_existing_job_lead(
     posting_type = normalize_job_posting_type(lead.posting_type)
     source_posted_at = _as_utc(lead.source_posted_at)
     tags = sorted({tag.strip().casefold() for tag in lead.tags or [] if tag.strip()})
-    metadata = _job_lead_metadata_with_staging_source_fingerprint(
-        lead,
-        posting_type=posting_type,
-        tags=tags,
+    metadata = _job_lead_source_metadata(lead)
+    staging_source_changed = _job_lead_staging_source_changed_sql(
+        persisted="job_leads",
+        incoming="incoming",
     )
-    staging_source_fingerprint = str(metadata[_STAGING_SOURCE_FINGERPRINT_METADATA_KEY])
-    query = """
+    query = f"""
         WITH incoming AS (
-            SELECT %s::text AS staging_source_fingerprint
+            SELECT
+                %s::text AS source_url,
+                %s::timestamptz AS source_posted_at,
+                %s::text AS title,
+                %s::text AS organization,
+                %s::text AS body_raw,
+                %s::text AS body_normalized,
+                %s::text AS posting_type,
+                %s::text AS location,
+                %s::boolean AS remote,
+                %s::text AS apply_url,
+                %s::text[] AS tags,
+                %s::double precision AS confidence,
+                %s::jsonb AS metadata
         )
         UPDATE job_leads
-        SET source_url = %s,
-            source_posted_at = COALESCE(%s, source_posted_at),
-            title = %s,
-            organization = COALESCE(%s, organization),
-            body_raw = %s,
-            body_normalized = %s,
-            posting_type = %s,
-            location = COALESCE(%s, location),
-            remote = COALESCE(%s, remote),
-            apply_url = %s,
-            tags = %s,
-            confidence = GREATEST(confidence, %s),
-            metadata = metadata || %s,
+        SET source_url = incoming.source_url,
+            source_posted_at = COALESCE(
+                incoming.source_posted_at, job_leads.source_posted_at
+            ),
+            title = incoming.title,
+            organization = COALESCE(incoming.organization, job_leads.organization),
+            body_raw = incoming.body_raw,
+            body_normalized = incoming.body_normalized,
+            posting_type = incoming.posting_type,
+            location = COALESCE(incoming.location, job_leads.location),
+            remote = COALESCE(incoming.remote, job_leads.remote),
+            apply_url = incoming.apply_url,
+            tags = incoming.tags,
+            confidence = GREATEST(job_leads.confidence, incoming.confidence),
+            metadata = job_leads.metadata || incoming.metadata,
             staged_discord_guild_id = CASE
                 WHEN job_leads.status IN ('pending', 'rejected')
-                    AND (job_leads.metadata ->> '_staging_source_fingerprint')
-                        IS DISTINCT FROM incoming.staging_source_fingerprint
+                    AND ({staging_source_changed})
                 THEN NULL
                 ELSE job_leads.staged_discord_guild_id
             END,
             staged_discord_channel_id = CASE
                 WHEN job_leads.status IN ('pending', 'rejected')
-                    AND (job_leads.metadata ->> '_staging_source_fingerprint')
-                        IS DISTINCT FROM incoming.staging_source_fingerprint
+                    AND ({staging_source_changed})
                 THEN NULL
                 ELSE job_leads.staged_discord_channel_id
             END,
             staged_discord_thread_id = CASE
                 WHEN job_leads.status IN ('pending', 'rejected')
-                    AND (job_leads.metadata ->> '_staging_source_fingerprint')
-                        IS DISTINCT FROM incoming.staging_source_fingerprint
+                    AND ({staging_source_changed})
                 THEN NULL
                 ELSE job_leads.staged_discord_thread_id
             END,
             staged_at = CASE
                 WHEN job_leads.status IN ('pending', 'rejected')
-                    AND (job_leads.metadata ->> '_staging_source_fingerprint')
-                        IS DISTINCT FROM incoming.staging_source_fingerprint
+                    AND ({staging_source_changed})
                 THEN NULL
                 ELSE job_leads.staged_at
             END,
             staging_reservation_token = CASE
                 WHEN job_leads.status IN ('pending', 'rejected')
-                    AND (job_leads.metadata ->> '_staging_source_fingerprint')
-                        IS DISTINCT FROM incoming.staging_source_fingerprint
+                    AND ({staging_source_changed})
                 THEN NULL
                 ELSE job_leads.staging_reservation_token
             END,
             staging_reserved_at = CASE
                 WHEN job_leads.status IN ('pending', 'rejected')
-                    AND (job_leads.metadata ->> '_staging_source_fingerprint')
-                        IS DISTINCT FROM incoming.staging_source_fingerprint
+                    AND ({staging_source_changed})
                 THEN NULL
                 ELSE job_leads.staging_reserved_at
             END,
             updated_at = NOW()
         FROM incoming
-        WHERE source_key = %s
-          AND external_id = %s
-          AND status IN ('pending', 'rejected')
-        RETURNING id::text
+        WHERE job_leads.source_key = %s
+          AND job_leads.external_id = %s
+          AND job_leads.status IN ('pending', 'rejected')
+        RETURNING job_leads.*
     """
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
-                query,
+                trusted_sql(query),
                 (
-                    staging_source_fingerprint,
                     lead.source_url,
                     source_posted_at,
                     lead.title.strip() or "Untitled job lead",
@@ -573,7 +626,11 @@ def update_existing_job_lead(
                 ),
             )
             row = cursor.fetchone()
-    return str(row["id"]) if row is not None else None
+            if row is None:
+                return None
+            persisted = _as_lead(row)
+            _seed_job_lead_staging_source_fingerprint(cursor, persisted)
+    return persisted.id
 
 
 def existing_job_lead_external_ids(
@@ -869,6 +926,36 @@ def record_job_lead_staging_cleanup_required(
             cursor.execute(query, (recovery_metadata, lead_id))
             row = cursor.fetchone()
     return row is not None
+
+
+def clear_job_lead_staging_cleanup_required(
+    settings: SharedSettings,
+    *,
+    lead_id: str,
+) -> JobLead | None:
+    """Clear an operator-reconciled holding-thread cleanup block."""
+    query = """
+        UPDATE job_leads
+        SET
+            metadata = metadata - %s::text,
+            updated_at = NOW()
+        WHERE id = %s
+          AND status IN ('pending', 'rejected')
+          AND metadata ? %s::text
+        RETURNING *
+    """
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                query,
+                (
+                    _STAGING_CLEANUP_REQUIRED_METADATA_KEY,
+                    lead_id,
+                    _STAGING_CLEANUP_REQUIRED_METADATA_KEY,
+                ),
+            )
+            row = cursor.fetchone()
+    return _as_lead(row) if row is not None else None
 
 
 def mark_job_lead_posted(

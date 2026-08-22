@@ -4005,6 +4005,9 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         target_channel: discord.ForumChannel | None = None,
     ) -> None:
         """Delete an unsaved holding thread and release this attempt's reservation."""
+        thread_id = str(getattr(thread, "id", "")).strip() or None
+        guild_id = str(getattr(getattr(target_channel, "guild", None), "id", ""))
+        channel_id = str(getattr(target_channel, "id", ""))
         delete_thread = cast(
             Callable[..., Awaitable[None]] | None,
             getattr(thread, "delete", None),
@@ -4012,8 +4015,12 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         deletion_failed = thread is not None and delete_thread is None
         if deletion_failed:
             logger.warning(
-                "Cannot delete unsaved unqualified lead thread lead_id=%s: no delete method",
+                "Cannot delete unsaved unqualified lead thread "
+                "lead_id=%s guild_id=%s channel_id=%s thread_id=%s: no delete method",
                 lead_id,
+                guild_id,
+                channel_id,
+                thread_id,
             )
         if delete_thread is not None:
             try:
@@ -4023,14 +4030,15 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             except Exception as exc:
                 deletion_failed = True
                 logger.warning(
-                    "Failed deleting unsaved unqualified lead thread lead_id=%s: %s",
+                    "Failed deleting unsaved unqualified lead thread "
+                    "lead_id=%s guild_id=%s channel_id=%s thread_id=%s: %s",
                     lead_id,
+                    guild_id,
+                    channel_id,
+                    thread_id,
                     exc,
                 )
         if deletion_failed:
-            thread_id = str(getattr(thread, "id", "")).strip() or None
-            guild_id = str(getattr(getattr(target_channel, "guild", None), "id", ""))
-            channel_id = str(getattr(target_channel, "id", ""))
             try:
                 recovery_recorded = await asyncio.to_thread(
                     record_job_lead_staging_cleanup_required,
@@ -4042,15 +4050,23 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 )
             except Exception as exc:
                 logger.warning(
-                    "Failed recording unqualified lead staging recovery state lead_id=%s: %s",
+                    "Failed recording unqualified lead staging recovery state "
+                    "lead_id=%s guild_id=%s channel_id=%s thread_id=%s: %s",
                     lead_id,
+                    guild_id,
+                    channel_id,
+                    thread_id,
                     exc,
                 )
                 return
             if not recovery_recorded:
                 logger.warning(
-                    "Could not record unqualified lead staging recovery state lead_id=%s",
+                    "Could not record unqualified lead staging recovery state "
+                    "lead_id=%s guild_id=%s channel_id=%s thread_id=%s",
                     lead_id,
+                    guild_id,
+                    channel_id,
+                    thread_id,
                 )
                 return
         try:
@@ -4167,7 +4183,13 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 allowed_mentions=self._job_lead_allowed_mentions(),
                 reason=f"{reason} by {reviewer}",
             )
-        except discord.Forbidden:
+        except discord.Forbidden as exc:
+            logger.warning(
+                "Forbidden staging unqualified lead thread lead_id=%s channel_id=%s: %s",
+                lead.id,
+                target_channel.id,
+                exc,
+            )
             await self._cleanup_failed_job_lead_staging(
                 lead_id=lead.id,
                 reservation_token=reservation_token,
