@@ -2013,10 +2013,11 @@ class TestCRMCog:
             id = 123
             applied_tags = []
 
-            def __init__(self, parent: DummyForumChannel) -> None:
+            def __init__(self, parent: DummyForumChannel, guild: Mock) -> None:
                 self.parent = parent
+                self.guild = guild
 
-        thread_instance = DummyThread(DummyForumChannel(456))
+        thread_instance = DummyThread(DummyForumChannel(456), guild)
         thread_instance.starter_message = starter_msg
         mock_interaction.channel = thread_instance
 
@@ -2158,10 +2159,11 @@ class TestCRMCog:
             id = 123
             applied_tags = []
 
-            def __init__(self, parent: DummyForumChannel) -> None:
+            def __init__(self, parent: DummyForumChannel, guild: Mock) -> None:
                 self.parent = parent
+                self.guild = guild
 
-        thread_instance = DummyThread(DummyForumChannel(456))
+        thread_instance = DummyThread(DummyForumChannel(456), guild)
         thread_instance.starter_message = starter_msg
         mock_interaction.channel = thread_instance
 

@@ -58,6 +58,7 @@ from five08.agent import (
 from five08.clients.espo import EspoAPIError, EspoClient
 from five08.logging import configure_observability
 from five08.job_leads import (
+    clear_job_lead_staging_cleanup_required,
     job_lead_display_payload,
     JobLeadStatus,
     list_job_leads,
@@ -134,6 +135,7 @@ from five08.backend.schemas import (
     DashboardJobChannelUpdateRequest,
     DashboardJobLeadPostRequest,
     DashboardJobLeadReviewRequest,
+    DashboardJobLeadStagingRecoveryClearRequest,
     DashboardJobLeadSyncRequest,
     DashboardOnboardingEmailDraftRequest,
     DashboardOnboardingEmailSendRequest,
@@ -1056,7 +1058,7 @@ async def _post_job_lead_to_discord(
     tags: str | None = None,
     engagement_status: EngagementStatus = EngagementStatus.LEAD,
 ) -> tuple[dict[str, Any], int]:
-    """Ask the Discord bot to create a jobs forum thread for an approved lead."""
+    """Ask the Discord bot to promote a qualified lead into a jobs forum."""
     base_url = settings.discord_bot_internal_base_url.strip()
     if not base_url:
         return {"error": "bot_endpoint_not_configured"}, 503
@@ -1074,13 +1076,54 @@ async def _post_job_lead_to_discord(
                 "reviewer_discord_user_id": reviewer_discord_user_id,
                 "channel_id": channel_id,
                 "tags": tags,
-                "approve_before_post": True,
                 "engagement_status": engagement_status.value,
             },
             timeout=15.0,
         )
     except httpx.HTTPError as exc:
         logger.warning("Failed posting job lead %s to Discord: %s", lead_id, exc)
+        return {"error": "bot_request_failed"}, 502
+
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    if response.status_code == 401:
+        return {"error": "bot_auth_failed"}, 502
+    if response.status_code >= 400 and "error" not in payload:
+        payload = {**payload, "error": "bot_request_failed"}
+    return cast(dict[str, Any], payload), response.status_code
+
+
+async def _stage_job_lead_to_discord(
+    request: Request,
+    *,
+    lead_id: str,
+    reviewer_discord_user_id: str,
+) -> tuple[dict[str, Any], int]:
+    """Ask the Discord bot to create an unqualified holding thread for one lead."""
+    base_url = settings.discord_bot_internal_base_url.strip()
+    if not base_url:
+        return {"error": "bot_endpoint_not_configured"}, 503
+
+    api_secret = str(settings.api_shared_secret or "").strip()
+    if not api_secret:
+        return {"error": "api_secret_not_configured"}, 503
+
+    try:
+        response = await _http_client_from_app(request.app).post(
+            f"{base_url.rstrip('/')}/internal/jobs/job-leads/stage",
+            headers={"X-API-Secret": api_secret},
+            json={
+                "lead_id": lead_id,
+                "reviewer_discord_user_id": reviewer_discord_user_id,
+            },
+            timeout=15.0,
+        )
+    except httpx.HTTPError as exc:
+        logger.warning("Failed staging job lead %s in Discord: %s", lead_id, exc)
         return {"error": "bot_request_failed"}, 502
 
     try:
@@ -1728,6 +1771,7 @@ async def _session_payload(session: AuthSession) -> dict[str, Any]:
         "display_name": session.display_name,
         "groups": session.groups,
         "is_admin": session.is_admin,
+        "can_manage_leads": _session_has_steering_access(session),
         "permissions": sorted(await _session_dashboard_permissions_async(session)),
         "expires_at": session.expires_at,
         "actor_provider": session.actor_provider,
@@ -4265,6 +4309,28 @@ def _valid_discord_channel_id_or_none(channel_id: str) -> str | None:
     return normalized
 
 
+async def _dashboard_job_forum_is_available(
+    request: Request,
+    *,
+    channel_id: str,
+) -> bool | None:
+    """Return whether the bot exposes this forum as a safe registration target."""
+    live_channels = await _list_job_channels_from_bot(
+        request,
+        register_defaults=False,
+    )
+    if live_channels is None:
+        return None
+    available_channels = live_channels.get("available_channels")
+    if not isinstance(available_channels, list):
+        return None
+    return any(
+        isinstance(candidate, Mapping)
+        and str(candidate.get("channel_id") or "").strip() == channel_id
+        for candidate in available_channels
+    )
+
+
 async def dashboard_update_job_channel_handler(
     request: Request,
     channel_id: str,
@@ -4327,6 +4393,38 @@ async def dashboard_update_job_channel_handler(
             metadata={"error": "discord_server_not_configured"},
         )
         return JSONResponse({"error": "discord_server_not_configured"}, status_code=409)
+
+    forum_available = await _dashboard_job_forum_is_available(
+        request,
+        channel_id=normalized_channel_id,
+    )
+    if forum_available is None:
+        logger.warning(
+            "Refusing dashboard job-channel update because forum validation is unavailable "
+            "guild=%s channel=%s",
+            guild_id,
+            normalized_channel_id,
+        )
+        await _audit_dashboard_job_channel_change(
+            session,
+            result=AuditResult.ERROR,
+            channel_id=normalized_channel_id,
+            action="job_channel.update",
+            metadata={"error": "job_forum_validation_unavailable"},
+        )
+        return JSONResponse(
+            {"error": "job_forum_validation_unavailable"},
+            status_code=503,
+        )
+    if not forum_available:
+        await _audit_dashboard_job_channel_change(
+            session,
+            result=AuditResult.ERROR,
+            channel_id=normalized_channel_id,
+            action="job_channel.update",
+            metadata={"error": "job_forum_not_available"},
+        )
+        return JSONResponse({"error": "job_forum_not_available"}, status_code=403)
 
     try:
         created = await asyncio.to_thread(
@@ -4579,11 +4677,111 @@ async def dashboard_review_job_lead_handler(
     return JSONResponse(jsonable_encoder(job_lead_display_payload(lead)))
 
 
+async def dashboard_clear_job_lead_staging_recovery_handler(
+    request: Request,
+    lead_id: str,
+) -> JSONResponse:
+    """Clear a holding-thread recovery block after an operator removes the orphan."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_GIGS_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+    steering_error = _dashboard_steering_or_error(session)
+    if steering_error is not None:
+        return steering_error
+
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+
+    try:
+        payload = DashboardJobLeadStagingRecoveryClearRequest.model_validate(
+            await request.json()
+        )
+    except Exception:
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
+
+    cleared = await asyncio.to_thread(
+        clear_job_lead_staging_cleanup_required,
+        settings,
+        lead_id=lead_id,
+    )
+    if cleared is None:
+        return JSONResponse(
+            {"error": "job_lead_staging_recovery_not_found"},
+            status_code=409,
+        )
+
+    actor_provider, actor_subject = _session_audit_actor(session)
+    await _write_auth_audit_event(
+        action="job_leads.staging_recovery.clear",
+        result=AuditResult.SUCCESS,
+        actor_subject=actor_subject,
+        actor_display_name=session.display_name,
+        actor_provider=actor_provider,
+        resource_type="job_lead",
+        resource_id=cleared.id,
+        metadata={"lead_id": cleared.id, "orphan_deleted": payload.orphan_deleted},
+    )
+    return JSONResponse(jsonable_encoder(job_lead_display_payload(cleared)))
+
+
+async def dashboard_stage_job_lead_handler(
+    request: Request,
+    lead_id: str,
+) -> JSONResponse:
+    """Stage one sourced lead in the unqualified Discord holding forum."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_GIGS_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+    steering_error = _dashboard_steering_or_error(session)
+    if steering_error is not None:
+        return steering_error
+
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+
+    reviewer = _session_discord_actor_id(session) or session.subject
+    result, status_code = await _stage_job_lead_to_discord(
+        request,
+        lead_id=lead_id,
+        reviewer_discord_user_id=reviewer,
+    )
+    if status_code >= 400:
+        return JSONResponse(result, status_code=status_code)
+
+    actor_provider, actor_subject = _session_audit_actor(session)
+    await _write_auth_audit_event(
+        action="job_leads.stage",
+        result=AuditResult.SUCCESS,
+        actor_subject=actor_subject,
+        actor_display_name=session.display_name,
+        actor_provider=actor_provider,
+        resource_type="job_lead",
+        resource_id=str(result.get("lead_id") or lead_id),
+        metadata={
+            "lead_id": result.get("lead_id") or lead_id,
+            "guild_id": result.get("guild_id"),
+            "channel_id": result.get("channel_id"),
+            "thread_id": result.get("thread_id"),
+        },
+    )
+    return JSONResponse(result)
+
+
 async def dashboard_post_job_lead_handler(
     request: Request,
     lead_id: str,
 ) -> JSONResponse:
-    """Post one approved sourced job lead to the registered Discord jobs forum."""
+    """Promote one qualified lead into a registered Discord jobs forum."""
     session, error_response = await _dashboard_session_or_error(
         request,
         required_permission=DASHBOARD_PERMISSION_GIGS_WRITE,
@@ -4622,7 +4820,7 @@ async def dashboard_post_job_lead_handler(
 
     actor_provider, actor_subject = _session_audit_actor(session)
     await _write_auth_audit_event(
-        action="job_leads.post",
+        action="job_leads.promote",
         result=AuditResult.SUCCESS,
         actor_subject=actor_subject,
         actor_display_name=session.display_name,

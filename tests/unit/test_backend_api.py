@@ -7,6 +7,7 @@ import hmac
 import json
 import re
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, Mock, call, patch
 
@@ -2102,6 +2103,7 @@ def test_dashboard_me_member_session_only_gets_gig_permissions(
 
     assert response.status_code == 200
     assert response.json()["permissions"] == ["gigs:read", "gigs:write"]
+    assert response.json()["can_manage_leads"] is False
 
 
 def test_dashboard_me_member_on_project_gets_project_read_permission(
@@ -2248,7 +2250,7 @@ def test_dashboard_me_returns_crm_linked_admin_session(client: TestClient) -> No
         subject="123456789",
         email="admin@508.dev",
         display_name="Discord Admin",
-        groups=["discord_admin"],
+        groups=["Admin"],
         is_admin=True,
         id_token="id-token-1",
         expires_at=4_102_444_800,
@@ -2268,6 +2270,7 @@ def test_dashboard_me_returns_crm_linked_admin_session(client: TestClient) -> No
     assert response.json()["actor_provider"] == api.ActorProvider.DISCORD.value
     assert response.json()["crm_base_url"] == api._crm_base_url()
     assert "jobs:write" in response.json()["permissions"]
+    assert response.json()["can_manage_leads"] is True
 
 
 def test_dashboard_me_normalizes_crm_api_base_url(
@@ -3973,7 +3976,7 @@ def test_dashboard_job_lead_scrape_status_reports_not_run(client: TestClient) ->
     }
 
 
-def test_dashboard_review_job_lead_approves_with_discord_reviewer(
+def test_dashboard_review_job_lead_approves_without_holding_thread(
     client: TestClient,
 ) -> None:
     session = _dashboard_write_session()
@@ -4226,6 +4229,95 @@ def test_dashboard_sync_job_leads_rejects_unsupported_source(
     mock_enqueue.assert_not_called()
 
 
+def test_dashboard_stage_job_lead_posts_to_holding_forum(
+    client: TestClient,
+) -> None:
+    session = _dashboard_write_session()
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._stage_job_lead_to_discord",
+            new_callable=AsyncMock,
+            return_value=(
+                {
+                    "status": "staged",
+                    "lead_id": "lead-1",
+                    "guild_id": "guild-1",
+                    "channel_id": "unqualified-1",
+                    "thread_id": "thread-unqualified-1",
+                },
+                200,
+            ),
+        ) as mock_stage,
+        patch("five08.backend.api.insert_audit_event") as mock_insert,
+    ):
+        response = client.post("/dashboard/api/gig-leads/lead-1/stage", json={})
+
+    assert response.status_code == 200
+    assert response.json()["thread_id"] == "thread-unqualified-1"
+    assert mock_stage.await_count == 1
+    assert mock_stage.await_args.kwargs == {
+        "lead_id": "lead-1",
+        "reviewer_discord_user_id": "steering-1",
+    }
+    audit_payload = mock_insert.call_args.args[1]
+    assert audit_payload.action == "job_leads.stage"
+    assert audit_payload.resource_id == "lead-1"
+    assert audit_payload.metadata == {
+        "lead_id": "lead-1",
+        "guild_id": "guild-1",
+        "channel_id": "unqualified-1",
+        "thread_id": "thread-unqualified-1",
+    }
+
+
+def test_dashboard_clear_job_lead_staging_recovery_requires_manual_reconciliation(
+    client: TestClient,
+) -> None:
+    session = _dashboard_write_session()
+    cleared = SimpleNamespace(id="lead-1")
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api.clear_job_lead_staging_cleanup_required",
+            return_value=cleared,
+        ) as clear_recovery,
+        patch(
+            "five08.backend.api.job_lead_display_payload",
+            return_value={"id": "lead-1", "status": "pending"},
+        ),
+        patch("five08.backend.api.insert_audit_event") as mock_insert,
+    ):
+        rejected = client.post(
+            "/dashboard/api/gig-leads/lead-1/staging-recovery/clear",
+            json={"orphan_deleted": False},
+        )
+        response = client.post(
+            "/dashboard/api/gig-leads/lead-1/staging-recovery/clear",
+            json={"orphan_deleted": True},
+        )
+
+    assert rejected.status_code == 400
+    assert rejected.json() == {"error": "invalid_payload"}
+    assert response.status_code == 200
+    assert response.json() == {"id": "lead-1", "status": "pending"}
+    clear_recovery.assert_called_once_with(api.settings, lead_id="lead-1")
+    audit_payload = mock_insert.call_args.args[1]
+    assert audit_payload.action == "job_leads.staging_recovery.clear"
+    assert audit_payload.resource_id == "lead-1"
+    assert audit_payload.metadata == {"lead_id": "lead-1", "orphan_deleted": True}
+
+
 def test_dashboard_post_job_lead_posts_approved_lead_to_discord(
     client: TestClient,
 ) -> None:
@@ -4275,7 +4367,7 @@ def test_dashboard_post_job_lead_posts_approved_lead_to_discord(
     }
     audit_payload = mock_insert.call_args.args[1]
     assert audit_payload.source == api.AuditSource.ADMIN_DASHBOARD
-    assert audit_payload.action == "job_leads.post"
+    assert audit_payload.action == "job_leads.promote"
     assert audit_payload.result == api.AuditResult.SUCCESS
     assert audit_payload.actor_provider == api.ActorProvider.DISCORD
     assert audit_payload.actor_subject == "steering-1"
@@ -4334,7 +4426,7 @@ async def test_post_job_lead_to_discord_maps_bot_auth_failure(
 
     assert status_code == 502
     assert payload == {"error": "bot_auth_failed"}
-    assert http_client.post.await_args.kwargs["json"]["approve_before_post"] is True
+    assert "approve_before_post" not in http_client.post.await_args.kwargs["json"]
     assert http_client.post.await_args.kwargs["json"]["engagement_status"] == "lead"
 
 
@@ -4422,6 +4514,105 @@ def test_dashboard_job_channels_prefers_live_discord_tag_metadata(
     assert response.status_code == 200
     assert response.json() == live_payload
     list_channels.assert_not_called()
+
+
+def test_dashboard_job_channel_rejects_forum_omitted_by_bot(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(api.settings, "discord_server_id", "guild-1")
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="validated",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._list_job_channels_from_bot",
+            new_callable=AsyncMock,
+            return_value={
+                "channels": [],
+                "available_channels": [{"channel_id": "789", "channel_name": "gigs"}],
+            },
+        ) as list_channels,
+        patch("five08.backend.api.register_job_post_channel") as register,
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as audit,
+    ):
+        response = client.put(
+            "/dashboard/api/job-channels/456",
+            json={"posting_type": "part_time"},
+        )
+
+    assert response.status_code == 403
+    assert response.json() == {"error": "job_forum_not_available"}
+    list_channels.assert_awaited_once()
+    assert list_channels.await_args.kwargs == {"register_defaults": False}
+    register.assert_not_called()
+    assert audit.await_args.kwargs["metadata"]["error"] == "job_forum_not_available"
+
+
+def test_dashboard_job_channel_fails_closed_when_forum_validation_is_unavailable(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(api.settings, "discord_server_id", "guild-1")
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="validated",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._list_job_channels_from_bot",
+            new_callable=AsyncMock,
+            return_value=None,
+        ) as list_channels,
+        patch("five08.backend.api.register_job_post_channel") as register,
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as audit,
+        patch("five08.backend.api.logger") as logger,
+    ):
+        response = client.put(
+            "/dashboard/api/job-channels/456",
+            json={"posting_type": "part_time"},
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {"error": "job_forum_validation_unavailable"}
+    list_channels.assert_awaited_once()
+    assert list_channels.await_args.kwargs == {"register_defaults": False}
+    register.assert_not_called()
+    logger.warning.assert_called_once()
+    assert audit.await_args.kwargs["metadata"]["error"] == (
+        "job_forum_validation_unavailable"
+    )
 
 
 async def test_post_job_lead_to_discord_requires_bot_endpoint(

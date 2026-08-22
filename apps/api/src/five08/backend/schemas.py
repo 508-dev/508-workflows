@@ -83,6 +83,12 @@ class DashboardJobLeadReviewRequest(BaseModel):
     status: Literal["pending", "approved", "rejected"]
 
 
+class DashboardJobLeadStagingRecoveryClearRequest(BaseModel):
+    """Operator confirmation that an orphaned holding thread was removed."""
+
+    orphan_deleted: Literal[True]
+
+
 class DashboardJobLeadPostRequest(BaseModel):
     """Payload for posting one approved sourced job lead to Discord."""
 

@@ -39,14 +39,20 @@ class GigThreadStatusRequest(BaseModel):
 
 
 class PostJobLeadRequest(BaseModel):
-    """Internal payload for posting an approved sourced job lead to Discord."""
+    """Internal payload for promoting a qualified lead to a gigs forum."""
 
     lead_id: str
     reviewer_discord_user_id: str
     channel_id: str | None = None
     tags: str | None = None
-    approve_before_post: bool = False
     engagement_status: str = EngagementStatus.LEAD.value
+
+
+class StageJobLeadRequest(BaseModel):
+    """Internal payload for posting a sourced lead to the holding forum."""
+
+    lead_id: str
+    reviewer_discord_user_id: str
 
 
 class InternalAPIRoutes:
@@ -70,6 +76,10 @@ class InternalAPIRoutes:
         app.router.add_post(
             "/internal/jobs/job-leads/post",
             self.post_job_lead_handler,
+        )
+        app.router.add_post(
+            "/internal/jobs/job-leads/stage",
+            self.stage_job_lead_handler,
         )
         app.router.add_get(
             "/internal/jobs/channels",
@@ -468,9 +478,23 @@ class InternalAPIRoutes:
             reviewer_discord_user_id=payload.reviewer_discord_user_id,
             channel_id=payload.channel_id,
             tags=payload.tags,
-            approve_before_post=payload.approve_before_post,
             engagement_status=normalize_engagement_status(payload.engagement_status),
-            reason="Dashboard approved job lead",
+            reason="Dashboard promoted qualified job lead",
+        )
+        return result, status_code
+
+    async def _stage_job_lead(
+        self,
+        payload: StageJobLeadRequest,
+    ) -> tuple[dict[str, Any], int]:
+        jobs_cog = self.bot.get_cog("JobsCog")
+        if jobs_cog is None or not hasattr(jobs_cog, "stage_job_lead_to_discord"):
+            return {"error": "jobs_cog_unavailable"}, 503
+
+        result, status_code = await jobs_cog.stage_job_lead_to_discord(
+            lead_id=payload.lead_id,
+            reviewer_discord_user_id=payload.reviewer_discord_user_id,
+            reason="Dashboard staged unqualified job lead",
         )
         return result, status_code
 
@@ -504,7 +528,7 @@ class InternalAPIRoutes:
         return web.json_response(result, status=status_code)
 
     async def post_job_lead_handler(self, request: web.Request) -> web.Response:
-        """Create a Discord forum thread for an approved sourced job lead."""
+        """Promote a qualified sourced lead into a registered Discord gigs forum."""
         if not self._is_authorized(request):
             return web.json_response({"error": "unauthorized"}, status=401)
 
@@ -525,4 +549,28 @@ class InternalAPIRoutes:
             )
 
         result, status_code = await self._post_job_lead(payload)
+        return web.json_response(result, status=status_code)
+
+    async def stage_job_lead_handler(self, request: web.Request) -> web.Response:
+        """Create a holding-forum thread for an unqualified sourced job lead."""
+        if not self._is_authorized(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+
+        try:
+            payload_data = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid_json"}, status=400)
+
+        if not isinstance(payload_data, dict):
+            return web.json_response({"error": "payload_must_be_object"}, status=400)
+
+        try:
+            payload = StageJobLeadRequest.model_validate(payload_data)
+        except (ValidationError, TypeError) as exc:
+            return web.json_response(
+                {"error": "invalid_payload", "detail": str(exc)},
+                status=400,
+            )
+
+        result, status_code = await self._stage_job_lead(payload)
         return web.json_response(result, status=status_code)
