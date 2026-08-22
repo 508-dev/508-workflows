@@ -1894,9 +1894,7 @@ function App() {
         },
       )
       setGigLeads((current) =>
-        current.map((currentLead) =>
-          currentLead.id === leadId ? { ...currentLead, ...lead } : currentLead,
-        ),
+        current.map((currentLead) => (currentLead.id === leadId ? lead : currentLead)),
       )
       showToast("Cleared the holding-thread recovery block", "ok")
     } catch (error) {

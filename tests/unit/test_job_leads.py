@@ -254,7 +254,11 @@ def test_upsert_seeds_staging_fingerprint_from_coalesced_persisted_values(
     )
     seed_query, seed_params = cursor.executed[1]
     assert "metadata = metadata || jsonb_build_object" in seed_query
-    assert seed_params == (persisted_fingerprint, "lead-1")
+    assert seed_params == (
+        job_leads._STAGING_SOURCE_FINGERPRINT_METADATA_KEY,
+        persisted_fingerprint,
+        "lead-1",
+    )
 
 
 def test_refresh_seeds_staging_fingerprint_from_coalesced_persisted_values(
@@ -302,7 +306,11 @@ def test_refresh_seeds_staging_fingerprint_from_coalesced_persisted_values(
     )
     seed_query, seed_params = cursor.executed[1]
     assert "metadata = metadata || jsonb_build_object" in seed_query
-    assert seed_params == (persisted_fingerprint, "lead-1")
+    assert seed_params == (
+        job_leads._STAGING_SOURCE_FINGERPRINT_METADATA_KEY,
+        persisted_fingerprint,
+        "lead-1",
+    )
 
 
 def test_upsert_job_lead_skips_reviewed_conflict(monkeypatch) -> None:
@@ -612,13 +620,16 @@ def test_mark_job_lead_staged_records_reserved_holding_thread(monkeypatch) -> No
         "123",
         "456",
         "789",
+        job_leads._STAGING_SOURCE_FINGERPRINT_METADATA_KEY,
         "source-fingerprint",
         "11111111-1111-1111-1111-111111111111",
         "attempt-1",
     )
 
 
-def test_record_job_lead_staging_cleanup_required_blocks_restaging(monkeypatch) -> None:
+def test_record_job_lead_staging_cleanup_required_records_approved_lead(
+    monkeypatch,
+) -> None:
     cursor = _CursorStub(rows=[{"id": "11111111-1111-1111-1111-111111111111"}])
     _install_connection_stub(monkeypatch, cursor)
 
@@ -633,7 +644,7 @@ def test_record_job_lead_staging_cleanup_required_blocks_restaging(monkeypatch) 
     assert recorded is True
     query, params = cursor.executed[0]
     assert "metadata = metadata || %s" in query
-    assert "status IN ('pending', 'rejected')" in query
+    assert "status IN" not in query
     assert "staged_discord_thread_id IS NULL" not in query
     assert params[0].obj == {
         job_leads._STAGING_CLEANUP_REQUIRED_METADATA_KEY: {
@@ -670,14 +681,14 @@ def test_job_lead_staging_recovery_details_returns_orphaned_thread_metadata() ->
     }
 
 
-def test_clear_job_lead_staging_cleanup_required_releases_reconciled_lead(
+def test_clear_job_lead_staging_cleanup_required_allows_approved_lead(
     monkeypatch,
 ) -> None:
     cursor = _CursorStub(
         rows=[
             _lead_row(
                 metadata={"source": "hackernews"},
-                status="pending",
+                status="approved",
             )
         ]
     )
@@ -693,7 +704,7 @@ def test_clear_job_lead_staging_cleanup_required_releases_reconciled_lead(
     query, params = cursor.executed[0]
     assert "metadata = metadata - %s::text" in query
     assert "metadata ? %s::text" in query
-    assert "status IN ('pending', 'rejected')" in query
+    assert "status IN" not in query
     assert params == (
         job_leads._STAGING_CLEANUP_REQUIRED_METADATA_KEY,
         "11111111-1111-1111-1111-111111111111",

@@ -336,12 +336,19 @@ def _seed_job_lead_staging_source_fingerprint(cursor: Any, lead: JobLead) -> Non
         UPDATE job_leads
         SET
             metadata = metadata || jsonb_build_object(
-                '_staging_source_fingerprint', %s::text
+                %s::text, %s::text
             ),
             updated_at = NOW()
         WHERE id = %s
     """
-    cursor.execute(query, (fingerprint, lead.id))
+    cursor.execute(
+        query,
+        (
+            _STAGING_SOURCE_FINGERPRINT_METADATA_KEY,
+            fingerprint,
+            lead.id,
+        ),
+    )
 
 
 def _as_lead(row: dict[str, Any]) -> JobLead:
@@ -801,7 +808,7 @@ def mark_job_lead_staged(
             staged_discord_thread_id = %s,
             staged_at = NOW(),
             metadata = metadata || jsonb_build_object(
-                '_staging_source_fingerprint', %s::text
+                %s::text, %s::text
             ),
             staging_reservation_token = NULL,
             staging_reserved_at = NULL,
@@ -820,6 +827,7 @@ def mark_job_lead_staged(
                     guild_id,
                     channel_id,
                     thread_id,
+                    _STAGING_SOURCE_FINGERPRINT_METADATA_KEY,
                     fingerprint,
                     lead_id,
                     reservation_token,
@@ -902,7 +910,7 @@ def record_job_lead_staging_cleanup_required(
     channel_id: str,
     thread_id: str | None,
 ) -> bool:
-    """Record an orphaned holding thread before permitting another staging attempt."""
+    """Persist an orphaned holding thread for operator reconciliation."""
     recovery_metadata = Jsonb(
         {
             _STAGING_CLEANUP_REQUIRED_METADATA_KEY: {
@@ -918,7 +926,6 @@ def record_job_lead_staging_cleanup_required(
             metadata = metadata || %s,
             updated_at = NOW()
         WHERE id = %s
-          AND status IN ('pending', 'rejected')
         RETURNING id
     """
     with get_postgres_connection(settings) as conn:
@@ -940,7 +947,6 @@ def clear_job_lead_staging_cleanup_required(
             metadata = metadata - %s::text,
             updated_at = NOW()
         WHERE id = %s
-          AND status IN ('pending', 'rejected')
           AND metadata ? %s::text
         RETURNING *
     """

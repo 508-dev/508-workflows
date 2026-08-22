@@ -552,9 +552,7 @@ async def test_stage_job_lead_deletes_thread_and_releases_reservation_when_save_
     )
 
 
-async def test_stage_job_lead_records_recovery_before_releasing_orphaned_thread() -> (
-    None
-):
+async def test_stage_job_lead_records_recovery_after_concurrent_qualification() -> None:
     guild = SimpleNamespace(id=123)
     thread = SimpleNamespace(
         id=789,
@@ -613,6 +611,43 @@ async def test_stage_job_lead_records_recovery_before_releasing_orphaned_thread(
     )
 
 
+async def test_cleanup_failed_staging_retries_recovery_after_record_error() -> None:
+    guild = SimpleNamespace(id=123)
+    channel = SimpleNamespace(id=456, guild=guild)
+    thread = SimpleNamespace(
+        id=789,
+        delete=AsyncMock(side_effect=RuntimeError("Discord unavailable")),
+    )
+    cog = JobsCog(Mock())
+
+    with (
+        patch.object(
+            jobs_module,
+            "record_job_lead_staging_cleanup_required",
+            side_effect=[RuntimeError("Postgres unavailable"), True],
+        ) as record_recovery,
+        patch.object(
+            jobs_module, "release_job_lead_staging_reservation", return_value=True
+        ) as release,
+        patch.object(jobs_module, "logger") as logger,
+    ):
+        await cog._cleanup_failed_job_lead_staging(
+            lead_id="lead-1",
+            reservation_token="reservation-1",
+            thread=thread,
+            target_channel=channel,
+        )
+
+    thread.delete.assert_awaited_once()
+    assert record_recovery.call_count == 2
+    release.assert_called_once_with(
+        jobs_module.settings,
+        lead_id="lead-1",
+        reservation_token="reservation-1",
+    )
+    logger.error.assert_not_called()
+
+
 async def test_stage_job_lead_keeps_reservation_when_orphan_recovery_cannot_be_recorded() -> (
     None
 ):
@@ -641,10 +676,11 @@ async def test_stage_job_lead_keeps_reservation_when_orphan_recovery_cannot_be_r
         patch.object(
             jobs_module,
             "record_job_lead_staging_cleanup_required",
-            return_value=False,
+            side_effect=[False, False],
         ) as record_recovery,
         patch.object(jobs_module, "release_job_lead_staging_reservation") as release,
         patch.object(jobs_module, "uuid4", return_value="reservation-1"),
+        patch.object(jobs_module, "logger") as logger,
     ):
         result, status_code = await cog.stage_job_lead_to_discord(
             lead_id=lead.id,
@@ -657,8 +693,17 @@ async def test_stage_job_lead_keeps_reservation_when_orphan_recovery_cannot_be_r
         "lead_id": lead.id,
         "thread_id": "789",
     }
-    record_recovery.assert_called_once()
+    assert record_recovery.call_count == 2
     release.assert_not_called()
+    logger.error.assert_called_once()
+    assert logger.error.call_args.args[:5] == (
+        "Could not persist unqualified lead staging recovery after retry "
+        "lead_id=%s guild_id=%s channel_id=%s thread_id=%s: %s",
+        lead.id,
+        "123",
+        "456",
+        "789",
+    )
 
 
 async def test_unqualified_leads_forum_cannot_be_registered_for_matching() -> None:

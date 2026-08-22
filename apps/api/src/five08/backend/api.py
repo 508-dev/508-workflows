@@ -4704,9 +4704,6 @@ async def dashboard_clear_job_lead_staging_recovery_handler(
     except Exception:
         return JSONResponse({"error": "invalid_payload"}, status_code=400)
 
-    if not payload.orphan_deleted:
-        return JSONResponse({"error": "orphan_deletion_required"}, status_code=400)
-
     cleared = await asyncio.to_thread(
         clear_job_lead_staging_cleanup_required,
         settings,

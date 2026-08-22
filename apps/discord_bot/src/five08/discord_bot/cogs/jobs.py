@@ -4039,34 +4039,44 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                     exc,
                 )
         if deletion_failed:
-            try:
-                recovery_recorded = await asyncio.to_thread(
-                    record_job_lead_staging_cleanup_required,
-                    settings,
-                    lead_id=lead_id,
-                    guild_id=guild_id,
-                    channel_id=channel_id,
-                    thread_id=thread_id,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Failed recording unqualified lead staging recovery state "
+            recovery_recorded = False
+            recovery_error: Exception | None = None
+            for attempt in range(1, 3):
+                try:
+                    recovery_recorded = await asyncio.to_thread(
+                        record_job_lead_staging_cleanup_required,
+                        settings,
+                        lead_id=lead_id,
+                        guild_id=guild_id,
+                        channel_id=channel_id,
+                        thread_id=thread_id,
+                    )
+                    recovery_error = None
+                except Exception as exc:
+                    recovery_error = exc
+
+                if recovery_recorded:
+                    break
+                if attempt == 1:
+                    logger.warning(
+                        "Retrying unqualified lead staging recovery record "
+                        "lead_id=%s guild_id=%s channel_id=%s thread_id=%s: %s",
+                        lead_id,
+                        guild_id,
+                        channel_id,
+                        thread_id,
+                        recovery_error or "no row updated",
+                    )
+
+            if not recovery_recorded:
+                logger.error(
+                    "Could not persist unqualified lead staging recovery after retry "
                     "lead_id=%s guild_id=%s channel_id=%s thread_id=%s: %s",
                     lead_id,
                     guild_id,
                     channel_id,
                     thread_id,
-                    exc,
-                )
-                return
-            if not recovery_recorded:
-                logger.warning(
-                    "Could not record unqualified lead staging recovery state "
-                    "lead_id=%s guild_id=%s channel_id=%s thread_id=%s",
-                    lead_id,
-                    guild_id,
-                    channel_id,
-                    thread_id,
+                    recovery_error or "no row updated",
                 )
                 return
         try:
