@@ -374,6 +374,8 @@ async def test_stage_job_lead_to_discord_creates_holding_thread_without_gig() ->
         jobs_module.settings,
         lead_id=lead.id,
         reservation_token="reservation-1",
+        guild_id="123",
+        channel_id="456",
     )
     mark.assert_called_once_with(
         jobs_module.settings,

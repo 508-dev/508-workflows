@@ -4151,6 +4151,8 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 settings,
                 lead_id=lead.id,
                 reservation_token=reservation_token,
+                guild_id=str(target_channel.guild.id),
+                channel_id=str(target_channel.id),
             )
         except Exception as exc:
             logger.warning(

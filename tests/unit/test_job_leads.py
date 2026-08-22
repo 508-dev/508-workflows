@@ -541,7 +541,9 @@ def test_review_job_lead_restores_rejected_lead_to_pending(monkeypatch) -> None:
     )
 
 
-def test_reserve_job_lead_staging_claims_pending_lead_atomically(monkeypatch) -> None:
+def test_reserve_job_lead_staging_claims_pending_lead_with_durable_recovery_block(
+    monkeypatch,
+) -> None:
     cursor = _CursorStub(rows=[_lead_row(staging_reservation_token="attempt-1")])
     _install_connection_stub(monkeypatch, cursor)
 
@@ -549,24 +551,36 @@ def test_reserve_job_lead_staging_claims_pending_lead_atomically(monkeypatch) ->
         job_leads.SharedSettings(),
         lead_id="11111111-1111-1111-1111-111111111111",
         reservation_token="attempt-1",
+        guild_id="123",
+        channel_id="456",
     )
 
     assert reserved is not None
     query, params = cursor.executed[0]
+    assert "metadata = metadata || %s" in query
     assert "staging_reservation_token = %s" in query
     assert "staging_reservation_token IS NULL" in query
     assert "staging_reserved_at IS NULL" in query
     assert "staging_reserved_at < NOW() - (%s * INTERVAL '1 second')" in query
     assert "staged_discord_thread_id IS NULL" in query
-    assert "metadata -> '_staging_cleanup_required' IS NULL" in query
-    assert params == (
+    assert "metadata -> %s::text IS NULL" in query
+    assert params[0].obj == {
+        job_leads._STAGING_CLEANUP_REQUIRED_METADATA_KEY: {
+            "state": job_leads._STAGING_CLEANUP_RESERVATION_STATE,
+            "guild_id": "123",
+            "channel_id": "456",
+            "thread_id": None,
+        }
+    }
+    assert params[1:] == (
         "attempt-1",
         "11111111-1111-1111-1111-111111111111",
+        job_leads._STAGING_CLEANUP_REQUIRED_METADATA_KEY,
         job_leads.JOB_LEAD_STAGING_RESERVATION_TTL_SECONDS,
     )
 
 
-def test_release_job_lead_staging_reservation_only_releases_own_attempt(
+def test_release_job_lead_staging_reservation_only_releases_its_attempt_marker(
     monkeypatch,
 ) -> None:
     cursor = _CursorStub(rows=[{"id": "11111111-1111-1111-1111-111111111111"}])
@@ -580,10 +594,20 @@ def test_release_job_lead_staging_reservation_only_releases_own_attempt(
 
     assert released is True
     query, params = cursor.executed[0]
+    assert "metadata = CASE" in query
+    assert "THEN metadata - %s::text" in query
     assert "staging_reservation_token = NULL" in query
     assert "staging_reservation_token = %s" in query
     assert "staged_discord_thread_id IS NULL" in query
-    assert params == ("11111111-1111-1111-1111-111111111111", "attempt-1")
+    assert params == (
+        job_leads._STAGING_CLEANUP_REQUIRED_METADATA_KEY,
+        job_leads._STAGING_CLEANUP_RESERVATION_STATE,
+        job_leads._STAGING_CLEANUP_REQUIRED_METADATA_KEY,
+        "11111111-1111-1111-1111-111111111111",
+        "attempt-1",
+        job_leads._STAGING_CLEANUP_REQUIRED_METADATA_KEY,
+        job_leads._STAGING_CLEANUP_RESERVATION_STATE,
+    )
 
 
 def test_mark_job_lead_staged_records_reserved_holding_thread(monkeypatch) -> None:
@@ -615,11 +639,12 @@ def test_mark_job_lead_staged_records_reserved_holding_thread(monkeypatch) -> No
     assert "status = 'pending'" in query
     assert "staged_discord_thread_id IS NULL" in query
     assert "staging_reservation_token = %s" in query
-    assert "metadata = metadata || jsonb_build_object" in query
+    assert "metadata = (metadata - %s::text) || jsonb_build_object" in query
     assert params == (
         "123",
         "456",
         "789",
+        job_leads._STAGING_CLEANUP_REQUIRED_METADATA_KEY,
         job_leads._STAGING_SOURCE_FINGERPRINT_METADATA_KEY,
         "source-fingerprint",
         "11111111-1111-1111-1111-111111111111",
@@ -648,6 +673,7 @@ def test_record_job_lead_staging_cleanup_required_records_approved_lead(
     assert "staged_discord_thread_id IS NULL" not in query
     assert params[0].obj == {
         job_leads._STAGING_CLEANUP_REQUIRED_METADATA_KEY: {
+            "state": job_leads._STAGING_CLEANUP_RECOVERY_STATE,
             "guild_id": "123",
             "channel_id": "456",
             "thread_id": "789",
@@ -687,7 +713,11 @@ def test_clear_job_lead_staging_cleanup_required_allows_approved_lead(
     cursor = _CursorStub(
         rows=[
             _lead_row(
-                metadata={"source": "hackernews"},
+                metadata={
+                    job_leads._STAGING_CLEANUP_REQUIRED_METADATA_KEY: {
+                        "state": job_leads._STAGING_CLEANUP_RECOVERY_STATE,
+                    }
+                },
                 status="approved",
             )
         ]
@@ -703,12 +733,41 @@ def test_clear_job_lead_staging_cleanup_required_allows_approved_lead(
     assert cleared.id == "11111111-1111-1111-1111-111111111111"
     query, params = cursor.executed[0]
     assert "metadata = metadata - %s::text" in query
+    assert "staging_reservation_token = NULL" in query
+    assert "staging_reserved_at = NULL" in query
     assert "metadata ? %s::text" in query
     assert "status IN" not in query
     assert params == (
         job_leads._STAGING_CLEANUP_REQUIRED_METADATA_KEY,
         "11111111-1111-1111-1111-111111111111",
         job_leads._STAGING_CLEANUP_REQUIRED_METADATA_KEY,
+        job_leads._STAGING_CLEANUP_REQUIRED_METADATA_KEY,
+        job_leads._STAGING_CLEANUP_RESERVATION_STATE,
+        job_leads._STAGING_CLEANUP_REQUIRED_METADATA_KEY,
+        job_leads._STAGING_CLEANUP_RESERVATION_STATE,
+        job_leads.JOB_LEAD_STAGING_RESERVATION_TTL_SECONDS,
+    )
+
+
+def test_clear_job_lead_staging_cleanup_required_only_clears_stale_attempts(
+    monkeypatch,
+) -> None:
+    cursor = _CursorStub(rows=[_lead_row()])
+    _install_connection_stub(monkeypatch, cursor)
+
+    cleared = job_leads.clear_job_lead_staging_cleanup_required(
+        job_leads.SharedSettings(),
+        lead_id="11111111-1111-1111-1111-111111111111",
+    )
+
+    assert cleared is not None
+    query, params = cursor.executed[0]
+    assert "IS DISTINCT FROM %s" in query
+    assert "staging_reserved_at < NOW() - (%s * INTERVAL '1 second')" in query
+    assert params[-3:] == (
+        job_leads._STAGING_CLEANUP_REQUIRED_METADATA_KEY,
+        job_leads._STAGING_CLEANUP_RESERVATION_STATE,
+        job_leads.JOB_LEAD_STAGING_RESERVATION_TTL_SECONDS,
     )
 
 

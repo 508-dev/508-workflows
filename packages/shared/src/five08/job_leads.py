@@ -21,6 +21,8 @@ from five08.settings import SharedSettings
 JOB_LEAD_STAGING_RESERVATION_TTL_SECONDS = 15 * 60
 _STAGING_CLEANUP_REQUIRED_METADATA_KEY = "_staging_cleanup_required"
 _STAGING_SOURCE_FINGERPRINT_METADATA_KEY = "_staging_source_fingerprint"
+_STAGING_CLEANUP_RESERVATION_STATE = "reservation"
+_STAGING_CLEANUP_RECOVERY_STATE = "recovery"
 
 
 def _job_lead_staging_source_changed_sql(
@@ -807,7 +809,7 @@ def mark_job_lead_staged(
             staged_discord_channel_id = %s,
             staged_discord_thread_id = %s,
             staged_at = NOW(),
-            metadata = metadata || jsonb_build_object(
+            metadata = (metadata - %s::text) || jsonb_build_object(
                 %s::text, %s::text
             ),
             staging_reservation_token = NULL,
@@ -827,6 +829,7 @@ def mark_job_lead_staged(
                     guild_id,
                     channel_id,
                     thread_id,
+                    _STAGING_CLEANUP_REQUIRED_METADATA_KEY,
                     _STAGING_SOURCE_FINGERPRINT_METADATA_KEY,
                     fingerprint,
                     lead_id,
@@ -842,21 +845,38 @@ def reserve_job_lead_staging(
     *,
     lead_id: str,
     reservation_token: str,
+    guild_id: str,
+    channel_id: str,
 ) -> JobLead | None:
-    """Atomically claim a pending lead, reclaiming abandoned reservations."""
+    """Atomically claim a pending lead and retain a recovery block for Discord work."""
     token = reservation_token.strip()
     if not token:
         raise ValueError("Job lead staging reservation token is required.")
+    normalized_guild_id = guild_id.strip()
+    normalized_channel_id = channel_id.strip()
+    if not normalized_guild_id or not normalized_channel_id:
+        raise ValueError("Job lead staging reservation forum is required.")
+    reservation_metadata = Jsonb(
+        {
+            _STAGING_CLEANUP_REQUIRED_METADATA_KEY: {
+                "state": _STAGING_CLEANUP_RESERVATION_STATE,
+                "guild_id": normalized_guild_id,
+                "channel_id": normalized_channel_id,
+                "thread_id": None,
+            }
+        }
+    )
     query = """
         UPDATE job_leads
         SET
+            metadata = metadata || %s,
             staging_reservation_token = %s,
             staging_reserved_at = NOW(),
             updated_at = NOW()
         WHERE id = %s
           AND status = 'pending'
           AND staged_discord_thread_id IS NULL
-          AND metadata -> '_staging_cleanup_required' IS NULL
+          AND metadata -> %s::text IS NULL
           AND (
               staging_reservation_token IS NULL
               OR staging_reserved_at IS NULL
@@ -868,7 +888,13 @@ def reserve_job_lead_staging(
         with conn.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
                 query,
-                (token, lead_id, JOB_LEAD_STAGING_RESERVATION_TTL_SECONDS),
+                (
+                    reservation_metadata,
+                    token,
+                    lead_id,
+                    _STAGING_CLEANUP_REQUIRED_METADATA_KEY,
+                    JOB_LEAD_STAGING_RESERVATION_TTL_SECONDS,
+                ),
             )
             row = cursor.fetchone()
     return _as_lead(row) if row is not None else None
@@ -887,17 +913,39 @@ def release_job_lead_staging_reservation(
     query = """
         UPDATE job_leads
         SET
+            metadata = CASE
+                WHEN (metadata -> %s::text) ->> 'state' = %s
+                THEN metadata - %s::text
+                ELSE metadata
+            END,
             staging_reservation_token = NULL,
             staging_reserved_at = NULL,
             updated_at = NOW()
         WHERE id = %s
           AND staged_discord_thread_id IS NULL
-          AND staging_reservation_token = %s
+          AND (
+              staging_reservation_token = %s
+              OR (
+                  staging_reservation_token IS NULL
+                  AND (metadata -> %s::text) ->> 'state' = %s
+              )
+          )
         RETURNING id
     """
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
-            cursor.execute(query, (lead_id, token))
+            cursor.execute(
+                query,
+                (
+                    _STAGING_CLEANUP_REQUIRED_METADATA_KEY,
+                    _STAGING_CLEANUP_RESERVATION_STATE,
+                    _STAGING_CLEANUP_REQUIRED_METADATA_KEY,
+                    lead_id,
+                    token,
+                    _STAGING_CLEANUP_REQUIRED_METADATA_KEY,
+                    _STAGING_CLEANUP_RESERVATION_STATE,
+                ),
+            )
             row = cursor.fetchone()
     return row is not None
 
@@ -914,6 +962,7 @@ def record_job_lead_staging_cleanup_required(
     recovery_metadata = Jsonb(
         {
             _STAGING_CLEANUP_REQUIRED_METADATA_KEY: {
+                "state": _STAGING_CLEANUP_RECOVERY_STATE,
                 "guild_id": guild_id.strip() or None,
                 "channel_id": channel_id.strip() or None,
                 "thread_id": thread_id.strip() if thread_id else None,
@@ -945,9 +994,22 @@ def clear_job_lead_staging_cleanup_required(
         UPDATE job_leads
         SET
             metadata = metadata - %s::text,
+            staging_reservation_token = NULL,
+            staging_reserved_at = NULL,
             updated_at = NOW()
         WHERE id = %s
           AND metadata ? %s::text
+          AND (
+              (metadata -> %s::text) ->> 'state' IS DISTINCT FROM %s
+              OR (
+                  (metadata -> %s::text) ->> 'state' = %s
+                  AND (
+                      staging_reservation_token IS NULL
+                      OR staging_reserved_at IS NULL
+                      OR staging_reserved_at < NOW() - (%s * INTERVAL '1 second')
+                  )
+              )
+          )
         RETURNING *
     """
     with get_postgres_connection(settings) as conn:
@@ -958,6 +1020,11 @@ def clear_job_lead_staging_cleanup_required(
                     _STAGING_CLEANUP_REQUIRED_METADATA_KEY,
                     lead_id,
                     _STAGING_CLEANUP_REQUIRED_METADATA_KEY,
+                    _STAGING_CLEANUP_REQUIRED_METADATA_KEY,
+                    _STAGING_CLEANUP_RESERVATION_STATE,
+                    _STAGING_CLEANUP_REQUIRED_METADATA_KEY,
+                    _STAGING_CLEANUP_RESERVATION_STATE,
+                    JOB_LEAD_STAGING_RESERVATION_TTL_SECONDS,
                 ),
             )
             row = cursor.fetchone()
