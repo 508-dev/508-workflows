@@ -121,6 +121,21 @@ def test_forwarded_intro_requires_an_intro_signal_and_distinct_identity() -> Non
     assert is_forwarded_intro_message(message) is False
 
 
+def test_forwarded_create_contact_request_is_a_trusted_contact_signal() -> None:
+    message = EmailMessage()
+    message["From"] = "Michael <michael@508.dev>"
+    message["Subject"] = "Fwd: Ada Lovelace"
+    message.set_content(
+        "Please create a contact from this introduction.\n\n"
+        "---------- Forwarded message ---------\n"
+        "From: Ada Lovelace <ada@example.com>\n"
+        "Subject: Hello\n\n"
+        "You can find my work at https://example.com/ada.\n"
+    )
+
+    assert is_forwarded_intro_message(message) is True
+
+
 def test_trusted_intro_creates_candidate_and_crm_contact(monkeypatch) -> None:
     message = EmailMessage()
     message["From"] = "Michael <michael@508.dev>"

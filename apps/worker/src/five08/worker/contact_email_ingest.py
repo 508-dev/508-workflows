@@ -40,6 +40,10 @@ _INTRODUCTION_SIGNAL = re.compile(
     r"meet(?:ing)?|thought you (?:two|might))\b",
     re.IGNORECASE,
 )
+_CREATE_CONTACT_SIGNAL = re.compile(
+    r"\b(?:please\s+)?create\s+(?:a\s+)?contact\b",
+    re.IGNORECASE,
+)
 _MAX_BODY_CHARS = 20_000
 _MAX_LINKS = 25
 
@@ -83,7 +87,7 @@ def is_contact_intake_message(message: Message, settings: WorkerSettings) -> boo
 
 
 def is_forwarded_intro_message(message: Message) -> bool:
-    """Identify a forwarded introduction with a distinct, usable contact identity."""
+    """Identify a forwarded intro or explicit contact request with a usable identity."""
     source_message, extraction_method = _source_message(message)
     if extraction_method == "direct":
         return False
@@ -96,7 +100,10 @@ def is_forwarded_intro_message(message: Message) -> bool:
         return False
     source_text = f"{_subject(source_message, _message_text(source_message)) or ''}\n"
     source_text += _message_text(source_message)
-    return bool(_INTRODUCTION_SIGNAL.search(source_text))
+    return bool(
+        _INTRODUCTION_SIGNAL.search(source_text)
+        or _CREATE_CONTACT_SIGNAL.search(source_text)
+    )
 
 
 class ContactEmailCandidateProcessor:

@@ -144,7 +144,7 @@ Pydantic import errors.
 
 - Optional: CONTACT_EMAIL_INTAKE_ADDRESS (default: contacts@508.dev; only messages with this value in Delivered-To or X-Original-To become dashboard contact candidates).
 - Note: mail not delivery-addressed to CONTACT_EMAIL_INTAKE_ADDRESS stays on the existing resume intake path. Contact candidates are stored for dashboard approval and only create or update EspoCRM after an explicit review action.
-- Note: an authenticated, privileged mailbox sender may also forward an introduction to the normal workflow mailbox. When the forwarded message has a distinct name and email plus introduction language, it is stored, audit-logged, and automatically creates or links the CRM contact. Other workflow-mailbox forwards remain on the resume path and do not create contacts.
+- Note: an authenticated, privileged mailbox sender may also forward an introduction to the normal workflow mailbox. When the forwarded message has a distinct name and email plus introduction language, or an explicit instruction such as `please create a contact`, it is stored, audit-logged, and automatically creates or links the CRM contact. Other workflow-mailbox forwards remain on the resume path and do not create contacts.
 
 ## Onboarding Email Sending
 
