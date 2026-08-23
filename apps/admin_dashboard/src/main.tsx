@@ -624,7 +624,6 @@ type FilterState = Partial<Record<PeopleFilterKey, string>>
 const onboardingStatusOptions = [
   ["pending", "Needs review"],
   ["selected", "Selected"],
-  ["assignedonboarder", "Assigned to onboarder"],
   ["reachingout", "Reaching out"],
   ["awaitingcontribution", "Awaiting contribution"],
   ["onboarded", "Onboarded"],
@@ -2455,7 +2454,6 @@ function App() {
         onboarder: string
         onboarding_state?: string
         onboarding_status_label?: string
-        state_updated?: boolean
       }>(`/dashboard/api/onboarding/${encodeURIComponent(normalizedContactId)}/onboarder`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2467,13 +2465,6 @@ function App() {
             ? {
                 ...person,
                 onboarder: payload.onboarder,
-                onboarding_state:
-                  payload.state_updated && payload.onboarding_state
-                    ? payload.onboarding_state
-                    : person.onboarding_state,
-                onboarding_status_label:
-                  payload.onboarding_status_label ||
-                  (payload.state_updated ? undefined : person.onboarding_status_label),
               }
             : person,
         ),

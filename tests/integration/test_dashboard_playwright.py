@@ -553,7 +553,6 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
                         "onboarder": "jane",
                         "previous_state": "reachingout",
                         "onboarding_state": "reachingout",
-                        "state_updated": False,
                         "sync_job_id": "sync-job-person",
                     }
                 ),

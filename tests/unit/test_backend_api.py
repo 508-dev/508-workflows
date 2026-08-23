@@ -7397,7 +7397,7 @@ def test_dashboard_update_gig_status_rejects_malformed_id(
     assert response.json()["error"] == "invalid_engagement_id"
 
 
-def test_dashboard_assign_onboarder_updates_crm_and_audits(
+def test_dashboard_assign_onboarder_preserves_candidate_status_and_audits(
     client: TestClient,
 ) -> None:
     session = api.AuthSession(
@@ -7451,9 +7451,8 @@ def test_dashboard_assign_onboarder_updates_crm_and_audits(
     assert payload["contact_name"] == "Bea Prospect"
     assert payload["onboarder"] == "jane"
     assert payload["previous_state"] == "pending"
-    assert payload["onboarding_state"] == "assignedonboarder"
-    assert payload["onboarding_status_label"] == "Assigned to onboarder"
-    assert payload["state_updated"] is True
+    assert payload["onboarding_state"] == "pending"
+    assert payload["onboarding_status_label"] == "Needs review"
     assert payload["sync_job_id"] == "sync-job-1"
     assert espo_client.request.call_args_list[0].args == (
         "GET",
@@ -7462,7 +7461,7 @@ def test_dashboard_assign_onboarder_updates_crm_and_audits(
     assert espo_client.request.call_args_list[1].args == (
         "PUT",
         "Contact/contact-prospect-1",
-        {"cOnboarder": "jane", "cOnboardingState": "assignedonboarder"},
+        {"cOnboarder": "jane"},
     )
     assert mock_enqueue.call_args.kwargs["args"] == ("contact-prospect-1",)
     audit_kwargs = mock_audit.call_args.kwargs
@@ -7671,7 +7670,7 @@ def test_dashboard_update_onboarding_status_rejects_invalid_status(
     assert audit_kwargs["metadata"]["reason"] == "invalid_status"
 
 
-def test_dashboard_update_onboarding_status_allows_selected_without_onboarder(
+def test_dashboard_update_onboarding_status_preserves_selected_onboarder(
     client: TestClient,
 ) -> None:
     session = api.AuthSession(
@@ -7688,7 +7687,7 @@ def test_dashboard_update_onboarding_status_allows_selected_without_onboarder(
         "id": "contact-prospect-1",
         "name": "Bea Prospect",
         "cOnboardingState": "pending",
-        "cOnboarder": "none",
+        "cOnboarder": "jane",
     }
 
     with (
@@ -7720,7 +7719,7 @@ def test_dashboard_update_onboarding_status_allows_selected_without_onboarder(
     assert espo_client.request.call_args_list[1].args == (
         "PUT",
         "Contact/contact-prospect-1",
-        {"cOnboardingState": "selected", "cOnboarder": ""},
+        {"cOnboardingState": "selected"},
     )
     mock_enqueue.assert_called_once()
     audit_kwargs = mock_audit.call_args.kwargs

@@ -18,7 +18,6 @@ export type OnboardingStateCarrier = {
 const onboardingStateLabels: Record<string, string> = {
   pending: "Needs review",
   selected: "Selected",
-  assignedonboarder: "Assigned to onboarder",
   reachingout: "Reaching out",
   awaitingcontribution: "Awaiting contribution",
   onboarded: "Onboarded",
@@ -88,7 +87,7 @@ export function toneForOnboardingState(value?: string): Tone {
     .trim()
     .toLowerCase()
   if (!normalized || normalized === "pending") return "neutral"
-  if (normalized === "selected" || normalized === "assignedonboarder") return "queued"
+  if (normalized === "selected") return "queued"
   if (normalized === "rejected") return "failed"
   if (normalized === "onboarded") return "succeeded"
   if (normalized === "waitlist") return "running"
