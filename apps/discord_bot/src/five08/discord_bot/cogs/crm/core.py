@@ -5721,13 +5721,9 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 full_contact.get(ONBOARDING_STATUS_FIELD)
             )
 
-            update_payload: dict[str, str] = {ONBOARDER_FIELD: onboarder_username}
-            state_updated = False
-            if current_state in {"pending", "selected"}:
-                update_payload[ONBOARDING_STATUS_FIELD] = "assignedonboarder"
-                state_updated = True
-
-            self.espo_api.request("PUT", f"Contact/{contact_id}", update_payload)
+            self.espo_api.request(
+                "PUT", f"Contact/{contact_id}", {ONBOARDER_FIELD: onboarder_username}
+            )
 
             contact_name = full_contact.get("name", "Unknown")
             try:
@@ -5738,14 +5734,10 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 logger.warning(
                     "Failed recording onboarding assignment recency", exc_info=True
                 )
-            status_line = (
-                "onboarding state set to `assignedonboarder`"
-                if state_updated
-                else "onboarding state left unchanged"
-            )
             await interaction.followup.send(
                 f"✅ Assigned **{onboarder_username}** as onboarder for "
-                f"**{contact_name}** (`{contact_id}`); {status_line}.",
+                f"**{contact_name}** (`{contact_id}`); onboarding state remains "
+                f"`{current_state or 'unset'}`.",
                 ephemeral=True,
             )
             self._audit_command(
@@ -5756,7 +5748,6 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                     "contact_id": str(contact_id),
                     "contact_name": contact_name,
                     "onboarder": onboarder_username,
-                    "state_updated": state_updated,
                     "previous_state": current_state or None,
                 },
                 resource_type="crm_contact",

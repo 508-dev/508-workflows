@@ -1923,7 +1923,6 @@ def _datetime_or_none(value: Any) -> str | None:
 _ONBOARDING_STATUS_LABELS = {
     "pending": "Needs review",
     "selected": "Selected",
-    "assignedonboarder": "Assigned to onboarder",
     "reachingout": "Reaching out",
     "awaitingcontribution": "Awaiting contribution",
     "onboarded": "Onboarded",
@@ -3276,23 +3275,19 @@ def _assign_dashboard_onboarder_in_crm(
 
     current_state = str(full_contact.get(_ONBOARDING_STATUS_FIELD) or "").strip()
     normalized_state = current_state.casefold()
-    update_payload: dict[str, str] = {_ONBOARDER_FIELD: onboarder_username}
-    state_updated = False
-    if normalized_state in {"pending", "selected"}:
-        update_payload[_ONBOARDING_STATUS_FIELD] = "assignedonboarder"
-        state_updated = True
-
-    client.request("PUT", f"Contact/{normalized_contact_id}", update_payload)
-    resulting_state = "assignedonboarder" if state_updated else current_state
+    client.request(
+        "PUT",
+        f"Contact/{normalized_contact_id}",
+        {_ONBOARDER_FIELD: onboarder_username},
+    )
     return {
         "status": "updated",
         "contact_id": normalized_contact_id,
         "contact_name": full_contact.get("name") or "CRM contact",
         "onboarder": onboarder_username,
         "previous_state": normalized_state or None,
-        "onboarding_state": resulting_state or None,
-        "onboarding_status_label": _onboarding_status_label(resulting_state),
-        "state_updated": state_updated,
+        "onboarding_state": current_state or None,
+        "onboarding_status_label": _onboarding_status_label(current_state),
     }
 
 
@@ -3329,22 +3324,15 @@ def _update_dashboard_onboarding_status_in_crm(
     onboarder_is_unassigned = (
         onboarder_username is None or onboarder_raw.casefold() in {"none", "no discord"}
     )
-    if (
-        normalized_status in {"assignedonboarder", "reachingout"}
-        and onboarder_is_unassigned
-    ):
+    if normalized_status == "reachingout" and onboarder_is_unassigned:
         raise DashboardOnboarderAssignmentError(
             "onboarder_required_for_active_stage",
             status_code=409,
         )
-    update_payload: dict[str, str] = {_ONBOARDING_STATUS_FIELD: normalized_status}
-    if normalized_status == "selected":
-        # Returning a candidate to Selected explicitly releases the onboarder.
-        update_payload[_ONBOARDER_FIELD] = ""
     client.request(
         "PUT",
         f"Contact/{normalized_contact_id}",
-        update_payload,
+        {_ONBOARDING_STATUS_FIELD: normalized_status},
     )
     return {
         "status": "updated",
@@ -7640,7 +7628,6 @@ async def dashboard_assign_onboarder_handler(
         metadata={
             "contact_name": result["contact_name"],
             "previous_state": result["previous_state"],
-            "state_updated": result["state_updated"],
             "sync_job_id": sync_job_id,
         },
     )

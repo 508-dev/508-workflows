@@ -3205,10 +3205,10 @@ class TestCRMCog:
         assert resolved is None
 
     @pytest.mark.asyncio
-    async def test_assign_onboarder_success_updates_pending_state(
+    async def test_assign_onboarder_success_preserves_pending_state(
         self, crm_cog, mock_interaction
     ):
-        """Assigning onboarder should set pending state to assignedonboarder."""
+        """Assigning an onboarder should leave the candidate status unchanged."""
         steering_role = Mock()
         steering_role.name = "Steering Committee"
         mock_interaction.user.roles = [steering_role]
@@ -3237,18 +3237,18 @@ class TestCRMCog:
         assert request_calls[1].args == (
             "PUT",
             "Contact/contact123",
-            {"cOnboarder": "jane", "cOnboardingState": "assignedonboarder"},
+            {"cOnboarder": "jane"},
         )
 
         message = mock_interaction.followup.send.call_args[0][0]
-        assert "onboarding state set to `assignedonboarder`" in message
+        assert "onboarding state remains `pending`" in message
         assert "Assigned **jane** as onboarder" in message
 
     @pytest.mark.asyncio
-    async def test_assign_onboarder_success_keeps_state_when_not_pending(
+    async def test_assign_onboarder_success_preserves_existing_state(
         self, crm_cog, mock_interaction
     ):
-        """Assigning onboarder should preserve existing non-pending onboarding state."""
+        """Assigning an onboarder should preserve the existing candidate state."""
         steering_role = Mock()
         steering_role.name = "Steering Committee"
         mock_interaction.user.roles = [steering_role]
@@ -3275,7 +3275,7 @@ class TestCRMCog:
         payload = crm_cog.espo_api.request.call_args_list[1][0][2]
         assert payload == {"cOnboarder": "jane"}
         message = mock_interaction.followup.send.call_args[0][0]
-        assert "onboarding state left unchanged" in message
+        assert "onboarding state remains `onboarded`" in message
 
     @pytest.mark.asyncio
     async def test_assign_onboarder_multiple_matches_returns_prompt(

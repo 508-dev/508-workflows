@@ -18,8 +18,8 @@ class VolunteerAvailability(StrEnum):
     PAUSED = "paused"
 
 
-ACTIVE_ONBOARDING_STATES = ("assignedonboarder", "reachingout", "awaitingcontribution")
-REMINDER_STATES = ("selected", "assignedonboarder", "reachingout")
+ACTIVE_ONBOARDING_STATES = ("selected", "reachingout", "awaitingcontribution")
+REMINDER_STATES = ("selected", "reachingout")
 
 
 def normalize_onboarder_username(value: str | None) -> str | None:
@@ -256,7 +256,12 @@ def claim_due_onboarding_reminders(
         WITH candidates AS (
             SELECT
                 p.id,
-                replace(replace(replace(lower(btrim(coalesce(p.onboarding_state, ''))), '_', ''), '-', ''), ' ', '') AS stage,
+                CASE
+                    WHEN replace(replace(replace(lower(btrim(coalesce(p.onboarding_state, ''))), '_', ''), '-', ''), ' ', '') = 'selected'
+                        AND lower(btrim(coalesce(p.onboarder, ''))) NOT IN ('', 'none', 'no discord')
+                    THEN 'assigned'
+                    ELSE replace(replace(replace(lower(btrim(coalesce(p.onboarding_state, ''))), '_', ''), '-', ''), ' ', '')
+                END AS stage,
                 COALESCE(p.onboarding_updated_at, p.created_at) AS activity_at,
                 FLOOR(
                     EXTRACT(EPOCH FROM (NOW() - COALESCE(p.onboarding_updated_at, p.created_at)))
