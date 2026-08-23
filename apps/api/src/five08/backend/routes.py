@@ -61,6 +61,9 @@ class BackendRouteSurface(Protocol):
     dashboard_onboarding_email_draft_handler: RouteHandler
     dashboard_onboarding_email_send_handler: RouteHandler
     dashboard_onboarding_handler: RouteHandler
+    dashboard_onboarding_volunteers_handler: RouteHandler
+    dashboard_onboarding_volunteer_handler: RouteHandler
+    dashboard_onboarding_suggestions_handler: RouteHandler
     dashboard_people_handler: RouteHandler
     dashboard_project_member_candidates_handler: RouteHandler
     dashboard_project_wiki_matches_handler: RouteHandler
@@ -157,6 +160,13 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
         api.dashboard_onboarding_email_send_handler
     )
     dashboard_onboarding_handler = api.dashboard_onboarding_handler
+    dashboard_onboarding_volunteers_handler = (
+        api.dashboard_onboarding_volunteers_handler
+    )
+    dashboard_onboarding_volunteer_handler = api.dashboard_onboarding_volunteer_handler
+    dashboard_onboarding_suggestions_handler = (
+        api.dashboard_onboarding_suggestions_handler
+    )
     dashboard_people_handler = api.dashboard_people_handler
     dashboard_project_member_candidates_handler = (
         api.dashboard_project_member_candidates_handler
@@ -404,6 +414,21 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
     app.add_api_route(
         "/dashboard/api/onboarding",
         dashboard_onboarding_handler,
+        methods=["GET"],
+    )
+    app.add_api_route(
+        "/dashboard/api/onboarding/volunteers",
+        dashboard_onboarding_volunteers_handler,
+        methods=["GET"],
+    )
+    app.add_api_route(
+        "/dashboard/api/onboarding/volunteers/{contact_id}",
+        dashboard_onboarding_volunteer_handler,
+        methods=["PUT"],
+    )
+    app.add_api_route(
+        "/dashboard/api/onboarding/{contact_id}/suggestions",
+        dashboard_onboarding_suggestions_handler,
         methods=["GET"],
     )
     app.add_api_route(

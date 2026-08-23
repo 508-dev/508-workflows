@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -52,6 +53,15 @@ class DashboardOnboardingStatusRequest(BaseModel):
     """Payload for updating one dashboard onboarding status."""
 
     status: str
+
+
+class DashboardOnboardingVolunteerRequest(BaseModel):
+    """Create or update one willing-onboarder registry entry."""
+
+    timezone: str
+    availability: Literal["available", "paused"] = "available"
+    paused_until: datetime | None = None
+    max_active_assignments: int | None = Field(default=None, ge=1)
 
 
 class DashboardOnboardingEmailDraftRequest(BaseModel):

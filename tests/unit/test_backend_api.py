@@ -7451,7 +7451,7 @@ def test_dashboard_assign_onboarder_updates_crm_and_audits(
     assert payload["contact_name"] == "Bea Prospect"
     assert payload["onboarder"] == "jane"
     assert payload["previous_state"] == "pending"
-    assert payload["onboarding_state"] == "selected"
+    assert payload["onboarding_state"] == "assignedonboarder"
     assert payload["onboarding_status_label"] == "Assigned to onboarder"
     assert payload["state_updated"] is True
     assert payload["sync_job_id"] == "sync-job-1"
@@ -7462,7 +7462,7 @@ def test_dashboard_assign_onboarder_updates_crm_and_audits(
     assert espo_client.request.call_args_list[1].args == (
         "PUT",
         "Contact/contact-prospect-1",
-        {"cOnboarder": "jane", "cOnboardingState": "selected"},
+        {"cOnboarder": "jane", "cOnboardingState": "assignedonboarder"},
     )
     assert mock_enqueue.call_args.kwargs["args"] == ("contact-prospect-1",)
     audit_kwargs = mock_audit.call_args.kwargs
@@ -7671,7 +7671,7 @@ def test_dashboard_update_onboarding_status_rejects_invalid_status(
     assert audit_kwargs["metadata"]["reason"] == "invalid_status"
 
 
-def test_dashboard_update_onboarding_status_requires_onboarder_for_selected(
+def test_dashboard_update_onboarding_status_allows_selected_without_onboarder(
     client: TestClient,
 ) -> None:
     session = api.AuthSession(
@@ -7715,15 +7715,17 @@ def test_dashboard_update_onboarding_status_requires_onboarder_for_selected(
             json={"status": "selected"},
         )
 
-    assert response.status_code == 409
-    assert response.json() == {"error": "onboarder_required_for_selected"}
-    assert espo_client.request.call_count == 1
-    assert espo_client.request.call_args.args == ("GET", "Contact/contact-prospect-1")
-    mock_enqueue.assert_not_called()
+    assert response.status_code == 200
+    assert espo_client.request.call_count == 2
+    assert espo_client.request.call_args_list[1].args == (
+        "PUT",
+        "Contact/contact-prospect-1",
+        {"cOnboardingState": "selected", "cOnboarder": ""},
+    )
+    mock_enqueue.assert_called_once()
     audit_kwargs = mock_audit.call_args.kwargs
     assert audit_kwargs["action"] == "crm.update_onboarding_status"
-    assert audit_kwargs["result"] == api.AuditResult.ERROR
-    assert audit_kwargs["metadata"]["reason"] == "onboarder_required_for_selected"
+    assert audit_kwargs["result"] == api.AuditResult.SUCCESS
 
 
 def test_dashboard_onboarding_email_draft_uses_crm_contact_and_local_marker(

@@ -16,6 +16,8 @@ import {
 describe("dashboard utility helpers", () => {
   it("normalizes onboarding state labels and tones", () => {
     expect(labelForOnboardingState("Reachingout")).toBe("Reaching out")
+    expect(labelForOnboardingState("selected")).toBe("Selected")
+    expect(labelForOnboardingState("assignedonboarder")).toBe("Assigned to onboarder")
     expect(labelForOnboardingState("awaiting-contribution")).toBe("Awaiting Contribution")
     expect(labelForOnboardingState("")).toBe("No status")
     expect(toneForOnboardingState("rejected")).toBe("failed")
