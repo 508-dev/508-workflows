@@ -201,3 +201,15 @@ def test_intake_kind_uses_llm_action_to_route_unclear_contact_to_review() -> Non
         )
         == "workflow_contact_review"
     )
+
+
+def test_workflow_message_filters_unauthorized_sender_before_llm() -> None:
+    processor = ResumeMailboxProcessor(_build_settings())
+    processor._has_authenticated_sender = Mock(return_value=True)
+    processor._sender_is_authorized = Mock(return_value=False)
+    processor.workflow_action_classifier = Mock()
+
+    result = processor._workflow_message_intake_kind(_build_message())
+
+    assert result == "ignored"
+    processor.workflow_action_classifier.classify.assert_not_called()

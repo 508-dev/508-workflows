@@ -131,11 +131,7 @@ class ResumeMailboxProcessor:
                     if raw_payload is None:
                         continue
                     message = email.message_from_bytes(raw_payload)
-                    kind = _message_intake_kind(
-                        message,
-                        self.settings,
-                        classifier=self.workflow_action_classifier,
-                    )
+                    kind = self._workflow_message_intake_kind(message)
                     if kind == "contact":
                         result = ContactEmailCandidateProcessor(
                             self.settings
@@ -235,11 +231,7 @@ class ResumeMailboxProcessor:
                         message_num=num,
                         message_id=message_id,
                         raw_message_b64=base64.b64encode(raw_payload).decode("ascii"),
-                        kind=_message_intake_kind(
-                            message,
-                            self.settings,
-                            classifier=self.workflow_action_classifier,
-                        ),
+                        kind=self._workflow_message_intake_kind(message),
                     )
                 )
 
@@ -262,6 +254,28 @@ class ResumeMailboxProcessor:
 
         message = email.message_from_bytes(raw_payload)
         return self.process_message(message)
+
+    def _workflow_message_intake_kind(self, message: Message) -> str:
+        """Authorize normal workflow mail before its contents reach the LLM."""
+        if is_contact_intake_message(message, self.settings):
+            return "contact"
+
+        _, sender_email = self._sender_identity(message)
+        if not sender_email:
+            return "ignored"
+        if (
+            self.settings.email_require_sender_auth_headers
+            and not self._has_authenticated_sender(message)
+        ):
+            return "ignored"
+        if not self._sender_is_authorized(sender_email):
+            return "ignored"
+
+        return _message_intake_kind(
+            message,
+            self.settings,
+            classifier=self.workflow_action_classifier,
+        )
 
     @property
     def _imap_timeout(self) -> float:
