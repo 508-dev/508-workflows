@@ -7881,17 +7881,17 @@ function OnboardingRow({
       emailDraftOptions.has_contributed === emailOptions.has_contributed &&
       emailDraftOptions.discord_joined === emailOptions.discord_joined &&
       emailDraftOptions.agreement_signed === emailOptions.agreement_signed)
+  const draftOptionsWarning =
+    emailDraft && !emailDraft.onboarding_email_sent_at && !draftMatchesOptions
+      ? "Draft options changed. Regenerate to apply them; you can still send this draft."
+      : ""
   const sendUnavailableMessage =
-    emailDraft && !emailDraft.onboarding_email_sent_at
-      ? !draftMatchesOptions
-        ? "Send disabled: regenerate after changing draft options."
-        : !emailDraft.can_send
-          ? !emailDraft.recipient_email
-            ? "Send disabled: candidate email is missing."
-            : !emailDraft.reply_to_email
-              ? "Send disabled: your Reply-To email is missing."
-              : "Send disabled: onboarding email SMTP is not configured."
-          : ""
+    emailDraft && !emailDraft.onboarding_email_sent_at && !emailDraft.can_send
+      ? !emailDraft.recipient_email
+        ? "Send disabled: candidate email is missing."
+        : !emailDraft.reply_to_email
+          ? "Send disabled: your Reply-To email is missing."
+          : "Send disabled: onboarding email SMTP is not configured."
       : ""
   const sendUnavailableIsSmtp = sendUnavailableMessage.includes("SMTP")
   const draftBusy = Boolean(loading[`onboarding-email-draft:${person.crm_contact_id}`])
@@ -7906,7 +7906,7 @@ function OnboardingRow({
     }
   }
   async function sendDraft() {
-    if (!emailDraft || !emailDraftOptions || !draftMatchesOptions) return
+    if (!emailDraft || !emailDraftOptions) return
     const sent = await onSendEmail(
       person.crm_contact_id,
       emailDraftOptions,
@@ -8197,12 +8197,7 @@ function OnboardingRow({
                       type="button"
                       variant="default"
                       onClick={sendDraft}
-                      disabled={
-                        sendBusy ||
-                        !emailDraft.can_send ||
-                        !draftMatchesOptions ||
-                        !draftBody.trim()
-                      }
+                      disabled={sendBusy || !emailDraft.can_send || !draftBody.trim()}
                       title={sendUnavailableMessage || undefined}
                     >
                       <Send />
@@ -8224,6 +8219,9 @@ function OnboardingRow({
                           </Button>
                         ) : null}
                       </span>
+                    ) : null}
+                    {draftOptionsWarning ? (
+                      <span className="text-sm text-muted-foreground">{draftOptionsWarning}</span>
                     ) : null}
                     {emailDraft.marker_status === "error" ? (
                       <span className="text-sm text-muted-foreground">
