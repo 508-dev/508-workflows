@@ -61,6 +61,7 @@ import {
   type JobPostChannel,
   type JobPostChannelTag,
 } from "@/views/configuration-view"
+import { ContactEmailIntakePanel } from "@/views/contact-email-intake-panel"
 import {
   type NewsletterStatus,
   type NewsletterSuppression,
@@ -6765,6 +6766,7 @@ function OnboardingView(props: {
   const filterOptions = peopleFilterDefinitions[props.onboardingFilterKind]?.options || []
   return (
     <>
+      <ContactEmailIntakePanel />
       {props.canWrite ? (
         <EngineerSetupPanel loading={props.loading.engineerSetup} onSetup={props.onSetupEngineer} />
       ) : null}
