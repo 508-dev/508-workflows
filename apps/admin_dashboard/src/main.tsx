@@ -7883,7 +7883,7 @@ function OnboardingRow({
       emailDraftOptions.agreement_signed === emailOptions.agreement_signed)
   const draftOptionsWarning =
     emailDraft && !emailDraft.onboarding_email_sent_at && !draftMatchesOptions
-      ? "Draft options changed. Regenerate to apply them; you can still send this draft."
+      ? "Draft options changed. Regenerate to apply them; the change does not block sending."
       : ""
   const sendUnavailableMessage =
     emailDraft && !emailDraft.onboarding_email_sent_at && !emailDraft.can_send
