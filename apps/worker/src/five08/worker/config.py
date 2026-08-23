@@ -113,6 +113,8 @@ class WorkerSettings(SharedSettings):
     contact_email_action_classifier_enabled: bool = True
     contact_email_action_classifier_model: str | None = None
     contact_email_action_classifier_timeout_seconds: float = Field(default=8.0, gt=0)
+    contact_email_extraction_enabled: bool = True
+    contact_email_extraction_model: str | None = None
     intake_resume_fetch_timeout_seconds: float = Field(default=20.0, gt=0)
     intake_resume_max_redirects: int = Field(default=3, ge=0)
     intake_resume_allowed_hosts: str = ""

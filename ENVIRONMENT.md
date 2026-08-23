@@ -146,7 +146,9 @@ Pydantic import errors.
 - Note: mail not delivery-addressed to CONTACT_EMAIL_INTAKE_ADDRESS stays on the existing resume intake path. Contact candidates are stored for dashboard approval and only create or update EspoCRM after an explicit review action.
 - `Optional`: `CONTACT_EMAIL_ACTION_CLASSIFIER_ENABLED` (default: `true`; use the configured OpenAI-compatible provider to classify non-alias workflow-mailbox mail as create-contact, review-contact, resume, or ignore)
 - `Optional`: `CONTACT_EMAIL_ACTION_CLASSIFIER_MODEL` (defaults to the configured fast, fallback, or primary model) and `CONTACT_EMAIL_ACTION_CLASSIFIER_TIMEOUT_SECONDS` (default: `8.0`)
-- Note: the model returns only a schema-validated action proposal. A create-contact proposal still requires an authenticated privileged sender and a forwarded, distinct name/email; it is persisted and audit-logged before CRM creation or linking. A review-contact proposal creates a dashboard candidate. If the classifier is unavailable, a conservative introduction/create-contact heuristic is used; other messages stay on the existing resume path.
+- `Optional`: `CONTACT_EMAIL_EXTRACTION_ENABLED` (default: `true`) and `CONTACT_EMAIL_EXTRACTION_MODEL` (defaults to the action classifier model) enable schema-validated name, email, and link extraction for review candidates, including `contacts@` mail.
+- Note: enabling contact extraction sends the forwarded message content to the configured OpenAI-compatible provider for extraction. Disable it when that data-sharing path is not appropriate for the mailbox.
+- Note: the model returns only schema-validated proposals. A create-contact proposal still requires an authenticated privileged sender and a forwarded, distinct name/email; it is persisted and audit-logged before CRM creation or linking. A review-contact proposal creates a dashboard candidate. `contacts@` extraction never creates a CRM contact; the dashboard remains the required approval point. If either classifier is unavailable, a conservative deterministic fallback is used.
 
 ## Onboarding Email Sending
 

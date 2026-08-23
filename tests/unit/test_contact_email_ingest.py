@@ -12,7 +12,9 @@ from five08.contact_email_candidates import (
     ContactEmailCandidateStatus,
 )
 from five08.worker.contact_email_ingest import (
+    ContactEmailExtraction,
     ContactEmailCandidateProcessor,
+    ContactEmailExtractor,
     TrustedIntroContactProcessor,
     WorkflowMailboxAction,
     WorkflowMailboxActionClassifier,
@@ -87,17 +89,24 @@ def test_processor_extracts_inline_forward_identity_and_links(monkeypatch) -> No
         store_candidate,
     )
 
-    result = ContactEmailCandidateProcessor(_settings()).process_message(message)
+    processor = ContactEmailCandidateProcessor(_settings())
+    processor.extractor = Mock()
+    processor.extractor.extract.return_value = ContactEmailExtraction(
+        proposed_name="Ada Lovelace",
+        proposed_email="ada@example.com",
+        links=["https://www.linkedin.com/in/ada"],
+        method="llm",
+    )
+
+    result = processor.process_message(message)
 
     assert result.candidate_id == "candidate-1"
     candidate = captured["candidate"]
     assert candidate.proposed_name == "Ada Lovelace"
     assert candidate.proposed_email == "ada@example.com"
-    assert candidate.extraction_method == "inline_forward"
-    assert candidate.links == [
-        "https://example.com/ada",
-        "https://www.linkedin.com/in/ada",
-    ]
+    assert candidate.extraction_method == "inline_forward+llm"
+    assert candidate.links == ["https://www.linkedin.com/in/ada"]
+    processor.extractor.extract.assert_called_once()
 
 
 def test_forwarded_intro_requires_an_intro_signal_and_distinct_identity() -> None:
@@ -169,6 +178,49 @@ def test_workflow_action_classifier_uses_validated_llm_action() -> None:
     assert decision.action is WorkflowMailboxAction.REVIEW_CONTACT
     assert decision.method == "llm"
     completion.assert_called_once()
+
+
+def test_contact_email_extractor_accepts_only_grounded_llm_fields() -> None:
+    message = EmailMessage()
+    message["From"] = "Ada Lovelace <ada@example.com>"
+    message["Subject"] = "Hello"
+    message.set_content(
+        "I'm Ada Lovelace. Find me at ada@example.com and https://example.com/ada.\n"
+    )
+    client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(
+                create=Mock(
+                    return_value=SimpleNamespace(
+                        choices=[
+                            SimpleNamespace(
+                                message=SimpleNamespace(
+                                    content=(
+                                        '{"proposed_name":"Ada Lovelace",'
+                                        '"proposed_email":"ada@example.com",'
+                                        '"relevant_links":["https://example.com/ada",'
+                                        '"https://invented.example"],"confidence":0.9}'
+                                    )
+                                )
+                            )
+                        ]
+                    )
+                )
+            )
+        )
+    )
+
+    result = ContactEmailExtractor(_settings(), client=client).extract(
+        message,
+        fallback_name=None,
+        fallback_email=None,
+        fallback_links=["https://example.com/ada"],
+    )
+
+    assert result.proposed_name == "Ada Lovelace"
+    assert result.proposed_email == "ada@example.com"
+    assert result.links == ["https://example.com/ada"]
+    assert result.method == "llm"
 
 
 def test_trusted_intro_creates_candidate_and_crm_contact(monkeypatch) -> None:
