@@ -110,6 +110,9 @@ class WorkerSettings(SharedSettings):
     imap_server: str | None = None
     imap_timeout_seconds: float = 10.0
     contact_email_intake_address: str = "contacts@508.dev"
+    contact_email_action_classifier_enabled: bool = True
+    contact_email_action_classifier_model: str | None = None
+    contact_email_action_classifier_timeout_seconds: float = Field(default=8.0, gt=0)
     intake_resume_fetch_timeout_seconds: float = Field(default=20.0, gt=0)
     intake_resume_max_redirects: int = Field(default=3, ge=0)
     intake_resume_allowed_hosts: str = ""

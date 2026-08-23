@@ -880,6 +880,8 @@ async def _email_resume_scheduler() -> None:
                 job_name = {
                     "contact": "process_contact_email_message_job",
                     "trusted_intro_contact": "process_trusted_intro_contact_job",
+                    "workflow_contact_review": "process_workflow_contact_review_job",
+                    "ignored": "process_ignored_workflow_email_job",
                 }.get(message.kind, "process_mailbox_message_job")
                 job_function = JOB_FUNCTIONS[job_name]
                 job = await asyncio.to_thread(

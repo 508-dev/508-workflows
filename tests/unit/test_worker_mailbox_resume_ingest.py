@@ -11,6 +11,10 @@ from five08.worker.mailbox_resume_ingest import (
     ResumeMailboxProcessor,
     _message_intake_kind,
 )
+from five08.worker.contact_email_ingest import (
+    WorkflowMailboxAction,
+    WorkflowMailboxActionDecision,
+)
 
 
 class _MinimalProfile:
@@ -174,3 +178,26 @@ def test_intake_kind_routes_forwarded_intro_to_trusted_contact_job() -> None:
     message["Delivered-To"] = "contacts@508.dev"
 
     assert _message_intake_kind(message, _build_settings()) == "contact"
+
+
+def test_intake_kind_uses_llm_action_to_route_unclear_contact_to_review() -> None:
+    class ReviewClassifier:
+        def classify(self, _message: EmailMessage) -> WorkflowMailboxActionDecision:
+            return WorkflowMailboxActionDecision(
+                action=WorkflowMailboxAction.REVIEW_CONTACT,
+                method="llm",
+                rationale="Ambiguous contact proposal.",
+            )
+
+    message = EmailMessage()
+    message["From"] = "Admin User <admin@508.dev>"
+    message.set_content("Forwarded person details")
+
+    assert (
+        _message_intake_kind(
+            message,
+            _build_settings(),
+            classifier=ReviewClassifier(),  # type: ignore[arg-type]
+        )
+        == "workflow_contact_review"
+    )

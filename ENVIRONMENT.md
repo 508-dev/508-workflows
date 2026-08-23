@@ -144,7 +144,9 @@ Pydantic import errors.
 
 - Optional: CONTACT_EMAIL_INTAKE_ADDRESS (default: contacts@508.dev; only messages with this value in Delivered-To or X-Original-To become dashboard contact candidates).
 - Note: mail not delivery-addressed to CONTACT_EMAIL_INTAKE_ADDRESS stays on the existing resume intake path. Contact candidates are stored for dashboard approval and only create or update EspoCRM after an explicit review action.
-- Note: an authenticated, privileged mailbox sender may also forward an introduction to the normal workflow mailbox. When the forwarded message has a distinct name and email plus introduction language, or an explicit instruction such as `please create a contact`, it is stored, audit-logged, and automatically creates or links the CRM contact. Other workflow-mailbox forwards remain on the resume path and do not create contacts.
+- `Optional`: `CONTACT_EMAIL_ACTION_CLASSIFIER_ENABLED` (default: `true`; use the configured OpenAI-compatible provider to classify non-alias workflow-mailbox mail as create-contact, review-contact, resume, or ignore)
+- `Optional`: `CONTACT_EMAIL_ACTION_CLASSIFIER_MODEL` (defaults to the configured fast, fallback, or primary model) and `CONTACT_EMAIL_ACTION_CLASSIFIER_TIMEOUT_SECONDS` (default: `8.0`)
+- Note: the model returns only a schema-validated action proposal. A create-contact proposal still requires an authenticated privileged sender and a forwarded, distinct name/email; it is persisted and audit-logged before CRM creation or linking. A review-contact proposal creates a dashboard candidate. If the classifier is unavailable, a conservative introduction/create-contact heuristic is used; other messages stay on the existing resume path.
 
 ## Onboarding Email Sending
 

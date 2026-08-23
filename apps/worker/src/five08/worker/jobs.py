@@ -208,6 +208,32 @@ def process_trusted_intro_contact_job(raw_message_b64: str) -> dict[str, Any]:
         }
 
 
+def process_workflow_contact_review_job(raw_message_b64: str) -> dict[str, Any]:
+    """Persist an LLM-routed workflow-mailbox contact proposal for review."""
+    try:
+        raw_message = base64.b64decode(raw_message_b64.encode("ascii"), validate=True)
+        message = message_from_bytes(raw_message)
+        result = ContactEmailCandidateProcessor(settings).process_message(
+            message,
+            delivered_to=str(settings.email_username or "workflows@508.dev"),
+            require_contact_intake_recipient=False,
+            require_forwarded_identity=True,
+        )
+        return result.__dict__
+    except Exception as exc:
+        logger.warning("Failed processing workflow contact review message: %s", exc)
+        return {
+            "candidate_id": None,
+            "proposed_email": None,
+            "skipped_reason": "message_processing_error",
+        }
+
+
+def process_ignored_workflow_email_job(_raw_message_b64: str) -> dict[str, Any]:
+    """Record a deliberate no-op for an LLM-classified unrelated workflow email."""
+    return {"skipped_reason": "mailbox_action_ignored"}
+
+
 def sync_people_from_crm_job() -> dict[str, Any]:
     """Sync a full contacts page-set from CRM into the local people cache."""
     logger.info("Processing CRM people full-sync job")
@@ -299,6 +325,8 @@ JOB_FUNCTIONS: dict[str, Callable[..., dict[str, Any]]] = {
     process_mailbox_message_job.__name__: process_mailbox_message_job,
     process_contact_email_message_job.__name__: process_contact_email_message_job,
     process_trusted_intro_contact_job.__name__: process_trusted_intro_contact_job,
+    process_workflow_contact_review_job.__name__: process_workflow_contact_review_job,
+    process_ignored_workflow_email_job.__name__: process_ignored_workflow_email_job,
     sync_people_from_crm_job.__name__: sync_people_from_crm_job,
     sync_person_from_crm_job.__name__: sync_person_from_crm_job,
     sync_projects_from_erpnext_job.__name__: sync_projects_from_erpnext_job,

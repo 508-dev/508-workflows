@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 from five08.contact_email_candidates import (
     ContactEmailCandidate,
@@ -13,6 +14,8 @@ from five08.contact_email_candidates import (
 from five08.worker.contact_email_ingest import (
     ContactEmailCandidateProcessor,
     TrustedIntroContactProcessor,
+    WorkflowMailboxAction,
+    WorkflowMailboxActionClassifier,
     is_contact_intake_message,
     is_forwarded_intro_message,
 )
@@ -134,6 +137,38 @@ def test_forwarded_create_contact_request_is_a_trusted_contact_signal() -> None:
     )
 
     assert is_forwarded_intro_message(message) is True
+
+
+def test_workflow_action_classifier_uses_validated_llm_action() -> None:
+    message = EmailMessage()
+    message["From"] = "Michael <michael@508.dev>"
+    message["Subject"] = "Fwd: Please help"
+    message.set_content("Please add this person to our contacts.")
+    completion = Mock(
+        return_value=SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=(
+                            '{"action":"review_contact","rationale":"Person '
+                            'mentioned, but the request is ambiguous.","confidence":0.7}'
+                        )
+                    )
+                )
+            ]
+        )
+    )
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=completion))
+    )
+
+    decision = WorkflowMailboxActionClassifier(_settings(), client=client).classify(
+        message
+    )
+
+    assert decision.action is WorkflowMailboxAction.REVIEW_CONTACT
+    assert decision.method == "llm"
+    completion.assert_called_once()
 
 
 def test_trusted_intro_creates_candidate_and_crm_contact(monkeypatch) -> None:

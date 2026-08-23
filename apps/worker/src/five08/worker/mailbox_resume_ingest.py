@@ -25,8 +25,9 @@ from five08.queue import get_postgres_connection
 from five08.worker.contact_email_ingest import (
     ContactEmailCandidateProcessor,
     TrustedIntroContactProcessor,
+    WorkflowMailboxAction,
+    WorkflowMailboxActionClassifier,
     is_contact_intake_message,
-    is_forwarded_intro_message,
 )
 from five08.worker.config import WorkerSettings
 from five08.worker.crm.resume_profile_processor import ResumeProfileProcessor
@@ -64,12 +65,24 @@ class MailboxMessagePayload:
     kind: str
 
 
-def _message_intake_kind(message: Message, settings: WorkerSettings) -> str:
-    """Route explicit aliases before applying the trusted introduction heuristic."""
+def _message_intake_kind(
+    message: Message,
+    settings: WorkerSettings,
+    *,
+    classifier: WorkflowMailboxActionClassifier | None = None,
+) -> str:
+    """Route aliases deterministically and all other mail through typed LLM actioning."""
     if is_contact_intake_message(message, settings):
         return "contact"
-    if is_forwarded_intro_message(message):
+    decision = (classifier or WorkflowMailboxActionClassifier(settings)).classify(
+        message
+    )
+    if decision.action is WorkflowMailboxAction.CREATE_CONTACT:
         return "trusted_intro_contact"
+    if decision.action is WorkflowMailboxAction.REVIEW_CONTACT:
+        return "workflow_contact_review"
+    if decision.action is WorkflowMailboxAction.IGNORE:
+        return "ignored"
     return "resume"
 
 
@@ -80,6 +93,7 @@ class ResumeMailboxProcessor:
         self.settings = settings
         self.espo_api = EspoClient(settings.espo_base_url, settings.espo_api_key)
         self.resume_processor = ResumeProfileProcessor()
+        self.workflow_action_classifier = WorkflowMailboxActionClassifier(settings)
 
     def poll_inbox(self) -> int:
         """Process one IMAP poll cycle and return successfully processed attachment count."""
@@ -117,14 +131,37 @@ class ResumeMailboxProcessor:
                     if raw_payload is None:
                         continue
                     message = email.message_from_bytes(raw_payload)
-                    if is_contact_intake_message(message, self.settings):
+                    kind = _message_intake_kind(
+                        message,
+                        self.settings,
+                        classifier=self.workflow_action_classifier,
+                    )
+                    if kind == "contact":
                         result = ContactEmailCandidateProcessor(
                             self.settings
                         ).process_message(message)
-                    elif is_forwarded_intro_message(message):
+                    elif kind == "trusted_intro_contact":
                         result = TrustedIntroContactProcessor(
                             self.settings
                         ).process_message(message)
+                    elif kind == "workflow_contact_review":
+                        result = ContactEmailCandidateProcessor(
+                            self.settings
+                        ).process_message(
+                            message,
+                            delivered_to=str(
+                                self.settings.email_username or "workflows@508.dev"
+                            ),
+                            require_contact_intake_recipient=False,
+                            require_forwarded_identity=True,
+                        )
+                    elif kind == "ignored":
+                        result = ResumeMailboxResult(
+                            sender_email=None,
+                            sender_name=None,
+                            processed_attachments=0,
+                            skipped_reason="mailbox_action_ignored",
+                        )
                     else:
                         result = self.process_message(message)
                 except Exception as exc:
@@ -198,7 +235,11 @@ class ResumeMailboxProcessor:
                         message_num=num,
                         message_id=message_id,
                         raw_message_b64=base64.b64encode(raw_payload).decode("ascii"),
-                        kind=_message_intake_kind(message, self.settings),
+                        kind=_message_intake_kind(
+                            message,
+                            self.settings,
+                            classifier=self.workflow_action_classifier,
+                        ),
                     )
                 )
 
