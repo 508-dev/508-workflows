@@ -55,6 +55,7 @@ from five08.newsletter_sync import (
     format_newsletter_sync_warning,
     sync_newsletter_contacts,
 )
+from five08.onboarding import mark_onboarder_assigned
 from five08.redaction import redact_email_addresses
 from five08.skills import normalize_skill, normalize_skill_list
 from five08.discord_bot.utils.audit import DiscordAuditCogMixin
@@ -5612,7 +5613,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
     async def assign_onboarder(
         self, interaction: discord.Interaction, contact: str, onboarder: str
     ) -> None:
-        """Assign an onboarder and set onboarding state to selected if still pending."""
+        """Assign an available onboarder and move a selected candidate to that stage."""
         try:
             await interaction.response.defer(ephemeral=True)
 
@@ -5722,15 +5723,23 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
 
             update_payload: dict[str, str] = {ONBOARDER_FIELD: onboarder_username}
             state_updated = False
-            if current_state == "pending":
-                update_payload[ONBOARDING_STATUS_FIELD] = "selected"
+            if current_state in {"pending", "selected"}:
+                update_payload[ONBOARDING_STATUS_FIELD] = "assignedonboarder"
                 state_updated = True
 
             self.espo_api.request("PUT", f"Contact/{contact_id}", update_payload)
 
             contact_name = full_contact.get("name", "Unknown")
+            try:
+                await asyncio.to_thread(
+                    mark_onboarder_assigned, settings, onboarder_username
+                )
+            except Exception:
+                logger.warning(
+                    "Failed recording onboarding assignment recency", exc_info=True
+                )
             status_line = (
-                "onboarding state set to `selected`"
+                "onboarding state set to `assignedonboarder`"
                 if state_updated
                 else "onboarding state left unchanged"
             )

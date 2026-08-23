@@ -3208,7 +3208,7 @@ class TestCRMCog:
     async def test_assign_onboarder_success_updates_pending_state(
         self, crm_cog, mock_interaction
     ):
-        """Assigning onboarder should set pending state to selected."""
+        """Assigning onboarder should set pending state to assignedonboarder."""
         steering_role = Mock()
         steering_role.name = "Steering Committee"
         mock_interaction.user.roles = [steering_role]
@@ -3237,11 +3237,11 @@ class TestCRMCog:
         assert request_calls[1].args == (
             "PUT",
             "Contact/contact123",
-            {"cOnboarder": "jane", "cOnboardingState": "selected"},
+            {"cOnboarder": "jane", "cOnboardingState": "assignedonboarder"},
         )
 
         message = mock_interaction.followup.send.call_args[0][0]
-        assert "onboarding state set to `selected`" in message
+        assert "onboarding state set to `assignedonboarder`" in message
         assert "Assigned **jane** as onboarder" in message
 
     @pytest.mark.asyncio

@@ -44,6 +44,11 @@ class SharedSettings(BaseSettings):
     gig_recruiting_stale_days: int = Field(default=7, ge=1)
     gig_contacted_reminder_days: int = Field(default=5, ge=1)
     gig_recruiting_reminder_max_age_days: int = Field(default=90, ge=1)
+    onboarding_reminders_enabled: bool = False
+    onboarding_reminder_stale_days: int = Field(default=7, ge=1)
+    onboarding_reminder_repeat_days: int = Field(default=7, ge=1)
+    onboarding_reminder_check_seconds: int = Field(default=3600, ge=60)
+    discord_onboarding_volunteers_channel_id: str | None = None
     minio_endpoint: str = "http://127.0.0.1:9000"
     minio_root_user: str = "internal"
     minio_root_password: str = ""

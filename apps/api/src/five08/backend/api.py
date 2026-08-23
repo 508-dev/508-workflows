@@ -140,6 +140,7 @@ from five08.backend.schemas import (
     DashboardOnboardingEmailDraftRequest,
     DashboardOnboardingEmailSendRequest,
     DashboardOnboardingStatusRequest,
+    DashboardOnboardingVolunteerRequest,
     DashboardProjectCreateRequest,
     DashboardProjectHistoricalMemberRemoveRequest,
     DashboardProjectHistoricalMemberRequest,
@@ -188,6 +189,13 @@ from five08.onboarding_email import (
     onboarding_email_smtp_ready,
     send_onboarding_email_message,
     validate_plain_email,
+)
+from five08.onboarding import (
+    VolunteerAvailability,
+    list_onboarding_volunteers,
+    mark_onboarder_assigned,
+    suggested_onboarders,
+    upsert_onboarding_volunteer,
 )
 from five08.newsletter_sync import NewsletterSyncProcessor
 from five08.newsletter_suppressions import list_newsletter_suppressions
@@ -1914,7 +1922,8 @@ def _datetime_or_none(value: Any) -> str | None:
 
 _ONBOARDING_STATUS_LABELS = {
     "pending": "Needs review",
-    "selected": "Assigned to onboarder",
+    "selected": "Selected",
+    "assignedonboarder": "Assigned to onboarder",
     "reachingout": "Reaching out",
     "awaitingcontribution": "Awaiting contribution",
     "onboarded": "Onboarded",
@@ -2266,6 +2275,7 @@ def _query_dashboard_people(
             address_state,
             timezone,
             seniority,
+            professional_roles,
             linkedin,
             skills,
             latest_resume_id,
@@ -2703,6 +2713,7 @@ def _list_dashboard_onboarding(
             address_state,
             timezone,
             seniority,
+            professional_roles,
             linkedin,
             skills,
             latest_resume_id,
@@ -3267,12 +3278,12 @@ def _assign_dashboard_onboarder_in_crm(
     normalized_state = current_state.casefold()
     update_payload: dict[str, str] = {_ONBOARDER_FIELD: onboarder_username}
     state_updated = False
-    if normalized_state == "pending":
-        update_payload[_ONBOARDING_STATUS_FIELD] = "selected"
+    if normalized_state in {"pending", "selected"}:
+        update_payload[_ONBOARDING_STATUS_FIELD] = "assignedonboarder"
         state_updated = True
 
     client.request("PUT", f"Contact/{normalized_contact_id}", update_payload)
-    resulting_state = "selected" if state_updated else current_state
+    resulting_state = "assignedonboarder" if state_updated else current_state
     return {
         "status": "updated",
         "contact_id": normalized_contact_id,
@@ -3318,15 +3329,22 @@ def _update_dashboard_onboarding_status_in_crm(
     onboarder_is_unassigned = (
         onboarder_username is None or onboarder_raw.casefold() in {"none", "no discord"}
     )
-    if normalized_status == "selected" and onboarder_is_unassigned:
+    if (
+        normalized_status in {"assignedonboarder", "reachingout"}
+        and onboarder_is_unassigned
+    ):
         raise DashboardOnboarderAssignmentError(
-            "onboarder_required_for_selected",
+            "onboarder_required_for_active_stage",
             status_code=409,
         )
+    update_payload: dict[str, str] = {_ONBOARDING_STATUS_FIELD: normalized_status}
+    if normalized_status == "selected":
+        # Returning a candidate to Selected explicitly releases the onboarder.
+        update_payload[_ONBOARDER_FIELD] = ""
     client.request(
         "PUT",
         f"Contact/{normalized_contact_id}",
-        {_ONBOARDING_STATUS_FIELD: normalized_status},
+        update_payload,
     )
     return {
         "status": "updated",
@@ -7446,6 +7464,91 @@ async def dashboard_onboarding_handler(
     return JSONResponse(people)
 
 
+def _onboarding_candidate_timezone(contact_id: str) -> str | None:
+    """Load the cached candidate timezone used for volunteer suggestions."""
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                "SELECT timezone FROM people WHERE crm_contact_id = %s LIMIT 1",
+                (contact_id,),
+            )
+            row = cursor.fetchone()
+    if row is None:
+        return None
+    timezone_name = str(row.get("timezone") or "").strip()
+    return timezone_name or None
+
+
+async def dashboard_onboarding_volunteers_handler(request: Request) -> JSONResponse:
+    """List willing onboarders with their current workload and success counts."""
+    _, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_ONBOARDING_READ,
+    )
+    if error_response is not None:
+        return error_response
+    volunteers = await asyncio.to_thread(list_onboarding_volunteers, settings)
+    return JSONResponse(jsonable_encoder(volunteers))
+
+
+async def dashboard_onboarding_volunteer_handler(
+    request: Request,
+    contact_id: str,
+) -> JSONResponse:
+    """Create or update one willing-onboarder registry entry."""
+    _, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_ONBOARDING_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+    try:
+        payload = DashboardOnboardingVolunteerRequest.model_validate(
+            await request.json()
+        )
+        result = await asyncio.to_thread(
+            upsert_onboarding_volunteer,
+            settings,
+            crm_contact_id=contact_id,
+            timezone_name=payload.timezone,
+            availability=VolunteerAvailability(payload.availability),
+            paused_until=payload.paused_until,
+            max_active_assignments=payload.max_active_assignments,
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+    return JSONResponse(jsonable_encoder(result))
+
+
+async def dashboard_onboarding_suggestions_handler(
+    request: Request,
+    contact_id: str,
+) -> JSONResponse:
+    """Suggest available onboarders for a candidate without auto-assigning one."""
+    _, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_ONBOARDING_READ,
+    )
+    if error_response is not None:
+        return error_response
+    candidate_timezone = await asyncio.to_thread(
+        _onboarding_candidate_timezone, contact_id
+    )
+    volunteers = await asyncio.to_thread(
+        suggested_onboarders,
+        settings,
+        candidate_timezone=candidate_timezone,
+    )
+    return JSONResponse(
+        jsonable_encoder(
+            {"candidate_timezone": candidate_timezone, "volunteers": volunteers}
+        )
+    )
+
+
 async def dashboard_assign_onboarder_handler(
     request: Request,
     contact_id: str,
@@ -7500,6 +7603,15 @@ async def dashboard_assign_onboarder_handler(
         return JSONResponse(
             {"error": "crm_update_failed", "detail": str(exc)},
             status_code=502,
+        )
+
+    try:
+        await asyncio.to_thread(mark_onboarder_assigned, settings, result["onboarder"])
+    except Exception:
+        logger.warning(
+            "Failed recording onboarding assignment recency contact_id=%s",
+            result["contact_id"],
+            exc_info=True,
         )
 
     sync_job_id: str | None = None

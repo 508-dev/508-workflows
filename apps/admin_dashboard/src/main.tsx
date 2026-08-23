@@ -121,6 +121,11 @@ type Person = {
   email_508?: string
   created_at?: string
   address_country?: string
+  address_city?: string
+  address_state?: string
+  timezone?: string
+  seniority?: string
+  professional_roles?: string[]
   discord_user_id?: string
   discord_username?: string
   contact_type?: string
@@ -141,6 +146,21 @@ type Person = {
   profile_status?: ProfileStatus
   latest_intake_submission?: IntakeSubmission
   latest_resume_intake_submission?: IntakeSubmission
+}
+
+type OnboardingVolunteer = {
+  person_id: string
+  crm_contact_id: string
+  name?: string
+  username: string
+  timezone: string
+  availability: "available" | "paused"
+  paused_until?: string | null
+  max_active_assignments?: number | null
+  last_assigned_at?: string | null
+  active_assignments: number
+  successful_onboardings: number
+  timezone_distance_hours?: number
 }
 
 type OnboardingEmailTriState = "yes" | "no" | "unknown"
@@ -603,7 +623,8 @@ type FilterState = Partial<Record<PeopleFilterKey, string>>
 
 const onboardingStatusOptions = [
   ["pending", "Needs review"],
-  ["selected", "Assigned to onboarder"],
+  ["selected", "Selected"],
+  ["assignedonboarder", "Assigned to onboarder"],
   ["reachingout", "Reaching out"],
   ["awaitingcontribution", "Awaiting contribution"],
   ["onboarded", "Onboarded"],
@@ -954,6 +975,7 @@ function App() {
   const [newsletterSuppressions, setNewsletterSuppressions] = useState<NewsletterSuppression[]>([])
   const [newsletterStatus, setNewsletterStatus] = useState<NewsletterStatus | null>(null)
   const [onboarding, setOnboarding] = useState<Person[]>([])
+  const [onboardingVolunteers, setOnboardingVolunteers] = useState<OnboardingVolunteer[]>([])
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([])
   const [agentReport, setAgentReport] = useState<AgentReport | null>(null)
   const [configurationItems, setConfigurationItems] = useState<ConfigurationItem[]>([])
@@ -2123,6 +2145,52 @@ function App() {
     }
   }
 
+  async function loadOnboardingVolunteers() {
+    setBusy("onboardingVolunteers", true)
+    try {
+      setOnboardingVolunteers(
+        await requestJson<OnboardingVolunteer[]>("/dashboard/api/onboarding/volunteers"),
+      )
+    } catch (error) {
+      showError(error, "Unable to load onboarding volunteers")
+    } finally {
+      setBusy("onboardingVolunteers", false)
+    }
+  }
+
+  async function saveOnboardingVolunteer(
+    contactId: string,
+    payload: Pick<OnboardingVolunteer, "timezone" | "availability" | "max_active_assignments">,
+  ) {
+    setBusy(`onboarding-volunteer:${contactId}`, true)
+    try {
+      await requestJson(`/dashboard/api/onboarding/volunteers/${encodeURIComponent(contactId)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      })
+      showToast("Onboarder registry updated", "ok")
+      await loadOnboardingVolunteers()
+    } catch (error) {
+      showError(error, "Unable to update onboarder registry")
+    } finally {
+      setBusy(`onboarding-volunteer:${contactId}`, false)
+    }
+  }
+
+  async function loadOnboarderSuggestions(contactId: string | undefined) {
+    if (!contactId) return []
+    try {
+      const payload = await requestJson<{ volunteers: OnboardingVolunteer[] }>(
+        `/dashboard/api/onboarding/${encodeURIComponent(contactId)}/suggestions`,
+      )
+      return payload.volunteers || []
+    } catch (error) {
+      showError(error, "Unable to suggest onboarders")
+      return []
+    }
+  }
+
   async function draftOnboardingEmail(
     contactId: string | undefined,
     options: OnboardingEmailOptions,
@@ -2606,7 +2674,10 @@ function App() {
       void loadJobPostChannels()
     }
     if (view === "projects") void loadProjects()
-    if (view === "onboarding") void loadOnboarding()
+    if (view === "onboarding") {
+      void loadOnboarding()
+      void loadOnboardingVolunteers()
+    }
     if (view === "newsletter") void loadNewsletterDashboard()
     if (view === "jobs") void loadJobs()
     if (view === "agent") void loadAgentReport()
@@ -2629,7 +2700,10 @@ function App() {
       void loadJobPostChannels()
     }
     if (view === "projects") void loadProjects()
-    if (view === "onboarding") void loadOnboarding()
+    if (view === "onboarding") {
+      void loadOnboarding()
+      void loadOnboardingVolunteers()
+    }
     if (view === "newsletter") void loadNewsletterDashboard()
     if (view === "jobs") void loadJobs()
     if (view === "agent") void loadAgentReport()
@@ -3083,6 +3157,11 @@ function App() {
               onSearch={loadOnboarding}
               onSort={(key) => handleSort("onboarding", key)}
               onAssign={assignOnboarder}
+              volunteers={onboardingVolunteers}
+              volunteersLoading={loading.onboardingVolunteers}
+              onLoadVolunteers={loadOnboardingVolunteers}
+              onSaveVolunteer={saveOnboardingVolunteer}
+              onSuggestions={loadOnboarderSuggestions}
               onStatusChange={updateOnboardingStatus}
               onDraftEmail={draftOnboardingEmail}
               onSendEmail={sendOnboardingEmail}
@@ -7233,6 +7312,132 @@ function PeopleView(props: {
   )
 }
 
+function OnboardingVolunteerRegistry({
+  volunteers,
+  loading,
+  canWrite,
+  onRefresh,
+  onSave,
+}: {
+  volunteers: OnboardingVolunteer[]
+  loading?: boolean
+  canWrite: boolean
+  onRefresh: () => void
+  onSave: (
+    contactId: string,
+    payload: Pick<OnboardingVolunteer, "timezone" | "availability" | "max_active_assignments">,
+  ) => void
+}) {
+  const [contactId, setContactId] = useState("")
+  const [timezone, setTimezone] = useState("UTC")
+  const [maxActive, setMaxActive] = useState("")
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Willing onboarders</CardTitle>
+        <div className="flex items-center gap-2">
+          <span className="text-sm text-muted-foreground">{volunteers.length} registered</span>
+          <Button type="button" variant="outline" size="sm" onClick={onRefresh} disabled={loading}>
+            <RefreshCw /> Refresh
+          </Button>
+        </div>
+      </CardHeader>
+      {canWrite ? (
+        <form
+          className="grid gap-2 border-b p-4 md:grid-cols-[minmax(180px,1fr)_minmax(160px,1fr)_120px_auto]"
+          onSubmit={(event) => {
+            event.preventDefault()
+            if (!contactId.trim() || !timezone.trim()) return
+            onSave(contactId.trim(), {
+              timezone: timezone.trim(),
+              availability: "available",
+              max_active_assignments: maxActive ? Number(maxActive) : null,
+            })
+            setContactId("")
+          }}
+        >
+          <Input
+            value={contactId}
+            placeholder="CRM contact ID"
+            aria-label="Volunteer CRM contact ID"
+            onChange={(event) => setContactId(event.target.value)}
+          />
+          <Input
+            value={timezone}
+            placeholder="IANA timezone, e.g. Asia/Tokyo"
+            aria-label="Volunteer timezone"
+            onChange={(event) => setTimezone(event.target.value)}
+          />
+          <Input
+            type="number"
+            min="1"
+            value={maxActive}
+            placeholder="Capacity"
+            aria-label="Maximum active assignments"
+            onChange={(event) => setMaxActive(event.target.value)}
+          />
+          <Button type="submit" disabled={!contactId.trim() || !timezone.trim()}>
+            Add volunteer
+          </Button>
+        </form>
+      ) : null}
+      <div className="overflow-x-auto">
+        <Table aria-label="Willing onboarders">
+          <TableHeader>
+            <TableRow>
+              <TableHead>Onboarder</TableHead>
+              <TableHead>Timezone</TableHead>
+              <TableHead>Availability</TableHead>
+              <TableHead>Active</TableHead>
+              <TableHead>Onboarded</TableHead>
+              <TableHead>Capacity</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {volunteers.map((volunteer) => (
+              <TableRow key={volunteer.person_id}>
+                <TableCell>
+                  <strong>{volunteer.name || volunteer.username}</strong>
+                  <div className="text-xs text-muted-foreground">{volunteer.username}</div>
+                </TableCell>
+                <TableCell>{volunteer.timezone}</TableCell>
+                <TableCell>
+                  {canWrite ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant={volunteer.availability === "available" ? "outline" : "default"}
+                      onClick={() =>
+                        onSave(volunteer.crm_contact_id, {
+                          timezone: volunteer.timezone,
+                          availability:
+                            volunteer.availability === "available" ? "paused" : "available",
+                          max_active_assignments: volunteer.max_active_assignments || null,
+                        })
+                      }
+                    >
+                      {volunteer.availability === "available" ? "Pause" : "Resume"}
+                    </Button>
+                  ) : (
+                    <Badge
+                      variant={volunteer.availability === "available" ? "succeeded" : "queued"}
+                    >
+                      {volunteer.availability}
+                    </Badge>
+                  )}
+                </TableCell>
+                <TableCell>{volunteer.active_assignments}</TableCell>
+                <TableCell>{volunteer.successful_onboardings}</TableCell>
+                <TableCell>{volunteer.max_active_assignments || "No limit"}</TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+    </Card>
+  )
+}
+
 function OnboardingView(props: {
   people: Person[]
   sort: { key: string; direction: SortDirection }
@@ -7248,6 +7453,14 @@ function OnboardingView(props: {
   onSearch: () => void
   onSort: (key: string) => void
   onAssign: (contactId: string | undefined, onboarder: string) => void
+  volunteers: OnboardingVolunteer[]
+  volunteersLoading?: boolean
+  onLoadVolunteers: () => void
+  onSaveVolunteer: (
+    contactId: string,
+    payload: Pick<OnboardingVolunteer, "timezone" | "availability" | "max_active_assignments">,
+  ) => void
+  onSuggestions: (contactId: string | undefined) => Promise<OnboardingVolunteer[]>
   onStatusChange: (contactId: string | undefined, status: string) => void
   onDraftEmail: (
     contactId: string | undefined,
@@ -7277,6 +7490,13 @@ function OnboardingView(props: {
       {props.canWrite ? (
         <EngineerSetupPanel loading={props.loading.engineerSetup} onSetup={props.onSetupEngineer} />
       ) : null}
+      <OnboardingVolunteerRegistry
+        volunteers={props.volunteers}
+        loading={props.volunteersLoading}
+        canWrite={props.canWrite}
+        onRefresh={props.onLoadVolunteers}
+        onSave={props.onSaveVolunteer}
+      />
       <Card>
         <CardHeader>
           <CardTitle>Onboarding queue</CardTitle>
@@ -7446,6 +7666,7 @@ function OnboardingView(props: {
                   loading={props.loading}
                   canWrite={props.canWrite}
                   onAssign={props.onAssign}
+                  onSuggestions={props.onSuggestions}
                   onStatusChange={props.onStatusChange}
                   onDraftEmail={props.onDraftEmail}
                   onSendEmail={props.onSendEmail}
@@ -7815,6 +8036,7 @@ function OnboardingRow({
   loading,
   canWrite,
   onAssign,
+  onSuggestions,
   onStatusChange,
   onDraftEmail,
   onSendEmail,
@@ -7827,6 +8049,7 @@ function OnboardingRow({
   loading: Record<string, boolean>
   canWrite: boolean
   onAssign: (contactId: string | undefined, onboarder: string) => void
+  onSuggestions: (contactId: string | undefined) => Promise<OnboardingVolunteer[]>
   onStatusChange: (contactId: string | undefined, status: string) => void
   onDraftEmail: (
     contactId: string | undefined,
@@ -7844,6 +8067,7 @@ function OnboardingRow({
 }) {
   const displayName = person.name || person.email_508 || person.email || "CRM contact"
   const [value, setValue] = useState(displayOnboarder(person.onboarder))
+  const [suggestions, setSuggestions] = useState<OnboardingVolunteer[]>([])
   const [emailOpen, setEmailOpen] = useState(false)
   const [emailDraft, setEmailDraft] = useState<OnboardingEmailDraft | null>(null)
   const [emailDraftOptions, setEmailDraftOptions] = useState<OnboardingEmailOptions | null>(null)
@@ -8016,6 +8240,31 @@ function OnboardingRow({
               Save
             </Button>
           </form>
+          {canWrite && currentStatus === "selected" ? (
+            <div className="mt-2 grid max-w-64 gap-1">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => void onSuggestions(person.crm_contact_id).then(setSuggestions)}
+              >
+                Suggest onboarders
+              </Button>
+              {suggestions.map((volunteer) => (
+                <Button
+                  key={volunteer.person_id}
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  className="justify-start text-left"
+                  onClick={() => onAssign(person.crm_contact_id, volunteer.username)}
+                >
+                  {volunteer.name || volunteer.username} · {volunteer.timezone} ·{" "}
+                  {volunteer.active_assignments} active
+                </Button>
+              ))}
+            </div>
+          ) : null}
         </TableCell>
         <TableCell>{formatDate(person.onboarding_updated_at)}</TableCell>
         <TableCell>

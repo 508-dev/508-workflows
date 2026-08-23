@@ -90,6 +90,20 @@ dashboard field.
 - `GIG_RECRUITING_STALE_DAYS`
 - `GIG_CONTACTED_REMINDER_DAYS`
 - `GIG_RECRUITING_REMINDER_MAX_AGE_DAYS`
+- `ONBOARDING_REMINDERS_ENABLED`: enables the Discord onboarding reminder loop.
+- `ONBOARDING_REMINDER_STALE_DAYS`: inactivity threshold before the first reminder (default: 7).
+- `ONBOARDING_REMINDER_REPEAT_DAYS`: repeat interval for unchanged onboarding work (default: 7).
+- `ONBOARDING_REMINDER_CHECK_SECONDS`: bot polling interval for reminder windows.
+- `DISCORD_ONBOARDING_VOLUNTEERS_CHANNEL_ID`: Discord snowflake for the internal volunteer channel.
+
+## Onboarding status rollout
+
+Before enabling this feature, add `assignedonboarder` to EspoCRM's
+`cOnboardingState` picklist. Then run
+`uv run python scripts/migrate_selected_onboarding_contacts.py` to preview the
+legacy `selected` contacts that already have an onboarder. Re-run it with
+`--apply` after reviewing the output. Contacts that are selected without an
+onboarder intentionally remain in `selected`.
 
 `./scripts/dev.sh` overrides local Redis settings to deterministic per-worktree
 localhost ports. Compose injects Docker-network URLs.

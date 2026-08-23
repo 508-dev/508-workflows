@@ -32,7 +32,7 @@ class EspoPeopleSyncClient:
             "id,name,emailAddress,emailAddressData,c508Email,"
             "cDiscordUsername,cDiscordUserId,cDiscordRoles,cDiscordUserID,"
             "cGithubUsername,githubUsername,type,contactType,"
-            "addressCountry,addressCity,addressState,cTimezone,cSeniority,"
+            "addressCountry,addressCity,addressState,cTimezone,cSeniority,cRoles,"
             "cMemberAgreementSignedAt,cOnboardingState,cOnboarder,"
             "cOnboardingUpdatedAt,"
             f"{LINKEDIN_FIELD},skills,cSkillAttrs,resumeIds,resumeNames"
@@ -196,6 +196,7 @@ class PeopleSyncProcessor:
             address_state=_text_or_none(raw_contact.get("addressState")),
             timezone=_text_or_none(raw_contact.get("cTimezone")),
             seniority=_text_or_none(raw_contact.get("cSeniority")),
+            professional_roles=self._professional_roles(raw_contact.get("cRoles")),
             linkedin=self._coerce_linkedin(raw_contact),
             skills=skills,
             skill_attrs=skill_attrs,
@@ -339,6 +340,15 @@ class PeopleSyncProcessor:
                 if text:
                     roles.append(text)
             return roles
+        return []
+
+    @staticmethod
+    def _professional_roles(raw_roles: Any) -> list[str]:
+        """Normalize the CRM professional-role field into short display values."""
+        if isinstance(raw_roles, str):
+            return [value.strip() for value in raw_roles.split(",") if value.strip()]
+        if isinstance(raw_roles, list):
+            return [str(value).strip() for value in raw_roles if str(value).strip()]
         return []
 
     def _github_username(self, raw_contact: dict[str, Any]) -> str | None:

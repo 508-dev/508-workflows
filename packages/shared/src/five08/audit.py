@@ -66,6 +66,7 @@ class PersonRecord:
     address_state: str | None = None
     timezone: str | None = None
     seniority: str | None = None
+    professional_roles: list[str] | None = None
     linkedin: str | None = None
     skills: list[str] | None = None
     skill_attrs: dict[str, int] | None = None
@@ -150,6 +151,7 @@ def upsert_person(settings: SharedSettings, person: PersonRecord) -> str:
             address_state,
             timezone,
             seniority,
+            professional_roles,
             linkedin,
             skills,
             skill_attrs,
@@ -160,7 +162,7 @@ def upsert_person(settings: SharedSettings, person: PersonRecord) -> str:
             onboarding_updated_at,
             sync_status
         ) VALUES (
-            %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s, %s,
             %s, %s, %s, %s, %s,
             %s, %s, %s, %s, %s,
             %s, %s, %s, %s, %s,
@@ -182,6 +184,7 @@ def upsert_person(settings: SharedSettings, person: PersonRecord) -> str:
             address_state = EXCLUDED.address_state,
             timezone = EXCLUDED.timezone,
             seniority = EXCLUDED.seniority,
+            professional_roles = EXCLUDED.professional_roles,
             linkedin = EXCLUDED.linkedin,
             skills = EXCLUDED.skills,
             skill_attrs = EXCLUDED.skill_attrs,
@@ -194,6 +197,7 @@ def upsert_person(settings: SharedSettings, person: PersonRecord) -> str:
         RETURNING id::text;
     """
     roles = person.discord_roles or []
+    professional_roles = person.professional_roles or []
     skills = person.skills or []
     skill_attrs = person.skill_attrs or {}
 
@@ -218,6 +222,7 @@ def upsert_person(settings: SharedSettings, person: PersonRecord) -> str:
                     _normalize_text(person.address_state),
                     _normalize_text(person.timezone),
                     _normalize_text(person.seniority),
+                    professional_roles,
                     _normalize_text(person.linkedin),
                     skills,
                     Jsonb(skill_attrs),
