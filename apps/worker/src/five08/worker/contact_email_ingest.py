@@ -3,17 +3,31 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 from dataclasses import dataclass
 from email import message_from_bytes
 from email.message import Message
 from email.utils import parseaddr
 
+from five08.audit import (
+    ActorProvider,
+    AuditEventInput,
+    AuditResult,
+    AuditSource,
+    insert_audit_event,
+)
+from five08.clients.espo import EspoAPIError
 from five08.contact_email_candidates import (
     ContactEmailCandidateInput,
+    ContactEmailCandidateStatus,
+    get_contact_email_candidate,
+    review_contact_email_candidate,
     upsert_contact_email_candidate,
 )
 from five08.worker.config import WorkerSettings
+
+logger = logging.getLogger(__name__)
 
 _EMAIL_IN_HEADER = re.compile(
     r"(?i)([a-z0-9.!#$%&'*+/=?^_{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+)"
@@ -21,6 +35,11 @@ _EMAIL_IN_HEADER = re.compile(
 _FORWARDED_HEADER = re.compile(r"(?im)^From:\s*(.+?)\s*$")
 _FORWARDED_SUBJECT = re.compile(r"(?im)^Subject:\s*(.+?)\s*$")
 _LINK = re.compile(r"https?://[^\s<>()\[\]{}\"']+", re.IGNORECASE)
+_INTRODUCTION_SIGNAL = re.compile(
+    r"\b(?:introduc(?:e|ed|ing|tion)|connect(?:ed|ing|ion)?|"
+    r"meet(?:ing)?|thought you (?:two|might))\b",
+    re.IGNORECASE,
+)
 _MAX_BODY_CHARS = 20_000
 _MAX_LINKS = 25
 
@@ -31,6 +50,16 @@ class ContactEmailIngestResult:
 
     candidate_id: str | None
     proposed_email: str | None
+    skipped_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class TrustedIntroContactResult:
+    """Outcome for an authorized forwarded introduction."""
+
+    candidate_id: str | None
+    crm_contact_id: str | None
+    action: str | None
     skipped_reason: str | None = None
 
 
@@ -53,20 +82,50 @@ def is_contact_intake_message(message: Message, settings: WorkerSettings) -> boo
     return False
 
 
+def is_forwarded_intro_message(message: Message) -> bool:
+    """Identify a forwarded introduction with a distinct, usable contact identity."""
+    source_message, extraction_method = _source_message(message)
+    if extraction_method == "direct":
+        return False
+    source_name, source_email = _source_identity(
+        source_message,
+        fallback_body=_message_text(message),
+    )
+    _, forwarded_by_email = _sender_identity(message)
+    if not source_name or not source_email or source_email == forwarded_by_email:
+        return False
+    source_text = f"{_subject(source_message, _message_text(source_message)) or ''}\n"
+    source_text += _message_text(source_message)
+    return bool(_INTRODUCTION_SIGNAL.search(source_text))
+
+
 class ContactEmailCandidateProcessor:
     """Create a review candidate without mutating EspoCRM."""
 
     def __init__(self, settings: WorkerSettings) -> None:
         self.settings = settings
 
-    def process_message(self, message: Message) -> ContactEmailIngestResult:
-        """Persist a candidate only for mail delivered to the configured alias."""
-        if not is_contact_intake_message(message, self.settings):
+    def process_message(
+        self,
+        message: Message,
+        *,
+        delivered_to: str | None = None,
+        require_contact_intake_recipient: bool = True,
+    ) -> ContactEmailIngestResult:
+        """Persist a candidate without creating or updating EspoCRM."""
+        if require_contact_intake_recipient and not is_contact_intake_message(
+            message, self.settings
+        ):
             return ContactEmailIngestResult(
                 candidate_id=None,
                 proposed_email=None,
                 skipped_reason="recipient_not_contact_intake",
             )
+        destination = (
+            delivered_to.strip().casefold()
+            if delivered_to and delivered_to.strip()
+            else configured_contact_intake_address(self.settings)
+        )
 
         forwarded_by_name, forwarded_by_email = _sender_identity(message)
         source_message, extraction_method = _source_message(message)
@@ -79,7 +138,7 @@ class ContactEmailCandidateProcessor:
             self.settings,
             ContactEmailCandidateInput(
                 message_id=_message_id(message),
-                delivered_to=configured_contact_intake_address(self.settings),
+                delivered_to=destination,
                 forwarded_by_name=forwarded_by_name,
                 forwarded_by_email=forwarded_by_email,
                 proposed_name=proposed_name,
@@ -94,6 +153,197 @@ class ContactEmailCandidateProcessor:
             candidate_id=candidate.id,
             proposed_email=candidate.proposed_email,
         )
+
+
+class TrustedIntroContactProcessor:
+    """Autocreate a contact only from a high-confidence, authorized introduction."""
+
+    def __init__(self, settings: WorkerSettings) -> None:
+        # Import lazily: mailbox intake also imports the candidate parser for
+        # recipient-routed contact review messages.
+        from five08.worker.mailbox_resume_ingest import ResumeMailboxProcessor
+
+        self.settings = settings
+        self.contact_candidates = ContactEmailCandidateProcessor(settings)
+        self.resume_processor = ResumeMailboxProcessor(settings)
+
+    def process_message(self, message: Message) -> TrustedIntroContactResult:
+        """Persist and approve a trusted forwarded introduction idempotently."""
+        if not is_forwarded_intro_message(message):
+            return TrustedIntroContactResult(
+                candidate_id=None,
+                crm_contact_id=None,
+                action=None,
+                skipped_reason="not_forwarded_intro",
+            )
+
+        forwarded_by_name, forwarded_by_email = _sender_identity(message)
+        if not forwarded_by_email:
+            return TrustedIntroContactResult(
+                candidate_id=None,
+                crm_contact_id=None,
+                action=None,
+                skipped_reason="missing_sender_email",
+            )
+        if (
+            self.settings.email_require_sender_auth_headers
+            and not self.resume_processor._has_authenticated_sender(message)
+        ):
+            return TrustedIntroContactResult(
+                candidate_id=None,
+                crm_contact_id=None,
+                action=None,
+                skipped_reason="sender_authentication_failed",
+            )
+        if not self.resume_processor._sender_is_authorized(forwarded_by_email):
+            return TrustedIntroContactResult(
+                candidate_id=None,
+                crm_contact_id=None,
+                action=None,
+                skipped_reason="sender_not_authorized",
+            )
+
+        candidate_result = self.contact_candidates.process_message(
+            message,
+            delivered_to=str(self.settings.email_username or "workflows@508.dev"),
+            require_contact_intake_recipient=False,
+        )
+        if not candidate_result.candidate_id:
+            return TrustedIntroContactResult(
+                candidate_id=None,
+                crm_contact_id=None,
+                action=None,
+                skipped_reason=candidate_result.skipped_reason
+                or "candidate_persistence_failed",
+            )
+        candidate = get_contact_email_candidate(
+            self.settings, candidate_result.candidate_id
+        )
+        if candidate is None:
+            return TrustedIntroContactResult(
+                candidate_id=candidate_result.candidate_id,
+                crm_contact_id=None,
+                action=None,
+                skipped_reason="candidate_not_found",
+            )
+        if candidate.status is ContactEmailCandidateStatus.APPROVED:
+            return TrustedIntroContactResult(
+                candidate_id=candidate.id,
+                crm_contact_id=candidate.crm_contact_id,
+                action="already_approved",
+            )
+        if not candidate.proposed_name or not candidate.proposed_email:
+            return TrustedIntroContactResult(
+                candidate_id=candidate.id,
+                crm_contact_id=None,
+                action=None,
+                skipped_reason="candidate_identity_incomplete",
+            )
+
+        try:
+            existing_contact = self.resume_processor._find_contact_by_email(
+                candidate.proposed_email
+            )
+            if existing_contact is None:
+                crm_contact = self.resume_processor._create_contact_for_email(
+                    candidate.proposed_email,
+                    candidate.proposed_name,
+                )
+                action = "created"
+            else:
+                crm_contact = existing_contact
+                action = "linked_existing"
+        except EspoAPIError as exc:
+            self._audit_outcome(
+                sender_email=forwarded_by_email,
+                sender_name=forwarded_by_name,
+                candidate_id=candidate.id,
+                crm_contact_id=None,
+                action="failed",
+                result=AuditResult.ERROR,
+                metadata={"reason": "crm_update_failed", "error": str(exc)},
+            )
+            return TrustedIntroContactResult(
+                candidate_id=candidate.id,
+                crm_contact_id=None,
+                action=None,
+                skipped_reason="crm_update_failed",
+            )
+
+        crm_contact_id = str(crm_contact.get("id") or "").strip()
+        if not crm_contact_id:
+            return TrustedIntroContactResult(
+                candidate_id=candidate.id,
+                crm_contact_id=None,
+                action=None,
+                skipped_reason="crm_contact_id_missing",
+            )
+        reviewed = review_contact_email_candidate(
+            self.settings,
+            candidate_id=candidate.id,
+            status=ContactEmailCandidateStatus.APPROVED,
+            reviewer=forwarded_by_email,
+            proposed_name=candidate.proposed_name,
+            proposed_email=candidate.proposed_email,
+            crm_contact_id=crm_contact_id,
+        )
+        if reviewed is None:
+            return TrustedIntroContactResult(
+                candidate_id=candidate.id,
+                crm_contact_id=crm_contact_id,
+                action="already_reviewed",
+            )
+        self._audit_outcome(
+            sender_email=forwarded_by_email,
+            sender_name=forwarded_by_name,
+            candidate_id=candidate.id,
+            crm_contact_id=crm_contact_id,
+            action=action,
+            result=AuditResult.SUCCESS,
+        )
+        return TrustedIntroContactResult(
+            candidate_id=candidate.id,
+            crm_contact_id=crm_contact_id,
+            action=action,
+        )
+
+    def _audit_outcome(
+        self,
+        *,
+        sender_email: str,
+        sender_name: str | None,
+        candidate_id: str,
+        crm_contact_id: str | None,
+        action: str,
+        result: AuditResult,
+        metadata: dict[str, str] | None = None,
+    ) -> None:
+        """Write a best-effort audit record for a trusted automatic CRM action."""
+        try:
+            insert_audit_event(
+                self.settings,
+                AuditEventInput(
+                    source=AuditSource.ADMIN_DASHBOARD,
+                    action="crm.trusted_intro_mailbox_ingest",
+                    result=result,
+                    actor_provider=ActorProvider.ADMIN_SSO,
+                    actor_subject=sender_email,
+                    actor_display_name=sender_name,
+                    resource_type="contact_email_candidate",
+                    resource_id=candidate_id,
+                    metadata={
+                        "crm_contact_id": crm_contact_id or "",
+                        "action": action,
+                        **(metadata or {}),
+                    },
+                ),
+            )
+        except Exception:
+            logger.warning(
+                "Best-effort trusted introduction audit failed candidate_id=%s",
+                candidate_id,
+                exc_info=True,
+            )
 
 
 def _message_id(message: Message) -> str:

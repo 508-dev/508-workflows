@@ -12,12 +12,20 @@ from five08.contact_email_candidates import (
 )
 from five08.worker.contact_email_ingest import (
     ContactEmailCandidateProcessor,
+    TrustedIntroContactProcessor,
     is_contact_intake_message,
+    is_forwarded_intro_message,
 )
 
 
 def _settings() -> SimpleNamespace:
-    return SimpleNamespace(contact_email_intake_address="contacts@508.dev")
+    return SimpleNamespace(
+        contact_email_intake_address="contacts@508.dev",
+        email_username="workflows@508.dev",
+        email_require_sender_auth_headers=True,
+        espo_base_url="https://crm.example.test",
+        espo_api_key="test-key",
+    )
 
 
 def _candidate() -> ContactEmailCandidate:
@@ -87,3 +95,87 @@ def test_processor_extracts_inline_forward_identity_and_links(monkeypatch) -> No
         "https://example.com/ada",
         "https://www.linkedin.com/in/ada",
     ]
+
+
+def test_forwarded_intro_requires_an_intro_signal_and_distinct_identity() -> None:
+    message = EmailMessage()
+    message["From"] = "Michael <michael@508.dev>"
+    message["Subject"] = "Fwd: Connecting you two"
+    message.set_content(
+        "---------- Forwarded message ---------\n"
+        "From: Ada Lovelace <ada@example.com>\n"
+        "Subject: Introduction\n\n"
+        "I wanted to introduce Ada. Her work is at https://example.com/ada.\n"
+    )
+
+    assert is_forwarded_intro_message(message) is True
+
+    message.set_content(
+        "---------- Forwarded message ---------\n"
+        "From: Ada Lovelace <ada@example.com>\n"
+        "Subject: Invoice\n\n"
+        "Please see the attached invoice.\n"
+    )
+    message.replace_header("Subject", "Fwd: Invoice")
+
+    assert is_forwarded_intro_message(message) is False
+
+
+def test_trusted_intro_creates_candidate_and_crm_contact(monkeypatch) -> None:
+    message = EmailMessage()
+    message["From"] = "Michael <michael@508.dev>"
+    message["Subject"] = "Fwd: Introduction"
+    message.set_content(
+        "---------- Forwarded message ---------\n"
+        "From: Ada Lovelace <ada@example.com>\n"
+        "Subject: Introduction\n\n"
+        "I'd like to introduce Ada: https://example.com/ada\n"
+    )
+    candidate = _candidate()
+    monkeypatch.setattr(
+        "five08.worker.contact_email_ingest.upsert_contact_email_candidate",
+        lambda *_args: candidate,
+    )
+    monkeypatch.setattr(
+        "five08.worker.contact_email_ingest.get_contact_email_candidate",
+        lambda *_args: candidate,
+    )
+    monkeypatch.setattr(
+        "five08.worker.contact_email_ingest.review_contact_email_candidate",
+        lambda *_args, **_kwargs: candidate,
+    )
+
+    processor = TrustedIntroContactProcessor(_settings())
+    monkeypatch.setattr(
+        processor.resume_processor,
+        "_has_authenticated_sender",
+        lambda _message: True,
+    )
+    monkeypatch.setattr(
+        processor.resume_processor,
+        "_sender_is_authorized",
+        lambda _email: True,
+    )
+    monkeypatch.setattr(
+        processor.resume_processor,
+        "_find_contact_by_email",
+        lambda _email: None,
+    )
+    created: dict[str, str] = {}
+
+    def create_contact(email: str, name: str) -> dict[str, str]:
+        created["email"] = email
+        created["name"] = name
+        return {"id": "crm-contact-1"}
+
+    monkeypatch.setattr(
+        processor.resume_processor, "_create_contact_for_email", create_contact
+    )
+    monkeypatch.setattr(processor, "_audit_outcome", lambda **_kwargs: None)
+
+    result = processor.process_message(message)
+
+    assert result.candidate_id == "candidate-1"
+    assert result.crm_contact_id == "crm-contact-1"
+    assert result.action == "created"
+    assert created == {"email": "ada@example.com", "name": "Ada Lovelace"}

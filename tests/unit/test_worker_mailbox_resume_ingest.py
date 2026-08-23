@@ -6,7 +6,11 @@ from email.message import EmailMessage
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from five08.worker.mailbox_resume_ingest import ResumeAttachment, ResumeMailboxProcessor
+from five08.worker.mailbox_resume_ingest import (
+    ResumeAttachment,
+    ResumeMailboxProcessor,
+    _message_intake_kind,
+)
 
 
 class _MinimalProfile:
@@ -152,3 +156,21 @@ def test_candidate_email_from_extract_result_falls_back_to_additional_email() ->
     )
 
     assert result == "secondary@example.com"
+
+
+def test_intake_kind_routes_forwarded_intro_to_trusted_contact_job() -> None:
+    message = EmailMessage()
+    message["From"] = "Admin User <admin@508.dev>"
+    message["Subject"] = "Fwd: Introduction"
+    message.set_content(
+        "---------- Forwarded message ---------\n"
+        "From: Ada Lovelace <ada@example.com>\n"
+        "Subject: Introduction\n\n"
+        "I wanted to introduce Ada.\n"
+    )
+
+    assert _message_intake_kind(message, _build_settings()) == "trusted_intro_contact"
+
+    message["Delivered-To"] = "contacts@508.dev"
+
+    assert _message_intake_kind(message, _build_settings()) == "contact"

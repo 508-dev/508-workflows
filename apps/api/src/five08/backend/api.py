@@ -877,11 +877,11 @@ async def _email_resume_scheduler() -> None:
                 idempotency_key = (
                     message.message_id if message.message_id else message.message_num
                 )
-                job_function = (
-                    JOB_FUNCTIONS["process_contact_email_message_job"]
-                    if message.kind == "contact"
-                    else JOB_FUNCTIONS["process_mailbox_message_job"]
-                )
+                job_name = {
+                    "contact": "process_contact_email_message_job",
+                    "trusted_intro_contact": "process_trusted_intro_contact_job",
+                }.get(message.kind, "process_mailbox_message_job")
+                job_function = JOB_FUNCTIONS[job_name]
                 job = await asyncio.to_thread(
                     enqueue_job,
                     queue=queue,

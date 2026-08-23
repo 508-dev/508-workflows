@@ -18,7 +18,10 @@ from five08.worker.crm.intake_form_processor import IntakeFormProcessor
 from five08.worker.crm.people_sync import PeopleSyncProcessor
 from five08.worker.crm.processor import ContactSkillsProcessor
 from five08.worker.crm.resume_profile_processor import ResumeProfileProcessor
-from five08.worker.contact_email_ingest import ContactEmailCandidateProcessor
+from five08.worker.contact_email_ingest import (
+    ContactEmailCandidateProcessor,
+    TrustedIntroContactProcessor,
+)
 from five08.worker.erpnext_project_sync import ERPNextProjectSyncProcessor
 from five08.worker.mailbox_resume_ingest import ResumeMailboxProcessor
 from five08.worker.masking import mask_email
@@ -176,6 +179,35 @@ def process_contact_email_message_job(raw_message_b64: str) -> dict[str, Any]:
         }
 
 
+def process_trusted_intro_contact_job(raw_message_b64: str) -> dict[str, Any]:
+    """Autocreate or link one contact from an authorized forwarded introduction."""
+    try:
+        raw_message = base64.b64decode(raw_message_b64.encode("ascii"), validate=True)
+    except Exception as exc:
+        logger.warning(
+            "Skipping trusted introduction job due to invalid payload: %s", exc
+        )
+        return {
+            "candidate_id": None,
+            "crm_contact_id": None,
+            "action": None,
+            "skipped_reason": "invalid_message_payload",
+        }
+
+    try:
+        message = message_from_bytes(raw_message)
+        result = TrustedIntroContactProcessor(settings).process_message(message)
+        return result.__dict__
+    except Exception as exc:
+        logger.warning("Failed processing trusted introduction message: %s", exc)
+        return {
+            "candidate_id": None,
+            "crm_contact_id": None,
+            "action": None,
+            "skipped_reason": "message_processing_error",
+        }
+
+
 def sync_people_from_crm_job() -> dict[str, Any]:
     """Sync a full contacts page-set from CRM into the local people cache."""
     logger.info("Processing CRM people full-sync job")
@@ -266,6 +298,7 @@ JOB_FUNCTIONS: dict[str, Callable[..., dict[str, Any]]] = {
     process_intake_form_job.__name__: process_intake_form_job,
     process_mailbox_message_job.__name__: process_mailbox_message_job,
     process_contact_email_message_job.__name__: process_contact_email_message_job,
+    process_trusted_intro_contact_job.__name__: process_trusted_intro_contact_job,
     sync_people_from_crm_job.__name__: sync_people_from_crm_job,
     sync_person_from_crm_job.__name__: sync_person_from_crm_job,
     sync_projects_from_erpnext_job.__name__: sync_projects_from_erpnext_job,

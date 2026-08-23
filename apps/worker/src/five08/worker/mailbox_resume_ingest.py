@@ -24,7 +24,9 @@ from five08.clients.espo import EspoAPIError, EspoClient
 from five08.queue import get_postgres_connection
 from five08.worker.contact_email_ingest import (
     ContactEmailCandidateProcessor,
+    TrustedIntroContactProcessor,
     is_contact_intake_message,
+    is_forwarded_intro_message,
 )
 from five08.worker.config import WorkerSettings
 from five08.worker.crm.resume_profile_processor import ResumeProfileProcessor
@@ -60,6 +62,15 @@ class MailboxMessagePayload:
     message_id: str | None
     raw_message_b64: str
     kind: str
+
+
+def _message_intake_kind(message: Message, settings: WorkerSettings) -> str:
+    """Route explicit aliases before applying the trusted introduction heuristic."""
+    if is_contact_intake_message(message, settings):
+        return "contact"
+    if is_forwarded_intro_message(message):
+        return "trusted_intro_contact"
+    return "resume"
 
 
 class ResumeMailboxProcessor:
@@ -108,6 +119,10 @@ class ResumeMailboxProcessor:
                     message = email.message_from_bytes(raw_payload)
                     if is_contact_intake_message(message, self.settings):
                         result = ContactEmailCandidateProcessor(
+                            self.settings
+                        ).process_message(message)
+                    elif is_forwarded_intro_message(message):
+                        result = TrustedIntroContactProcessor(
                             self.settings
                         ).process_message(message)
                     else:
@@ -183,11 +198,7 @@ class ResumeMailboxProcessor:
                         message_num=num,
                         message_id=message_id,
                         raw_message_b64=base64.b64encode(raw_payload).decode("ascii"),
-                        kind=(
-                            "contact"
-                            if is_contact_intake_message(message, self.settings)
-                            else "resume"
-                        ),
+                        kind=_message_intake_kind(message, self.settings),
                     )
                 )
 
