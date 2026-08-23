@@ -196,10 +196,6 @@ class AgentOrchestrator:
                 message="Impersonated Discord requests cannot use agent tools",
             )
 
-        deterministic_response = self._plan_deterministic_workflow(text, context)
-        if deterministic_response is not None:
-            return deterministic_response
-
         explicit_memory_action = self._parse_memory_action(text)
         if explicit_memory_action is not None:
             if explicit_memory_action.tool_name == "memory_write.remember_fact":
@@ -332,6 +328,20 @@ class AgentOrchestrator:
             # retain their existing confirmation and policy controls without
             # disclosing the identifier to the external planner. Ambiguous
             # requests fail closed and ask for a supported explicit workflow.
+            if self._has_multiple_deterministic_workflows(text):
+                question = (
+                    "Please submit one supported workflow at a time when it "
+                    "contains email addresses or internal identifiers."
+                )
+                return AgentResponse(
+                    status="needs_clarification",
+                    message=(
+                        "I cannot send email addresses or internal identifiers to "
+                        "the model planner, and I will not partially run a "
+                        "compound request."
+                    ),
+                    clarification_question=question,
+                )
             action = self._parse_action(text)
             if action is None:
                 question = (
@@ -362,17 +372,18 @@ class AgentOrchestrator:
                 planner="deterministic_regex",
             )
 
+        deterministic_response = self._plan_deterministic_workflow(text, context)
+        if deterministic_response is not None:
+            return deterministic_response
+
         planner_context = self._planner_context_with_authorized_snippets(context)
-        planned_response = self._plan_with_model(
-            text,
-            planner_context,
-        )
+        planned_response = self._plan_with_model(text, planner_context)
         if planned_response is not None:
             return planned_response
 
         planner: LiteralPlanner = "deterministic_regex"
         planning_text = text
-        action = self._parse_action(text)
+        action: AgentToolAction | None = None
         if action is None and not re.search(
             r"\bcreate\s+(?:a\s+)?task\b", text, re.IGNORECASE
         ):
@@ -1054,82 +1065,21 @@ class AgentOrchestrator:
                 ),
             )
 
-        next_actions = [
-            AgentToolAction(
-                tool_name=draft_action.tool_name,
-                arguments=draft_action.arguments,
-                summary=draft_action.summary,
-            )
-            for draft_action in draft.actions
-        ]
-        if len(next_actions) != 1:
-            return AgentResponse(
-                status="needs_clarification",
-                results=results,
-                message=("I can run one bounded public-web research action at a time."),
-                clarification_question="What single public web page or search should I use next?",
-            )
-        for action in next_actions:
-            if not action.tool_name.startswith(_WEB_READ_TOOL_PREFIX):
-                return AgentResponse(
-                    status="needs_clarification",
-                    results=results,
-                    message=(
-                        "I completed the public research. Please make any internal "
-                        "or write workflow as a separate request."
-                    ),
-                    clarification_question=(
-                        "What separate internal or write action should I plan?"
-                    ),
-                )
-            if (
-                action.tool_name == "web_read.extract"
-                and not self._is_extract_from_prior_search_result(action, results)
-            ):
-                return AgentResponse(
-                    status="needs_clarification",
-                    results=results,
-                    message=(
-                        "I can only read a public page returned by this research "
-                        "search."
-                    ),
-                    clarification_question=(
-                        "Which result from the completed public search should I read?"
-                    ),
-                )
-            try:
-                self.registry.validate_planner_action(
-                    action.tool_name,
-                    action.arguments,
-                )
-            except (PermissionError, ValueError):
-                return AgentResponse(
-                    status="needs_clarification",
-                    results=results,
-                    message="I need a clearer public web research request.",
-                    clarification_question="What should I search for or read on the web?",
-                )
-            clarification = self._planner_action_clarification(action, context=context)
-            if clarification is not None:
-                return AgentResponse(
-                    status="needs_clarification",
-                    results=results,
-                    message=clarification,
-                    clarification_question=clarification,
-                )
-
-        return self._response_for_actions(
-            actions=next_actions,
-            context=context,
-            planning_text=planning_text,
-            planner="live_model",
-            model=result.model,
-            loop_state=_PlanningLoopState(
-                remaining_steps=remaining_steps - 1,
-                observations=observations,
-                results=results,
+        # Search results are untrusted external content. A model may summarize
+        # them, but it may not use them to choose another outbound search or an
+        # extraction target. The caller must explicitly select any follow-up
+        # URL or make a fresh public-web request.
+        return AgentResponse(
+            status="needs_clarification",
+            results=results,
+            message=(
+                "I completed the public research. To continue, choose a result "
+                "URL explicitly or make a new public web request."
             ),
-            deadline_monotonic=deadline_monotonic,
+            clarification_question=(
+                "Which public result URL should I read, or what should I search for "
+                "next?"
+            ),
         )
 
     def _planner_follow_up_budget_seconds(self) -> float:
@@ -1570,18 +1520,18 @@ class AgentOrchestrator:
             action = self._parse_github_issue(text)
             if action is not None:
                 return action
-        if re.search(r"\b(?:list|show)\s+(?:github|gh)\s+repositories\b", text, re.I):
-            return AgentToolAction(
-                tool_name="github_repository.list_repositories",
-                arguments={},
-                summary="List repositories selected for the GitHub App",
-            )
         web_action = self._parse_public_web_action(text)
         if web_action is not None:
             return web_action
         erp_action = self._parse_erp_read_action(text)
         if erp_action is not None:
             return erp_action
+        if re.search(r"\b(?:list|show)\s+(?:github|gh)\s+repositories\b", text, re.I):
+            return AgentToolAction(
+                tool_name="github_repository.list_repositories",
+                arguments={},
+                summary="List repositories selected for the GitHub App",
+            )
         if any(
             keyword in lowered
             for keyword in ["find task", "search task", "list task", "show task"]

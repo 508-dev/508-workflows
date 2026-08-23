@@ -558,6 +558,14 @@ def enqueue_job(
     )
     if created:
         queue.enqueue(job_id, run_at=run_after)
+    else:
+        # A process can persist the idempotent row and fail before its first
+        # broker delivery. Re-deliver only still-queued work; running and
+        # retrying jobs already have an owner, and terminal jobs must never be
+        # revived implicitly.
+        existing = get_job(settings, job_id)
+        if existing is not None and existing.status is JobStatus.QUEUED:
+            queue.enqueue(job_id, run_at=existing.run_after)
     return EnqueuedJob(id=job_id, created=created)
 
 

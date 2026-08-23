@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from time import monotonic
 from threading import Event
 from types import SimpleNamespace
-from typing import cast
+from typing import Callable, cast
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -35,6 +35,7 @@ from five08.agent.schedules import (
     AgentScheduleDiscordDelivery,
     AgentScheduleExecutionMode,
     AgentScheduleRecord,
+    AgentScheduleRunDeliveryStatus,
     AgentScheduleRunRecord,
     AgentScheduleRunStatus,
     AgentScheduleRunTrigger,
@@ -95,6 +96,9 @@ def _run() -> AgentScheduleRunRecord:
         finished_at=None,
         output=None,
         error=None,
+        delivery_status=AgentScheduleRunDeliveryStatus.PENDING,
+        delivery_message_id=None,
+        delivery_claimed_at=None,
         created_at=now,
         updated_at=now,
         execution_token="00000000-0000-0000-0000-000000000001",
@@ -1573,6 +1577,8 @@ async def test_schedule_execution_reclaims_only_a_stale_running_run(
         claim_run.call_args.kwargs["reclaim_running_before"]
         >= stale_running_run.started_at
     )
+
+
 @pytest.mark.asyncio
 async def test_schedule_execution_never_posts_a_report_twice_after_recorded_delivery(
     monkeypatch: pytest.MonkeyPatch,
@@ -1657,8 +1663,10 @@ async def test_schedule_execution_never_posts_a_report_twice_after_recorded_deli
     assert response["status"] == "succeeded"
     assert response["delivery_status"] == "already_posted"
     post_report.assert_not_awaited()
-    run_synchronously.assert_awaited_once()
-    assert callable(run_synchronously.await_args.kwargs["callback"])
+    assert run_synchronously.await_count == 2
+    assert all(
+        callable(call.kwargs["callback"]) for call in run_synchronously.await_args_list
+    )
     orchestrator.execute_plan.assert_not_called()
     assert complete_run.call_args.kwargs["status"] is AgentScheduleRunStatus.SUCCEEDED
     assert (
@@ -1750,6 +1758,118 @@ async def test_frozen_schedule_execution_records_bounded_control_flow_outcomes(
     assert (
         complete_run.call_args.kwargs["execution_token"] == running_run.execution_token
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "summary_failure",
+    [
+        api.AgentScheduleExecutionCapacityError("scheduled execution capacity is busy"),
+        TimeoutError("scheduled execution timed out"),
+    ],
+)
+async def test_frozen_schedule_summary_uses_bounded_executor_and_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+    summary_failure: Exception,
+) -> None:
+    """An optional model summary cannot outlive the schedule's executor budget."""
+
+    queued_run = _run()
+    running_run = replace(
+        queued_run,
+        status=AgentScheduleRunStatus.RUNNING,
+        started_at=queued_run.occurrence_at,
+    )
+    claimed_delivery = replace(
+        running_run,
+        delivery_status=AgentScheduleRunDeliveryStatus.CLAIMED,
+        delivery_claimed_at=running_run.occurrence_at,
+    )
+    posted_delivery = replace(
+        claimed_delivery,
+        delivery_status=AgentScheduleRunDeliveryStatus.POSTED,
+        delivery_message_id="message-1",
+    )
+    completed_run = replace(
+        posted_delivery,
+        status=AgentScheduleRunStatus.SUCCEEDED,
+        finished_at=running_run.occurrence_at,
+    )
+    schedule = _schedule()
+    schedule = replace(
+        schedule,
+        definition=schedule.definition.model_copy(
+            update={
+                "summary_mode": "model_for_public_data",
+                "sources_are_public": True,
+            }
+        ),
+    )
+    context = AgentIdentityContext(
+        discord_user_id="1001",
+        organization_id="1000",
+        guild_id="1000",
+        roles=["Admin"],
+    )
+    bound_calls: list[dict[str, object]] = []
+    execution_results = [
+        AgentExecutionResult(
+            tool_name="github_issue.search_issues",
+            status="succeeded",
+            result={"issues": [], "total_count": 0},
+        )
+    ]
+
+    async def refreshed_context(*_args: object, **_kwargs: object):
+        return context, None, 200
+
+    async def bounded_execution(**kwargs: object) -> object:
+        bound_calls.append(kwargs)
+        if len(bound_calls) == 1:
+            callback = cast(Callable[[], object], kwargs["callback"])
+            return callback()
+        raise summary_failure
+
+    post_report = AsyncMock(return_value=({"message_id": "message-1"}, 200))
+    complete_run = Mock(return_value=completed_run)
+    orchestrator = SimpleNamespace(
+        policy=SimpleNamespace(
+            scopes_for_context=Mock(return_value=set(schedule.allowed_scopes))
+        ),
+        execute_plan=Mock(return_value=execution_results),
+    )
+    monkeypatch.setattr(api, "get_agent_schedule_run", Mock(return_value=queued_run))
+    monkeypatch.setattr(api, "claim_agent_schedule_run", Mock(return_value=running_run))
+    monkeypatch.setattr(api, "get_agent_schedule", Mock(return_value=schedule))
+    monkeypatch.setattr(api, "_fresh_agent_schedule_context", refreshed_context)
+    monkeypatch.setattr(api, "_get_agent_orchestrator", lambda: orchestrator)
+    monkeypatch.setattr(api, "_agent_schedule_plan", Mock(return_value=object()))
+    monkeypatch.setattr(api, "_run_agent_schedule_sync_bounded", bounded_execution)
+    monkeypatch.setattr(
+        api,
+        "claim_agent_schedule_run_delivery",
+        Mock(return_value=claimed_delivery),
+    )
+    monkeypatch.setattr(
+        api,
+        "mark_agent_schedule_run_delivery_posted",
+        Mock(return_value=posted_delivery),
+    )
+    monkeypatch.setattr(api, "complete_agent_schedule_run", complete_run)
+    monkeypatch.setattr(api, "_post_agent_schedule_report_to_bot", post_report)
+
+    response, status_code = await api._execute_agent_schedule_run(
+        cast(Request, SimpleNamespace()),
+        run_id=queued_run.id,
+    )
+
+    assert status_code == 200
+    assert response["status"] == "succeeded"
+    assert len(bound_calls) == 2
+    assert bound_calls[0]["deadline_monotonic"] == bound_calls[1]["deadline_monotonic"]
+    assert callable(bound_calls[1]["callback"])
+    assert "Scheduled report" in post_report.await_args.kwargs["content"]
+    complete_run.assert_called_once()
 
 
 @pytest.mark.asyncio

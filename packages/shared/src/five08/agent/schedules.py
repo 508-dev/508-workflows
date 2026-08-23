@@ -98,6 +98,15 @@ class AgentScheduleRunStatus(StrEnum):
     SKIPPED = "skipped"
 
 
+class AgentScheduleRunDeliveryStatus(StrEnum):
+    """Durable report-delivery state for one schedule occurrence."""
+
+    PENDING = "pending"
+    CLAIMED = "claimed"
+    POSTED = "posted"
+    UNKNOWN = "unknown"
+
+
 class AgentScheduleRunTrigger(StrEnum):
     """Source that created one schedule run."""
 
@@ -326,6 +335,9 @@ class AgentScheduleRunRecord:
     finished_at: datetime | None
     output: str | None
     error: str | None
+    delivery_status: AgentScheduleRunDeliveryStatus
+    delivery_message_id: str | None
+    delivery_claimed_at: datetime | None
     created_at: datetime
     updated_at: datetime
     # Each successful claim assigns a new durable execution lease.  It is kept
@@ -1593,6 +1605,15 @@ def _as_schedule_run_record(row: dict[str, Any]) -> AgentScheduleRunRecord:
         finished_at=_nullable_utc_datetime(row.get("finished_at")),
         output=str(row["output"]) if row.get("output") is not None else None,
         error=str(row["error"]) if row.get("error") is not None else None,
+        delivery_status=AgentScheduleRunDeliveryStatus(
+            str(row.get("delivery_status") or AgentScheduleRunDeliveryStatus.PENDING)
+        ),
+        delivery_message_id=(
+            str(row["delivery_message_id"])
+            if row.get("delivery_message_id") is not None
+            else None
+        ),
+        delivery_claimed_at=_nullable_utc_datetime(row.get("delivery_claimed_at")),
         created_at=_utc_datetime(row["created_at"]),
         updated_at=_utc_datetime(row["updated_at"]),
         execution_token=(

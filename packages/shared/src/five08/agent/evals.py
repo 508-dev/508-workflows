@@ -303,8 +303,6 @@ class LivePlannerDraft(BaseModel):
 
         if self.status == "planned" and not self.actions:
             raise ValueError("planned drafts require at least one action")
-        if self.status == "needs_clarification" and not self.clarification_question:
-            raise ValueError("clarification drafts require a question")
         if self.status == "answer":
             if not self.answer or not self.answer.strip():
                 raise ValueError("answer drafts require an answer")
@@ -664,9 +662,26 @@ def run_fixture_with_live_planner(
     )
     message = fixture.request.current_message()
     context = orchestrator._load_request_context(context)
-    deterministic_response = orchestrator._plan_deterministic_workflow(
-        message.strip(), context
-    )
+    # Mirror the production gateway's outer authorization checks before
+    # choosing the deterministic route. Calling the helper directly is useful
+    # here because an eval should still probe the provider for deterministic
+    # scenarios, but it must not bypass the gateway's fail-closed role guard.
+    if not orchestrator.policy.scopes_for_context(context):
+        deterministic_response: AgentResponse | None = AgentResponse(
+            status="denied",
+            message=(
+                "Your current Discord roles do not grant access to agent workflows."
+            ),
+        )
+    elif context.impersonation:
+        deterministic_response = AgentResponse(
+            status="denied",
+            message="Impersonated Discord requests cannot use agent tools",
+        )
+    else:
+        deterministic_response = orchestrator._plan_deterministic_workflow(
+            message.strip(), context
+        )
 
     # Probe the provider even for deterministic routes so its raw semantic
     # quality remains observable, but always execute the production routing
@@ -1215,13 +1230,6 @@ def _response_from_live_draft(
             status="failed",
             message=f"Live planner failed: {parse_error or 'unknown error'}",
         )
-    resolved_member_agreement = orchestrator._plan_member_agreement_from_crm(
-        message,
-        context,
-        planner="live_model",
-    )
-    if resolved_member_agreement is not None:
-        return resolved_member_agreement
     if draft.status == "answer":
         chat_decision = orchestrator.policy.authorize_chat(context=context)
         if not chat_decision.allowed:
@@ -1236,21 +1244,13 @@ def _response_from_live_draft(
                 clarification_question="What read-only question or workflow should I run?",
             )
         return AgentResponse(status="executed", message=draft.answer or "")
-    if draft.status == "needs_clarification":
-        fallback_action = _deterministic_live_planner_fallback(
-            orchestrator=orchestrator,
-            message=message,
-            context=context,
+    if draft.status == "needs_clarification" or not draft.actions:
+        question = draft.clarification_question or "What should I do next?"
+        return AgentResponse(
+            status="needs_clarification",
+            message=question,
+            clarification_question=question,
         )
-        if fallback_action is not None:
-            actions = [fallback_action]
-        else:
-            question = draft.clarification_question or "What should I do next?"
-            return AgentResponse(
-                status="needs_clarification",
-                message=question,
-                clarification_question=question,
-            )
     else:
         actions = [
             AgentToolAction(
@@ -1355,18 +1355,6 @@ def _response_from_live_draft(
         results=results,
         message=orchestrator._execution_message(results),
     )
-
-
-def _deterministic_live_planner_fallback(
-    *,
-    orchestrator: AgentOrchestrator,
-    message: str,
-    context: AgentIdentityContext,
-) -> AgentToolAction | None:
-    action = orchestrator._deterministic_action_for_model_fallback(message, context)
-    if action is not None:
-        action.summary = action.summary or f"Call {action.tool_name}"
-    return action
 
 
 def _live_model_selection(

@@ -941,8 +941,13 @@ class ToolRegistry:
         if tool_name == "web_read.search":
             _validate_planner_web_search_arguments(arguments)
         if tool_name == "web_read.extract":
+            url = str(arguments.get("url") or "").strip()
+            if contains_private_agent_identifier(url):
+                raise PermissionError(
+                    "Public web extraction URLs cannot contain internal record identifiers"
+                )
             try:
-                validate_public_https_url_shape(str(arguments.get("url") or ""))
+                validate_public_https_url_shape(url)
             except WebResearchValidationError as exc:
                 raise ValueError(str(exc)) from exc
         _validate_planner_argument_value(arguments)
@@ -1701,6 +1706,10 @@ class ToolRegistry:
         url = str(arguments.get("url") or "").strip()
         if not url:
             raise ValueError("Public web URL is required")
+        if contains_private_agent_identifier(url):
+            raise PermissionError(
+                "Public web extraction URLs cannot contain internal record identifiers"
+            )
         try:
             url = validate_public_https_url(url)
         except WebResearchValidationError as exc:

@@ -7,8 +7,10 @@ from io import StringIO
 from pathlib import Path
 from types import ModuleType
 
+from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
+from alembic.script import ScriptDirectory
 
 
 def _load_memory_jsonb_alignment_migration() -> ModuleType:
@@ -44,3 +46,14 @@ def test_memory_jsonb_alignment_downgrade_keeps_newly_wide_rows() -> None:
     assert "DROP CONSTRAINT ck_agent_memory_facts_value_json_size" in sql
     assert "octet_length(value_json::text) <= 8192" in sql
     assert "NOT VALID" in sql
+
+
+def test_worker_migrations_have_one_head() -> None:
+    """Backend startup can upgrade worker migrations without an ambiguous head."""
+
+    repository_root = Path(__file__).resolve().parents[2]
+    migration_path = repository_root / "apps/worker/src/five08/worker/migrations"
+    config = Config(toml_file=str(repository_root / "apps/worker/pyproject.toml"))
+    config.set_main_option("script_location", str(migration_path))
+
+    assert len(ScriptDirectory.from_config(config).get_heads()) == 1

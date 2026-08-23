@@ -48,6 +48,8 @@ _ENGINEER_SCOPES = frozenset(
         "project:read",
         "github:issue:read",
         "github:issue:create",
+        "github:repository:configured:read",
+        "github:repository:configured:write",
         "github:pr:create",
         "worker:job:rerun_dev",
         "context:read_current_thread",
@@ -63,6 +65,13 @@ _STEERING_COMMITTEE_SCOPES = frozenset(
         "task:update",
         "task:update_own",
         "task:assign",
+        "github:issue:read",
+        "github:issue:create",
+        "github:pr:create",
+        "github:repository:all:read",
+        "github:repository:all:write",
+        "github:project:read",
+        "github:project:write",
         "crm:contact:read",
         "crm:contact:update",
         "docuseal:submission:create",
@@ -195,6 +204,11 @@ class PolicyEngine:
         allowed_guild_ids: Collection[str] = (),
         require_guild_binding: bool = False,
         allow_role_name_fallback: bool = True,
+        github_default_repo: str = "508-dev/todos",
+        github_allowed_repos: str = "",
+        github_steering_all_installed_repos: bool = True,
+        github_steering_extra_repos: str = "",
+        github_app_configured: bool = False,
     ) -> None:
         self._allowed_guild_ids = frozenset(
             str(guild_id).strip() for guild_id in allowed_guild_ids
@@ -210,51 +224,7 @@ class PolicyEngine:
         }
         self._require_guild_binding = require_guild_binding
         self._allow_role_name_fallback = allow_role_name_fallback
-
-    @classmethod
-    def from_settings(cls, settings: SharedSettings) -> PolicyEngine:
-        """Build the production policy from immutable Discord ID bindings."""
-
-        environment = settings.environment.strip().casefold()
-        local_environments = {"local", "development", "dev", "test", "testing"}
-        configured_guild_id = str(settings.discord_server_id or "").strip()
-        allowed_guild_ids = (
-            frozenset({configured_guild_id})
-            if configured_guild_id.isdecimal() and int(configured_guild_id) > 0
-            else frozenset()
-        )
-        return cls(
-            role_id_bindings=settings.agent_discord_role_id_bindings,
-            allowed_guild_ids=allowed_guild_ids,
-            # Production is intentionally unusable until an explicit guild
-            # allowlist is configured alongside the role-ID bundle mappings.
-            require_guild_binding=environment not in local_environments,
-            allow_role_name_fallback=settings.agent_role_name_fallback_enabled,
-        )
-
-    def guild_is_allowed(self, guild_id: str | None) -> bool:
-        """Return whether a Discord guild may reach this policy instance."""
-
-        normalized_guild_id = (guild_id or "").strip()
-        if self._allowed_guild_ids:
-            return normalized_guild_id in self._allowed_guild_ids
-        return not self._require_guild_binding
-
-    def __init__(
-        self,
-        *,
-        github_default_repo: str = "508-dev/todos",
-        github_member_extra_repos: str = "",
-        github_allowed_repos: str = "",
-        github_steering_all_installed_repos: bool = True,
-        github_steering_extra_repos: str = "",
-        github_app_configured: bool = False,
-    ) -> None:
         self.github_default_repo = github_default_repo
-        self.github_member_repositories = _repository_set(
-            github_default_repo,
-            github_member_extra_repos,
-        )
         self.github_configured_repositories = _repository_set(
             github_default_repo,
             github_allowed_repos,
@@ -267,26 +237,60 @@ class PolicyEngine:
         self.github_app_configured = github_app_configured
 
     @classmethod
-    def from_runtime_config(cls, config: ToolRuntimeConfig) -> "PolicyEngine":
-        """Build repository-aware authorization rules from live tool config."""
+    def from_settings(
+        cls,
+        settings: SharedSettings,
+        *,
+        runtime_config: ToolRuntimeConfig | None = None,
+    ) -> PolicyEngine:
+        """Build the production policy from immutable Discord ID bindings."""
 
+        environment = settings.environment.strip().casefold()
+        local_environments = {"local", "development", "dev", "test", "testing"}
+        configured_guild_id = str(settings.discord_server_id or "").strip()
+        allowed_guild_ids = (
+            frozenset({configured_guild_id})
+            if configured_guild_id.isdecimal() and int(configured_guild_id) > 0
+            else frozenset()
+        )
+        config = runtime_config or ToolRuntimeConfig.from_settings(settings)
         return cls(
+            role_id_bindings=settings.agent_discord_role_id_bindings,
+            allowed_guild_ids=allowed_guild_ids,
+            # Production is intentionally unusable until an explicit guild
+            # allowlist is configured alongside the role-ID bundle mappings.
+            require_guild_binding=environment not in local_environments,
+            allow_role_name_fallback=settings.agent_role_name_fallback_enabled,
             github_default_repo=config.github_default_repo,
-            github_member_extra_repos=config.github_member_extra_repos,
             github_allowed_repos=config.github_allowed_repos,
             github_steering_all_installed_repos=(
                 config.github_steering_all_installed_repos
             ),
             github_steering_extra_repos=config.github_steering_extra_repos,
-            github_app_configured=all(
-                bool(str(value or "").strip())
-                for value in (
-                    config.github_app_client_id,
-                    config.github_app_installation_id,
-                    config.github_app_private_key,
-                )
-            ),
+            github_app_configured=_github_app_is_configured(config),
         )
+
+    @classmethod
+    def from_runtime_config(cls, config: ToolRuntimeConfig) -> PolicyEngine:
+        """Build repository-aware authorization rules from live tool config."""
+
+        return cls(
+            github_default_repo=config.github_default_repo,
+            github_allowed_repos=config.github_allowed_repos,
+            github_steering_all_installed_repos=(
+                config.github_steering_all_installed_repos
+            ),
+            github_steering_extra_repos=config.github_steering_extra_repos,
+            github_app_configured=_github_app_is_configured(config),
+        )
+
+    def guild_is_allowed(self, guild_id: str | None) -> bool:
+        """Return whether a Discord guild may reach this policy instance."""
+
+        normalized_guild_id = (guild_id or "").strip()
+        if self._allowed_guild_ids:
+            return normalized_guild_id in self._allowed_guild_ids
+        return not self._require_guild_binding
 
     def scopes_for_context(self, context: AgentIdentityContext) -> set[str]:
         if not self.guild_is_allowed(context.guild_id):
@@ -416,25 +420,26 @@ class PolicyEngine:
         return required_scopes
 
     def _github_issue_scope(self, *, repository: object, write: bool) -> str:
+        """Return the narrowest repository scope required for an issue action."""
+
         normalized_repository = _repository_key(repository) or _repository_key(
             self.github_default_repo
         )
         suffix = "write" if write else "read"
-        if normalized_repository in self.github_member_repositories:
-            return f"github:repository:member:{suffix}"
-        if (
-            not self.github_app_configured
-            and normalized_repository in self.github_configured_repositories
-        ):
-            return f"github:repository:configured:{suffix}"
-        if (
-            self.github_app_configured and self.github_steering_all_installed_repos
-        ) or normalized_repository in self.github_steering_repositories:
-            return f"github:repository:all:{suffix}"
-        # During migration, preserve existing Engineer behavior for legacy
-        # token-backed installs. Execution still enforces GITHUB_ALLOWED_REPOS.
+        # Legacy token installs have an explicit repository allowlist. Keep the
+        # existing Engineer grants working during the GitHub App migration.
         if not self.github_app_configured:
-            return "github:issue:create" if write else "github:issue:read"
+            if normalized_repository in self.github_configured_repositories:
+                return "github:issue:create" if write else "github:issue:read"
+            return f"github:repository:configured:{suffix}"
+        # App installations are selected at execution time. Only Steering and
+        # Admin may use the installation-wide grant; a member never receives
+        # it merely by belonging to the Discord server.
+        if (
+            self.github_steering_all_installed_repos
+            or normalized_repository in self.github_steering_repositories
+        ):
+            return f"github:repository:all:{suffix}"
         return f"github:repository:steering:{suffix}"
 
     def authorize_context_read(
@@ -473,6 +478,17 @@ class PolicyEngine:
         if visibility == "project":
             return context.response_destination_visibility in {"private", "restricted"}
         return True
+
+
+def _github_app_is_configured(config: ToolRuntimeConfig) -> bool:
+    return all(
+        bool(str(value or "").strip())
+        for value in (
+            config.github_app_client_id,
+            config.github_app_installation_id,
+            config.github_app_private_key,
+        )
+    )
 
 
 def _repository_set(*values: str | None) -> set[str]:

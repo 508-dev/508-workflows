@@ -9749,6 +9749,11 @@ def _agent_schedule_run_payload(run: AgentScheduleRunRecord) -> dict[str, Any]:
         else None,
         "output": run.output,
         "error": run.error,
+        "delivery_status": run.delivery_status.value,
+        "delivery_message_id": run.delivery_message_id,
+        "delivery_claimed_at": run.delivery_claimed_at.isoformat()
+        if run.delivery_claimed_at is not None
+        else None,
         "created_at": run.created_at.isoformat(),
         "updated_at": run.updated_at.isoformat(),
     }
@@ -10148,6 +10153,11 @@ def _run_agent_schedule_loop(
         draft = getattr(planner_result, "draft", None)
         status = str(getattr(draft, "status", "") or "")
         if status == "answer":
+            if not any(result.status == "succeeded" for result in results):
+                return _AgentScheduleLoopOutcome(
+                    results=results,
+                    error="scheduled_planner_answer_without_observation",
+                )
             answer = str(getattr(draft, "answer", "") or "").strip()
             return _AgentScheduleLoopOutcome(results=results, answer=answer or None)
         if status == "needs_clarification":
@@ -11083,13 +11093,33 @@ async def _execute_agent_schedule_run(
         }, 502
 
     if schedule.definition.execution_mode is AgentScheduleExecutionMode.FROZEN_ACTIONS:
-        model_summary = await asyncio.to_thread(
-            _model_agent_schedule_summary,
-            orchestrator=orchestrator,
-            schedule=schedule,
-            context=context,
-            results=results,
-        )
+        try:
+            model_summary = cast(
+                str | None,
+                await _run_agent_schedule_sync_bounded(
+                    callback=partial(
+                        _model_agent_schedule_summary,
+                        orchestrator=orchestrator,
+                        schedule=schedule,
+                        context=context,
+                        results=results,
+                    ),
+                    deadline_monotonic=deadline,
+                ),
+            )
+        except (AgentScheduleExecutionCapacityError, TimeoutError) as exc:
+            # The read-only tool observations are already available. Do not
+            # let an optional public-data rewrite hold up report delivery when
+            # the isolated schedule executor is saturated or reaches the
+            # schedule's shared deadline.
+            logger.warning(
+                "Falling back to deterministic schedule report after model summary "
+                "limit schedule_id=%s run_id=%s error=%s",
+                schedule.id,
+                run.id,
+                type(exc).__name__,
+            )
+            model_summary = None
     report_content = _agent_schedule_report_content(
         schedule=schedule,
         results=results,
@@ -11231,20 +11261,19 @@ async def _execute_agent_schedule_run(
             run_id=run.id,
             execution_token=execution_token,
         )
-        delivery_error = "report_delivery_outcome_unknown"
         completed = await asyncio.to_thread(
             complete_agent_schedule_run,
             settings,
             run_id=run.id,
             execution_token=execution_token,
             status=AgentScheduleRunStatus.FAILED,
-            error=delivery_error,
+            error="report_delivery_outcome_unknown",
         )
         return {
             "status": AgentScheduleRunStatus.FAILED.value,
             "schedule_id": schedule.id,
             "delivery_status": "outcome_unknown",
-            "error": delivery_error,
+            "error": "report_delivery_outcome_unknown",
             "run": _agent_schedule_run_payload(completed or run),
         }, 200
 
@@ -11326,7 +11355,7 @@ async def _execute_agent_schedule_run(
         "schedule_id": schedule.id,
         "delivery_status": str(delivery.get("status") or "posted"),
         "delivery": delivery,
-        "run": _agent_schedule_run_payload(completed or run),
+        "run": _agent_schedule_run_payload(completed or recorded_delivery),
     }, 200
 
 
@@ -12331,7 +12360,7 @@ def _claim_pending_agent_plan_durably(
                 if isinstance(stored_expiry, datetime)
                 else _normalized_agent_plan_expiry(plan.expires_at)
             )
-            if expires_at is not None and now > expires_at:
+            if expires_at is not None and now >= expires_at:
                 cursor.execute(
                     "DELETE FROM agent_pending_plans WHERE plan_id = %s",
                     (plan_id,),
