@@ -22,6 +22,10 @@ from five08.audit import (
 )
 from five08.clients.espo import EspoAPIError, EspoClient
 from five08.queue import get_postgres_connection
+from five08.worker.contact_email_ingest import (
+    ContactEmailCandidateProcessor,
+    is_contact_intake_message,
+)
 from five08.worker.config import WorkerSettings
 from five08.worker.crm.resume_profile_processor import ResumeProfileProcessor
 
@@ -55,6 +59,7 @@ class MailboxMessagePayload:
     message_num: str
     message_id: str | None
     raw_message_b64: str
+    kind: str
 
 
 class ResumeMailboxProcessor:
@@ -97,7 +102,16 @@ class ResumeMailboxProcessor:
                     continue
 
                 try:
-                    result = self._process_fetched_message(data)
+                    raw_payload = self._extract_message_payload(data)
+                    if raw_payload is None:
+                        continue
+                    message = email.message_from_bytes(raw_payload)
+                    if is_contact_intake_message(message, self.settings):
+                        result = ContactEmailCandidateProcessor(
+                            self.settings
+                        ).process_message(message)
+                    else:
+                        result = self.process_message(message)
                 except Exception as exc:
                     logger.exception(
                         "Failed processing mailbox message num=%s error=%s", num, exc
@@ -109,8 +123,11 @@ class ResumeMailboxProcessor:
                         skipped_reason="message_processing_error",
                     )
 
-                processed_total += result.processed_attachments
-                if result.processed_attachments > 0 or result.skipped_reason is None:
+                processed_total += getattr(result, "processed_attachments", 0)
+                if (
+                    getattr(result, "processed_attachments", 0) > 0
+                    or result.skipped_reason is None
+                ):
                     mail.store(num, "+FLAGS", "\\Seen")
 
             return processed_total
@@ -166,6 +183,11 @@ class ResumeMailboxProcessor:
                         message_num=num,
                         message_id=message_id,
                         raw_message_b64=base64.b64encode(raw_payload).decode("ascii"),
+                        kind=(
+                            "contact"
+                            if is_contact_intake_message(message, self.settings)
+                            else "resume"
+                        ),
                     )
                 )
 

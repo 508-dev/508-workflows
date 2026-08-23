@@ -61,6 +61,11 @@ import {
   type JobPostChannel,
   type JobPostChannelTag,
 } from "@/views/configuration-view"
+import {
+  type ContactEmailCandidate,
+  type ContactEmailCandidateDecision,
+  ContactEmailCandidatesPanel,
+} from "@/views/contact-email-candidates"
 import { ContactEmailIntakePanel } from "@/views/contact-email-intake-panel"
 import {
   type NewsletterStatus,
@@ -890,6 +895,7 @@ function App() {
   const [newsletterSuppressions, setNewsletterSuppressions] = useState<NewsletterSuppression[]>([])
   const [newsletterStatus, setNewsletterStatus] = useState<NewsletterStatus | null>(null)
   const [onboarding, setOnboarding] = useState<Person[]>([])
+  const [contactEmailCandidates, setContactEmailCandidates] = useState<ContactEmailCandidate[]>([])
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([])
   const [agentReport, setAgentReport] = useState<AgentReport | null>(null)
   const [configurationItems, setConfigurationItems] = useState<ConfigurationItem[]>([])
@@ -1917,12 +1923,51 @@ function App() {
   async function loadOnboarding() {
     setBusy("onboarding", true)
     try {
-      const payload = await requestJson<Person[]>(onboardingUrl())
-      setOnboarding(payload)
+      const [peoplePayload, candidatesPayload] = await Promise.all([
+        requestJson<Person[]>(onboardingUrl()),
+        requestJson<ContactEmailCandidate[]>("/dashboard/api/onboarding/contact-candidates"),
+      ])
+      setOnboarding(peoplePayload)
+      setContactEmailCandidates(candidatesPayload)
     } catch (error) {
       showError(error, "Unable to load onboarding")
     } finally {
       setBusy("onboarding", false)
+    }
+  }
+
+  async function reviewContactEmailCandidate(
+    candidate: ContactEmailCandidate,
+    decision: ContactEmailCandidateDecision,
+  ) {
+    const key = `contact-email-candidate:${candidate.id}`
+    setBusy(key, true)
+    try {
+      const result = await requestJson<ContactEmailCandidate & { crm_action?: string }>(
+        "/dashboard/api/onboarding/contact-candidates/" +
+          encodeURIComponent(candidate.id) +
+          "/review",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(decision),
+        },
+      )
+      setContactEmailCandidates((current) =>
+        current.filter((currentCandidate) => currentCandidate.id !== result.id),
+      )
+      showToast(
+        decision.decision === "dismiss"
+          ? "Dismissed contact candidate"
+          : result.crm_action === "linked_existing"
+            ? "Linked existing CRM contact"
+            : "Created CRM contact",
+        "ok",
+      )
+    } catch (error) {
+      showError(error, "Unable to review contact candidate")
+    } finally {
+      setBusy(key, false)
     }
   }
 
@@ -2869,6 +2914,7 @@ function App() {
           {view === "onboarding" ? (
             <OnboardingView
               people={sortedOnboarding}
+              contactEmailCandidates={contactEmailCandidates}
               sort={sort.onboarding}
               loading={loading}
               onboardingQuery={onboardingQuery}
@@ -2885,6 +2931,7 @@ function App() {
               onDraftEmail={draftOnboardingEmail}
               onSendEmail={sendOnboardingEmail}
               onSetupEngineer={setupEngineer}
+              onReviewContactEmailCandidate={reviewContactEmailCandidate}
               setOnboardingQuery={setOnboardingQuery}
               setOnboardingState={setOnboardingState}
               setOnboarderFilter={setOnboarderFilter}
@@ -6727,6 +6774,7 @@ function PeopleView(props: {
 
 function OnboardingView(props: {
   people: Person[]
+  contactEmailCandidates: ContactEmailCandidate[]
   sort: { key: string; direction: SortDirection }
   loading: Record<string, boolean>
   canWrite: boolean
@@ -6751,6 +6799,10 @@ function OnboardingView(props: {
     markdownBody: string,
   ) => Promise<OnboardingEmailDraft | null>
   onSetupEngineer: (payload: EngineerSetupRequest) => Promise<EngineerSetupResult | null>
+  onReviewContactEmailCandidate: (
+    candidate: ContactEmailCandidate,
+    decision: ContactEmailCandidateDecision,
+  ) => void
   canConfigure: boolean
   onOpenConfiguration: () => void
   setOnboardingQuery: (value: string) => void
@@ -6767,6 +6819,17 @@ function OnboardingView(props: {
   return (
     <>
       <ContactEmailIntakePanel />
+      <ContactEmailCandidatesPanel
+        candidates={props.contactEmailCandidates}
+        canWrite={props.canWrite}
+        loading={
+          props.loading.onboarding ||
+          Object.keys(props.loading).some(
+            (key) => key.startsWith("contact-email-candidate:") && props.loading[key],
+          )
+        }
+        onReview={props.onReviewContactEmailCandidate}
+      />
       {props.canWrite ? (
         <EngineerSetupPanel loading={props.loading.engineerSetup} onSetup={props.onSetupEngineer} />
       ) : null}

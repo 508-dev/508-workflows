@@ -495,6 +495,13 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
                 body=json.dumps(_onboarding_payload()),
             )
 
+        def contact_candidates_route(route: Any) -> None:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps([]),
+            )
+
         def assign_onboarder_route(route: Any) -> None:
             assign_onboarder_requested.set()
             route.fulfill(
@@ -742,6 +749,10 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
         page.route(
             "**/dashboard/api/onboarding/contact-prospect-1/status",
             update_onboarding_status_route,
+        )
+        page.route(
+            "**/dashboard/api/onboarding/contact-candidates",
+            contact_candidates_route,
         )
         page.route("**/dashboard/api/onboarding?*", onboarding_route)
         page.route("**/dashboard/api/people?*", people_route)

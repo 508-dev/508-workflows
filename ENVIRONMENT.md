@@ -142,6 +142,9 @@ Pydantic import errors.
 - `Required when EMAIL_RESUME_INTAKE_ENABLED=true`: `EMAIL_USERNAME`, `EMAIL_PASSWORD`, `IMAP_SERVER`
 - Note: resume intake writes LinkedIn URLs to `cLinkedIn`, leaves the intake-completed field unset, and matches resume filenames using `resume,cv,curriculum`.
 
+- Optional: CONTACT_EMAIL_INTAKE_ADDRESS (default: contacts@508.dev; only messages with this value in Delivered-To or X-Original-To become dashboard contact candidates).
+- Note: mail not delivery-addressed to CONTACT_EMAIL_INTAKE_ADDRESS stays on the existing resume intake path. Contact candidates are stored for dashboard approval and only create or update EspoCRM after an explicit review action.
+
 ## Onboarding Email Sending
 
 - `Optional`: `ONBOARDING_EMAIL_SMTP_SERVER` (dashboard-configurable; falls back to `SMTP_SERVER`; for Migadu use `smtp.migadu.com`)

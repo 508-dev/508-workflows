@@ -36,6 +36,8 @@ class BackendRouteSurface(Protocol):
     dashboard_audit_events_handler: RouteHandler
     dashboard_bulk_update_projects_handler: RouteHandler
     dashboard_configuration_handler: RouteHandler
+    dashboard_contact_email_candidates_handler: RouteHandler
+    dashboard_review_contact_email_candidate_handler: RouteHandler
     dashboard_create_project_handler: RouteHandler
     dashboard_erpnext_account_managers_handler: RouteHandler
     dashboard_erpnext_contacts_handler: RouteHandler
@@ -117,6 +119,12 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
     dashboard_audit_events_handler = api.dashboard_audit_events_handler
     dashboard_bulk_update_projects_handler = api.dashboard_bulk_update_projects_handler
     dashboard_configuration_handler = api.dashboard_configuration_handler
+    dashboard_contact_email_candidates_handler = (
+        api.dashboard_contact_email_candidates_handler
+    )
+    dashboard_review_contact_email_candidate_handler = (
+        api.dashboard_review_contact_email_candidate_handler
+    )
     dashboard_create_project_handler = api.dashboard_create_project_handler
     dashboard_erpnext_account_managers_handler = (
         api.dashboard_erpnext_account_managers_handler
@@ -380,6 +388,16 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
         "/dashboard/api/onboarding",
         dashboard_onboarding_handler,
         methods=["GET"],
+    )
+    app.add_api_route(
+        "/dashboard/api/onboarding/contact-candidates",
+        dashboard_contact_email_candidates_handler,
+        methods=["GET"],
+    )
+    app.add_api_route(
+        "/dashboard/api/onboarding/contact-candidates/{candidate_id}/review",
+        dashboard_review_contact_email_candidate_handler,
+        methods=["POST"],
     )
     app.add_api_route(
         "/dashboard/api/onboarding/engineers",

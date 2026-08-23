@@ -56,6 +56,13 @@ from five08.agent import (
     ToolRuntimeConfig,
 )
 from five08.clients.espo import EspoAPIError, EspoClient
+from five08.contact_email_candidates import (
+    ContactEmailCandidate,
+    ContactEmailCandidateStatus,
+    get_contact_email_candidate,
+    list_contact_email_candidates,
+    review_contact_email_candidate,
+)
 from five08.logging import configure_observability
 from five08.job_leads import (
     job_lead_display_payload,
@@ -126,6 +133,7 @@ from five08.backend.schemas import (
     AgentConfirmationRequest,
     DashboardAssignOnboarderRequest,
     DashboardBulkProjectUpdateRequest,
+    DashboardContactEmailCandidateReviewRequest,
     DashboardConfigurationUpdateRequest,
     DashboardEngineerSetupRequest,
     DashboardGigApplicationCreateRequest,
@@ -869,13 +877,18 @@ async def _email_resume_scheduler() -> None:
                 idempotency_key = (
                     message.message_id if message.message_id else message.message_num
                 )
+                job_function = (
+                    JOB_FUNCTIONS["process_contact_email_message_job"]
+                    if message.kind == "contact"
+                    else JOB_FUNCTIONS["process_mailbox_message_job"]
+                )
                 job = await asyncio.to_thread(
                     enqueue_job,
                     queue=queue,
-                    fn=JOB_FUNCTIONS["process_mailbox_message_job"],
+                    fn=job_function,
                     args=(message.raw_message_b64,),
                     settings=settings,
-                    idempotency_key=f"mailbox-inbox:{idempotency_key}",
+                    idempotency_key=f"mailbox-{message.kind}:{idempotency_key}",
                 )
                 if job.created:
                     enqueued += 1
@@ -7170,6 +7183,202 @@ async def dashboard_onboarding_handler(
         skills=skills,
     )
     return JSONResponse(people)
+
+
+def _contact_email_candidate_payload(
+    candidate: ContactEmailCandidate,
+) -> dict[str, Any]:
+    """Serialize a review candidate without exposing implementation-only state."""
+    return {
+        "id": candidate.id,
+        "status": candidate.status.value,
+        "delivered_to": candidate.delivered_to,
+        "forwarded_by_name": candidate.forwarded_by_name,
+        "forwarded_by_email": candidate.forwarded_by_email,
+        "proposed_name": candidate.proposed_name,
+        "proposed_email": candidate.proposed_email,
+        "subject": candidate.subject,
+        "body_text": candidate.body_text,
+        "links": candidate.links,
+        "extraction_method": candidate.extraction_method,
+        "crm_contact_id": candidate.crm_contact_id,
+        "created_at": candidate.created_at,
+        "reviewed_at": candidate.reviewed_at,
+    }
+
+
+def _find_crm_contact_by_email(email_address: str) -> dict[str, Any] | None:
+    """Find one exact EspoCRM contact match for idempotent approval."""
+    client = EspoClient(settings.espo_base_url, settings.espo_api_key)
+    response = client.list_contacts(
+        {
+            "where": [
+                {
+                    "type": "equals",
+                    "attribute": "emailAddress",
+                    "value": email_address,
+                }
+            ],
+            "maxSize": 1,
+            "select": "id,name,emailAddress",
+        }
+    )
+    contacts = response.get("list")
+    if not isinstance(contacts, list) or not contacts:
+        return None
+    first = contacts[0]
+    return first if isinstance(first, dict) else None
+
+
+async def dashboard_contact_email_candidates_handler(request: Request) -> JSONResponse:
+    """Return pending alias-delivered contact candidates for review."""
+    _, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_ONBOARDING_READ,
+    )
+    if error_response is not None:
+        return error_response
+
+    candidates = await asyncio.to_thread(list_contact_email_candidates, settings)
+    return JSONResponse(
+        jsonable_encoder(
+            [_contact_email_candidate_payload(candidate) for candidate in candidates]
+        )
+    )
+
+
+async def dashboard_review_contact_email_candidate_handler(
+    request: Request,
+    candidate_id: str,
+) -> JSONResponse:
+    """Apply a human review decision; only approval may mutate EspoCRM."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_ONBOARDING_WRITE,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+
+    csrf_error = _dashboard_same_origin_post_or_error(request)
+    if csrf_error is not None:
+        return csrf_error
+
+    try:
+        payload = DashboardContactEmailCandidateReviewRequest.model_validate(
+            await request.json()
+        )
+    except Exception:
+        return JSONResponse({"error": "invalid_request"}, status_code=400)
+
+    candidate = await asyncio.to_thread(
+        get_contact_email_candidate, settings, candidate_id
+    )
+    if candidate is None:
+        return JSONResponse(
+            {"error": "contact_email_candidate_not_found"}, status_code=404
+        )
+    if candidate.status is not ContactEmailCandidateStatus.PENDING:
+        return JSONResponse(
+            {
+                "error": "contact_email_candidate_already_reviewed",
+                "candidate": _contact_email_candidate_payload(candidate),
+            },
+            status_code=409,
+        )
+
+    reviewer = _session_discord_actor_id(session) or session.subject
+    proposed_name = (payload.name or candidate.proposed_name or "").strip()
+    proposed_email = (payload.email or candidate.proposed_email or "").strip()
+
+    if payload.decision == "dismiss":
+        reviewed = await asyncio.to_thread(
+            review_contact_email_candidate,
+            settings,
+            candidate_id=candidate.id,
+            status=ContactEmailCandidateStatus.DISMISSED,
+            reviewer=reviewer,
+        )
+        if reviewed is None:
+            return JSONResponse(
+                {"error": "contact_email_candidate_already_reviewed"}, status_code=409
+            )
+        actor_provider, actor_subject = _session_audit_actor(session)
+        await _write_auth_audit_event(
+            action="contact_email_candidate.dismiss",
+            result=AuditResult.SUCCESS,
+            actor_subject=actor_subject,
+            actor_display_name=session.display_name,
+            actor_provider=actor_provider,
+            resource_type="contact_email_candidate",
+            resource_id=reviewed.id,
+        )
+        return JSONResponse(
+            jsonable_encoder(_contact_email_candidate_payload(reviewed))
+        )
+
+    if not proposed_name:
+        return JSONResponse({"error": "contact_name_required"}, status_code=400)
+    try:
+        proposed_email = validate_plain_email(proposed_email, "email")
+    except ValueError as exc:
+        return JSONResponse(
+            {"error": "invalid_email", "detail": str(exc)}, status_code=400
+        )
+
+    try:
+        crm_client = EspoClient(settings.espo_base_url, settings.espo_api_key)
+        existing_contact = await asyncio.to_thread(
+            _find_crm_contact_by_email, proposed_email
+        )
+        contact_payload = {"name": proposed_name, "emailAddress": proposed_email}
+        if existing_contact is not None:
+            crm_contact = existing_contact
+            crm_action = "linked_existing"
+        else:
+            crm_contact = await asyncio.to_thread(
+                crm_client.request, "POST", "Contact", contact_payload
+            )
+            crm_action = "created"
+    except EspoAPIError as exc:
+        logger.warning(
+            "Contact email candidate CRM approval failed candidate_id=%s error=%s",
+            candidate.id,
+            exc,
+        )
+        return JSONResponse({"error": "crm_update_failed"}, status_code=502)
+
+    crm_contact_id = str(crm_contact.get("id") or "").strip()
+    if not crm_contact_id:
+        return JSONResponse({"error": "crm_contact_id_missing"}, status_code=502)
+    reviewed = await asyncio.to_thread(
+        review_contact_email_candidate,
+        settings,
+        candidate_id=candidate.id,
+        status=ContactEmailCandidateStatus.APPROVED,
+        reviewer=reviewer,
+        proposed_name=proposed_name,
+        proposed_email=proposed_email,
+        crm_contact_id=crm_contact_id,
+    )
+    if reviewed is None:
+        return JSONResponse(
+            {"error": "contact_email_candidate_already_reviewed"}, status_code=409
+        )
+    actor_provider, actor_subject = _session_audit_actor(session)
+    await _write_auth_audit_event(
+        action="contact_email_candidate.approve",
+        result=AuditResult.SUCCESS,
+        actor_subject=actor_subject,
+        actor_display_name=session.display_name,
+        actor_provider=actor_provider,
+        resource_type="contact_email_candidate",
+        resource_id=reviewed.id,
+        metadata={"crm_contact_id": crm_contact_id, "crm_action": crm_action},
+    )
+    result = _contact_email_candidate_payload(reviewed)
+    result["crm_action"] = crm_action
+    return JSONResponse(jsonable_encoder(result))
 
 
 async def dashboard_assign_onboarder_handler(

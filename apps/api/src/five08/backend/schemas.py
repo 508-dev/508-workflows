@@ -54,6 +54,14 @@ class DashboardOnboardingStatusRequest(BaseModel):
     status: str
 
 
+class DashboardContactEmailCandidateReviewRequest(BaseModel):
+    """Payload for approving or dismissing a contact proposed from email."""
+
+    decision: Literal["approve", "dismiss"]
+    name: str | None = Field(default=None, max_length=255)
+    email: str | None = Field(default=None, max_length=320)
+
+
 class DashboardOnboardingEmailDraftRequest(BaseModel):
     """Payload for drafting one dashboard onboarding email."""
 

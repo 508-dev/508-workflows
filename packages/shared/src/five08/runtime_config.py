@@ -658,6 +658,14 @@ _DEFINITIONS: tuple[RuntimeConfigDefinition, ...] = (
         env_names=("IMAP_SERVER",),
     ),
     RuntimeConfigDefinition(
+        key="CONTACT_EMAIL_INTAKE_ADDRESS",
+        attr="contact_email_intake_address",
+        label="Contact intake address",
+        category="Intake",
+        description="Alias delivery address allowed to create dashboard contact candidates.",
+        env_names=("CONTACT_EMAIL_INTAKE_ADDRESS",),
+    ),
+    RuntimeConfigDefinition(
         key="INTAKE_RESUME_ALLOWED_HOSTS",
         attr="intake_resume_allowed_hosts",
         label="Resume URL allowed hosts",
