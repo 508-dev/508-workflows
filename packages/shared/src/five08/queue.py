@@ -21,6 +21,12 @@ from five08.settings import SharedSettings
 logger = logging.getLogger(__name__)
 
 
+# An idempotent request can arrive again after the initial database insert but
+# before the first broker delivery. Reuse the durable queued-row reservation
+# rather than publishing a broker message for every upstream retry.
+_DUPLICATE_ENQUEUE_REDELIVERY_BACKOFF_SECONDS = 60.0
+
+
 def trusted_sql(query: str) -> SQL:
     """Type SQL assembled only from internal fragments plus placeholders.
 
@@ -560,12 +566,16 @@ def enqueue_job(
         queue.enqueue(job_id, run_at=run_after)
     else:
         # A process can persist the idempotent row and fail before its first
-        # broker delivery. Re-deliver only still-queued work; running and
-        # retrying jobs already have an owner, and terminal jobs must never be
-        # revived implicitly.
-        existing = get_job(settings, job_id)
-        if existing is not None and existing.status is JobStatus.QUEUED:
-            queue.enqueue(job_id, run_at=existing.run_after)
+        # broker delivery. The conditional reservation in
+        # ``redeliver_queued_job`` both recovers that gap after a bounded
+        # backoff and prevents an upstream retry storm from appending a broker
+        # message for every duplicate request.
+        redeliver_queued_job(
+            queue,
+            settings=settings,
+            job_id=job_id,
+            minimum_age_seconds=_DUPLICATE_ENQUEUE_REDELIVERY_BACKOFF_SECONDS,
+        )
     return EnqueuedJob(id=job_id, created=created)
 
 

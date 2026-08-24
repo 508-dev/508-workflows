@@ -4,7 +4,6 @@ from datetime import datetime, timezone
 from unittest.mock import MagicMock, Mock, patch
 
 from five08.queue import (
-    JobRecord,
     JobStatus,
     _parse_status,
     claim_job_for_execution,
@@ -33,36 +32,49 @@ def test_enqueue_job_persists_and_dispatches_to_queue_client() -> None:
     assert result.created is True
 
 
-def test_enqueue_job_redelivers_an_existing_queued_job() -> None:
-    """An interrupted first broker handoff remains recoverable."""
+def test_enqueue_job_reserves_a_redelivery_lease_for_existing_work() -> None:
+    """Duplicate request-path delivery uses the durable broker retry lease."""
 
     queue = Mock()
     settings = SharedSettings(job_max_attempts=5)
-    existing = JobRecord(
-        id="job-1",
-        type="example",
-        status=JobStatus.QUEUED,
-        payload={},
-        idempotency_key="example:1",
-        attempts=0,
-        max_attempts=5,
-        run_after=None,
-        locked_at=None,
-        locked_by=None,
-        last_error=None,
-        created_at=datetime.now(tz=timezone.utc),
-        updated_at=datetime.now(tz=timezone.utc),
-    )
 
     with (
         patch("five08.queue.create_job_record", return_value=("job-1", False)),
-        patch("five08.queue.get_job", return_value=existing),
+        patch("five08.queue.redeliver_queued_job", return_value=True) as redeliver,
     ):
         result = enqueue_job(
             queue=queue, fn=lambda value: value, args=("payload",), settings=settings
         )
 
-    queue.enqueue.assert_called_once_with("job-1", run_at=None)
+    redeliver.assert_called_once_with(
+        queue,
+        settings=settings,
+        job_id="job-1",
+        minimum_age_seconds=60.0,
+    )
+    queue.enqueue.assert_not_called()
+    assert result.id == "job-1"
+    assert result.created is False
+
+
+def test_enqueue_job_does_not_publish_when_duplicate_redelivery_is_unreserved() -> None:
+    """A fresh queued row must not publish another broker message immediately."""
+
+    queue = Mock()
+
+    with (
+        patch("five08.queue.create_job_record", return_value=("job-1", False)),
+        patch("five08.queue.redeliver_queued_job", return_value=False) as redeliver,
+    ):
+        result = enqueue_job(
+            queue=queue,
+            fn=lambda value: value,
+            args=("payload",),
+            settings=SharedSettings(),
+        )
+
+    redeliver.assert_called_once()
+    queue.enqueue.assert_not_called()
     assert result.id == "job-1"
     assert result.created is False
 
