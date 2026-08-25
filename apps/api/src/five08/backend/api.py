@@ -10000,6 +10000,18 @@ def _agent_schedule_loop_actions(
             return None, "scheduled_planner_extract_not_from_search"
         try:
             orchestrator.registry.validate_planner_action(tool_name, arguments)
+            if tool_name == "github_issue.search_issues":
+                # GitHub execution treats a non-string repository as absent and
+                # can otherwise fall back to GITHUB_DEFAULT_REPO. Reuse the
+                # frozen schedule validator before deriving scopes or
+                # authorizing this model-proposed action.
+                if not isinstance(arguments.get("repository"), str):
+                    raise ValueError("scheduled GitHub repository must be a string")
+                arguments = AgentScheduleAction(
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    summary=summary,
+                ).arguments
         except (PermissionError, ValueError):
             return None, "scheduled_planner_action_invalid"
         manifest = orchestrator.registry.get(tool_name)

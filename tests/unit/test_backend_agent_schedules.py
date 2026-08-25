@@ -820,6 +820,61 @@ def test_agent_loop_rejects_invalid_crm_search_before_execution(
     assert api._agent_schedule_loop_error_is_non_retryable(outcome.error)
 
 
+@pytest.mark.parametrize(
+    "repository",
+    [
+        123,
+        ["508-dev/508-workflows"],
+    ],
+)
+def test_agent_loop_rejects_malformed_github_repository_before_authorization(
+    repository: object,
+) -> None:
+    """A malformed planner value cannot fall back to the configured repository."""
+
+    policy = SimpleNamespace(
+        required_scopes_for_action=Mock(
+            side_effect=AssertionError("invalid action reached scope derivation")
+        ),
+        authorize_with_scopes=Mock(
+            side_effect=AssertionError("invalid action reached authorization")
+        ),
+    )
+    orchestrator = SimpleNamespace(registry=ToolRegistry(), policy=policy)
+    schedule = _agent_loop_schedule(tool_allowlist=["github_issue.search_issues"])
+    context = AgentIdentityContext(
+        discord_user_id="1001",
+        organization_id="1000",
+        guild_id="1000",
+        roles=["Admin"],
+    )
+
+    actions, error = api._agent_schedule_loop_actions(
+        orchestrator=cast(AgentOrchestrator, orchestrator),
+        schedule=schedule,
+        context=context,
+        effective_scopes={"agent:schedule:manage", "github:issue:read"},
+        draft_actions=[
+            PlannerDraftAction(
+                tool_name="github_issue.search_issues",
+                arguments={
+                    "repository": repository,
+                    "query": "label:bug",
+                    "state": "open",
+                    "limit": 10,
+                },
+                summary="Inspect public GitHub issues",
+            )
+        ],
+        prior_results=[],
+    )
+
+    assert actions is None
+    assert error == "scheduled_planner_action_invalid"
+    policy.required_scopes_for_action.assert_not_called()
+    policy.authorize_with_scopes.assert_not_called()
+
+
 def test_agent_loop_rejects_identifier_lookup_from_a_legacy_catalog() -> None:
     """An older persisted row cannot let a model invent a record identifier."""
 
