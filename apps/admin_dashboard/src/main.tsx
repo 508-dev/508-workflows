@@ -700,10 +700,41 @@ function messageForApiError(record: Record<string, unknown>, fallback: string) {
   if (error === "crm_profile_lookup_failed") {
     return "CRM profile lookup failed. Try again after CRM is reachable."
   }
+  if (error === "crm_lookup_failed") {
+    return "Could not verify the candidate in CRM. No email was sent; try again once CRM is reachable."
+  }
+  if (error === "contact_not_onboarding_eligible") {
+    return "This candidate is no longer eligible for onboarding email. Refresh the queue and review their status."
+  }
+  if (error === "candidate_terminal_onboarding_state") {
+    return "This candidate is already in a terminal onboarding state, so no email was sent."
+  }
+  if (error === "recipient_email_required") {
+    return "The candidate does not have a valid email address, so no email was sent."
+  }
+  if (error === "reply_to_email_required") {
+    return "Your Reply-To email is unavailable, so no email was sent."
+  }
+  if (error === "smtp_not_configured") {
+    return "Onboarding email SMTP is not configured, so no email was sent."
+  }
+  if (error === "email_send_failed") {
+    return "The mail server could not confirm it accepted the email. It was not marked sent; check the recipient inbox or SMTP logs before retrying to avoid a duplicate."
+  }
   if (error === "ambiguous_person") {
     return "Multiple people matched. Choose the matching person record."
   }
   return error || fallback
+}
+
+function onboardingEmailSendProgress(seconds: number) {
+  if (seconds < 10) {
+    return `Sending — ${seconds}s elapsed. Checking details and waiting for the mail server.`
+  }
+  if (seconds < 25) {
+    return `Still sending — ${seconds}s elapsed. Waiting for the mail server to confirm receipt.`
+  }
+  return `Taking longer than expected — ${seconds}s elapsed. The request is still active; do not retry yet, as that could send a duplicate email.`
 }
 
 function messageFromUnknown(error: unknown, fallback: string) {
@@ -8062,6 +8093,7 @@ function OnboardingRow({
   const [emailOpen, setEmailOpen] = useState(false)
   const [emailDraft, setEmailDraft] = useState<OnboardingEmailDraft | null>(null)
   const [emailDraftOptions, setEmailDraftOptions] = useState<OnboardingEmailOptions | null>(null)
+  const [sendElapsedSeconds, setSendElapsedSeconds] = useState(0)
   const [emailOptions, setEmailOptions] = useState<OnboardingEmailOptions>({
     has_contributed: normalizedOnboardingStatusValue(onboardingStateValue(person)) === "onboarded",
     discord_joined: person.discord_user_id ? "yes" : "unknown",
@@ -8112,6 +8144,18 @@ function OnboardingRow({
   const draftBusy = Boolean(loading[`onboarding-email-draft:${person.crm_contact_id}`])
   const sendBusy = Boolean(loading[`onboarding-email-send:${person.crm_contact_id}`])
   const draftBody = emailDraft?.markdown_body || ""
+  useEffect(() => {
+    if (!sendBusy) {
+      setSendElapsedSeconds(0)
+      return
+    }
+
+    const startedAt = Date.now()
+    const updateElapsed = () => setSendElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000))
+    updateElapsed()
+    const interval = window.setInterval(updateElapsed, 1000)
+    return () => window.clearInterval(interval)
+  }, [sendBusy])
   async function generateDraft(nextOptions = emailOptions) {
     const draft = await onDraftEmail(person.crm_contact_id, nextOptions)
     if (draft) {
@@ -8443,6 +8487,15 @@ function OnboardingRow({
                       <Send />
                       {sendBusy ? "Sending" : "Send"}
                     </Button>
+                    {sendBusy ? (
+                      <span
+                        className="text-sm text-muted-foreground"
+                        role="status"
+                        aria-live="polite"
+                      >
+                        {onboardingEmailSendProgress(sendElapsedSeconds)}
+                      </span>
+                    ) : null}
                     {sendUnavailableMessage ? (
                       <span className="text-sm text-muted-foreground">
                         {sendUnavailableMessage}
