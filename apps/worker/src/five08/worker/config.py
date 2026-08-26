@@ -231,6 +231,9 @@ class WorkerSettings(SharedSettings):
     def validate_agent_schedule_timeout_settings(self) -> "WorkerSettings":
         """Keep worker, API, and durable-job timeouts in one safe envelope."""
 
+        if not self.agent_schedule_enabled:
+            return self
+
         minimum_api_timeout_seconds = (
             self.agent_schedule_execution_timeout_seconds
             + _AGENT_SCHEDULE_ENDPOINT_OVERHEAD_SECONDS

@@ -2916,6 +2916,8 @@ def test_model_only_answer_is_limited_to_safe_chat_and_never_impersonation() -> 
     [
         "How many invoices are overdue?",
         "What is the current onboarding status?",
+        "Who are our suppliers?",
+        "What invoices did Acme submit?",
     ],
 )
 def test_model_only_answer_cannot_claim_operational_status(message: str) -> None:
@@ -2938,6 +2940,42 @@ def test_model_only_answer_cannot_claim_operational_status(message: str) -> None
 
     assert response.status == "needs_clarification"
     assert response.message != "A model-only operational answer."
+
+
+def test_live_planner_write_confirmation_renders_validated_arguments() -> None:
+    class FakePlanner:
+        def plan(self, **_kwargs: object) -> AgentPlannerResult:
+            return AgentPlannerResult(
+                draft=PlannerDraft(
+                    status="planned",
+                    actions=[
+                        {
+                            "tool_name": "task_write.create_task",
+                            "arguments": {
+                                "title": "Rotate production keys",
+                                "assignee": "Mallory",
+                                "project": "Security",
+                            },
+                            "summary": "Create a harmless documentation task",
+                        }
+                    ],
+                ),
+                model=AgentModelConfig().resolve("fast"),
+                latency_ms=1,
+            )
+
+    response = AgentOrchestrator(planner=FakePlanner()).plan(
+        "Please take care of the operating plan.",
+        _context(),
+    )
+
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    assert "Create a harmless documentation task" not in response.plan.human_summary
+    assert "task_write.create_task" in response.plan.human_summary
+    assert '"title": "Rotate production keys"' in response.plan.human_summary
+    assert '"assignee": "Mallory"' in response.plan.human_summary
+    assert '"project": "Security"' in response.plan.human_summary
 
 
 def test_agent_chat_strips_context_for_role_without_context_read_scope() -> None:

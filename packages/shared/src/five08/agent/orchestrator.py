@@ -92,11 +92,6 @@ _MONTHS = {
 LiteralPlanner = Literal["deterministic_regex", "live_model"]
 _WEB_READ_TOOL_PREFIX = "web_read."
 _MAX_PLANNER_OBSERVATION_CHARS = 12_000
-_OPERATIONAL_STATUS_SIGNAL_RE = re.compile(
-    r"\b(?:how\s+many|how\s+much|current|status|overdue|pending|open|closed|"
-    r"approved|rejected|stale|total|count|number\s+of)\b",
-    re.IGNORECASE,
-)
 _OPERATIONAL_DATA_SUBJECT_RE = re.compile(
     r"\b(?:invoices?|billing|erp(?:next)?|suppliers?|onboarding|crm|contacts?|"
     r"members?|tasks?|github|issues?|projects?|database|records?)\b",
@@ -802,12 +797,12 @@ class AgentOrchestrator:
 
     @staticmethod
     def _is_operational_status_request(text: str) -> bool:
-        """Recognize data/status questions that need a grounded tool read."""
+        """Recognize organization-data questions that need a grounded tool read."""
 
-        return bool(
-            _OPERATIONAL_STATUS_SIGNAL_RE.search(text)
-            and _OPERATIONAL_DATA_SUBJECT_RE.search(text)
-        )
+        # A model must not supply organization facts without a validated read
+        # just because the question omits a narrow status word such as
+        # "current" or "pending".
+        return bool(_OPERATIONAL_DATA_SUBJECT_RE.search(text))
 
     def _response_for_action(
         self,
@@ -1487,7 +1482,12 @@ class AgentOrchestrator:
             model_tier=model_tier,
             model=model or self._resolve_model(model_tier),
             actions=actions,
-            human_summary=self._human_summary(actions),
+            human_summary=self._human_summary(
+                actions,
+                render_validated_arguments=(
+                    planner == "live_model" and requires_confirmation
+                ),
+            ),
             requires_confirmation=requires_confirmation,
             expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
             context_sources=context_sources_for_snippets(
@@ -3024,13 +3024,24 @@ class AgentOrchestrator:
         }.get(tool_name, "unknown")
 
     @staticmethod
-    def _human_summary(actions: list[AgentToolAction]) -> str:
+    def _human_summary(
+        actions: list[AgentToolAction],
+        *,
+        render_validated_arguments: bool = False,
+    ) -> str:
         if not actions:
             return "No actions."
         return "\n".join(
-            f"{index}. {action.summary}"
+            f"{index}. "
+            f"{AgentOrchestrator._validated_action_summary(action) if render_validated_arguments else action.summary}"
             for index, action in enumerate(actions, start=1)
         )
+
+    @staticmethod
+    def _validated_action_summary(action: AgentToolAction) -> str:
+        """Render the exact post-validation payload shown for confirmation."""
+
+        return f"{action.tool_name}: {json.dumps(action.arguments, ensure_ascii=False, sort_keys=True)}"
 
     @staticmethod
     def _agent_schedule_creation_summary(arguments: dict[str, object]) -> str:

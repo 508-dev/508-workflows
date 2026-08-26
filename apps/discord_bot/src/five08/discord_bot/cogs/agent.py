@@ -32,6 +32,7 @@ _PUBLIC_SAFE_CLARIFICATION_MESSAGES = frozenset(
 )
 _GENERIC_UNSUPPORTED_AGENT_MESSAGE = "I could not map that to a supported workflow."
 _AGENT_RESPONSE_THREAD_NAME = "Agent response"
+NO_MENTIONS = discord.AllowedMentions.none()
 _AGENT_HELP_REQUESTS = frozenset(
     {
         "help",
@@ -803,9 +804,13 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
     ) -> None:
         thread = await self._mention_response_thread(message=message, request=request)
         if thread is not None:
-            await thread.send(content[:1900])
+            await thread.send(content[:1900], allowed_mentions=NO_MENTIONS)
             return
-        await message.reply(content[:1900], mention_author=False)
+        await message.reply(
+            content[:1900],
+            mention_author=False,
+            allowed_mentions=NO_MENTIONS,
+        )
 
     async def _mention_response_thread(
         self,

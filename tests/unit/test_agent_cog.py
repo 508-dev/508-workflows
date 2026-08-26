@@ -1104,8 +1104,32 @@ async def test_agent_mention_posts_clarification_in_thread() -> None:
         "I could not map that to a supported workflow yet"
         in thread.send.await_args.args[0]
     )
+    assert thread.send.await_args.kwargs["allowed_mentions"].to_dict()["parse"] == []
     message.reply.assert_not_awaited()
     cog._audit_message_safe.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_agent_mention_public_reply_disables_attacker_controlled_mentions() -> (
+    None
+):
+    cog = AgentCog.__new__(AgentCog)
+    cog._mention_response_thread = AsyncMock(return_value=None)
+    message = SimpleNamespace(reply=AsyncMock())
+    content = "@everyone <@123> <@&456>"
+
+    await cog._send_mention_public_response(
+        message=message,
+        request="help",
+        content=content,
+    )
+
+    message.reply.assert_awaited_once_with(
+        content,
+        mention_author=False,
+        allowed_mentions=agent_module.NO_MENTIONS,
+    )
+    assert message.reply.await_args.kwargs["allowed_mentions"].to_dict()["parse"] == []
 
 
 def test_mention_thread_name_does_not_include_request_content() -> None:
@@ -1351,7 +1375,10 @@ async def test_agent_mention_answers_acknowledgement_without_backend() -> None:
     await cog.agent_mention(message)
 
     cog._post_agent_request.assert_not_awaited()
-    thread.send.assert_awaited_once_with("Got it.")
+    thread.send.assert_awaited_once_with(
+        "Got it.",
+        allowed_mentions=agent_module.NO_MENTIONS,
+    )
     cog._audit_message_safe.assert_not_called()
 
 

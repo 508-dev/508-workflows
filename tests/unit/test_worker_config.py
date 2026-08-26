@@ -69,6 +69,18 @@ def test_agent_schedule_api_timeout_fits_inside_the_worker_lease() -> None:
         )
 
 
+def test_disabled_agent_schedules_skip_unused_timeout_relationships() -> None:
+    settings = WorkerSettings(
+        agent_schedule_enabled=False,
+        agent_schedule_execution_timeout_seconds=300.0,
+        agent_schedule_api_timeout_seconds=360.0,
+        job_timeout_seconds=300,
+    )
+
+    assert settings.agent_schedule_enabled is False
+    assert settings.job_timeout_seconds == 300
+
+
 def test_email_intake_requires_mailbox_credentials() -> None:
     with pytest.raises(ValidationError, match="EMAIL_PASSWORD must be set"):
         WorkerSettings(
