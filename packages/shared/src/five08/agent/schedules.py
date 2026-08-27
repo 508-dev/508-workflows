@@ -1483,7 +1483,7 @@ def complete_agent_schedule_run(
             cursor.execute(
                 """
                 UPDATE agent_schedules
-                SET last_run_at = %s,
+                SET last_run_at = GREATEST(last_run_at, %s),
                     updated_at = NOW()
                 WHERE id = %s
                 """,
@@ -1558,7 +1558,7 @@ def fail_agent_schedule_run(
             cursor.execute(
                 """
                 UPDATE agent_schedules
-                SET last_run_at = %s,
+                SET last_run_at = GREATEST(last_run_at, %s),
                     updated_at = NOW()
                 WHERE id = %s
                 """,

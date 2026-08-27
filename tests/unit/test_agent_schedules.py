@@ -1265,6 +1265,73 @@ def test_stale_delivery_claims_are_listed_and_manually_bounded(
     [
         (
             complete_agent_schedule_run,
+            {"status": AgentScheduleRunStatus.SUCCEEDED, "output": "done"},
+        ),
+        (fail_agent_schedule_run, {"error": "dispatch failed"}),
+    ],
+)
+def test_terminal_run_updates_keep_schedule_last_run_at_monotonic(
+    monkeypatch: pytest.MonkeyPatch,
+    transition: Any,
+    kwargs: dict[str, Any],
+) -> None:
+    """An older overlapping completion cannot regress the schedule timestamp."""
+
+    finished_at = datetime(2026, 8, 27, 9, 0, tzinfo=timezone.utc)
+    run_id = "00000000-0000-0000-0000-000000000001"
+    execution_token = "00000000-0000-0000-0000-000000000002"
+    run_row = {
+        "id": run_id,
+        "schedule_id": "schedule-1",
+        "occurrence_at": finished_at,
+        "trigger": "schedule",
+        "status": "succeeded"
+        if transition is complete_agent_schedule_run
+        else "failed",
+        "job_id": "job-1",
+        "started_at": finished_at,
+        "finished_at": finished_at,
+        "output": "done" if transition is complete_agent_schedule_run else None,
+        "error": None
+        if transition is complete_agent_schedule_run
+        else "dispatch failed",
+        "delivery_status": "pending",
+        "delivery_message_id": None,
+        "delivery_claimed_at": None,
+        "execution_token": execution_token,
+        "created_at": finished_at,
+        "updated_at": finished_at,
+    }
+    cursor = MagicMock()
+    cursor.fetchone.return_value = run_row
+    connection = MagicMock()
+    connection.__enter__.return_value.cursor.return_value.__enter__.return_value = (
+        cursor
+    )
+    monkeypatch.setattr(
+        schedules,
+        "get_postgres_connection",
+        lambda _settings: connection,
+    )
+
+    changed = transition(
+        SharedSettings(),
+        run_id=run_id,
+        execution_token=execution_token,
+        **kwargs,
+    )
+
+    assert changed is not None
+    schedule_query, schedule_params = cursor.execute.call_args_list[1].args
+    assert "last_run_at = GREATEST(last_run_at, %s)" in schedule_query
+    assert schedule_params == (finished_at, "schedule-1")
+
+
+@pytest.mark.parametrize(
+    ("transition", "kwargs"),
+    [
+        (
+            complete_agent_schedule_run,
             {"status": AgentScheduleRunStatus.FAILED, "error": "late result"},
         ),
         (fail_agent_schedule_run, {"error": "late dispatch failure"}),
