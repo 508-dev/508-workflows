@@ -10377,7 +10377,7 @@ def _public_schedule_observations(
                 "status": str(getattr(result, "status", "unknown")),
                 "data_json": json.dumps(
                     {
-                        "total_count": payload.get("total_count"),
+                        **_github_schedule_count_observation(payload),
                         "issues": issue_payload,
                     },
                     ensure_ascii=False,
@@ -10429,10 +10429,7 @@ def _schedule_model_observation_payload(
     """Return the data-classification-safe model view of one tool result."""
 
     if tool_name == "github_issue.search_issues":
-        issues = payload.get("issues")
-        return {
-            "matching_issue_count": _schedule_count(payload.get("total_count"), issues)
-        }
+        return _github_schedule_count_observation(payload)
     if tool_name == "crm_read.search_contacts":
         return _schedule_list_count_observation(
             payload,
@@ -10553,6 +10550,30 @@ def _schedule_count(value: object, fallback: object) -> int:
     return len(fallback) if isinstance(fallback, list) else 0
 
 
+def _github_schedule_count_observation(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Project a GitHub count without widening a bounded page to the repository."""
+
+    count = _schedule_count(payload.get("total_count"), payload.get("issues"))
+    if payload.get("search_is_partial") is True:
+        return {
+            "matching_issue_count_in_searched_page": count,
+            "search_is_partial": True,
+        }
+    return {"matching_issue_count": count}
+
+
+def _github_schedule_count_line(payload: Mapping[str, Any]) -> str:
+    """Render exact versus bounded GitHub issue counts unambiguously."""
+
+    count = _schedule_count(payload.get("total_count"), payload.get("issues"))
+    if payload.get("search_is_partial") is True:
+        return (
+            f"Found {count} matching GitHub issue(s) in the bounded "
+            "recent-results page; older issues were not searched."
+        )
+    return f"Found {count} matching GitHub issue(s)."
+
+
 def _schedule_list_count_observation(
     payload: Mapping[str, Any],
     *,
@@ -10623,6 +10644,15 @@ def _model_agent_schedule_summary(
         or contains_private_agent_identifier(schedule.definition.prompt)
     ):
         return None
+    if any(
+        getattr(result, "tool_name", "") == "github_issue.search_issues"
+        and isinstance(getattr(result, "result", None), Mapping)
+        and getattr(result, "result").get("search_is_partial") is True
+        for result in results
+    ):
+        # A free-form summary could erase or contradict the bounded-search
+        # qualifier. Use the deterministic renderer, which labels it exactly.
+        return None
     observations = _public_schedule_observations(results)
     if not observations:
         return None
@@ -10683,15 +10713,17 @@ def _deterministic_agent_schedule_report(
         payload = getattr(result, "result", None)
         if not isinstance(payload, dict):
             continue
-        total_count = payload.get("total_count")
         issues = payload.get("issues")
         issue_list = issues if isinstance(issues, list) else []
-        count_label = (
-            str(total_count) if isinstance(total_count, int) else str(len(issue_list))
-        )
-        lines.append(f"\nFound {count_label} matching GitHub issue(s).")
+        lines.append(f"\n{_github_schedule_count_line(payload)}")
         if not issue_list:
-            lines.append("No issues matched this schedule's frozen query.")
+            if payload.get("search_is_partial") is True:
+                lines.append(
+                    "No matches appeared in that bounded page; older issues "
+                    "were not searched."
+                )
+            else:
+                lines.append("No issues matched this schedule's frozen query.")
             continue
         for raw_issue in issue_list[:10]:
             if not isinstance(raw_issue, dict):
@@ -10725,11 +10757,7 @@ def _deterministic_agent_loop_report(
         if not isinstance(payload, Mapping):
             continue
         if tool_name == "github_issue.search_issues":
-            lines.append(
-                "\nFound "
-                f"{_schedule_count(payload.get('total_count'), payload.get('issues'))} "
-                "matching GitHub issue(s)."
-            )
+            lines.append(f"\n{_github_schedule_count_line(payload)}")
         elif tool_name == "crm_read.search_contacts":
             lines.append(
                 "\nCRM contact search matched "

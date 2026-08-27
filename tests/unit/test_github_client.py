@@ -230,3 +230,52 @@ def test_github_projects_use_organization_projects_permission(
     )
 
     assert provider.requests == [(None, {"organization_projects": "write"})]
+
+
+def test_github_issue_search_marks_a_full_bounded_page_as_partial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single full REST page must not claim a repository-wide match count."""
+
+    client = GitHubClient(token="token")
+    raw_items = [
+        {"number": number, "title": f"Issue {number}", "body": "triage"}
+        for number in range(30)
+    ]
+
+    def list_request(*_args: object, **_kwargs: object) -> list[dict[str, object]]:
+        return raw_items
+
+    monkeypatch.setattr(client, "_list_request", list_request)
+
+    result = client.list_issues(
+        repository="508-dev/508-workflows",
+        query="triage",
+        limit=5,
+    )
+
+    assert len(result["issues"]) == 5
+    assert result["total_count"] == 30
+    assert result["search_is_partial"] is True
+
+
+def test_github_issue_search_marks_a_short_page_as_complete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A short first page exhausts the selected repository issue state."""
+
+    client = GitHubClient(token="token")
+
+    def list_request(*_args: object, **_kwargs: object) -> list[dict[str, object]]:
+        return [{"number": 1, "title": "Issue 1", "body": "triage"}]
+
+    monkeypatch.setattr(client, "_list_request", list_request)
+
+    result = client.list_issues(
+        repository="508-dev/508-workflows",
+        query="triage",
+        limit=5,
+    )
+
+    assert result["total_count"] == 1
+    assert result["search_is_partial"] is False

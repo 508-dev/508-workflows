@@ -259,12 +259,13 @@ class GitHubClient:
         """List repository issues while excluding pull requests deterministically."""
 
         bounded_limit = min(max(limit, 1), 20)
+        page_size = min(max(bounded_limit * 5, 30), 100)
         raw_items = self._list_request(
             "GET",
             f"/repos/{repository}/issues",
             params={
                 "state": _issue_state(state),
-                "per_page": min(max(bounded_limit * 5, 30), 100),
+                "per_page": page_size,
                 "sort": "updated",
                 "direction": "desc",
             },
@@ -279,7 +280,14 @@ class GitHubClient:
             and "pull_request" not in item
             and _issue_matches_query(item, normalized_query)
         ]
-        return {"issues": issues[:bounded_limit], "total_count": len(issues)}
+        return {
+            "issues": issues[:bounded_limit],
+            "total_count": len(issues),
+            # The REST issues endpoint includes pull requests and exposes no
+            # total in this response shape. A full first page is therefore
+            # conservatively partial: older repository items may still match.
+            "search_is_partial": len(raw_items) >= page_size,
+        }
 
     def search_issues(
         self,

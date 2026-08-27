@@ -624,6 +624,67 @@ def test_agent_loop_marks_capped_internal_counts_as_partial(
     assert api._schedule_model_observation_payload(tool_name, payload) == expected
 
 
+def test_github_schedule_count_stays_partial_in_model_and_report_projections() -> None:
+    """A bounded GitHub page is never rendered as a repository-wide total."""
+
+    payload = {
+        "issues": [],
+        "total_count": 0,
+        "search_is_partial": True,
+    }
+    result = AgentExecutionResult(
+        tool_name="github_issue.search_issues",
+        status="succeeded",
+        result=payload,
+    )
+
+    assert api._schedule_model_observation_payload(
+        "github_issue.search_issues", payload
+    ) == {
+        "matching_issue_count_in_searched_page": 0,
+        "search_is_partial": True,
+    }
+    report = api._deterministic_agent_schedule_report(
+        schedule=_schedule(),
+        results=[result],
+    )
+    assert (
+        "Found 0 matching GitHub issue(s) in the bounded recent-results page" in report
+    )
+    assert "older issues were not searched" in report
+    assert "No issues matched this schedule's frozen query" not in report
+
+
+def test_partial_github_schedule_skips_free_form_model_summary() -> None:
+    """A model cannot rewrite a bounded count as an exact repository total."""
+
+    schedule = replace(
+        _schedule(),
+        definition=_definition().model_copy(
+            update={
+                "summary_mode": "model_for_public_data",
+                "sources_are_public": True,
+            }
+        ),
+    )
+    planner = Mock()
+    result = AgentExecutionResult(
+        tool_name="github_issue.search_issues",
+        status="succeeded",
+        result={"issues": [], "total_count": 0, "search_is_partial": True},
+    )
+
+    summary = api._model_agent_schedule_summary(
+        orchestrator=cast(AgentOrchestrator, SimpleNamespace(planner=planner)),
+        schedule=schedule,
+        context=AgentIdentityContext(discord_user_id="1001"),
+        results=[result],
+    )
+
+    assert summary is None
+    planner.plan_with_observations.assert_not_called()
+
+
 def test_agent_loop_rejects_an_answer_before_any_scheduled_observation() -> None:
     """A scheduled report cannot publish a model-only answer."""
 
