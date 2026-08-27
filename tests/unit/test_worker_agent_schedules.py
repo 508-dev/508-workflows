@@ -59,6 +59,29 @@ def test_run_agent_schedule_job_marks_policy_rejections_non_retryable(
         jobs.run_agent_schedule_job("run-1")
 
 
+def test_run_agent_schedule_job_retries_internal_unauthorized_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rolling shared-secret mismatch can recover after both services update."""
+
+    monkeypatch.setattr(jobs.settings, "agent_schedule_api_base_url", "http://api")
+    monkeypatch.setattr(jobs.settings, "api_shared_secret", "rotating-secret")
+    response = SimpleNamespace(
+        status_code=401,
+        json=Mock(return_value={"error": "unauthorized"}),
+    )
+
+    with (
+        patch("five08.worker.jobs.requests.post", return_value=response),
+        pytest.raises(
+            RuntimeError, match="agent_schedule_api_failed:401:unauthorized"
+        ) as raised,
+    ):
+        jobs.run_agent_schedule_job("run-1")
+
+    assert not isinstance(raised.value, jobs.AgentScheduleRunNonRetryableError)
+
+
 def test_expired_agent_memory_cleanup_uses_only_the_worker_postgres_store(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

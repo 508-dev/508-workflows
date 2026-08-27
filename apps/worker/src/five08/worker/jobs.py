@@ -295,7 +295,7 @@ def run_agent_schedule_job(run_id: str) -> dict[str, Any]:
         }
 
     error_code = str(payload.get("error") or "agent_schedule_api_rejected")
-    if response.status_code in {400, 401, 403, 404, 422}:
+    if response.status_code in {400, 403, 404, 422}:
         raise AgentScheduleRunNonRetryableError(
             f"agent_schedule_api_rejected:{response.status_code}:{error_code}"
         )
