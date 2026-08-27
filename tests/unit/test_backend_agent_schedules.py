@@ -795,6 +795,70 @@ def test_partial_github_schedule_skips_free_form_model_summary() -> None:
     planner.plan_with_observations.assert_not_called()
 
 
+def test_scheduled_reports_escape_external_markdown_and_display_controls() -> None:
+    """External titles cannot visually inject Discord report structure."""
+
+    unsafe_title = "# [Official](https://evil.example) **Update**\u202e\x00"
+    github_report = api._deterministic_agent_schedule_report(
+        schedule=_schedule(),
+        results=[
+            AgentExecutionResult(
+                tool_name="github_issue.search_issues",
+                status="succeeded",
+                result={
+                    "issues": [
+                        {
+                            "number": 7,
+                            "title": unsafe_title,
+                            "html_url": "https://github.com/508-dev/508-workflows/issues/7",
+                        }
+                    ],
+                    "total_count": 1,
+                    "search_is_partial": False,
+                },
+            )
+        ],
+    )
+    web_report = api._deterministic_agent_schedule_report(
+        schedule=_agent_loop_schedule(
+            tool_allowlist=["web_read.search", "web_read.extract"]
+        ),
+        results=[
+            AgentExecutionResult(
+                tool_name="web_read.search",
+                status="succeeded",
+                result={
+                    "results": [
+                        {
+                            "title": unsafe_title,
+                            "url": "https://example.com/search?q=(unsafe)",
+                        }
+                    ]
+                },
+            ),
+            AgentExecutionResult(
+                tool_name="web_read.extract",
+                status="succeeded",
+                result={
+                    "title": unsafe_title,
+                    "url": "javascript:[masked](https://evil.example)",
+                },
+            ),
+        ],
+    )
+
+    for report in (github_report, web_report):
+        assert unsafe_title not in report
+        assert (
+            "\\# \\[Official\\]\\(https://evil.example\\) \\*\\*Update\\*\\*" in report
+        )
+        assert "\u202e" not in report
+        assert "\x00" not in report
+    assert "<https://github.com/508-dev/508-workflows/issues/7>" in github_report
+    assert "<https://example.com/search?q=(unsafe)>" in web_report
+    assert "javascript:" not in web_report
+
+
 def test_agent_loop_rejects_an_answer_before_any_scheduled_observation() -> None:
     """A scheduled report cannot publish a model-only answer."""
 

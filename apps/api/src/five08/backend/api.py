@@ -16,6 +16,7 @@ import sys
 import json
 import threading
 import time
+import unicodedata
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -10704,6 +10705,47 @@ def _single_line(value: object, *, limit: int = 280) -> str:
     return f"{normalized[: max(0, limit - 1)].rstrip()}…"
 
 
+_DISCORD_EXTERNAL_MARKDOWN_CHARS = frozenset("\\*_~|`[]()#>")
+
+
+def _discord_safe_external_text(value: object, *, limit: int) -> str:
+    """Collapse controls and escape externally controlled Discord display text."""
+
+    normalized = _single_line(value, limit=limit)
+    without_controls = "".join(
+        character
+        for character in normalized
+        if unicodedata.category(character) not in {"Cc", "Cf", "Cs"}
+    )
+    without_angle_syntax = without_controls.replace("<", "‹")
+    return "".join(
+        f"\\{character}" if character in _DISCORD_EXTERNAL_MARKDOWN_CHARS else character
+        for character in without_angle_syntax
+    )
+
+
+def _discord_safe_external_url(value: object, *, limit: int = 500) -> str:
+    """Return one non-Markdown HTTP(S) autolink or omit an unsafe external URL."""
+
+    raw = str(value or "").strip()
+    without_controls = "".join(
+        character
+        for character in raw
+        if unicodedata.category(character) not in {"Cc", "Cf", "Cs"}
+    )
+    if (
+        not without_controls
+        or len(without_controls) > limit
+        or any(character.isspace() for character in without_controls)
+    ):
+        return ""
+    parsed = urlsplit(without_controls)
+    if parsed.scheme.casefold() not in {"http", "https"} or not parsed.netloc:
+        return ""
+    escaped = without_controls.replace("<", "%3C").replace(">", "%3E")
+    return f"<{escaped}>"
+
+
 def _deterministic_agent_schedule_report(
     *,
     schedule: AgentScheduleRecord,
@@ -10737,8 +10779,11 @@ def _deterministic_agent_schedule_report(
             if not isinstance(raw_issue, dict):
                 continue
             number = raw_issue.get("number")
-            title = _single_line(raw_issue.get("title"), limit=220) or "Untitled issue"
-            url = str(raw_issue.get("html_url") or "").strip()
+            title = (
+                _discord_safe_external_text(raw_issue.get("title"), limit=220)
+                or "Untitled issue"
+            )
+            url = _discord_safe_external_url(raw_issue.get("html_url"))
             prefix = f"#{number}" if number is not None else "Issue"
             line = f"- {prefix}: {title}"
             if url:
@@ -10855,12 +10900,18 @@ def _deterministic_agent_loop_report(
             for item in result_rows[:5]:
                 if not isinstance(item, Mapping):
                     continue
-                title = _single_line(item.get("title"), limit=180) or "Untitled result"
-                url = _single_line(item.get("url"), limit=500)
+                title = (
+                    _discord_safe_external_text(item.get("title"), limit=180)
+                    or "Untitled result"
+                )
+                url = _discord_safe_external_url(item.get("url"))
                 lines.append(f"- {title}" + (f" — {url}" if url else ""))
         elif tool_name == "web_read.extract":
-            title = _single_line(payload.get("title"), limit=180) or "Public page"
-            url = _single_line(payload.get("url"), limit=500)
+            title = (
+                _discord_safe_external_text(payload.get("title"), limit=180)
+                or "Public page"
+            )
+            url = _discord_safe_external_url(payload.get("url"))
             lines.append(
                 f"\nRead public source: {title}" + (f" — {url}" if url else "")
             )
