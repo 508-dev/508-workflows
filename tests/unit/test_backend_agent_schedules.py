@@ -150,7 +150,8 @@ def test_agent_loop_creation_persists_an_exact_default_tool_catalog(
     assert "web_read.extract" not in definition.tool_allowlist
     assert "crm_write.update_contact" not in definition.tool_allowlist
     assert definition.tool_allowlist == api._default_agent_schedule_tool_allowlist(
-        ToolRuntimeConfig.from_settings(api.settings)
+        ToolRuntimeConfig.from_settings(api.settings),
+        guild_id="1000",
     )
 
 
@@ -190,7 +191,8 @@ def test_default_agent_loop_omits_github_for_an_incomplete_app_configuration() -
         ToolRuntimeConfig(
             github_app_client_id="github-app-client-id",
             github_api_token="github-token",
-        )
+        ),
+        guild_id="1000",
     )
 
     assert "github_issue.search_issues" not in tool_allowlist
@@ -297,6 +299,49 @@ def test_agent_loop_creation_includes_configured_optional_integrations(
             "erp_read.get_project_summary",
         }
     )
+
+
+def test_agent_loop_creation_omits_erp_tools_for_a_different_tenant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Configured ERP credentials are advertised only to their bound guild."""
+
+    monkeypatch.setattr(api.settings, "erpnext_base_url", "https://erp.example.test")
+    monkeypatch.setattr(api.settings, "erpnext_api_key", "erp-key")
+    monkeypatch.setattr(api.settings, "agent_erp_organization_id", "9999")
+
+    definition = api._agent_schedule_definition_from_fields(
+        SimpleNamespace(
+            prompt="Review current operational health.",
+            execution_mode="agent_loop",
+            tool_allowlist=[],
+            channel_id="2000",
+        ),
+        guild_id="1000",
+    )
+
+    assert not (set(definition.tool_allowlist) & api._AGENT_SCHEDULE_ERP_TOOL_NAMES)
+
+
+def test_agent_loop_creation_rejects_explicit_erp_tools_for_a_different_tenant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit catalog cannot bypass the ERP credential tenant binding."""
+
+    monkeypatch.setattr(api.settings, "erpnext_base_url", "https://erp.example.test")
+    monkeypatch.setattr(api.settings, "erpnext_api_key", "erp-key")
+    monkeypatch.setattr(api.settings, "agent_erp_organization_id", "9999")
+
+    with pytest.raises(ValueError, match="match the schedule Discord guild"):
+        api._agent_schedule_definition_from_fields(
+            SimpleNamespace(
+                prompt="Review current ERP project health.",
+                execution_mode="agent_loop",
+                tool_allowlist=["erp_read.search_projects"],
+                channel_id="2000",
+            ),
+            guild_id="1000",
+        )
 
 
 def test_frozen_github_schedule_requires_an_allowlisted_repository(

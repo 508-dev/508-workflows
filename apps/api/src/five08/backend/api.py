@@ -9464,6 +9464,8 @@ def _agent_schedule_manager_error(context: AgentIdentityContext) -> str | None:
 
 def _default_agent_schedule_tool_allowlist(
     runtime_config: ToolRuntimeConfig,
+    *,
+    guild_id: str,
 ) -> list[str]:
     """Return schedule-safe tools backed by the current integration config."""
 
@@ -9472,7 +9474,7 @@ def _default_agent_schedule_tool_allowlist(
     ).schedule_safe_tool_names()
     # A generic schedule should not advertise an optional integration that
     # cannot serve the planner at execution time. Explicit administrator
-    # selections remain deliberate and are preserved by the caller.
+    # selections remain deliberate, subject to tenant invariants below.
     configured_github_app_values = tuple(
         str(value or "").strip()
         for value in (
@@ -9526,13 +9528,18 @@ def _default_agent_schedule_tool_allowlist(
         for value in (runtime_config.espo_base_url, runtime_config.espo_api_key)
     ):
         schedule_safe_tools -= _AGENT_SCHEDULE_CRM_TOOL_NAMES
-    if not all(
-        str(value or "").strip()
-        for value in (
-            runtime_config.erpnext_base_url,
-            runtime_config.erpnext_api_key,
-            runtime_config.agent_erp_organization_id,
+    erp_organization_id = str(
+        runtime_config.agent_erp_organization_id or ""
+    ).strip()
+    if (
+        not all(
+            str(value or "").strip()
+            for value in (
+                runtime_config.erpnext_base_url,
+                runtime_config.erpnext_api_key,
+            )
         )
+        or erp_organization_id != str(guild_id).strip()
     ):
         schedule_safe_tools -= _AGENT_SCHEDULE_ERP_TOOL_NAMES
     return sorted(AGENT_SCHEDULE_AGENT_LOOP_ALLOWED_TOOL_NAMES & schedule_safe_tools)
@@ -9576,8 +9583,18 @@ def _agent_schedule_definition_from_fields(
         # accident.
         runtime_config = ToolRuntimeConfig.from_settings(settings)
         tool_allowlist = requested_tools or _default_agent_schedule_tool_allowlist(
-            runtime_config
+            runtime_config,
+            guild_id=guild_id,
         )
+        if (
+            set(tool_allowlist) & _AGENT_SCHEDULE_ERP_TOOL_NAMES
+            and str(runtime_config.agent_erp_organization_id or "").strip()
+            != str(guild_id).strip()
+        ):
+            raise ValueError(
+                "scheduled ERP tools require AGENT_ERP_ORGANIZATION_ID to match "
+                "the schedule Discord guild"
+            )
         return AgentScheduleDefinition(
             prompt=prompt,
             execution_mode=execution_mode,
