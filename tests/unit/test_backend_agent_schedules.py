@@ -218,6 +218,102 @@ def test_agent_loop_creation_omits_unconfigured_web_extraction(
     assert "web_read.extract" not in definition.tool_allowlist
 
 
+def test_schedule_envelope_requires_a_planner_only_for_agent_loops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deterministic frozen work remains usable without a model planner."""
+
+    policy = SimpleNamespace(
+        authorize=Mock(return_value=SimpleNamespace(allowed=True, reason="")),
+        required_scopes_for_action=Mock(return_value={"github:issue:read"}),
+    )
+    orchestrator = SimpleNamespace(
+        planner=None,
+        registry=ToolRegistry(),
+        policy=policy,
+    )
+    context = AgentIdentityContext(
+        discord_user_id="1001",
+        organization_id="1000",
+        guild_id="1000",
+        roles=["Admin"],
+    )
+    monkeypatch.setattr(api, "_agent_schedule_manager_error", lambda _context: None)
+    monkeypatch.setattr(api, "_get_agent_orchestrator", lambda: orchestrator)
+
+    loop_scopes, loop_error = api._validate_agent_schedule_envelope(
+        context=context,
+        definition=_agent_loop_schedule(
+            tool_allowlist=["onboarding_read.get_summary"]
+        ).definition,
+    )
+    frozen_scopes, frozen_error = api._validate_agent_schedule_envelope(
+        context=context,
+        definition=_definition(),
+    )
+
+    assert loop_scopes is None
+    assert loop_error == "scheduled_planner_not_configured"
+    assert frozen_error is None
+    assert frozen_scopes == {"agent:schedule:manage", "github:issue:read"}
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_creation_without_a_planner_does_not_persist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Impossible model-planned work is rejected before its durable insert."""
+
+    context = AgentIdentityContext(
+        discord_user_id="1001",
+        organization_id="1000",
+        guild_id="1000",
+        roles=["Admin"],
+    )
+
+    async def fresh_context(*_args: object, **_kwargs: object):
+        return context, None, 200
+
+    async def valid_channel(*_args: object, **_kwargs: object):
+        return {}, 200
+
+    definition = _agent_loop_schedule(
+        tool_allowlist=["onboarding_read.get_summary"]
+    ).definition
+    create_schedule = Mock()
+    monkeypatch.setattr(api, "_fresh_agent_schedule_context", fresh_context)
+    monkeypatch.setattr(api, "_agent_schedule_manager_error", lambda _context: None)
+    monkeypatch.setattr(
+        api,
+        "_validate_agent_schedule_channel_with_bot",
+        valid_channel,
+    )
+    monkeypatch.setattr(
+        api,
+        "_agent_schedule_definition_from_fields",
+        Mock(return_value=definition),
+    )
+    monkeypatch.setattr(
+        api,
+        "_get_agent_orchestrator",
+        lambda: SimpleNamespace(planner=None),
+    )
+    monkeypatch.setattr(api, "create_agent_schedule", create_schedule)
+
+    response, status_code = await api._create_agent_schedule_for_context(
+        cast(Request, SimpleNamespace()),
+        payload=SimpleNamespace(channel_id="2000"),
+        context=context,
+    )
+
+    assert status_code == 503
+    assert response == {
+        "error": "schedule_not_authorized",
+        "detail": "scheduled_planner_not_configured",
+    }
+    create_schedule.assert_not_called()
+
+
 def test_agent_loop_creation_includes_configured_web_extraction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

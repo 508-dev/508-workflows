@@ -9662,6 +9662,8 @@ def _validate_agent_schedule_envelope(
 
     allowed_scopes: set[str] = set()
     if definition.execution_mode is AgentScheduleExecutionMode.AGENT_LOOP:
+        if orchestrator.planner is None:
+            return None, "scheduled_planner_not_configured"
         for tool_name in definition.tool_allowlist:
             manifest = orchestrator.registry.get(tool_name)
             if (
@@ -11521,7 +11523,13 @@ async def _create_agent_schedule_for_context(
     )
     if allowed_scopes is None:
         status_code = (
-            503 if policy_error == "agent_orchestrator_not_configured" else 403
+            503
+            if policy_error
+            in {
+                "agent_orchestrator_not_configured",
+                "scheduled_planner_not_configured",
+            }
+            else 403
         )
         return {"error": "schedule_not_authorized", "detail": policy_error}, status_code
     try:
