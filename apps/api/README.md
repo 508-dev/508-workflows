@@ -50,7 +50,9 @@ curl -X GET "http://localhost:8090/jobs/<job_id>" \
 - `GET /dashboard/api/jobs/{job_id}`: Session-authenticated dashboard job detail with sensitive payload keys redacted.
 - `POST /dashboard/api/jobs/{job_id}/rerun`: Session-authenticated dashboard job rerun.
 - `GET /dashboard/api/agent-schedules`: Admin configuration-read list of
-  retained recurring agent schedules and dispatcher state.
+  retained recurring agent schedules and dispatcher state. Results are ordered
+  newest first and paginated with `limit` (1-100), `offset`, and `next_offset`;
+  the dashboard follows every page so archived definitions remain auditable.
 - `POST /dashboard/api/agent-schedules`,
   `PUT /dashboard/api/agent-schedules/{schedule_id}`, and
   `POST /dashboard/api/agent-schedules/{schedule_id}/run`: create, control,

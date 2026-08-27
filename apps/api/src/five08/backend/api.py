@@ -11869,11 +11869,21 @@ async def dashboard_agent_schedules_handler(request: Request) -> JSONResponse:
     guild_id = _configured_agent_schedule_guild_id()
     if guild_id is None:
         return JSONResponse({"error": "discord_server_not_configured"}, status_code=503)
+    query_params = getattr(request, "query_params", {})
     try:
-        schedules = await asyncio.to_thread(
+        page_offset = int(query_params.get("offset", "0"))
+        page_limit = int(query_params.get("limit", "100"))
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "invalid_pagination"}, status_code=400)
+    if page_offset < 0 or page_limit < 1 or page_limit > 100:
+        return JSONResponse({"error": "invalid_pagination"}, status_code=400)
+    try:
+        schedule_page = await asyncio.to_thread(
             list_agent_schedules,
             settings,
             guild_id=guild_id,
+            limit=page_limit + 1,
+            offset=page_offset,
             include_archived=True,
         )
         delivery_attention = await asyncio.to_thread(
@@ -11889,7 +11899,15 @@ async def dashboard_agent_schedules_handler(request: Request) -> JSONResponse:
     return JSONResponse(
         {
             "scheduler_enabled": settings.agent_schedule_enabled,
-            "schedules": [_agent_schedule_payload(schedule) for schedule in schedules],
+            "schedules": [
+                _agent_schedule_payload(schedule)
+                for schedule in schedule_page[:page_limit]
+            ],
+            "next_offset": (
+                page_offset + page_limit
+                if len(schedule_page) > page_limit
+                else None
+            ),
             "delivery_attention": [
                 _agent_schedule_run_payload(run) for run in delivery_attention
             ],

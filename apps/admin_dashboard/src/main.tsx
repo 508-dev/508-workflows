@@ -2324,10 +2324,25 @@ function App() {
   async function loadAgentSchedules() {
     setBusy("agentSchedules", true)
     try {
-      const payload = await requestJson<AgentSchedulesResponse>("/dashboard/api/agent-schedules")
-      setAgentSchedules(payload.schedules || [])
-      setAgentScheduleDeliveryAttention(payload.delivery_attention || [])
-      setAgentScheduleDispatcherEnabled(Boolean(payload.scheduler_enabled))
+      const schedules: AgentSchedule[] = []
+      let nextOffset: number | null = 0
+      let firstPage: AgentSchedulesResponse | null = null
+      while (nextOffset !== null) {
+        const currentOffset: number = nextOffset
+        const suffix: string = currentOffset === 0 ? "" : `?offset=${currentOffset}`
+        const payload: AgentSchedulesResponse = await requestJson<AgentSchedulesResponse>(
+          `/dashboard/api/agent-schedules${suffix}`,
+        )
+        firstPage ||= payload
+        schedules.push(...(payload.schedules || []))
+        nextOffset =
+          typeof payload.next_offset === "number" && payload.next_offset > currentOffset
+            ? payload.next_offset
+            : null
+      }
+      setAgentSchedules(schedules)
+      setAgentScheduleDeliveryAttention(firstPage?.delivery_attention || [])
+      setAgentScheduleDispatcherEnabled(Boolean(firstPage?.scheduler_enabled))
     } catch (error) {
       showError(error, "Unable to load recurring agent schedules")
     } finally {

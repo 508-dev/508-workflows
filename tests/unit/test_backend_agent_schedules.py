@@ -2051,8 +2051,12 @@ async def test_dashboard_lists_stale_delivery_claims_for_operator_attention(
     async def dashboard_session(*_args: object, **_kwargs: object):
         return None, None
 
+    async def run_sync(function: Callable[..., object], *args: object, **kwargs: object):
+        return function(*args, **kwargs)
+
     stale_claims = Mock(return_value=[stale_run])
     monkeypatch.setattr(api, "_dashboard_session_or_error", dashboard_session)
+    monkeypatch.setattr(api.asyncio, "to_thread", run_sync)
     monkeypatch.setattr(api, "_configured_agent_schedule_guild_id", lambda: "1000")
     list_schedules = Mock(return_value=[])
     monkeypatch.setattr(api, "list_agent_schedules", list_schedules)
@@ -2072,9 +2076,51 @@ async def test_dashboard_lists_stale_delivery_claims_for_operator_attention(
     assert payload["delivery_attention"][0]["delivery_status"] == "claimed"
     assert list_schedules.call_args.kwargs == {
         "guild_id": "1000",
+        "limit": 101,
+        "offset": 0,
         "include_archived": True,
     }
     assert stale_claims.call_args.kwargs["guild_id"] == "1000"
+
+
+@pytest.mark.asyncio
+async def test_dashboard_schedule_list_paginates_retained_archived_definitions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Older retained definitions remain reachable beyond the first 100 rows."""
+
+    async def dashboard_session(*_args: object, **_kwargs: object):
+        return None, None
+
+    async def run_sync(function: Callable[..., object], *args: object, **kwargs: object):
+        return function(*args, **kwargs)
+
+    schedule_page = [_schedule()] * 26
+    list_schedules = Mock(return_value=schedule_page)
+    monkeypatch.setattr(api, "_dashboard_session_or_error", dashboard_session)
+    monkeypatch.setattr(api.asyncio, "to_thread", run_sync)
+    monkeypatch.setattr(api, "_configured_agent_schedule_guild_id", lambda: "1000")
+    monkeypatch.setattr(api, "list_agent_schedules", list_schedules)
+    monkeypatch.setattr(
+        api,
+        "list_stale_agent_schedule_run_delivery_claims",
+        Mock(return_value=[]),
+    )
+
+    response = await api.dashboard_agent_schedules_handler(
+        cast(Request, SimpleNamespace(query_params={"offset": "100", "limit": "25"}))
+    )
+
+    assert response.status_code == 200
+    payload = json.loads(response.body)
+    assert len(payload["schedules"]) == 25
+    assert payload["next_offset"] == 125
+    assert list_schedules.call_args.kwargs == {
+        "guild_id": "1000",
+        "limit": 26,
+        "offset": 100,
+        "include_archived": True,
+    }
 
 
 @pytest.mark.asyncio

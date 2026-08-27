@@ -27,6 +27,7 @@ from five08.agent.schedules import (
     get_agent_schedule,
     get_agent_schedule_run,
     list_agent_schedule_runs_needing_queue_reconciliation,
+    list_agent_schedules,
     list_stale_agent_schedule_run_delivery_claims,
     mark_agent_schedule_run_delivery_posted,
     mark_agent_schedule_run_delivery_unknown,
@@ -476,6 +477,53 @@ def test_manual_run_requests_coalesce_within_the_schedule_cooldown(
     assert not any(
         "INSERT INTO agent_schedule_runs" in query for query, _ in cursor.calls
     )
+
+
+def test_schedule_list_applies_stable_offset_pagination(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 7, 28, 9, 0, tzinfo=timezone.utc)
+    definition = AgentScheduleDefinition(
+        prompt="Report the open GitHub issues.",
+        actions=[_github_action()],
+        delivery=_delivery(),
+    ).model_dump(mode="json")
+    schedule_row = {
+        "id": "00000000-0000-0000-0000-000000000010",
+        "organization_id": "1000",
+        "guild_id": "1000",
+        "owner_discord_user_id": "1001",
+        "name": "Archived report",
+        "cron_expression": "0 9 * * *",
+        "timezone": "UTC",
+        "definition": definition,
+        "allowed_scopes": ["agent:schedule:manage", "github:issue:read"],
+        "status": "archived",
+        "next_run_at": None,
+        "last_run_at": now,
+        "created_at": now,
+        "updated_at": now,
+    }
+    cursor = _FakeScheduleCursor(schedule_row=schedule_row, run_row={})
+    monkeypatch.setattr(
+        schedules,
+        "get_postgres_connection",
+        lambda _settings: _FakeScheduleConnection(cursor),
+    )
+
+    records = list_agent_schedules(
+        SharedSettings(),
+        guild_id="1000",
+        limit=25,
+        offset=100,
+        include_archived=True,
+    )
+
+    assert records[0].status is schedules.AgentScheduleStatus.ARCHIVED
+    query, params = cursor.calls[0]
+    assert "ORDER BY created_at DESC, id DESC" in query
+    assert "OFFSET %s" in query
+    assert params == ("1000", True, 25, 100)
 
 
 def test_manual_run_creates_a_replacement_after_a_terminal_run(

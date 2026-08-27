@@ -616,24 +616,33 @@ def list_agent_schedules(
     *,
     guild_id: str,
     limit: int = 100,
+    offset: int = 0,
     include_archived: bool = False,
 ) -> list[AgentScheduleRecord]:
     """List a guild's schedules newest first for an admin control surface."""
 
     normalized_guild_id = _normalize_discord_snowflake(guild_id)
     bounded_limit = max(1, min(int(limit), 500))
+    bounded_offset = max(0, int(offset))
     query = """
         SELECT *
         FROM agent_schedules
         WHERE guild_id = %s
           AND (%s OR status <> 'archived')
-        ORDER BY created_at DESC
+        ORDER BY created_at DESC, id DESC
         LIMIT %s
+        OFFSET %s
     """
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
-                query, (normalized_guild_id, include_archived, bounded_limit)
+                query,
+                (
+                    normalized_guild_id,
+                    include_archived,
+                    bounded_limit,
+                    bounded_offset,
+                ),
             )
             rows = cursor.fetchall()
     return [_as_schedule_record(row) for row in rows]

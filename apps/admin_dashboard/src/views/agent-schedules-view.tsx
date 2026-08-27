@@ -53,6 +53,7 @@ export type AgentScheduleRun = {
 export type AgentSchedulesResponse = {
   scheduler_enabled: boolean
   schedules: AgentSchedule[]
+  next_offset?: number | null
   delivery_attention?: AgentScheduleRun[]
 }
 
