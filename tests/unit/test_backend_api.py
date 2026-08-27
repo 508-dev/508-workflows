@@ -35,12 +35,29 @@ from five08.worker.masking import mask_email
 
 
 class _HealthyRedis:
+    def __init__(self, rate_limit_state: dict[str, set[str]] | None = None) -> None:
+        self.rate_limit_state = rate_limit_state if rate_limit_state is not None else {}
+        self.eval_calls: list[tuple[object, ...]] = []
+
     def ping(self) -> bool:
         return True
+
+    def eval(self, *args: object) -> int:
+        self.eval_calls.append(args)
+        _script, num_keys, key, _window_ms, max_requests, member = args
+        assert num_keys == 1
+        members = self.rate_limit_state.setdefault(str(key), set())
+        if len(members) >= int(str(max_requests)):
+            return 1
+        members.add(str(member))
+        return 0
 
 
 class _FailingRedis:
     def ping(self) -> bool:
+        raise RuntimeError("redis unavailable")
+
+    def eval(self, *_args: object) -> int:
         raise RuntimeError("redis unavailable")
 
 
@@ -346,7 +363,6 @@ def auth_headers(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     monkeypatch.setattr(api.settings, "environment", "test")
     monkeypatch.setattr(api.settings, "api_shared_secret", "test-secret")
     monkeypatch.setattr(api.settings, "agent_allow_role_name_fallback", True)
-    monkeypatch.setattr(api, "_AGENT_REQUEST_TIMESTAMPS", {})
     return {"X-API-Secret": "test-secret"}
 
 
@@ -391,6 +407,9 @@ def _agent_request_with_secret(
             "headers": [(b"x-api-secret", secret.encode("ascii"))],
             "client": ("testclient", 50000),
             "server": ("testserver", 80),
+            "app": SimpleNamespace(
+                state=SimpleNamespace(redis_conn=_HealthyRedis()),
+            ),
         },
         receive,
     )
@@ -1128,7 +1147,11 @@ def test_agent_routes_use_api_shared_secret(
 async def test_agent_request_returns_within_its_response_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def blocked_to_thread(*_args: object, **_kwargs: object) -> object:
+    async def blocked_to_thread(
+        function: object, *_args: object, **_kwargs: object
+    ) -> object:
+        if function is api._agent_request_rate_limited:
+            return False
         await asyncio.Event().wait()
 
     monkeypatch.setattr(api.settings, "environment", "test")
@@ -1303,7 +1326,11 @@ async def test_rate_limited_memory_request_redacts_preplanning_audit(
 
     monkeypatch.setattr(api.settings, "environment", "test")
     monkeypatch.setattr(api.settings, "api_shared_secret", "api-secret")
-    monkeypatch.setattr(api, "_agent_request_rate_limited", lambda _user_id: True)
+    monkeypatch.setattr(
+        api,
+        "_agent_request_rate_limited",
+        lambda _redis_conn, _user_id: True,
+    )
     audit = Mock()
     monkeypatch.setattr(api, "_schedule_agent_audit_event", audit)
     request = _agent_request_with_secret(
@@ -1439,6 +1466,61 @@ def test_agent_request_rate_limits_per_user(
     assert first_response.status_code == 422
     assert second_response.status_code == 429
     assert second_response.json()["status"] == "denied"
+
+
+def test_agent_request_rate_limit_is_atomic_across_redis_clients(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Replica-local clients enforce one shared sliding-window allowance."""
+
+    shared_state: dict[str, set[str]] = {}
+    first_replica = _HealthyRedis(shared_state)
+    second_replica = _HealthyRedis(shared_state)
+    monkeypatch.setattr(api, "_AGENT_REQUEST_RATE_LIMIT_MAX_REQUESTS", 1)
+
+    assert api._agent_request_rate_limited(first_replica, "123") is False
+    assert api._agent_request_rate_limited(second_replica, "123") is True
+    assert api._agent_request_rate_limited(second_replica, "456") is False
+
+    script = str(first_replica.eval_calls[0][0])
+    assert "redis.call('TIME')" in script
+    assert "ZREMRANGEBYSCORE" in script
+    assert "ZCARD" in script
+    assert "ZADD" in script
+    assert "PEXPIRE" in script
+    assert "123" not in str(first_replica.eval_calls[0][2])
+
+
+@pytest.mark.asyncio
+async def test_agent_request_fails_closed_when_shared_rate_limit_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Redis outage must not silently bypass the shared admission boundary."""
+
+    monkeypatch.setattr(api.settings, "environment", "test")
+    monkeypatch.setattr(api.settings, "api_shared_secret", "api-secret")
+    request = _agent_request_with_secret(
+        "api-secret",
+        body=json.dumps(
+            {
+                "message": "Search the web for current grants",
+                "context": {"discord_user_id": "123"},
+            }
+        ).encode(),
+    )
+    request.app.state.redis_conn = _FailingRedis()
+    audit = Mock()
+    monkeypatch.setattr(api, "_schedule_agent_audit_event", audit)
+
+    response = await api.agent_request_handler(request)
+
+    assert response.status_code == 503
+    assert json.loads(response.body) == {
+        "status": "failed",
+        "message": "Agent request rate limiting is temporarily unavailable.",
+    }
+    assert audit.call_args.kwargs["result"] is api.AuditResult.ERROR
+    assert audit.call_args.kwargs["metadata"]["reason"] == "rate_limit_unavailable"
 
 
 def test_agent_request_rejects_when_pending_plan_capacity_is_full(

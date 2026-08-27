@@ -407,8 +407,24 @@ _PENDING_AGENT_PLAN_CAPACITY_LOCK_KEY = "agent_pending_plans:capacity"
 _PENDING_AGENT_PLAN_CLEANUP_INTERVAL_SECONDS = 60
 _AGENT_REQUEST_RATE_LIMIT_WINDOW_SECONDS = 60.0
 _AGENT_REQUEST_RATE_LIMIT_MAX_REQUESTS = 10
-_AGENT_REQUEST_TIMESTAMPS: dict[str, list[float]] = {}
-_AGENT_REQUEST_RATE_LIMIT_LOCK = threading.RLock()
+_AGENT_REQUEST_RATE_LIMIT_SCRIPT = """
+local redis_time = redis.call('TIME')
+local now_ms = (tonumber(redis_time[1]) * 1000) + math.floor(tonumber(redis_time[2]) / 1000)
+local window_ms = tonumber(ARGV[1])
+local max_requests = tonumber(ARGV[2])
+local window_start_ms = now_ms - window_ms
+
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', window_start_ms)
+local request_count = redis.call('ZCARD', KEYS[1])
+if request_count >= max_requests then
+    redis.call('PEXPIRE', KEYS[1], window_ms)
+    return 1
+end
+
+redis.call('ZADD', KEYS[1], now_ms, tostring(now_ms) .. ':' .. ARGV[3])
+redis.call('PEXPIRE', KEYS[1], window_ms)
+return 0
+"""
 _AGENT_AUDIT_TASKS: set[asyncio.Task[None]] = set()
 _AGENT_SCHEDULE_MANAGE_SCOPE = "agent:schedule:manage"
 _AGENT_SCHEDULE_REPORT_MAX_CHARS = 1_900
@@ -624,30 +640,22 @@ def _is_webhook_authorized(request: Request) -> bool:
     )
 
 
-def _agent_request_rate_limited(discord_user_id: str) -> bool:
-    now = time.monotonic()
-    window_start = now - _AGENT_REQUEST_RATE_LIMIT_WINDOW_SECONDS
-    with _AGENT_REQUEST_RATE_LIMIT_LOCK:
-        for stored_user_id, stored_timestamps in list(
-            _AGENT_REQUEST_TIMESTAMPS.items()
-        ):
-            active_timestamps = [
-                timestamp
-                for timestamp in stored_timestamps
-                if timestamp >= window_start
-            ]
-            if active_timestamps:
-                _AGENT_REQUEST_TIMESTAMPS[stored_user_id] = active_timestamps
-            else:
-                del _AGENT_REQUEST_TIMESTAMPS[stored_user_id]
+def _agent_request_rate_limited(redis_conn: Any, discord_user_id: str) -> bool:
+    """Atomically enforce one sliding request window shared by every replica."""
 
-        timestamps = _AGENT_REQUEST_TIMESTAMPS.get(discord_user_id, [])
-        if len(timestamps) >= _AGENT_REQUEST_RATE_LIMIT_MAX_REQUESTS:
-            _AGENT_REQUEST_TIMESTAMPS[discord_user_id] = timestamps
-            return True
-        timestamps.append(now)
-        _AGENT_REQUEST_TIMESTAMPS[discord_user_id] = timestamps
-        return False
+    window_ms = max(1, int(_AGENT_REQUEST_RATE_LIMIT_WINDOW_SECONDS * 1000))
+    max_requests = max(1, int(_AGENT_REQUEST_RATE_LIMIT_MAX_REQUESTS))
+    user_digest = hashlib.sha256(discord_user_id.encode("utf-8")).hexdigest()
+    key = f"{settings.redis_key_prefix}:agent-request-rate-limit:{user_digest}"
+    limited = redis_conn.eval(
+        _AGENT_REQUEST_RATE_LIMIT_SCRIPT,
+        1,
+        key,
+        window_ms,
+        max_requests,
+        secrets.token_hex(16),
+    )
+    return int(limited) == 1
 
 
 def _encode_ulid_base32(value: int, length: int) -> str:
@@ -12541,7 +12549,33 @@ async def agent_request_handler(request: Request) -> JSONResponse:
         return JSONResponse(
             {"error": "invalid_payload", "detail": str(exc)}, status_code=400
         )
-    if _agent_request_rate_limited(payload.context.discord_user_id):
+    try:
+        rate_limited = await asyncio.to_thread(
+            _agent_request_rate_limited,
+            request.app.state.redis_conn,
+            payload.context.discord_user_id,
+        )
+    except Exception:
+        logger.exception("Shared agent request rate limiter failed")
+        _schedule_agent_audit_event(
+            context=payload.context,
+            action="agent.request",
+            result=AuditResult.ERROR,
+            plan=None,
+            metadata={
+                "status": "failed",
+                "reason": "rate_limit_unavailable",
+                "message_sanitized": _sanitize_agent_audit_message(payload.message),
+            },
+        )
+        return JSONResponse(
+            {
+                "status": "failed",
+                "message": "Agent request rate limiting is temporarily unavailable.",
+            },
+            status_code=503,
+        )
+    if rate_limited:
         _schedule_agent_audit_event(
             context=payload.context,
             action="agent.request",
