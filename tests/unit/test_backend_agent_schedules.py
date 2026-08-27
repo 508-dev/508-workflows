@@ -488,6 +488,10 @@ def test_frozen_github_schedule_accepts_a_configured_allowlisted_repository(
 
     monkeypatch.setattr(api.settings, "github_default_repo", "508-dev/todos")
     monkeypatch.setattr(api.settings, "github_allowed_repos", "508-dev/infra")
+    monkeypatch.setattr(api.settings, "github_app_client_id", None)
+    monkeypatch.setattr(api.settings, "github_app_installation_id", None)
+    monkeypatch.setattr(api.settings, "github_app_private_key", None)
+    monkeypatch.setattr(api.settings, "github_api_token", "github-token")
     payload = SimpleNamespace(
         prompt="Group related GitHub issues.",
         execution_mode="frozen_actions",
@@ -505,12 +509,43 @@ def test_frozen_github_schedule_accepts_a_configured_allowlisted_repository(
     assert definition.actions[0].arguments["repository"] == "508-dev/infra"
 
 
+def test_frozen_github_schedule_rejects_an_unusable_client_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An allowlisted repository is insufficient without executable auth."""
+
+    monkeypatch.setattr(api.settings, "github_default_repo", "508-dev/todos")
+    monkeypatch.setattr(api.settings, "github_allowed_repos", "")
+    monkeypatch.setattr(api.settings, "github_app_client_id", None)
+    monkeypatch.setattr(api.settings, "github_app_installation_id", None)
+    monkeypatch.setattr(api.settings, "github_app_private_key", None)
+    monkeypatch.setattr(api.settings, "github_api_token", None)
+    payload = SimpleNamespace(
+        prompt="Group related GitHub issues.",
+        execution_mode="frozen_actions",
+        channel_id="2000",
+        repository="508-dev/todos",
+        query="label:bug",
+        state="open",
+        limit=10,
+        summary_mode="deterministic",
+        sources_are_public=False,
+    )
+
+    with pytest.raises(ValueError, match="complete GitHub App configuration"):
+        api._agent_schedule_definition_from_fields(payload, guild_id="1000")
+
+
 def test_frozen_github_schedule_defaults_to_an_explicit_open_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An omitted state cannot turn into an unrestricted GitHub query later."""
 
     monkeypatch.setattr(api.settings, "github_default_repo", "508-dev/todos")
+    monkeypatch.setattr(api.settings, "github_app_client_id", None)
+    monkeypatch.setattr(api.settings, "github_app_installation_id", None)
+    monkeypatch.setattr(api.settings, "github_app_private_key", None)
+    monkeypatch.setattr(api.settings, "github_api_token", "github-token")
     payload = SimpleNamespace(
         prompt="Group related GitHub issues.",
         execution_mode="frozen_actions",

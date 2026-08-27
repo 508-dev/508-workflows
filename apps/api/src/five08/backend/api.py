@@ -9416,6 +9416,24 @@ def _validate_agent_schedule_github_repository(repository: str) -> None:
         )
 
 
+def _agent_github_client_is_usable(runtime_config: ToolRuntimeConfig) -> bool:
+    """Match ToolRegistry's complete-App or legacy-token client selection."""
+
+    configured_app_values = tuple(
+        str(value or "").strip()
+        for value in (
+            runtime_config.github_app_client_id,
+            runtime_config.github_app_installation_id,
+            runtime_config.github_app_private_key,
+        )
+    )
+    app_configured = all(configured_app_values)
+    token_configured = bool(str(runtime_config.github_api_token or "").strip())
+    # Any App field selects App mode in ToolRegistry, so an incomplete App
+    # must not silently fall through to a legacy token.
+    return app_configured or (not any(configured_app_values) and token_configured)
+
+
 async def _fresh_agent_schedule_context(
     request: Request,
     *,
@@ -9492,22 +9510,7 @@ def _default_agent_schedule_tool_allowlist(
     # A generic schedule should not advertise an optional integration that
     # cannot serve the planner at execution time. Explicit administrator
     # selections remain deliberate, subject to tenant invariants below.
-    configured_github_app_values = tuple(
-        str(value or "").strip()
-        for value in (
-            runtime_config.github_app_client_id,
-            runtime_config.github_app_installation_id,
-            runtime_config.github_app_private_key,
-        )
-    )
-    github_app_configured = all(configured_github_app_values)
-    github_token_configured = bool(str(runtime_config.github_api_token or "").strip())
-    # ToolRegistry treats any GitHub App field as an App configuration and
-    # rejects an incomplete set rather than falling through to the legacy token.
-    github_client_configured = github_app_configured or (
-        not any(configured_github_app_values) and github_token_configured
-    )
-    if not github_client_configured:
+    if not _agent_github_client_is_usable(runtime_config):
         schedule_safe_tools -= {"github_issue.search_issues"}
 
     web_provider_order = {
@@ -9629,6 +9632,12 @@ def _agent_schedule_definition_from_fields(
     state = str(getattr(payload, "state", "open") or "open").strip().casefold()
     limit = int(payload.limit)
     _validate_agent_schedule_github_repository(repository)
+    runtime_config = ToolRuntimeConfig.from_settings(settings)
+    if not _agent_github_client_is_usable(runtime_config):
+        raise ValueError(
+            "scheduled GitHub reports require a complete GitHub App "
+            "configuration or GITHUB_API_TOKEN"
+        )
     return AgentScheduleDefinition(
         prompt=prompt,
         execution_mode=execution_mode,
