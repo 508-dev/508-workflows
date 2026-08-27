@@ -1569,6 +1569,12 @@ def _agent_schedule_report_was_not_sent(delivery: Mapping[str, Any]) -> bool:
     return str(delivery.get("delivery_outcome") or "") == "not_attempted"
 
 
+def _agent_schedule_channel_failure_is_permanent(status_code: int) -> bool:
+    """Classify invalid saved destinations separately from bot outages."""
+
+    return 400 <= status_code < 500 and status_code not in {401, 429}
+
+
 async def _validate_agent_schedule_channel_with_bot(
     request: Request,
     *,
@@ -11074,6 +11080,50 @@ async def _execute_agent_schedule_run(
             "error": "owner_scopes_no_longer_granted",
             "run": _agent_schedule_run_payload(completed or run),
         }, 200
+
+    try:
+        (
+            channel_validation,
+            channel_status,
+        ) = await _validate_agent_schedule_channel_with_bot(
+            request,
+            guild_id=schedule.guild_id,
+            channel_id=schedule.definition.delivery.channel_id,
+            owner_discord_user_id=schedule.owner_discord_user_id,
+        )
+    except RuntimeError:
+        logger.warning(
+            "Unable to validate saved schedule channel schedule_id=%s",
+            schedule.id,
+            exc_info=True,
+        )
+        channel_validation = {"error": "schedule_channel_validation_unavailable"}
+        channel_status = 503
+    if channel_status != 200:
+        channel_error = str(
+            channel_validation.get("error") or "schedule_channel_validation_failed"
+        )
+        permanent_failure = _agent_schedule_channel_failure_is_permanent(channel_status)
+        terminal_status = (
+            AgentScheduleRunStatus.SKIPPED
+            if permanent_failure
+            else AgentScheduleRunStatus.FAILED
+        )
+        completed = await asyncio.to_thread(
+            complete_agent_schedule_run,
+            settings,
+            run_id=run.id,
+            execution_token=execution_token,
+            status=terminal_status,
+            error=channel_error,
+        )
+        return {
+            "status": terminal_status.value,
+            "schedule_id": schedule.id,
+            "delivery_status": "not_posted",
+            "error": channel_error,
+            "run": _agent_schedule_run_payload(completed or run),
+        }, (200 if permanent_failure else 503)
 
     deadline = monotonic() + min(
         float(schedule.definition.max_runtime_seconds),

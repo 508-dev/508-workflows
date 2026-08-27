@@ -119,6 +119,20 @@ def _agent_loop_schedule(*, tool_allowlist: list[str]) -> AgentScheduleRecord:
     )
 
 
+@pytest.fixture(autouse=True)
+def _ready_agent_schedule_channel(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep execution tests explicit about their default valid destination."""
+
+    async def ready_channel(*_args: object, **_kwargs: object):
+        return {"status": "ready"}, 200
+
+    monkeypatch.setattr(
+        api,
+        "_validate_agent_schedule_channel_with_bot",
+        ready_channel,
+    )
+
+
 def test_agent_loop_creation_persists_an_exact_default_tool_catalog(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1813,6 +1827,107 @@ async def test_schedule_execution_skips_revoked_owner_before_tools_or_discord(
     )
     make_plan.assert_not_called()
     post_report.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("channel_result", "channel_status", "expected_status", "response_status"),
+    [
+        (
+            {"error": "channel_not_found"},
+            404,
+            AgentScheduleRunStatus.SKIPPED,
+            200,
+        ),
+        (
+            {"error": "channel_lookup_failed"},
+            502,
+            AgentScheduleRunStatus.FAILED,
+            503,
+        ),
+        (
+            {"error": "unauthorized"},
+            401,
+            AgentScheduleRunStatus.FAILED,
+            503,
+        ),
+    ],
+)
+async def test_schedule_execution_validates_destination_before_billable_work(
+    monkeypatch: pytest.MonkeyPatch,
+    channel_result: dict[str, str],
+    channel_status: int,
+    expected_status: AgentScheduleRunStatus,
+    response_status: int,
+) -> None:
+    """Permanent destinations stop retries; bot outages retain recovery."""
+
+    queued_run = _run()
+    running_run = replace(
+        queued_run,
+        status=AgentScheduleRunStatus.RUNNING,
+        started_at=queued_run.occurrence_at,
+    )
+    completed_run = replace(
+        running_run,
+        status=expected_status,
+        finished_at=running_run.occurrence_at,
+        error=channel_result["error"],
+    )
+    schedule = _schedule()
+    context = AgentIdentityContext(
+        discord_user_id="1001",
+        organization_id="1000",
+        guild_id="1000",
+        roles=["Admin"],
+    )
+
+    async def refreshed_context(*_args: object, **_kwargs: object):
+        return context, None, 200
+
+    validate_channel = AsyncMock(return_value=(channel_result, channel_status))
+    execute_plan = Mock(side_effect=AssertionError("tools must not execute"))
+    make_plan = Mock(side_effect=AssertionError("tools must not be planned"))
+    bounded_execution = AsyncMock(side_effect=AssertionError("model must not run"))
+    complete_run = Mock(return_value=completed_run)
+    orchestrator = SimpleNamespace(
+        policy=SimpleNamespace(
+            scopes_for_context=Mock(return_value=set(schedule.allowed_scopes))
+        ),
+        execute_plan=execute_plan,
+    )
+    monkeypatch.setattr(api, "get_agent_schedule_run", Mock(return_value=queued_run))
+    monkeypatch.setattr(api, "claim_agent_schedule_run", Mock(return_value=running_run))
+    monkeypatch.setattr(api, "get_agent_schedule", Mock(return_value=schedule))
+    monkeypatch.setattr(api, "complete_agent_schedule_run", complete_run)
+    monkeypatch.setattr(api, "_fresh_agent_schedule_context", refreshed_context)
+    monkeypatch.setattr(api, "_get_agent_orchestrator", lambda: orchestrator)
+    monkeypatch.setattr(
+        api, "_validate_agent_schedule_channel_with_bot", validate_channel
+    )
+    monkeypatch.setattr(api, "_agent_schedule_plan", make_plan)
+    monkeypatch.setattr(api, "_run_agent_schedule_sync_bounded", bounded_execution)
+
+    request = cast(Request, SimpleNamespace())
+    response, actual_status = await api._execute_agent_schedule_run(
+        request,
+        run_id=queued_run.id,
+    )
+
+    assert actual_status == response_status
+    assert response["status"] == expected_status.value
+    assert response["error"] == channel_result["error"]
+    assert response["delivery_status"] == "not_posted"
+    validate_channel.assert_awaited_once_with(
+        request,
+        guild_id=schedule.guild_id,
+        channel_id=schedule.definition.delivery.channel_id,
+        owner_discord_user_id=schedule.owner_discord_user_id,
+    )
+    assert complete_run.call_args.kwargs["status"] is expected_status
+    execute_plan.assert_not_called()
+    make_plan.assert_not_called()
+    bounded_execution.assert_not_awaited()
 
 
 @pytest.mark.asyncio
