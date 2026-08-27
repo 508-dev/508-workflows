@@ -9,6 +9,7 @@ import {
   jobLeadClassificationMethodLabel,
   labelForOnboardingState,
   linkedinUrl,
+  messageForApiError,
   onboardingStateValue,
   toneForOnboardingState,
 } from "./dashboard-utils"
@@ -69,5 +70,14 @@ describe("dashboard utility helpers", () => {
     expect(jobLeadClassificationMethodLabel("heuristic")).toBe("Keyword fallback")
     expect(jobLeadClassificationMethodLabel("unknown")).toBe("Unknown")
     expect(jobLeadClassificationMethodLabel()).toBe("Unknown")
+  })
+
+  it("turns malformed onboarding email requests into actionable messages", () => {
+    expect(messageForApiError({ error: "empty_email_body" }, "Request failed")).toBe(
+      "The email body is empty. Add content before sending.",
+    )
+    expect(messageForApiError({ error: "invalid_payload" }, "Request failed")).toBe(
+      "The request contains invalid information. Refresh the page and try again.",
+    )
   })
 })

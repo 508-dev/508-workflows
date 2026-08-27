@@ -52,6 +52,65 @@ export function jsonPreview(value: unknown) {
   return JSON.stringify(value, null, 2)
 }
 
+export function messageForApiError(record: Record<string, unknown>, fallback: string) {
+  const detail = record.detail
+  if (typeof detail === "string" && detail.trim()) return detail
+
+  const error = record.error
+  if (typeof error !== "string") return fallback
+  if (error === "person_not_found") {
+    const person =
+      typeof record.person === "string" && record.person.trim() ? record.person : "that person"
+    return `No CRM person, ERPNext user, or ERPNext supplier matched "${person}". Try an email address or an exact name from CRM/ERPNext.`
+  }
+  if (error === "candidate_not_found") {
+    return "The selected person record is no longer available. Search again and choose one of the current matches."
+  }
+  if (error === "invalid_crm_profile") {
+    return "Paste a valid CRM Contact profile URL or Contact id."
+  }
+  if (error === "crm_profile_not_found") {
+    return "That CRM Contact profile was not found."
+  }
+  if (error === "crm_profile_mismatch") {
+    return "CRM returned a different Contact than the profile requested. Check the profile URL and try again."
+  }
+  if (error === "crm_profile_lookup_failed") {
+    return "CRM profile lookup failed. Try again after CRM is reachable."
+  }
+  if (error === "crm_lookup_failed") {
+    return "Could not verify the candidate in CRM. No email was sent; try again once CRM is reachable."
+  }
+  if (error === "contact_not_onboarding_eligible") {
+    return "This candidate is no longer eligible for onboarding email. Refresh the queue and review their status."
+  }
+  if (error === "candidate_terminal_onboarding_state") {
+    return "This candidate is already in a terminal onboarding state, so no email was sent."
+  }
+  if (error === "recipient_email_required") {
+    return "The candidate does not have a valid email address, so no email was sent."
+  }
+  if (error === "reply_to_email_required") {
+    return "Your Reply-To email is unavailable, so no email was sent."
+  }
+  if (error === "smtp_not_configured") {
+    return "Onboarding email SMTP is not configured, so no email was sent."
+  }
+  if (error === "email_send_failed") {
+    return "The mail server could not confirm it accepted the email. It was not marked sent; check the recipient inbox or SMTP logs before retrying to avoid a duplicate."
+  }
+  if (error === "empty_email_body") {
+    return "The email body is empty. Add content before sending."
+  }
+  if (error === "invalid_payload") {
+    return "The request contains invalid information. Refresh the page and try again."
+  }
+  if (error === "ambiguous_person") {
+    return "Multiple people matched. Choose the matching person record."
+  }
+  return error || fallback
+}
+
 export function isTerminalJobStatus(value?: string | null) {
   return ["succeeded", "dead", "canceled"].includes(
     String(value || "")
