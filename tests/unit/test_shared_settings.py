@@ -194,6 +194,17 @@ def test_shared_settings_accepts_legacy_github_app_id_alias() -> None:
     assert settings.github_app_client_id == "123"
 
 
+def test_schedule_output_retention_cannot_exceed_retained_run_history() -> None:
+    with pytest.raises(
+        ValueError,
+        match="AGENT_SCHEDULE_RUN_OUTPUT_RETENTION_PER_SCHEDULE",
+    ):
+        SharedSettings(
+            agent_schedule_run_retention_per_schedule=20,
+            agent_schedule_run_output_retention_per_schedule=21,
+        )
+
+
 def test_shared_settings_accept_newsletter_sync_env_aliases() -> None:
     settings = SharedSettings(
         **{

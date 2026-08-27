@@ -2096,7 +2096,9 @@ async def test_dashboard_lists_stale_delivery_claims_for_operator_attention(
     async def dashboard_session(*_args: object, **_kwargs: object):
         return None, None
 
-    async def run_sync(function: Callable[..., object], *args: object, **kwargs: object):
+    async def run_sync(
+        function: Callable[..., object], *args: object, **kwargs: object
+    ):
         return function(*args, **kwargs)
 
     stale_claims = Mock(return_value=[stale_run])
@@ -2137,7 +2139,9 @@ async def test_dashboard_schedule_list_paginates_retained_archived_definitions(
     async def dashboard_session(*_args: object, **_kwargs: object):
         return None, None
 
-    async def run_sync(function: Callable[..., object], *args: object, **kwargs: object):
+    async def run_sync(
+        function: Callable[..., object], *args: object, **kwargs: object
+    ):
         return function(*args, **kwargs)
 
     schedule_page = [_schedule()] * 26
@@ -2166,6 +2170,40 @@ async def test_dashboard_schedule_list_paginates_retained_archived_definitions(
         "offset": 100,
         "include_archived": True,
     }
+
+
+@pytest.mark.asyncio
+async def test_schedule_run_retention_runs_independently_of_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The maintenance loop applies configured bounds before its first sleep."""
+
+    async def run_sync(
+        function: Callable[..., object], *args: object, **kwargs: object
+    ):
+        return function(*args, **kwargs)
+
+    async def stop_after_first_run(delay: float) -> None:
+        assert delay == api.settings.agent_schedule_run_cleanup_interval_seconds
+        raise asyncio.CancelledError
+
+    result = SimpleNamespace(deleted_runs=7, cleared_outputs=3)
+    prune = Mock(return_value=result)
+    monkeypatch.setattr(api.asyncio, "to_thread", run_sync)
+    monkeypatch.setattr(api.asyncio, "sleep", stop_after_first_run)
+    monkeypatch.setattr(api, "prune_terminal_agent_schedule_runs", prune)
+
+    with pytest.raises(asyncio.CancelledError):
+        await api._agent_schedule_run_retention_scheduler()
+
+    prune.assert_called_once_with(
+        api.settings,
+        retain_per_schedule=api.settings.agent_schedule_run_retention_per_schedule,
+        retain_outputs_per_schedule=(
+            api.settings.agent_schedule_run_output_retention_per_schedule
+        ),
+        batch_size=api.settings.agent_schedule_run_cleanup_batch_size,
+    )
 
 
 @pytest.mark.asyncio

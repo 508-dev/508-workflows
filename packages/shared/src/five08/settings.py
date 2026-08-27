@@ -156,6 +156,28 @@ class SharedSettings(BaseSettings):
         ge=10.0,
         le=300.0,
     )
+    # Keep the dashboard's maximum 100-outcome audit window while retaining
+    # full report bodies only for its default 20-outcome detail window.
+    agent_schedule_run_retention_per_schedule: int = Field(
+        default=100,
+        ge=20,
+        le=10_000,
+    )
+    agent_schedule_run_output_retention_per_schedule: int = Field(
+        default=20,
+        ge=0,
+        le=1_000,
+    )
+    agent_schedule_run_cleanup_interval_seconds: int = Field(
+        default=3_600,
+        ge=300,
+        le=604_800,
+    )
+    agent_schedule_run_cleanup_batch_size: int = Field(
+        default=10_000,
+        ge=100,
+        le=100_000,
+    )
     searxng_base_url: str | None = None
     searxng_search_language: str | None = None
     brave_search_api_key: str | None = None
@@ -395,6 +417,20 @@ class SharedSettings(BaseSettings):
             raise ValueError(
                 "AGENT_PUBLIC_WEB_DEADLINE_SECONDS must not exceed "
                 "AGENT_REQUEST_RESPONSE_BUDGET_SECONDS"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_agent_schedule_run_retention(self) -> "SharedSettings":
+        """Keep full output retention inside the retained run audit window."""
+
+        if (
+            self.agent_schedule_run_output_retention_per_schedule
+            > self.agent_schedule_run_retention_per_schedule
+        ):
+            raise ValueError(
+                "AGENT_SCHEDULE_RUN_OUTPUT_RETENTION_PER_SCHEDULE must not exceed "
+                "AGENT_SCHEDULE_RUN_RETENTION_PER_SCHEDULE"
             )
         return self
 

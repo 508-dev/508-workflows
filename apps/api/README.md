@@ -112,6 +112,11 @@ The internal bot-facing management routes live under `/agent/schedules*`; the
 worker calls `POST /internal/agent-schedules/runs/{run_id}` using the existing
 `API_SHARED_SECRET`. Neither route is a browser-facing authorization surface.
 
+Terminal run history is bounded per schedule. By default the API retains the
+newest 100 outcomes for audit, keeps full report output only on the newest 20,
+and clears/deletes older data in bounded hourly batches. Queued and running
+occurrences are never removed by retention maintenance.
+
 Discord deep-link identity policy:
 
 - Discord deep links are available to active CRM-linked Discord users. Members receive gig-only permissions for their own posted gigs; Steering Committee+ users receive broader dashboard permissions. `Workflows Engineer` users receive Steering Committee write permissions, admin read permissions for jobs/audit, and dry-run access for admin-only dashboard writes such as job reruns and people/project syncs.

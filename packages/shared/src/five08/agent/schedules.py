@@ -363,6 +363,14 @@ class AgentScheduleManualRunResult:
     created: bool
 
 
+@dataclass(frozen=True)
+class AgentScheduleRunRetentionResult:
+    """Counts from one bounded terminal-run retention sweep."""
+
+    deleted_runs: int
+    cleared_outputs: int
+
+
 def _normalize_discord_snowflake(value: object) -> str:
     normalized = str(value or "").strip()
     if not normalized or not normalized.isdecimal() or int(normalized) <= 0:
@@ -1575,6 +1583,83 @@ def list_agent_schedule_runs(
             cursor.execute(query, (normalized_schedule_id, bounded_limit))
             rows = cursor.fetchall()
     return [_as_schedule_run_record(row) for row in rows]
+
+
+def prune_terminal_agent_schedule_runs(
+    settings: SharedSettings,
+    *,
+    retain_per_schedule: int,
+    retain_outputs_per_schedule: int,
+    batch_size: int,
+) -> AgentScheduleRunRetentionResult:
+    """Bound terminal run metadata and full report output for every schedule.
+
+    Nonterminal runs are never touched. The lateral subqueries use the existing
+    schedule/occurrence index and skip only each schedule's bounded retained
+    prefix, avoiding a full-table window sort as historical rows accumulate.
+    """
+
+    bounded_retention = max(1, int(retain_per_schedule))
+    bounded_output_retention = max(
+        0,
+        min(int(retain_outputs_per_schedule), bounded_retention),
+    )
+    bounded_batch_size = max(1, min(int(batch_size), 100_000))
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                WITH prunable AS (
+                    SELECT old_run.id
+                    FROM agent_schedules AS schedules
+                    CROSS JOIN LATERAL (
+                        SELECT runs.id
+                        FROM agent_schedule_runs AS runs
+                        WHERE runs.schedule_id = schedules.id
+                          AND runs.status IN ('succeeded', 'failed', 'skipped')
+                        ORDER BY runs.occurrence_at DESC, runs.id DESC
+                        OFFSET %s
+                    ) AS old_run
+                    LIMIT %s
+                )
+                DELETE FROM agent_schedule_runs AS runs
+                USING prunable
+                WHERE runs.id = prunable.id
+                """,
+                (bounded_retention, bounded_batch_size),
+            )
+            deleted_runs = max(int(getattr(cursor, "rowcount", 0) or 0), 0)
+            cursor.execute(
+                """
+                WITH redactable AS (
+                    SELECT old_output.id
+                    FROM agent_schedules AS schedules
+                    CROSS JOIN LATERAL (
+                        SELECT runs.id, runs.output
+                        FROM agent_schedule_runs AS runs
+                        WHERE runs.schedule_id = schedules.id
+                          AND runs.status IN ('succeeded', 'failed', 'skipped')
+                        ORDER BY runs.occurrence_at DESC, runs.id DESC
+                        OFFSET %s
+                    ) AS old_output
+                    WHERE old_output.output IS NOT NULL
+                    LIMIT %s
+                )
+                UPDATE agent_schedule_runs AS runs
+                SET output = NULL
+                FROM redactable
+                WHERE runs.id = redactable.id
+                """,
+                (
+                    bounded_output_retention,
+                    bounded_batch_size,
+                ),
+            )
+            cleared_outputs = max(int(getattr(cursor, "rowcount", 0) or 0), 0)
+    return AgentScheduleRunRetentionResult(
+        deleted_runs=deleted_runs,
+        cleared_outputs=cleared_outputs,
+    )
 
 
 def _as_schedule_record(row: dict[str, Any]) -> AgentScheduleRecord:

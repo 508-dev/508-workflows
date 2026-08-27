@@ -95,6 +95,7 @@ from five08.agent.schedules import (
     mark_agent_schedule_run_delivery_posted,
     mark_agent_schedule_run_delivery_unknown,
     pause_agent_schedule,
+    prune_terminal_agent_schedule_runs,
     release_agent_schedule_run_delivery_claim,
     resume_agent_schedule,
     set_agent_schedule_run_job_id,
@@ -9528,9 +9529,7 @@ def _default_agent_schedule_tool_allowlist(
         for value in (runtime_config.espo_base_url, runtime_config.espo_api_key)
     ):
         schedule_safe_tools -= _AGENT_SCHEDULE_CRM_TOOL_NAMES
-    erp_organization_id = str(
-        runtime_config.agent_erp_organization_id or ""
-    ).strip()
+    erp_organization_id = str(runtime_config.agent_erp_organization_id or "").strip()
     if (
         not all(
             str(value or "").strip()
@@ -9910,6 +9909,35 @@ async def _agent_schedule_dispatcher(app: FastAPI) -> None:
             await _dispatch_pending_agent_schedule_runs(queue)
         except Exception:
             logger.exception("Failed agent schedule dispatch iteration")
+        await asyncio.sleep(interval_seconds)
+
+
+async def _agent_schedule_run_retention_scheduler() -> None:
+    """Bound terminal run rows and report bodies independently of dispatch."""
+
+    interval_seconds = settings.agent_schedule_run_cleanup_interval_seconds
+    while True:
+        try:
+            result = await asyncio.to_thread(
+                prune_terminal_agent_schedule_runs,
+                settings,
+                retain_per_schedule=(
+                    settings.agent_schedule_run_retention_per_schedule
+                ),
+                retain_outputs_per_schedule=(
+                    settings.agent_schedule_run_output_retention_per_schedule
+                ),
+                batch_size=settings.agent_schedule_run_cleanup_batch_size,
+            )
+            if result.deleted_runs or result.cleared_outputs:
+                logger.info(
+                    "Applied agent schedule run retention deleted_runs=%s "
+                    "cleared_outputs=%s",
+                    result.deleted_runs,
+                    result.cleared_outputs,
+                )
+        except Exception:
+            logger.exception("Failed applying agent schedule run retention")
         await asyncio.sleep(interval_seconds)
 
 
@@ -11921,9 +11949,7 @@ async def dashboard_agent_schedules_handler(request: Request) -> JSONResponse:
                 for schedule in schedule_page[:page_limit]
             ],
             "next_offset": (
-                page_offset + page_limit
-                if len(schedule_page) > page_limit
-                else None
+                page_offset + page_limit if len(schedule_page) > page_limit else None
             ),
             "delivery_attention": [
                 _agent_schedule_run_payload(run) for run in delivery_attention
@@ -13648,6 +13674,15 @@ async def _lifespan(app: FastAPI) -> Any:
     else:
         logger.info("Agent schedule dispatcher disabled by config")
 
+    if app.state.postgres_migrations_ok:
+        app.state.agent_schedule_retention_task = asyncio.create_task(
+            _agent_schedule_run_retention_scheduler()
+        )
+    else:
+        logger.warning(
+            "Agent schedule run retention disabled because Postgres migrations failed"
+        )
+
     if settings.agent_memory_cleanup_enabled and app.state.postgres_migrations_ok:
         app.state.agent_memory_cleanup_task = asyncio.create_task(
             _agent_memory_cleanup_scheduler(app)
@@ -13688,6 +13723,12 @@ async def _lifespan(app: FastAPI) -> Any:
 
         if hasattr(app.state, "agent_schedule_task"):
             task = app.state.agent_schedule_task
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        if hasattr(app.state, "agent_schedule_retention_task"):
+            task = app.state.agent_schedule_retention_task
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task

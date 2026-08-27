@@ -31,6 +31,7 @@ from five08.agent.schedules import (
     list_stale_agent_schedule_run_delivery_claims,
     mark_agent_schedule_run_delivery_posted,
     mark_agent_schedule_run_delivery_unknown,
+    prune_terminal_agent_schedule_runs,
     release_agent_schedule_run_delivery_claim,
     resume_agent_schedule,
     validate_agent_schedule_timing,
@@ -379,6 +380,37 @@ class _FakeScheduleTransaction:
         return None
 
 
+class _RetentionCursor:
+    def __init__(self, row_counts: list[int]) -> None:
+        self.calls: list[tuple[str, tuple[Any, ...] | None]] = []
+        self._row_counts = row_counts
+        self.rowcount = 0
+
+    def __enter__(self) -> "_RetentionCursor":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def execute(self, query: str, params: tuple[Any, ...] | None = None) -> None:
+        self.calls.append((query, params))
+        self.rowcount = self._row_counts.pop(0)
+
+
+class _RetentionConnection:
+    def __init__(self, cursor: _RetentionCursor) -> None:
+        self._cursor = cursor
+
+    def __enter__(self) -> "_RetentionConnection":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def cursor(self, **_kwargs: object) -> _RetentionCursor:
+        return self._cursor
+
+
 class _ManualRunCursor:
     def __init__(
         self,
@@ -524,6 +556,36 @@ def test_schedule_list_applies_stable_offset_pagination(
     assert "ORDER BY created_at DESC, id DESC" in query
     assert "OFFSET %s" in query
     assert params == ("1000", True, 25, 100)
+
+
+def test_terminal_schedule_run_retention_bounds_rows_and_full_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cursor = _RetentionCursor([7, 3])
+    monkeypatch.setattr(
+        schedules,
+        "get_postgres_connection",
+        lambda _settings: _RetentionConnection(cursor),
+    )
+
+    result = prune_terminal_agent_schedule_runs(
+        SharedSettings(),
+        retain_per_schedule=100,
+        retain_outputs_per_schedule=20,
+        batch_size=1_000,
+    )
+
+    assert result.deleted_runs == 7
+    assert result.cleared_outputs == 3
+    delete_query, delete_params = cursor.calls[0]
+    output_query, output_params = cursor.calls[1]
+    assert "DELETE FROM agent_schedule_runs" in delete_query
+    assert "runs.status IN ('succeeded', 'failed', 'skipped')" in delete_query
+    assert "OFFSET %s" in delete_query
+    assert delete_params == (100, 1_000)
+    assert "UPDATE agent_schedule_runs" in output_query
+    assert "SET output = NULL" in output_query
+    assert output_params == (20, 1_000)
 
 
 def test_manual_run_creates_a_replacement_after_a_terminal_run(
