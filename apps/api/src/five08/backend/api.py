@@ -125,6 +125,7 @@ from five08.queue import (
     get_postgres_connection,
     get_redis_connection,
     is_postgres_healthy,
+    redeliver_due_failed_job,
     redeliver_queued_job,
     trusted_sql,
 )
@@ -9834,6 +9835,25 @@ async def _dispatch_pending_agent_schedule_runs(queue: QueueClient) -> None:
             if redelivered:
                 logger.warning(
                     "Redelivered queued worker job for agent schedule run_id=%s job_id=%s",
+                    run.id,
+                    run.job_id,
+                )
+            continue
+        if reconciliation.job_status == JobStatus.FAILED.value:
+            # A worker can commit its durable retry and exit before publishing
+            # the delayed Redis message. Reconcile the due database row under
+            # the same durable redelivery lease used for an initial delivery.
+            redelivered = await asyncio.to_thread(
+                redeliver_due_failed_job,
+                queue,
+                settings=settings,
+                job_id=run.job_id or "",
+                minimum_age_seconds=_AGENT_SCHEDULE_QUEUED_JOB_REDELIVERY_BACKOFF_SECONDS,
+            )
+            if redelivered:
+                logger.warning(
+                    "Redelivered due failed worker job for agent schedule "
+                    "run_id=%s job_id=%s",
                     run.id,
                     run.job_id,
                 )

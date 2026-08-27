@@ -1021,9 +1021,11 @@ def list_agent_schedule_runs_needing_queue_reconciliation(
     """Find nonterminal runs whose worker job needs durable recovery.
 
     A persisted ``queued`` job is not proof that its Redis delivery survived,
-    so the dispatcher may safely redeliver it through the worker's atomic job
-    claim. A missing job reference can be released for re-enqueueing, while a
-    terminal worker job is recorded against the durable schedule run.
+    and a due retryable ``failed`` job may have lost its delayed delivery after
+    the durable retry transition. The dispatcher may safely redeliver either
+    through the worker's atomic job claim. A missing job reference can be
+    released for re-enqueueing, while a terminal worker job is recorded against
+    the durable schedule run.
     """
 
     bounded_limit = max(1, min(int(limit), 500))
@@ -1038,6 +1040,12 @@ def list_agent_schedule_runs_needing_queue_reconciliation(
               jobs.id IS NULL
               OR jobs.status IN ('dead', 'canceled')
               OR (runs.status = 'queued' AND jobs.status = 'queued')
+              OR (
+                  jobs.status = 'failed'
+                  AND jobs.attempts < jobs.max_attempts
+                  AND jobs.run_after IS NOT NULL
+                  AND jobs.run_after <= NOW()
+              )
           )
         ORDER BY runs.created_at ASC
         LIMIT %s

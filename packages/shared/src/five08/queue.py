@@ -261,6 +261,52 @@ def redeliver_queued_job(
     return True
 
 
+def redeliver_due_failed_job(
+    queue: QueueClient,
+    *,
+    settings: SharedSettings,
+    job_id: str,
+    minimum_age_seconds: float,
+) -> bool:
+    """Recover a due retry whose delayed broker delivery may have been lost.
+
+    ``mark_job_retry`` durably records a retry as a failed job with a future
+    ``run_after`` before publishing its delayed Redis message. If the worker
+    exits between those operations, this helper leases and republishes the due
+    database row. The worker's atomic claim still owns execution, so a delayed
+    message that did survive can safely race this recovery delivery.
+    """
+
+    normalized_job_id = str(job_id or "").strip()
+    if not normalized_job_id:
+        return False
+    backoff_seconds = max(1.0, float(minimum_age_seconds))
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                UPDATE jobs
+                SET updated_at = NOW()
+                WHERE id = %s
+                  AND status = %s
+                  AND attempts < max_attempts
+                  AND run_after IS NOT NULL
+                  AND run_after <= NOW()
+                  AND updated_at <= GREATEST(
+                      run_after,
+                      NOW() - (%s * INTERVAL '1 second')
+                  )
+                RETURNING id, run_after
+                """,
+                (normalized_job_id, JobStatus.FAILED.value, backoff_seconds),
+            )
+            row = cursor.fetchone()
+    if row is None:
+        return False
+    queue.enqueue(str(row["id"]), run_at=row["run_after"])
+    return True
+
+
 def list_jobs(
     settings: SharedSettings,
     *,

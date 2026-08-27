@@ -1003,6 +1003,53 @@ def test_queue_reconciliation_includes_an_attached_queued_worker_job(
     assert params == (25,)
 
 
+def test_queue_reconciliation_includes_a_due_retryable_failed_worker_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lost delayed retry remains discoverable from durable job state."""
+
+    now = datetime(2026, 8, 27, 9, 0, tzinfo=timezone.utc)
+    run_row = {
+        "id": "run-1",
+        "schedule_id": "schedule-1",
+        "occurrence_at": now,
+        "trigger": "schedule",
+        "status": "running",
+        "job_id": "job-1",
+        "started_at": now,
+        "finished_at": None,
+        "output": None,
+        "error": None,
+        "delivery_status": "pending",
+        "delivery_message_id": None,
+        "delivery_claimed_at": None,
+        "execution_token": "token-1",
+        "created_at": now,
+        "updated_at": now,
+        "worker_job_status": "failed",
+        "worker_job_last_error": "temporary upstream failure",
+    }
+    cursor = _FakeScheduleCursor(schedule_row={}, run_row=run_row)
+    monkeypatch.setattr(
+        schedules,
+        "get_postgres_connection",
+        lambda _settings: _FakeScheduleConnection(cursor),
+    )
+
+    reconciliations = list_agent_schedule_runs_needing_queue_reconciliation(
+        SharedSettings(),
+        limit=25,
+    )
+
+    assert len(reconciliations) == 1
+    assert reconciliations[0].job_status == "failed"
+    query, params = cursor.calls[0]
+    assert "jobs.status = 'failed'" in query
+    assert "jobs.attempts < jobs.max_attempts" in query
+    assert "jobs.run_after <= NOW()" in query
+    assert params == (25,)
+
+
 def test_claim_can_recover_a_running_schedule_after_its_lease_expires(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

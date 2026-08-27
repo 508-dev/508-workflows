@@ -1180,6 +1180,49 @@ async def test_schedule_dispatch_redelivers_an_attached_queued_worker_job(
 
 
 @pytest.mark.asyncio
+async def test_schedule_dispatch_redelivers_a_due_failed_worker_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retry survives loss of its delayed Redis delivery after DB commit."""
+
+    run = replace(
+        _run(),
+        status=AgentScheduleRunStatus.RUNNING,
+        started_at=datetime.now(tz=timezone.utc),
+    )
+    reconciliation = SimpleNamespace(
+        run=run,
+        job_status="failed",
+        job_last_error="temporary upstream failure",
+    )
+    redeliver_job = Mock(return_value=True)
+    fail_run = Mock()
+    monkeypatch.setattr(
+        api,
+        "list_agent_schedule_runs_needing_queue_reconciliation",
+        Mock(return_value=[reconciliation]),
+    )
+    monkeypatch.setattr(api, "redeliver_due_failed_job", redeliver_job)
+    monkeypatch.setattr(api, "fail_agent_schedule_run", fail_run)
+    monkeypatch.setattr(
+        api,
+        "list_unenqueued_agent_schedule_runs",
+        Mock(return_value=[]),
+    )
+
+    queue = Mock()
+    await api._dispatch_pending_agent_schedule_runs(queue)
+
+    redeliver_job.assert_called_once_with(
+        queue,
+        settings=api.settings,
+        job_id=run.job_id,
+        minimum_age_seconds=api._AGENT_SCHEDULE_QUEUED_JOB_REDELIVERY_BACKOFF_SECONDS,
+    )
+    fail_run.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_schedule_dispatch_reenqueues_a_run_with_missing_worker_job(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
