@@ -82,7 +82,7 @@ export function messageForApiError(record: Record<string, unknown>, fallback: st
     return "Could not verify the candidate in CRM. No email was sent; try again once CRM is reachable."
   }
   if (error === "contact_not_onboarding_eligible") {
-    return "This candidate is no longer eligible for onboarding email. Refresh the queue and review their status."
+    return "This candidate is no longer eligible for onboarding. Refresh the queue and review their status."
   }
   if (error === "candidate_terminal_onboarding_state") {
     return "This candidate is already in a terminal onboarding state, so no email was sent."

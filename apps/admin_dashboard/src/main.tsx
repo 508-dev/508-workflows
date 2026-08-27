@@ -23,6 +23,7 @@ import {
 import { type ReactNode, StrictMode, useEffect, useMemo, useRef, useState } from "react"
 import { createRoot } from "react-dom/client"
 import { Empty } from "@/components/empty"
+import { OnboardingEmailSendStatus } from "@/components/onboarding-email-send-status"
 import { SortableTableHead } from "@/components/sortable-table-head"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -675,16 +676,6 @@ function stringFieldFromPayload(payload: unknown, key: string) {
   return JSON.stringify(value)
 }
 
-function onboardingEmailSendProgress(seconds: number) {
-  if (seconds < 10) {
-    return `Sending — ${seconds}s elapsed. Checking details and waiting for the mail server.`
-  }
-  if (seconds < 25) {
-    return `Still sending — ${seconds}s elapsed. Waiting for the mail server to confirm receipt.`
-  }
-  return `Taking longer than expected — ${seconds}s elapsed. The request is still active; do not retry yet, as that could send a duplicate email.`
-}
-
 function messageFromUnknown(error: unknown, fallback: string) {
   if (typeof error === "string" && error.trim()) return error
   if (error instanceof Error && error.message.trim()) return error.message
@@ -963,6 +954,9 @@ function App() {
   } | null>(null)
   const [jobDetail, setJobDetail] = useState<JobDetail | null>(null)
   const [loading, setLoading] = useState<Record<string, boolean>>({})
+  const [onboardingEmailSendStartedAt, setOnboardingEmailSendStartedAt] = useState<
+    Record<string, number>
+  >({})
   const [devErrors, setDevErrors] = useState<DashboardDevError[]>([])
   const [historicalPersonChoice, setHistoricalPersonChoice] = useState<{
     projectId: string
@@ -2208,6 +2202,10 @@ function App() {
       return null
     }
     const key = `onboarding-email-send:${contactId}`
+    setOnboardingEmailSendStartedAt((current) => ({
+      ...current,
+      [contactId]: current[contactId] ?? Date.now(),
+    }))
     setBusy(key, true)
     try {
       const payload = await requestJson<OnboardingEmailDraft>(
@@ -2242,6 +2240,11 @@ function App() {
       return null
     } finally {
       setBusy(key, false)
+      setOnboardingEmailSendStartedAt((current) => {
+        const next = { ...current }
+        delete next[contactId]
+        return next
+      })
     }
   }
 
@@ -3117,6 +3120,7 @@ function App() {
               people={sortedOnboarding}
               sort={sort.onboarding}
               loading={loading}
+              emailSendStartedAt={onboardingEmailSendStartedAt}
               onboardingQuery={onboardingQuery}
               onboardingState={onboardingState}
               onboarderFilter={onboarderFilter}
@@ -7412,6 +7416,7 @@ function OnboardingView(props: {
   people: Person[]
   sort: { key: string; direction: SortDirection }
   loading: Record<string, boolean>
+  emailSendStartedAt: Record<string, number>
   canWrite: boolean
   onboardingQuery: string
   onboardingState: string
@@ -7634,6 +7639,7 @@ function OnboardingView(props: {
                   }
                   person={person}
                   loading={props.loading}
+                  sendStartedAt={props.emailSendStartedAt[person.crm_contact_id || ""]}
                   canWrite={props.canWrite}
                   onAssign={props.onAssign}
                   onSuggestions={props.onSuggestions}
@@ -8004,6 +8010,7 @@ function EngineerSetupPanel({
 function OnboardingRow({
   person,
   loading,
+  sendStartedAt,
   canWrite,
   onAssign,
   onSuggestions,
@@ -8017,6 +8024,7 @@ function OnboardingRow({
 }: {
   person: Person
   loading: Record<string, boolean>
+  sendStartedAt?: number
   canWrite: boolean
   onAssign: (contactId: string | undefined, onboarder: string) => void
   onSuggestions: (contactId: string | undefined) => Promise<OnboardingVolunteer[]>
@@ -8041,7 +8049,6 @@ function OnboardingRow({
   const [emailOpen, setEmailOpen] = useState(false)
   const [emailDraft, setEmailDraft] = useState<OnboardingEmailDraft | null>(null)
   const [emailDraftOptions, setEmailDraftOptions] = useState<OnboardingEmailOptions | null>(null)
-  const [sendElapsedSeconds, setSendElapsedSeconds] = useState(0)
   const [emailOptions, setEmailOptions] = useState<OnboardingEmailOptions>({
     has_contributed: normalizedOnboardingStatusValue(onboardingStateValue(person)) === "onboarded",
     discord_joined: person.discord_user_id ? "yes" : "unknown",
@@ -8092,18 +8099,6 @@ function OnboardingRow({
   const draftBusy = Boolean(loading[`onboarding-email-draft:${person.crm_contact_id}`])
   const sendBusy = Boolean(loading[`onboarding-email-send:${person.crm_contact_id}`])
   const draftBody = emailDraft?.markdown_body || ""
-  useEffect(() => {
-    if (!sendBusy) {
-      setSendElapsedSeconds(0)
-      return
-    }
-
-    const startedAt = Date.now()
-    const updateElapsed = () => setSendElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000))
-    updateElapsed()
-    const interval = window.setInterval(updateElapsed, 1000)
-    return () => window.clearInterval(interval)
-  }, [sendBusy])
   async function generateDraft(nextOptions = emailOptions) {
     const draft = await onDraftEmail(person.crm_contact_id, nextOptions)
     if (draft) {
@@ -8282,6 +8277,9 @@ function OnboardingRow({
                 {emailDraft ? "Edit draft" : "Draft email"}
               </Button>
             ) : null}
+            {sendBusy && sendStartedAt !== undefined && (!emailOpen || !emailDraft) ? (
+              <OnboardingEmailSendStatus startedAt={sendStartedAt} />
+            ) : null}
           </div>
         </TableCell>
         <TableCell>
@@ -8435,14 +8433,8 @@ function OnboardingRow({
                       <Send />
                       {sendBusy ? "Sending" : "Send"}
                     </Button>
-                    {sendBusy ? (
-                      <span
-                        className="text-sm text-muted-foreground"
-                        role="status"
-                        aria-live="polite"
-                      >
-                        {onboardingEmailSendProgress(sendElapsedSeconds)}
-                      </span>
+                    {sendBusy && sendStartedAt !== undefined ? (
+                      <OnboardingEmailSendStatus startedAt={sendStartedAt} />
                     ) : null}
                     {sendUnavailableMessage ? (
                       <span className="text-sm text-muted-foreground">
