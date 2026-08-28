@@ -1003,10 +1003,12 @@ def test_queue_reconciliation_includes_an_attached_queued_worker_job(
     assert params == (25,)
 
 
+@pytest.mark.parametrize("run_status", ["running", "failed"])
 def test_queue_reconciliation_includes_a_due_retryable_failed_worker_job(
     monkeypatch: pytest.MonkeyPatch,
+    run_status: str,
 ) -> None:
-    """A lost delayed retry remains discoverable from durable job state."""
+    """A lost delayed retry remains discoverable after either run transition."""
 
     now = datetime(2026, 8, 27, 9, 0, tzinfo=timezone.utc)
     run_row = {
@@ -1014,16 +1016,16 @@ def test_queue_reconciliation_includes_a_due_retryable_failed_worker_job(
         "schedule_id": "schedule-1",
         "occurrence_at": now,
         "trigger": "schedule",
-        "status": "running",
+        "status": run_status,
         "job_id": "job-1",
         "started_at": now,
-        "finished_at": None,
+        "finished_at": now if run_status == "failed" else None,
         "output": None,
-        "error": None,
+        "error": "temporary upstream failure" if run_status == "failed" else None,
         "delivery_status": "pending",
         "delivery_message_id": None,
         "delivery_claimed_at": None,
-        "execution_token": "token-1",
+        "execution_token": "token-1" if run_status == "running" else None,
         "created_at": now,
         "updated_at": now,
         "worker_job_status": "failed",
@@ -1045,6 +1047,7 @@ def test_queue_reconciliation_includes_a_due_retryable_failed_worker_job(
     assert reconciliations[0].job_status == "failed"
     query, params = cursor.calls[0]
     assert "jobs.status = 'failed'" in query
+    assert "runs.status IN ('queued', 'running', 'failed')" in query
     assert "jobs.attempts < jobs.max_attempts" in query
     assert "jobs.run_after <= NOW()" in query
     assert params == (25,)

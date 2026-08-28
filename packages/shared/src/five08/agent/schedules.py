@@ -348,7 +348,7 @@ class AgentScheduleRunRecord:
 
 @dataclass(frozen=True)
 class AgentScheduleRunQueueReconciliation:
-    """A nonterminal run whose durable worker job needs dispatcher attention."""
+    """A run whose durable worker job needs dispatcher attention."""
 
     run: AgentScheduleRunRecord
     job_status: str | None
@@ -1018,7 +1018,7 @@ def list_agent_schedule_runs_needing_queue_reconciliation(
     *,
     limit: int = 100,
 ) -> list[AgentScheduleRunQueueReconciliation]:
-    """Find nonterminal runs whose worker job needs durable recovery.
+    """Find runs whose worker job needs durable recovery.
 
     A persisted ``queued`` job is not proof that its Redis delivery survived,
     and a due retryable ``failed`` job may have lost its delayed delivery after
@@ -1034,14 +1034,19 @@ def list_agent_schedule_runs_needing_queue_reconciliation(
                jobs.last_error AS worker_job_last_error
         FROM agent_schedule_runs AS runs
         LEFT JOIN jobs ON jobs.id = runs.job_id
-        WHERE runs.status IN ('queued', 'running')
-          AND runs.job_id IS NOT NULL
+        WHERE runs.job_id IS NOT NULL
           AND (
-              jobs.id IS NULL
-              OR jobs.status IN ('dead', 'canceled')
-              OR (runs.status = 'queued' AND jobs.status = 'queued')
+              (
+                  runs.status IN ('queued', 'running')
+                  AND (
+                      jobs.id IS NULL
+                      OR jobs.status IN ('dead', 'canceled')
+                      OR (runs.status = 'queued' AND jobs.status = 'queued')
+                  )
+              )
               OR (
-                  jobs.status = 'failed'
+                  runs.status IN ('queued', 'running', 'failed')
+                  AND jobs.status = 'failed'
                   AND jobs.attempts < jobs.max_attempts
                   AND jobs.run_after IS NOT NULL
                   AND jobs.run_after <= NOW()
