@@ -981,6 +981,85 @@ async def test_confirmation_context_in_dm_fetches_uncached_member_roles() -> Non
 
 
 @pytest.mark.asyncio
+async def test_confirmation_not_found_uses_empty_roles_for_definitive_departure() -> (
+    None
+):
+    response = Mock(status=404, reason="Not Found")
+    guild = SimpleNamespace(
+        get_member=Mock(),
+        fetch_member=AsyncMock(
+            side_effect=discord.NotFound(
+                response,
+                {"code": 10_007, "message": "Unknown Member"},
+            )
+        ),
+    )
+    cog = AgentCog.__new__(AgentCog)
+    cog.bot = SimpleNamespace(get_guild=Mock(return_value=guild))
+    view = AgentConfirmationView(
+        cog=cog,
+        requester_id=123,
+        plan_id="plan-1",
+        context={"organization_id": "456", "guild_id": "456"},
+    )
+    interaction = SimpleNamespace(
+        id=999,
+        guild_id=None,
+        channel_id=111,
+        message=SimpleNamespace(id=222),
+        user=SimpleNamespace(id=123),
+    )
+
+    context = await view._confirmation_context(interaction)
+
+    assert context["roles"] == []
+    assert context["role_ids"] == []
+    guild.fetch_member.assert_awaited_once_with(123)
+
+
+@pytest.mark.asyncio
+async def test_transient_member_refresh_failure_does_not_consume_confirmation() -> None:
+    response = Mock(status=503, reason="Service Unavailable")
+    guild = SimpleNamespace(
+        get_member=Mock(),
+        fetch_member=AsyncMock(
+            side_effect=discord.HTTPException(response, "Discord unavailable")
+        ),
+    )
+    cog = AgentCog.__new__(AgentCog)
+    cog.bot = SimpleNamespace(get_guild=Mock(return_value=guild))
+    cog._post_agent_confirmation = AsyncMock()
+    cog._audit_command_safe = Mock()
+    cog._format_agent_response = Mock(return_value="Agent status: failed")
+    view = AgentConfirmationView(
+        cog=cog,
+        requester_id=123,
+        plan_id="plan-1",
+        context={"organization_id": "456", "guild_id": "456"},
+    )
+    interaction = SimpleNamespace(
+        id=999,
+        guild_id=None,
+        channel_id=111,
+        response=SimpleNamespace(defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+        message=SimpleNamespace(id=222, edit=AsyncMock()),
+        user=SimpleNamespace(id=123),
+    )
+
+    await AgentConfirmationView.confirm(view, interaction, None)
+
+    cog._post_agent_confirmation.assert_not_awaited()
+    assert not view.is_finished()
+    assert all(not item.disabled for item in view.children)
+    interaction.message.edit.assert_not_awaited()
+    formatted_response = cog._format_agent_response.call_args.args[0]
+    assert formatted_response["message"] == (
+        "Discord membership could not be refreshed; try again."
+    )
+
+
+@pytest.mark.asyncio
 async def test_confirmation_context_in_dm_fails_closed_when_guild_membership_is_unavailable() -> (
     None
 ):

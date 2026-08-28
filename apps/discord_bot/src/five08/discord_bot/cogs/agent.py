@@ -1031,12 +1031,22 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             )
             try:
                 member = await fetch_member_call(user_id)
-            except Exception:
+            except discord.NotFound:
+                # A 404 is definitive evidence that the requester is no
+                # longer a member, so submit an empty snapshot and let the
+                # backend deny and consume the confirmation.
+                return [], []
+            except Exception as exc:
                 logger.warning(
                     "Failed refreshing Discord member roles for agent confirmation",
                     exc_info=True,
                 )
-                return [], []
+                # HTTP 5xx/429/permission and network failures cannot prove
+                # that access was revoked. Abort before the backend atomically
+                # consumes the pending confirmation so the requester can retry.
+                raise RuntimeError(
+                    "Discord membership could not be refreshed; try again."
+                ) from exc
             return self._role_names_from_user(member), self._role_ids_from_user(member)
 
         member = guild.get_member(user_id)
