@@ -312,7 +312,10 @@ def test_worktree_env_load_rejects_too_small_paseo_port_range() -> None:
     )
 
     assert result.returncode != 0
-    assert "PASEO_PORT_BASE through PASEO_PORT_END must include at least seven ports" in result.stderr
+    assert (
+        "PASEO_PORT_BASE through PASEO_PORT_END must include at least seven ports"
+        in result.stderr
+    )
 
 
 def test_worktree_env_print_port_summary_includes_host_service_ports() -> None:
