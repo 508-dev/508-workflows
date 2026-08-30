@@ -13,6 +13,8 @@ SCRIPT_PATH = REPO_ROOT / "scripts" / "worktree-env.sh"
 def _base_env() -> dict[str, str]:
     env = os.environ.copy()
     env.pop("CONDUCTOR_PORT", None)
+    env.pop("PASEO_PORT_BASE", None)
+    env.pop("PASEO_PORT_END", None)
     env.pop("WORKTREE_ENV_PORT_DEFAULT_SOURCE", None)
     for key in (
         "REDIS_HOST_PORT",
@@ -237,6 +239,80 @@ def test_worktree_env_load_uses_conductor_port_range_for_defaults() -> None:
         "45005",
         "45006",
     ]
+
+
+def test_worktree_env_load_uses_paseo_port_range_for_defaults() -> None:
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        repo_root = Path(tmp_dir)
+        scripts_dir = repo_root / "scripts"
+        scripts_dir.mkdir()
+        env = _base_env()
+        env["CONDUCTOR_PORT"] = "45000"
+        env["PASEO_PORT_BASE"] = "46000"
+        env["PASEO_PORT_END"] = "46006"
+
+        result = _run_shell(
+            f"""
+            set -eu
+            . {SCRIPT_PATH}
+            worktree_env_load {scripts_dir} host
+            printf '%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n' \\
+              "$REDIS_HOST_PORT" \\
+              "$POSTGRES_HOST_PORT" \\
+              "$WEB_HOST_PORT" \\
+              "$MINIO_API_HOST_PORT" \\
+              "$MINIO_CONSOLE_HOST_PORT" \\
+              "$WEB_PORT" \\
+              "$HEALTHCHECK_PORT"
+            """,
+            env=env,
+        )
+
+    assert result.returncode == 0
+    assert result.stdout.splitlines() == [
+        "46000",
+        "46001",
+        "46002",
+        "46003",
+        "46004",
+        "46005",
+        "46006",
+    ]
+
+
+def test_worktree_env_load_rejects_incomplete_paseo_port_range() -> None:
+    env = _base_env()
+    env["PASEO_PORT_BASE"] = "46000"
+
+    result = _run_shell(
+        f"""
+        set -eu
+        . {SCRIPT_PATH}
+        worktree_env_load {REPO_ROOT / "scripts"} host
+        """,
+        env=env,
+    )
+
+    assert result.returncode != 0
+    assert "PASEO_PORT_BASE and PASEO_PORT_END must be set together." in result.stderr
+
+
+def test_worktree_env_load_rejects_too_small_paseo_port_range() -> None:
+    env = _base_env()
+    env["PASEO_PORT_BASE"] = "46000"
+    env["PASEO_PORT_END"] = "46005"
+
+    result = _run_shell(
+        f"""
+        set -eu
+        . {SCRIPT_PATH}
+        worktree_env_load {REPO_ROOT / "scripts"} host
+        """,
+        env=env,
+    )
+
+    assert result.returncode != 0
+    assert "PASEO_PORT_BASE through PASEO_PORT_END must include at least seven ports" in result.stderr
 
 
 def test_worktree_env_print_port_summary_includes_host_service_ports() -> None:

@@ -2,8 +2,13 @@
 
 Use `.env.example` as the source of defaults.
 
-When running inside Conductor, `CONDUCTOR_PORT` is treated as the first port in
-the workspace's 10-port range for unset worktree defaults: Redis uses `+0`,
+When running inside PASEO, `PASEO_PORT_BASE` and `PASEO_PORT_END` reserve the
+inclusive range used for unset worktree defaults. The range must contain at
+least seven ports: Redis uses `+0`, Postgres `+1`, the Compose web port `+2`,
+MinIO API `+3`, MinIO Console `+4`, host-run web/API `+5`, and the bot health
+check `+6`. PASEO takes precedence over Conductor. When running inside
+Conductor, `CONDUCTOR_PORT` is treated as the first port in the workspace's
+10-port range for unset worktree defaults: Redis uses `+0`,
 Postgres `+1`, Compose web `+2`, MinIO API `+3`, MinIO console `+4`, host-run
 web/API `+5`, and bot health `+6`. Explicit service port overrides keep their
 current precedence rules.
