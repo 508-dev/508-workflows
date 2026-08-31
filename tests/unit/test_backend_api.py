@@ -1897,20 +1897,22 @@ def test_agent_confirmation_routes_schedule_creation_through_schedule_gate(
         *,
         plan: AgentPlan,
         context: AgentIdentityContext,
-    ) -> AgentResponse:
+    ) -> api._ConfirmedAgentScheduleCreationResult:
         captured["plan"] = plan
         captured["context"] = context
-        return AgentResponse(
-            status="executed",
-            plan=plan,
-            results=[
-                AgentExecutionResult(
-                    tool_name="agent_schedule.create",
-                    status="succeeded",
-                    result={"schedule_id": "schedule-2"},
-                )
-            ],
-            message="Created recurring report `schedule-2`.",
+        return api._ConfirmedAgentScheduleCreationResult(
+            response=AgentResponse(
+                status="executed",
+                plan=plan,
+                results=[
+                    AgentExecutionResult(
+                        tool_name="agent_schedule.create",
+                        status="succeeded",
+                        result={"schedule_id": "schedule-2"},
+                    )
+                ],
+                message="Created recurring report `schedule-2`.",
+            )
         )
 
     generic_executor = Mock()
@@ -1949,6 +1951,98 @@ def test_agent_confirmation_routes_schedule_creation_through_schedule_gate(
     assert isinstance(confirmation_context, AgentIdentityContext)
     assert confirmation_context.channel_id == "2000"
     generic_executor.execute_plan.assert_not_called()
+
+
+def test_agent_confirmation_restores_schedule_plan_after_preflight_outage(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A proven no-write outage leaves the same confirmation retryable."""
+
+    plan = AgentPlan(
+        plan_id="schedule-plan-retry",
+        intent="create_agent_schedule",
+        planner="live_model",
+        model_tier="fast",
+        model=AgentModelConfig().resolve("fast"),
+        actions=[
+            AgentToolAction(
+                tool_name="agent_schedule.create",
+                arguments={
+                    "name": "Weekly onboarding health",
+                    "cron_expression": "0 9 * * 1",
+                    "timezone": "Asia/Tokyo",
+                    "prompt": "Inspect onboarding health and report blockers.",
+                },
+                summary="Create recurring report",
+                requires_confirmation=True,
+            )
+        ],
+        human_summary="Create recurring report",
+        requires_confirmation=True,
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+    )
+    original_context = AgentIdentityContext(
+        discord_user_id="123",
+        organization_id="org-1",
+        guild_id="org-1",
+        channel_id="2000",
+        roles=["Admin"],
+    )
+
+    async def preflight_outage(
+        _request: api.Request,
+        *,
+        plan: AgentPlan,
+        context: AgentIdentityContext,
+    ) -> api._ConfirmedAgentScheduleCreationResult:
+        return api._ConfirmedAgentScheduleCreationResult(
+            response=AgentResponse(
+                status="failed",
+                plan=plan,
+                results=[
+                    AgentExecutionResult(
+                        tool_name="agent_schedule.create",
+                        status="failed",
+                        error="member_snapshot_failed",
+                    )
+                ],
+                message="The recurring schedule could not be created.",
+            ),
+            retryable_preflight_failure=True,
+        )
+
+    monkeypatch.setattr(api, "_AGENT_ORCHESTRATOR", Mock())
+    monkeypatch.setattr(
+        api,
+        "_PENDING_AGENT_PLANS",
+        {plan.plan_id: (plan, original_context)},
+    )
+    monkeypatch.setattr(
+        api,
+        "_execute_confirmed_agent_schedule_creation_plan",
+        preflight_outage,
+    )
+
+    with patch("five08.backend.api.insert_audit_event"):
+        response = client.post(
+            f"/agent/confirmations/{plan.plan_id}",
+            json={
+                "confirm": True,
+                "context": {
+                    "discord_user_id": "123",
+                    "organization_id": "org-1",
+                    "guild_id": "org-1",
+                    "roles": ["Admin"],
+                },
+            },
+            headers=auth_headers,
+        )
+
+    assert response.status_code == 503
+    assert response.json()["retryable_confirmation"] is True
+    assert api._PENDING_AGENT_PLANS[plan.plan_id] == (plan, original_context)
 
 
 def test_agent_confirmation_cancel_returns_canceled_status(

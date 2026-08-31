@@ -137,7 +137,7 @@ class AgentConfirmationView(discord.ui.View):
                 context=confirmation_context,
                 confirm=True,
             )
-            transport_failed = False
+            transport_failed = response.get("retryable_confirmation") is True
         except Exception as exc:
             logger.warning("Agent confirmation request failed: %s", exc)
             response = {"status": "failed", "message": str(exc)}
@@ -180,7 +180,7 @@ class AgentConfirmationView(discord.ui.View):
                 context=confirmation_context,
                 confirm=False,
             )
-            transport_failed = False
+            transport_failed = response.get("retryable_confirmation") is True
         except Exception as exc:
             logger.warning("Agent cancellation request failed: %s", exc)
             response = {"status": "failed", "message": str(exc)}

@@ -12364,12 +12364,20 @@ def _is_agent_schedule_creation_plan(plan: AgentPlan) -> bool:
     )
 
 
+@dataclass(frozen=True)
+class _ConfirmedAgentScheduleCreationResult:
+    """Schedule-confirmation result plus safe retry information."""
+
+    response: AgentResponse
+    retryable_preflight_failure: bool = False
+
+
 async def _execute_confirmed_agent_schedule_creation_plan(
     request: Request,
     *,
     plan: AgentPlan,
     context: AgentIdentityContext,
-) -> AgentResponse:
+) -> _ConfirmedAgentScheduleCreationResult:
     """Persist one confirmed agent-proposed schedule through the normal API gate.
 
     The generic agent registry intentionally never executes this action itself.
@@ -12389,17 +12397,19 @@ async def _execute_confirmed_agent_schedule_creation_plan(
             channel_id=str(context.channel_id or ""),
         )
     except (TypeError, ValidationError, ValueError):
-        return AgentResponse(
-            status="failed",
-            plan=plan,
-            results=[
-                AgentExecutionResult(
-                    tool_name=action.tool_name,
-                    status="failed",
-                    error="Invalid confirmed recurring schedule proposal",
-                )
-            ],
-            message="The recurring schedule proposal was invalid. Please ask again.",
+        return _ConfirmedAgentScheduleCreationResult(
+            response=AgentResponse(
+                status="failed",
+                plan=plan,
+                results=[
+                    AgentExecutionResult(
+                        tool_name=action.tool_name,
+                        status="failed",
+                        error="Invalid confirmed recurring schedule proposal",
+                    )
+                ],
+                message="The recurring schedule proposal was invalid. Please ask again.",
+            )
         )
 
     created, status_code = await _create_agent_schedule_for_context(
@@ -12412,43 +12422,55 @@ async def _execute_confirmed_agent_schedule_creation_plan(
         schedule_id = str(schedule_payload.get("id") or "")
         next_run_at = schedule_payload.get("next_run_at")
         channel_id = str(context.channel_id or "")
-        return AgentResponse(
-            status="executed",
-            plan=plan,
-            results=[
-                AgentExecutionResult(
-                    tool_name=action.tool_name,
-                    status="succeeded",
-                    result={
-                        "schedule_id": schedule_id,
-                        "next_run_at": str(next_run_at) if next_run_at else None,
-                        "channel_id": channel_id,
-                    },
-                )
-            ],
-            message=(
-                f"Created recurring report `{schedule_id}` for <#{channel_id}>. "
-                f"Next run: {next_run_at or 'unknown'}."
-            ),
+        return _ConfirmedAgentScheduleCreationResult(
+            response=AgentResponse(
+                status="executed",
+                plan=plan,
+                results=[
+                    AgentExecutionResult(
+                        tool_name=action.tool_name,
+                        status="succeeded",
+                        result={
+                            "schedule_id": schedule_id,
+                            "next_run_at": str(next_run_at) if next_run_at else None,
+                            "channel_id": channel_id,
+                        },
+                    )
+                ],
+                message=(
+                    f"Created recurring report `{schedule_id}` for <#{channel_id}>. "
+                    f"Next run: {next_run_at or 'unknown'}."
+                ),
+            )
         )
 
     detail = str(created.get("detail") or created.get("error") or "").strip()
     denied = status_code in {401, 403}
-    return AgentResponse(
-        status="denied" if denied else "failed",
-        plan=plan,
-        results=[
-            AgentExecutionResult(
-                tool_name=action.tool_name,
-                status="denied" if denied else "failed",
-                error=detail or "recurring_schedule_create_failed",
-            )
-        ],
-        message=(
-            "The recurring schedule was denied by policy."
-            if denied
-            else "The recurring schedule could not be created."
+    # Every 5xx except schedule_create_failed is emitted before the persistence
+    # call. It is therefore safe to restore the confirmation for retry. A
+    # database write failure is intentionally treated as ambiguous so a retry
+    # cannot create a duplicate schedule after an uncertain commit.
+    retryable_preflight_failure = (
+        status_code >= 500 and created.get("error") != "schedule_create_failed"
+    )
+    return _ConfirmedAgentScheduleCreationResult(
+        response=AgentResponse(
+            status="denied" if denied else "failed",
+            plan=plan,
+            results=[
+                AgentExecutionResult(
+                    tool_name=action.tool_name,
+                    status="denied" if denied else "failed",
+                    error=detail or "recurring_schedule_create_failed",
+                )
+            ],
+            message=(
+                "The recurring schedule was denied by policy."
+                if denied
+                else "The recurring schedule could not be created."
+            ),
         ),
+        retryable_preflight_failure=retryable_preflight_failure,
     )
 
 
@@ -12915,6 +12937,7 @@ async def agent_confirmation_handler(
                     "status": "failed",
                     "message": "Agent routes are not configured correctly.",
                     "error": str(exc),
+                    "retryable_confirmation": True,
                 },
                 status_code=503,
             )
@@ -12940,6 +12963,7 @@ async def agent_confirmation_handler(
                     "Agent confirmation storage is unavailable. Please try again "
                     "shortly."
                 ),
+                "retryable_confirmation": True,
             },
             status_code=503,
         )
@@ -12992,13 +13016,31 @@ async def agent_confirmation_handler(
         original_context=original_context,
         confirmation_context=payload.context,
     )
+    retryable_confirmation = False
     if _has_agent_schedule_creation_action(plan):
         if _is_agent_schedule_creation_plan(plan):
-            response = await _execute_confirmed_agent_schedule_creation_plan(
+            creation_result = await _execute_confirmed_agent_schedule_creation_plan(
                 request,
                 plan=plan,
                 context=execution_context,
             )
+            response = creation_result.response
+            if creation_result.retryable_preflight_failure:
+                try:
+                    retryable_confirmation = await _store_pending_agent_plan(
+                        plan,
+                        original_context,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Unable to restore agent schedule confirmation plan_id=%s",
+                        plan.plan_id,
+                    )
+                if not retryable_confirmation:
+                    logger.error(
+                        "Agent schedule confirmation could not be restored plan_id=%s",
+                        plan.plan_id,
+                    )
         else:
             response = AgentResponse(
                 status="denied",
@@ -13069,6 +13111,7 @@ async def agent_confirmation_handler(
             "model_tier": plan.model_tier,
             "model_source_tier": plan.model.source_tier,
             "action_names": [action.tool_name for action in plan.actions],
+            "retryable_confirmation": retryable_confirmation,
             # Results can contain CRM, account, ERP, or private-memory data.
             # Audit records retain outcomes for operational traceability, not
             # the returned payloads themselves.
@@ -13078,9 +13121,16 @@ async def agent_confirmation_handler(
             ],
         },
     )
+    response_payload = response.model_dump(mode="json")
+    if retryable_confirmation:
+        response_payload["retryable_confirmation"] = True
     return JSONResponse(
-        response.model_dump(mode="json"),
-        status_code={"executed": 200, "denied": 403, "failed": 500}[response.status],
+        response_payload,
+        status_code=(
+            503
+            if retryable_confirmation
+            else {"executed": 200, "denied": 403, "failed": 500}[response.status]
+        ),
     )
 
 

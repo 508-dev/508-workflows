@@ -1624,13 +1624,15 @@ async def test_confirmed_agent_schedule_creation_binds_current_channel(
         roles=["Admin"],
     )
 
-    response = await api._execute_confirmed_agent_schedule_creation_plan(
+    outcome = await api._execute_confirmed_agent_schedule_creation_plan(
         cast(Request, SimpleNamespace()),
         plan=plan,
         context=context,
     )
+    response = outcome.response
 
     assert response.status == "executed"
+    assert outcome.retryable_preflight_failure is False
     assert response.results[0].result == {
         "schedule_id": "schedule-2",
         "next_run_at": "2026-08-03T00:00:00+00:00",
@@ -1641,6 +1643,65 @@ async def test_confirmed_agent_schedule_creation_binds_current_channel(
     assert getattr(fields, "execution_mode") == "agent_loop"
     assert getattr(fields, "tool_allowlist") == []
     assert captured["context"] == context
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "retryable_preflight_failure"),
+    [
+        ("member_snapshot_failed", True),
+        ("schedule_channel_validation_failed", True),
+        ("schedule_create_failed", False),
+    ],
+)
+async def test_confirmed_schedule_retry_requires_a_proven_preflight_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    error: str,
+    retryable_preflight_failure: bool,
+) -> None:
+    """An ambiguous persistence failure must never permit a duplicate retry."""
+
+    async def create_schedule(*_args: object, **_kwargs: object):
+        return {"error": error}, 503
+
+    monkeypatch.setattr(api, "_create_agent_schedule_for_context", create_schedule)
+    plan = AgentPlan(
+        plan_id="schedule-plan-1",
+        intent="create_agent_schedule",
+        planner="live_model",
+        model_tier="fast",
+        model=AgentModelConfig().resolve("fast"),
+        actions=[
+            AgentToolAction(
+                tool_name="agent_schedule.create",
+                arguments={
+                    "name": "Weekly onboarding health",
+                    "cron_expression": "0 9 * * 1",
+                    "timezone": "Asia/Tokyo",
+                    "prompt": "Inspect onboarding health and report blockers.",
+                },
+                summary="Create recurring report",
+                requires_confirmation=True,
+            )
+        ],
+        human_summary="Create recurring report",
+        requires_confirmation=True,
+    )
+
+    outcome = await api._execute_confirmed_agent_schedule_creation_plan(
+        cast(Request, SimpleNamespace()),
+        plan=plan,
+        context=AgentIdentityContext(
+            discord_user_id="1001",
+            organization_id="1000",
+            guild_id="1000",
+            channel_id="2000",
+            roles=["Admin"],
+        ),
+    )
+
+    assert outcome.response.status == "failed"
+    assert outcome.retryable_preflight_failure is retryable_preflight_failure
 
 
 @pytest.mark.asyncio
