@@ -240,14 +240,16 @@ def listening_pids_for_port(port: int) -> list[int]:
 def allocated_port_range() -> tuple[str, list[int]]:
     paseo_base = os.environ.get("PASEO_PORT_BASE")
     paseo_end = os.environ.get("PASEO_PORT_END")
-    if paseo_base and paseo_end:
-        try:
-            base = int(paseo_base)
-            end = int(paseo_end)
-        except ValueError:
-            return "", []
+    if (
+        paseo_base
+        and paseo_end
+        and re.fullmatch(r"[0-9]+", paseo_base)
+        and re.fullmatch(r"[0-9]+", paseo_end)
+    ):
+        base = int(paseo_base)
+        end = int(paseo_end)
         if 1 <= base <= end <= 65535 and end >= base + 6:
-            return "PASEO_PORT range", list(range(base, end + 1))
+            return "PASEO_PORT range", [base + offset for offset in range(7)]
 
     conductor_port = os.environ.get("CONDUCTOR_PORT")
     if not conductor_port:
