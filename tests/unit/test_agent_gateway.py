@@ -2918,6 +2918,9 @@ def test_model_only_answer_is_limited_to_safe_chat_and_never_impersonation() -> 
         "What is the current onboarding status?",
         "Who are our suppliers?",
         "What invoices did Acme submit?",
+        "What customers owe us money?",
+        "What payments are outstanding?",
+        "What is our accounts receivable balance?",
     ],
 )
 def test_model_only_answer_cannot_claim_operational_status(message: str) -> None:
