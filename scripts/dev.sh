@@ -5,9 +5,6 @@ script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
 . "$script_dir/worktree-env.sh"
 worktree_env_load "$script_dir"
 
-printf 'PASEO_PORT_BASE=%s\n' "${PASEO_PORT_BASE-}"
-printf 'PASEO_PORT_END=%s\n' "${PASEO_PORT_END-}"
-
 UV_BIN=${UV_BIN:-$(command -v uv)}
 export UV_BIN
 
