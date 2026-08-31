@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from math import ceil
 from threading import Event, Thread, get_ident
+from time import monotonic
 from typing import Any, Final
 
 import dramatiq
@@ -262,6 +263,8 @@ def _requeue_running_job_after_lease(job_id: str) -> None:
 def _renew_job_lease_while_running(
     job_id: str,
     claim_token: str,
+    *,
+    deadline: float | None = None,
 ) -> Iterator[None]:
     """Refresh a running job lease and fence completion after a renewal failure.
 
@@ -276,9 +279,34 @@ def _renew_job_lease_while_running(
     lease_lost = Event()
     actor_thread_id = get_ident()
     interval_seconds = max(0.1, _job_lease_seconds() / 3)
+    execution_deadline = (
+        monotonic() + (_job_actor_time_limit_milliseconds() / 1000)
+        if deadline is None
+        else deadline
+    )
+
+    def _interrupt_for_lost_lease(message: str) -> None:
+        logger.warning(message, job_id)
+        if stop_event.is_set():
+            return
+        lease_lost.set()
+        raise_thread_exception(actor_thread_id, JobLeaseLostError)
 
     def _heartbeat() -> None:
-        while not stop_event.wait(interval_seconds):
+        while True:
+            remaining_seconds = execution_deadline - monotonic()
+            if remaining_seconds <= 0:
+                _interrupt_for_lost_lease(
+                    "Cancelling job_id=%s because its actor deadline elapsed"
+                )
+                return
+            if stop_event.wait(min(interval_seconds, remaining_seconds)):
+                return
+            if monotonic() >= execution_deadline:
+                _interrupt_for_lost_lease(
+                    "Cancelling job_id=%s because its actor deadline elapsed"
+                )
+                return
             try:
                 if renew_job_execution_lease(
                     settings,
@@ -286,14 +314,9 @@ def _renew_job_lease_while_running(
                     claim_token=claim_token,
                 ):
                     continue
-                logger.warning(
+                _interrupt_for_lost_lease(
                     "Cancelling job_id=%s because its execution lease was replaced",
-                    job_id,
                 )
-                if stop_event.is_set():
-                    return
-                lease_lost.set()
-                raise_thread_exception(actor_thread_id, JobLeaseLostError)
                 return
             except Exception:
                 logger.exception(
@@ -359,6 +382,7 @@ def _schedule_retry(job: JobRecord, attempts: int, *, error: str) -> None:
 
 
 def _run_job(job_id: str) -> None:
+    heartbeat_deadline = monotonic() + (_job_actor_time_limit_milliseconds() / 1000)
     job = claim_job_for_execution(
         settings,
         job_id,
@@ -411,7 +435,11 @@ def _run_job(job_id: str) -> None:
     try:
         args, kwargs = _extract_call_args(job)
         _schedule_job_lease_recovery(job_id, delay_seconds=_job_lease_seconds())
-        with _renew_job_lease_while_running(job_id, claim_token):
+        with _renew_job_lease_while_running(
+            job_id,
+            claim_token,
+            deadline=heartbeat_deadline,
+        ):
             result = handler(*args, **kwargs)
         transitioned = mark_job_succeeded(
             settings,

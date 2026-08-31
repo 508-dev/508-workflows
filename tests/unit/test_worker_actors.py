@@ -2,7 +2,7 @@
 
 from contextlib import nullcontext
 from datetime import datetime, timezone
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
 import pytest
 
@@ -70,7 +70,11 @@ def test_run_job_schedules_retry_for_docuseal_processing_error() -> None:
     assert (
         "DocusealAgreementProcessingError: CRM unavailable" == call_args.kwargs["error"]
     )
-    mock_heartbeat.assert_called_once_with("job-123", "worker-1:claim-123")
+    mock_heartbeat.assert_called_once_with(
+        "job-123",
+        "worker-1:claim-123",
+        deadline=ANY,
+    )
 
 
 def test_run_job_marks_dead_for_non_retryable_docuseal_error() -> None:
@@ -320,6 +324,50 @@ def test_job_lease_heartbeat_retries_a_transient_renewal_error() -> None:
     assert mock_renew.call_count == 2
     lease_lost.set.assert_not_called()
     mock_interrupt.assert_not_called()
+
+
+def test_job_lease_heartbeat_stops_renewing_at_the_actor_deadline() -> None:
+    """A blocked actor cannot keep its durable execution lease alive forever."""
+
+    stop_event = Mock()
+    stop_event.wait.return_value = False
+    stop_event.is_set.return_value = False
+    lease_lost = Mock()
+    lease_lost.is_set.return_value = True
+
+    class InlineThread:
+        def __init__(self, *, target: object, **_kwargs: object) -> None:
+            self._target = target
+
+        def start(self) -> None:
+            self._target()  # type: ignore[operator]
+
+        def join(self, *, timeout: float | None = None) -> None:
+            del timeout
+
+        def is_alive(self) -> bool:
+            return False
+
+    with (
+        patch("five08.worker.actors.Event", side_effect=[stop_event, lease_lost]),
+        patch("five08.worker.actors.Thread", InlineThread),
+        patch("five08.worker.actors.get_ident", return_value=1234),
+        patch(
+            "five08.worker.actors._job_actor_time_limit_milliseconds",
+            return_value=1_000,
+        ),
+        patch("five08.worker.actors.monotonic", side_effect=[100.0, 100.0, 101.0]),
+        patch("five08.worker.actors.renew_job_execution_lease") as mock_renew,
+        patch("five08.worker.actors.raise_thread_exception") as mock_interrupt,
+        pytest.raises(actors.JobLeaseLostError),
+    ):
+        with actors._renew_job_lease_while_running("job-heartbeat", "worker-1:claim"):
+            pass
+
+    mock_renew.assert_not_called()
+    lease_lost.set.assert_called_once()
+    stop_event.set.assert_called_once()
+    mock_interrupt.assert_called_once_with(1234, actors.JobLeaseLostError)
 
 
 def test_execute_job_does_not_persist_success_after_a_lost_lease() -> None:
