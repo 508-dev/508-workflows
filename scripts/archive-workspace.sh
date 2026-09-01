@@ -26,6 +26,17 @@ normalize_decimal() {
   printf '%s' "$value"
 }
 
+paseo_port_range_is_valid() {
+  local base end
+  base=${PASEO_PORT_BASE:-}
+  end=${PASEO_PORT_END:-}
+  [[ "$base" =~ ^[0-9]+$ && "$end" =~ ^[0-9]+$ ]] || return 1
+
+  base=$(normalize_decimal "$base")
+  end=$(normalize_decimal "$end")
+  [ "$base" -ge 1 ] && [ "$end" -le 65535 ] && [ "$end" -ge $((base + 6)) ]
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -n|--dry-run)
@@ -376,5 +387,8 @@ if [ "$skip_docker" -eq 1 ]; then
 elif [ "$dry_run" -eq 1 ]; then
   echo "[dry-run] ./scripts/docker-compose.sh down --remove-orphans"
 else
+  if ! paseo_port_range_is_valid; then
+    unset PASEO_PORT_BASE PASEO_PORT_END
+  fi
   ./scripts/docker-compose.sh down --remove-orphans
 fi

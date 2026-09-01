@@ -122,3 +122,48 @@ def test_archive_workspace_falls_back_to_conductor_for_malformed_paseo_ports(
     assert scanned_ports == [str(port) for port in range(45000, 45010)]
     assert "PASEO port range" not in result.stdout
     assert "Conductor port range: 45000..45009" in result.stdout
+
+
+def test_archive_workspace_unsets_malformed_paseo_ports_before_compose_teardown(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    scripts_dir = workspace / "scripts"
+    scripts_dir.mkdir(parents=True)
+    compose_env = tmp_path / "compose-env.txt"
+    compose_script = scripts_dir / "docker-compose.sh"
+    compose_script.write_text(
+        """#!/bin/sh
+printf 'PASEO_PORT_BASE=%s\\nPASEO_PORT_END=%s\\nCONDUCTOR_PORT=%s\\nARGS=%s\\n' \\
+  \"${PASEO_PORT_BASE-}\" \"${PASEO_PORT_END-}\" \"${CONDUCTOR_PORT-}\" \"$*\" > \"$TEST_COMPOSE_ENV\"
+""",
+        encoding="utf-8",
+    )
+    compose_script.chmod(0o755)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "CONDUCTOR_WORKSPACE_PATH": str(workspace),
+            "CONDUCTOR_PORT": "45000",
+            "PASEO_PORT_BASE": "+46000",
+            "PASEO_PORT_END": "46006",
+            "TEST_COMPOSE_ENV": str(compose_env),
+        }
+    )
+    result = subprocess.run(
+        [str(SCRIPT_PATH)],
+        cwd=REPO_ROOT,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert compose_env.read_text(encoding="utf-8").splitlines() == [
+        "PASEO_PORT_BASE=",
+        "PASEO_PORT_END=",
+        "CONDUCTOR_PORT=45000",
+        "ARGS=down --remove-orphans",
+    ]
