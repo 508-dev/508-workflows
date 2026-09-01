@@ -94,7 +94,8 @@ _WEB_READ_TOOL_PREFIX = "web_read."
 _MAX_PLANNER_OBSERVATION_CHARS = 12_000
 _OPERATIONAL_DATA_SUBJECT_RE = re.compile(
     r"\b(?:invoices?|billing|erp(?:next)?|suppliers?|customers?|payments?|"
-    r"balances?|owing|owed|owes?|receivables?|onboarding|crm|contacts?|members?|"
+    r"balances?|owing|owed|owes?|receivables?|revenue|sales|profit|costs?|"
+    r"onboarding|crm|contacts?|members?|"
     r"tasks?|github|issues?|projects?|database|records?)\b",
     re.IGNORECASE,
 )

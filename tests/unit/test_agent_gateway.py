@@ -2921,6 +2921,10 @@ def test_model_only_answer_is_limited_to_safe_chat_and_never_impersonation() -> 
         "What customers owe us money?",
         "What payments are outstanding?",
         "What is our accounts receivable balance?",
+        "What was our revenue this month?",
+        "What were our sales last month?",
+        "How much profit did we make?",
+        "How much did our costs increase?",
     ],
 )
 def test_model_only_answer_cannot_claim_operational_status(message: str) -> None:
