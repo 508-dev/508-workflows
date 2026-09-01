@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import discord
 import pytest
 
+import five08.discord_bot.cogs.agent as agent_module
 from five08.discord_bot.cogs.agent import AgentCog, AgentConfirmationView
 from five08.tls import default_ca_bundle_path
 
@@ -27,6 +28,16 @@ class _AsyncTyping:
 
     async def __aexit__(self, *args: object) -> None:
         return None
+
+
+@pytest.fixture(autouse=True)
+def _enable_explicit_local_role_name_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep legacy role-name fixtures local-only while production uses IDs."""
+
+    monkeypatch.setattr(agent_module.settings, "environment", "test")
+    monkeypatch.setattr(agent_module.settings, "agent_allow_role_name_fallback", True)
 
 
 def test_format_agent_response_renders_error_payload() -> None:
@@ -77,25 +88,77 @@ def test_format_agent_response_renders_generic_clarification_as_guidance() -> No
     )
 
 
-def test_agent_capabilities_include_member_task_and_memory_workflows() -> None:
+def test_agent_capabilities_include_steering_task_and_memory_workflows() -> None:
     message = AgentCog._agent_capabilities_message(
-        roles=["Member"],
+        roles=["Steering Committee"],
+        role_ids=[],
+        guild_id="test-guild",
         transport="slash",
     )
 
     assert "Tasks:" in message
     assert "Memory:" in message
-    assert "no agent workflows" not in message
+    assert "I do not see any agent workflows" not in message
 
 
-def test_agent_capabilities_advertise_only_engineer_task_scopes() -> None:
+def test_agent_capabilities_explain_members_have_no_privileged_workflows() -> None:
+    message = AgentCog._agent_capabilities_message(
+        roles=["Member"],
+        role_ids=[],
+        guild_id="test-guild",
+        transport="slash",
+    )
+
+    assert "I do not see any agent workflows available" in message
+    assert "Tasks:" not in message
+    assert "Memory:" not in message
+
+
+def test_agent_capabilities_advertise_engineer_read_only_project_scopes() -> None:
     message = AgentCog._agent_capabilities_message(
         roles=["Engineer"],
+        role_ids=[],
+        guild_id="test-guild",
         transport="slash",
     )
 
     assert "Tasks: search a project." in message
-    assert "Task writes: create tasks, and update your own tasks." in message
+    assert "Task writes:" not in message
+    assert "GitHub issues:" in message
+
+
+def test_agent_capabilities_advertise_bounded_billing_and_erp_reads() -> None:
+    billing_message = AgentCog._agent_capabilities_message(
+        roles=["Billing Team"],
+        role_ids=[],
+        guild_id="test-guild",
+        transport="slash",
+    )
+    erp_message = AgentCog._agent_capabilities_message(
+        roles=["ERP Developer"],
+        role_ids=[],
+        guild_id="test-guild",
+        transport="slash",
+    )
+
+    assert "Billing: search Sales/Purchase invoices and suppliers (read-only)." in (
+        billing_message
+    )
+    assert "ERP projects:" not in billing_message
+    assert "ERP projects: search projects and view read-only summaries." in erp_message
+    assert "Billing:" not in erp_message
+
+
+def test_agent_capabilities_advertise_confirmed_recurring_reports_for_admins() -> None:
+    message = AgentCog._agent_capabilities_message(
+        roles=["Admin"],
+        role_ids=[],
+        guild_id="test-guild",
+        transport="slash",
+    )
+
+    assert "Recurring reports:" in message
+    assert "before creating it" in message
 
 
 def test_format_agent_response_renders_github_issue_results() -> None:
@@ -150,6 +213,29 @@ def test_format_agent_response_renders_created_github_issue() -> None:
     assert "#43 Fix task sync https://github.example/issues/43" in message
 
 
+def test_format_agent_response_renders_created_agent_schedule() -> None:
+    cog = AgentCog.__new__(AgentCog)
+
+    message = cog._format_agent_response(
+        {
+            "status": "executed",
+            "results": [
+                {
+                    "tool_name": "agent_schedule.create",
+                    "status": "succeeded",
+                    "result": {
+                        "schedule_id": "schedule-123",
+                        "next_run_at": "2026-08-03T00:00:00+00:00",
+                    },
+                }
+            ],
+        }
+    )
+
+    assert "created `schedule-123`" in message
+    assert "2026-08-03T00:00:00+00:00" in message
+
+
 def test_format_agent_response_renders_contact_results() -> None:
     cog = AgentCog.__new__(AgentCog)
 
@@ -176,6 +262,49 @@ def test_format_agent_response_renders_contact_results() -> None:
 
     assert "- crm_read.search_contacts: 1 contacts" in message
     assert "Sarah Example sarah@example.com contact-1" in message
+
+
+def test_format_agent_response_renders_read_only_erp_results() -> None:
+    cog = AgentCog.__new__(AgentCog)
+
+    message = cog._format_agent_response(
+        {
+            "status": "executed",
+            "results": [
+                {
+                    "tool_name": "billing_read.get_invoice_summary",
+                    "status": "succeeded",
+                    "result": {
+                        "invoice": {
+                            "invoice_id": "SINV-0001",
+                            "status": "submitted",
+                            "customer": "Acme",
+                            "currency": "USD",
+                            "grand_total": 1250,
+                            "items": ["must never render"],
+                        }
+                    },
+                },
+                {
+                    "tool_name": "erp_read.get_project_summary",
+                    "status": "succeeded",
+                    "result": {
+                        "project": {
+                            "project_id": "PROJ-001",
+                            "project_name": "Atlas",
+                            "status": "Open",
+                            "customer": "Acme",
+                            "users": ["must never render"],
+                        }
+                    },
+                },
+            ],
+        }
+    )
+
+    assert "SINV-0001 · submitted · Acme · USD 1250" in message
+    assert "PROJ-001 · Atlas · Open · Acme" in message
+    assert "must never render" not in message
 
 
 def test_format_agent_response_renders_memory_facts() -> None:
@@ -205,6 +334,65 @@ def test_format_agent_response_renders_memory_facts() -> None:
 
     assert "- memory_read.get_user_facts: 1 remembered facts" in message
     assert "  - timezone: my timezone is Asia/Taipei" in message
+
+
+def test_format_agent_response_renders_public_web_search_results() -> None:
+    cog = AgentCog.__new__(AgentCog)
+
+    message = cog._format_agent_response(
+        {
+            "status": "executed",
+            "message": "The grant is currently open.",
+            "results": [
+                {
+                    "tool_name": "web_read.search",
+                    "status": "succeeded",
+                    "result": {
+                        "provider": "brave",
+                        "results": [
+                            {
+                                "title": "Grant announcement",
+                                "url": "https://example.com/grant",
+                                "snippet": "Current grant information.",
+                            }
+                        ],
+                    },
+                }
+            ],
+        }
+    )
+
+    assert "The grant is currently open." in message
+    assert "- web_read.search (brave): 1 results" in message
+    assert "Grant announcement https://example.com/grant" in message
+
+
+def test_format_agent_response_renders_public_web_extract() -> None:
+    cog = AgentCog.__new__(AgentCog)
+
+    message = cog._format_agent_response(
+        {
+            "status": "executed",
+            "results": [
+                {
+                    "tool_name": "web_read.extract",
+                    "status": "succeeded",
+                    "result": {
+                        "provider": "firecrawl",
+                        "title": "Grant details",
+                        "url": "https://example.com/grant",
+                        "content": "Public page details.",
+                    },
+                }
+            ],
+        }
+    )
+
+    assert (
+        "- web_read.extract (firecrawl): Grant details https://example.com/grant"
+        in message
+    )
+    assert "Public page details." in message
 
 
 def test_format_agent_response_surfaces_sso_recovery_email_warning() -> None:
@@ -325,6 +513,40 @@ async def test_confirmation_view_disable_stops_listener() -> None:
 async def test_confirmation_transport_failure_keeps_view_retryable() -> None:
     cog = SimpleNamespace(
         _post_agent_confirmation=AsyncMock(side_effect=RuntimeError("timeout")),
+        _audit_command_safe=Mock(),
+        _format_agent_response=Mock(return_value="Agent status: failed"),
+    )
+    view = AgentConfirmationView(
+        cog=cog,
+        requester_id=123,
+        plan_id="plan-1",
+        context={"discord_user_id": "123"},
+    )
+    interaction = SimpleNamespace(
+        response=SimpleNamespace(defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+        message=SimpleNamespace(edit=AsyncMock()),
+        user=SimpleNamespace(id=123),
+    )
+
+    await AgentConfirmationView.confirm(view, interaction, None)
+
+    assert not view.is_finished()
+    assert all(not item.disabled for item in view.children)
+    interaction.message.edit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_retryable_confirmation_response_keeps_view_enabled() -> None:
+    cog = SimpleNamespace(
+        _post_agent_confirmation=AsyncMock(
+            return_value={
+                "status": "failed",
+                "http_status": 503,
+                "retryable_confirmation": True,
+                "message": "Please try again shortly.",
+            }
+        ),
         _audit_command_safe=Mock(),
         _format_agent_response=Mock(return_value="Agent status: failed"),
     )
@@ -711,9 +933,13 @@ async def test_agent_command_member_info_lookup_reaches_gateway() -> None:
 
 
 @pytest.mark.asyncio
-async def test_confirmation_context_in_dm_uses_cached_original_guild_roles() -> None:
-    member = SimpleNamespace(roles=[SimpleNamespace(name="Member")])
-    guild = SimpleNamespace(get_member=Mock(return_value=member))
+async def test_confirmation_context_in_dm_uses_fresh_roles_over_cached_admin() -> None:
+    cached_admin = SimpleNamespace(roles=[SimpleNamespace(name="Admin", id=111)])
+    fresh_member = SimpleNamespace(roles=[SimpleNamespace(name="Member", id=222)])
+    guild = SimpleNamespace(
+        get_member=Mock(return_value=cached_admin),
+        fetch_member=AsyncMock(return_value=fresh_member),
+    )
     cog = AgentCog.__new__(AgentCog)
     cog.bot = SimpleNamespace(get_guild=Mock(return_value=guild))
     view = AgentConfirmationView(
@@ -743,8 +969,10 @@ async def test_confirmation_context_in_dm_uses_cached_original_guild_roles() -> 
     assert context["guild_id"] == "456"
     assert context["channel_id"] == "789"
     assert context["roles"] == ["Member"]
+    assert context["role_ids"] == ["222"]
     assert context["interaction_id"] == "999"
     assert context["message_id"] == "555"
+    guild.fetch_member.assert_awaited_once_with(123)
 
 
 @pytest.mark.asyncio
@@ -787,7 +1015,86 @@ async def test_confirmation_context_in_dm_fetches_uncached_member_roles() -> Non
 
 
 @pytest.mark.asyncio
-async def test_confirmation_context_in_dm_preserves_original_roles_when_guild_missing() -> (
+async def test_confirmation_not_found_uses_empty_roles_for_definitive_departure() -> (
+    None
+):
+    response = Mock(status=404, reason="Not Found")
+    guild = SimpleNamespace(
+        get_member=Mock(),
+        fetch_member=AsyncMock(
+            side_effect=discord.NotFound(
+                response,
+                {"code": 10_007, "message": "Unknown Member"},
+            )
+        ),
+    )
+    cog = AgentCog.__new__(AgentCog)
+    cog.bot = SimpleNamespace(get_guild=Mock(return_value=guild))
+    view = AgentConfirmationView(
+        cog=cog,
+        requester_id=123,
+        plan_id="plan-1",
+        context={"organization_id": "456", "guild_id": "456"},
+    )
+    interaction = SimpleNamespace(
+        id=999,
+        guild_id=None,
+        channel_id=111,
+        message=SimpleNamespace(id=222),
+        user=SimpleNamespace(id=123),
+    )
+
+    context = await view._confirmation_context(interaction)
+
+    assert context["roles"] == []
+    assert context["role_ids"] == []
+    guild.fetch_member.assert_awaited_once_with(123)
+
+
+@pytest.mark.asyncio
+async def test_transient_member_refresh_failure_does_not_consume_confirmation() -> None:
+    response = Mock(status=503, reason="Service Unavailable")
+    guild = SimpleNamespace(
+        get_member=Mock(),
+        fetch_member=AsyncMock(
+            side_effect=discord.HTTPException(response, "Discord unavailable")
+        ),
+    )
+    cog = AgentCog.__new__(AgentCog)
+    cog.bot = SimpleNamespace(get_guild=Mock(return_value=guild))
+    cog._post_agent_confirmation = AsyncMock()
+    cog._audit_command_safe = Mock()
+    cog._format_agent_response = Mock(return_value="Agent status: failed")
+    view = AgentConfirmationView(
+        cog=cog,
+        requester_id=123,
+        plan_id="plan-1",
+        context={"organization_id": "456", "guild_id": "456"},
+    )
+    interaction = SimpleNamespace(
+        id=999,
+        guild_id=None,
+        channel_id=111,
+        response=SimpleNamespace(defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+        message=SimpleNamespace(id=222, edit=AsyncMock()),
+        user=SimpleNamespace(id=123),
+    )
+
+    await AgentConfirmationView.confirm(view, interaction, None)
+
+    cog._post_agent_confirmation.assert_not_awaited()
+    assert not view.is_finished()
+    assert all(not item.disabled for item in view.children)
+    interaction.message.edit.assert_not_awaited()
+    formatted_response = cog._format_agent_response.call_args.args[0]
+    assert formatted_response["message"] == (
+        "Discord membership could not be refreshed; try again."
+    )
+
+
+@pytest.mark.asyncio
+async def test_confirmation_context_in_dm_fails_closed_when_guild_membership_is_unavailable() -> (
     None
 ):
     cog = AgentCog.__new__(AgentCog)
@@ -817,7 +1124,7 @@ async def test_confirmation_context_in_dm_preserves_original_roles_when_guild_mi
 
     assert context["organization_id"] == "456"
     assert context["guild_id"] == "456"
-    assert context["roles"] == ["Admin", "Member"]
+    assert context["roles"] == []
     assert context["message_id"] == "555"
 
 
@@ -910,8 +1217,32 @@ async def test_agent_mention_posts_clarification_in_thread() -> None:
         "I could not map that to a supported workflow yet"
         in thread.send.await_args.args[0]
     )
+    assert thread.send.await_args.kwargs["allowed_mentions"].to_dict()["parse"] == []
     message.reply.assert_not_awaited()
     cog._audit_message_safe.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_agent_mention_public_reply_disables_attacker_controlled_mentions() -> (
+    None
+):
+    cog = AgentCog.__new__(AgentCog)
+    cog._mention_response_thread = AsyncMock(return_value=None)
+    message = SimpleNamespace(reply=AsyncMock())
+    content = "@everyone <@123> <@&456>"
+
+    await cog._send_mention_public_response(
+        message=message,
+        request="help",
+        content=content,
+    )
+
+    message.reply.assert_awaited_once_with(
+        content,
+        mention_author=False,
+        allowed_mentions=agent_module.NO_MENTIONS,
+    )
+    assert message.reply.await_args.kwargs["allowed_mentions"].to_dict()["parse"] == []
 
 
 def test_mention_thread_name_does_not_include_request_content() -> None:
@@ -1157,7 +1488,10 @@ async def test_agent_mention_answers_acknowledgement_without_backend() -> None:
     await cog.agent_mention(message)
 
     cog._post_agent_request.assert_not_awaited()
-    thread.send.assert_awaited_once_with("Got it.")
+    thread.send.assert_awaited_once_with(
+        "Got it.",
+        allowed_mentions=agent_module.NO_MENTIONS,
+    )
     cog._audit_message_safe.assert_not_called()
 
 
@@ -1457,3 +1791,26 @@ def test_post_backend_json_returns_detail_error_response(
 
     assert payload["detail"] == "backend unavailable"
     assert payload["http_status"] == 500
+
+
+def test_post_backend_json_uses_api_shared_secret(
+    monkeypatch,
+) -> None:
+    cog = AgentCog.__new__(AgentCog)
+    monkeypatch.setattr(
+        "five08.discord_bot.cogs.agent.settings",
+        SimpleNamespace(
+            backend_api_base_url="http://api.test",
+            api_shared_secret="general-api-secret",
+            agent_api_timeout_seconds=8.0,
+        ),
+    )
+
+    with patch("five08.discord_bot.cogs.agent.requests.post") as mock_post:
+        mock_post.return_value = _FakeResponse(200, {"status": "executed"})
+
+        cog._post_backend_json("/agent/requests", {})
+
+    assert mock_post.call_args.kwargs["headers"] == {
+        "X-API-Secret": "general-api-secret"
+    }

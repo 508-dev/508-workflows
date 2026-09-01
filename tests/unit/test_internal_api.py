@@ -10,9 +10,12 @@ import pytest
 
 from five08.engagements import EngagementStatus
 from five08.discord_bot.utils.internal_api import (
+    AgentScheduleChannelRequest,
+    AgentScheduleMemberSnapshotRequest,
     GigThreadStatusRequest,
     InternalAPIRoutes,
     MemberAgreementRoleRequest,
+    PostAgentScheduleReportRequest,
     PostJobLeadRequest,
     StageJobLeadRequest,
 )
@@ -231,6 +234,371 @@ class TestInternalAPIRoutes:
         assert status_code == 200
         assert result["channels"][0]["requires_tag"] is True
         jobs_cog.list_registered_job_post_forums.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
+    async def test_discord_diagnostics_delegates_to_diagnostics_cog(
+        self,
+        internal_api_routes,
+    ):
+        """The dashboard role catalog must come from the read-only diagnostics cog."""
+        diagnostics_cog = Mock()
+        diagnostics_cog.get_diagnostics_snapshot = AsyncMock(
+            return_value=(
+                {
+                    "guild": {"id": "123", "name": "508.dev"},
+                    "roles": [{"id": "456", "name": "Admin"}],
+                },
+                200,
+            )
+        )
+        internal_api_routes.bot.get_cog.return_value = diagnostics_cog
+
+        result, status_code = await internal_api_routes._get_discord_diagnostics(
+            refresh=True,
+        )
+
+        assert status_code == 200
+        assert result["roles"][0]["id"] == "456"
+        diagnostics_cog.get_diagnostics_snapshot.assert_awaited_once_with(refresh=True)
+
+    @pytest.mark.asyncio
+    async def test_discord_diagnostics_reports_unavailable_without_cog(
+        self,
+        internal_api_routes,
+    ):
+        """No fallback may fabricate a role catalog when diagnostics is unavailable."""
+        internal_api_routes.bot.get_cog.return_value = None
+
+        result, status_code = await internal_api_routes._get_discord_diagnostics()
+
+        assert status_code == 503
+        assert result == {"error": "diagnostics_cog_unavailable"}
+
+    @pytest.mark.asyncio
+    async def test_agent_schedule_member_snapshot_fetches_current_role_ids(
+        self,
+        internal_api_routes,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Recurring work must refresh roles instead of trusting a saved grant."""
+
+        monkeypatch.setattr(
+            "five08.discord_bot.utils.internal_api.settings.discord_server_id",
+            "1000",
+        )
+        member = SimpleNamespace(
+            roles=[
+                SimpleNamespace(id=1000, name="@everyone"),
+                SimpleNamespace(id=1001, name="Admin"),
+            ]
+        )
+        guild = Mock()
+        guild.id = 1000
+        guild.fetch_member = AsyncMock(return_value=member)
+        internal_api_routes.bot.get_guild.return_value = guild
+
+        result, status_code = await internal_api_routes._agent_schedule_member_snapshot(
+            AgentScheduleMemberSnapshotRequest(
+                guild_id="1000",
+                discord_user_id="2000",
+            )
+        )
+
+        assert status_code == 200
+        assert result["role_ids"] == ["1000", "1001"]
+        assert result["roles"] == ["@everyone", "Admin"]
+        guild.fetch_member.assert_awaited_once_with(2000)
+
+    @pytest.mark.asyncio
+    async def test_agent_schedule_member_snapshot_rejects_cross_guild_request(
+        self,
+        internal_api_routes,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A bot-internal caller cannot use the role lookup across guilds."""
+
+        monkeypatch.setattr(
+            "five08.discord_bot.utils.internal_api.settings.discord_server_id",
+            "1000",
+        )
+        guild = Mock()
+        guild.id = 1000
+        internal_api_routes.bot.get_guild.return_value = guild
+
+        result, status_code = await internal_api_routes._agent_schedule_member_snapshot(
+            AgentScheduleMemberSnapshotRequest(
+                guild_id="other-guild",
+                discord_user_id="2000",
+            )
+        )
+
+        assert status_code == 403
+        assert result == {"error": "guild_mismatch"}
+        guild.fetch_member.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_agent_schedule_channel_validation_requires_a_messageable_target(
+        self,
+        internal_api_routes,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A schedule is not persisted until the bot can post in its channel."""
+
+        monkeypatch.setattr(
+            "five08.discord_bot.utils.internal_api.settings.discord_server_id",
+            "1000",
+        )
+
+        class FakeMessageable:
+            def __init__(self, guild: object) -> None:
+                self.guild = guild
+
+            def permissions_for(self, _member: object) -> SimpleNamespace:
+                return SimpleNamespace(view_channel=True, send_messages=True)
+
+        owner = object()
+        guild = SimpleNamespace(
+            id=1000,
+            me=object(),
+            fetch_member=AsyncMock(return_value=owner),
+        )
+        channel = FakeMessageable(guild)
+        internal_api_routes.bot.get_guild.return_value = guild
+        internal_api_routes.bot.get_channel.return_value = channel
+        monkeypatch.setattr(
+            "five08.discord_bot.utils.internal_api.discord.abc.Messageable",
+            FakeMessageable,
+        )
+
+        (
+            result,
+            status_code,
+        ) = await internal_api_routes._validate_agent_schedule_channel(
+            AgentScheduleChannelRequest(
+                guild_id="1000",
+                channel_id="2000",
+                owner_discord_user_id="3000",
+            )
+        )
+
+        assert status_code == 200
+        assert result == {
+            "status": "ready",
+            "guild_id": "1000",
+            "channel_id": "2000",
+        }
+        guild.fetch_member.assert_awaited_once_with(3000)
+
+    @pytest.mark.asyncio
+    async def test_agent_schedule_channel_validation_fails_closed_for_owner_permissions(
+        self,
+        internal_api_routes,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """The schedule owner must retain access to its report channel."""
+
+        monkeypatch.setattr(
+            "five08.discord_bot.utils.internal_api.settings.discord_server_id",
+            "1000",
+        )
+
+        bot_member = object()
+        owner = object()
+
+        class FakeMessageable:
+            def __init__(self, guild: object) -> None:
+                self.guild = guild
+
+            def permissions_for(self, member: object) -> SimpleNamespace:
+                if member is owner:
+                    return SimpleNamespace(view_channel=True, send_messages=False)
+                return SimpleNamespace(view_channel=True, send_messages=True)
+
+        guild = SimpleNamespace(
+            id=1000,
+            me=bot_member,
+            fetch_member=AsyncMock(return_value=owner),
+        )
+        internal_api_routes.bot.get_guild.return_value = guild
+        internal_api_routes.bot.get_channel.return_value = FakeMessageable(guild)
+        monkeypatch.setattr(
+            "five08.discord_bot.utils.internal_api.discord.abc.Messageable",
+            FakeMessageable,
+        )
+
+        (
+            result,
+            status_code,
+        ) = await internal_api_routes._validate_agent_schedule_channel(
+            AgentScheduleChannelRequest(
+                guild_id="1000",
+                channel_id="2000",
+                owner_discord_user_id="3000",
+            )
+        )
+
+        assert status_code == 403
+        assert result == {"error": "owner_missing_channel_send_permission"}
+        guild.fetch_member.assert_awaited_once_with(3000)
+
+    @pytest.mark.asyncio
+    async def test_agent_schedule_thread_validation_uses_thread_send_permission_for_bot_and_owner(
+        self,
+        internal_api_routes,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Thread destinations use the Discord thread send bit for both members."""
+
+        monkeypatch.setattr(
+            "five08.discord_bot.utils.internal_api.settings.discord_server_id",
+            "1000",
+        )
+
+        bot_member = object()
+        owner = object()
+        permission_checks: list[object] = []
+
+        class FakeThread:
+            def __init__(self, guild: object) -> None:
+                self.guild = guild
+
+            def permissions_for(self, member: object) -> SimpleNamespace:
+                permission_checks.append(member)
+                return SimpleNamespace(
+                    view_channel=True,
+                    send_messages=False,
+                    send_messages_in_threads=True,
+                )
+
+        guild = SimpleNamespace(
+            id=1000,
+            me=bot_member,
+            fetch_member=AsyncMock(return_value=owner),
+        )
+        internal_api_routes.bot.get_guild.return_value = guild
+        internal_api_routes.bot.get_channel.return_value = FakeThread(guild)
+        monkeypatch.setattr(
+            "five08.discord_bot.utils.internal_api.discord.Thread",
+            FakeThread,
+        )
+        monkeypatch.setattr(
+            "five08.discord_bot.utils.internal_api.discord.abc.Messageable",
+            FakeThread,
+        )
+
+        (
+            result,
+            status_code,
+        ) = await internal_api_routes._validate_agent_schedule_channel(
+            AgentScheduleChannelRequest(
+                guild_id="1000",
+                channel_id="2000",
+                owner_discord_user_id="3000",
+            )
+        )
+
+        assert status_code == 200
+        assert result == {
+            "status": "ready",
+            "guild_id": "1000",
+            "channel_id": "2000",
+        }
+        assert permission_checks == [bot_member, owner]
+
+    @pytest.mark.asyncio
+    async def test_agent_schedule_channel_validation_rejects_a_departed_owner(
+        self,
+        internal_api_routes,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A deleted guild member cannot retain a report destination."""
+
+        monkeypatch.setattr(
+            "five08.discord_bot.utils.internal_api.settings.discord_server_id",
+            "1000",
+        )
+
+        class FakeMessageable:
+            def __init__(self, guild: object) -> None:
+                self.guild = guild
+
+            def permissions_for(self, _member: object) -> SimpleNamespace:
+                return SimpleNamespace(view_channel=True, send_messages=True)
+
+        guild = SimpleNamespace(
+            id=1000,
+            me=object(),
+            fetch_member=AsyncMock(
+                side_effect=discord.NotFound(
+                    response=Mock(status=404, reason="Not Found"),
+                    message="owner not found",
+                )
+            ),
+        )
+        internal_api_routes.bot.get_guild.return_value = guild
+        internal_api_routes.bot.get_channel.return_value = FakeMessageable(guild)
+        monkeypatch.setattr(
+            "five08.discord_bot.utils.internal_api.discord.abc.Messageable",
+            FakeMessageable,
+        )
+
+        (
+            result,
+            status_code,
+        ) = await internal_api_routes._validate_agent_schedule_channel(
+            AgentScheduleChannelRequest(
+                guild_id="1000",
+                channel_id="2000",
+                owner_discord_user_id="3000",
+            )
+        )
+
+        assert status_code == 404
+        assert result == {"error": "schedule_owner_not_found"}
+
+    @pytest.mark.asyncio
+    async def test_agent_schedule_report_marks_channel_lookup_failure_not_attempted(
+        self,
+        internal_api_routes,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """The API can safely retry a report only when send was never reached."""
+
+        async def unavailable_channel(
+            *,
+            guild_id: str,
+            channel_id: str,
+            owner_discord_user_id: str,
+        ):
+            assert (guild_id, channel_id, owner_discord_user_id) == (
+                "1000",
+                "2000",
+                "3000",
+            )
+            return None, {"error": "channel_lookup_failed"}, 502
+
+        monkeypatch.setattr(
+            internal_api_routes,
+            "_resolve_agent_schedule_channel",
+            unavailable_channel,
+        )
+
+        result, status_code = await internal_api_routes._post_agent_schedule_report(
+            PostAgentScheduleReportRequest(
+                guild_id="1000",
+                channel_id="2000",
+                owner_discord_user_id="3000",
+                schedule_id="schedule-1",
+                run_id="run-1",
+                content="Report body",
+            )
+        )
+
+        assert status_code == 502
+        assert result == {
+            "error": "channel_lookup_failed",
+            "delivery_outcome": "not_attempted",
+        }
 
     @pytest.mark.asyncio
     async def test_update_gig_thread_status_rewrites_title_marker(

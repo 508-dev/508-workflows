@@ -7,6 +7,7 @@ from five08.agent.models import (
     AgentIdentityContext,
     AgentModelSelection,
     AgentPlan,
+    AgentResponsePlannerMetadata,
     AgentRequest,
     AgentResponse,
     AgentToolAction,
@@ -27,6 +28,7 @@ from five08.agent.memory import (
     InMemoryMemoryStore,
     MemoryStore,
 )
+from five08.agent.postgres_memory import PostgresMemoryStore
 from five08.agent.model_routing import (
     AgentModelConfig,
     AgentTierModelConfig,
@@ -43,6 +45,19 @@ from five08.agent.planner import (
 )
 from five08.agent.orchestrator import AgentOrchestrator
 from five08.agent.policy import PolicyDecision, PolicyEngine
+from five08.agent.schedules import (
+    AGENT_SCHEDULE_ALLOWED_TOOL_NAMES,
+    AgentScheduleAction,
+    AgentScheduleDefinition,
+    AgentScheduleDiscordDelivery,
+    AgentScheduleExecutionMode,
+    AgentScheduleProposal,
+    AgentScheduleRecord,
+    AgentScheduleRunRecord,
+    AgentScheduleRunStatus,
+    AgentScheduleRunTrigger,
+    AgentScheduleStatus,
+)
 from five08.agent.tools import (
     InMemoryTaskStore,
     ToolManifest,
@@ -64,8 +79,20 @@ __all__ = [
     "AgentOrchestrator",
     "AgentPlan",
     "AgentRequest",
+    "AgentResponsePlannerMetadata",
     "AgentTierModelConfig",
     "AgentResponse",
+    "AgentScheduleAction",
+    "AgentScheduleDefinition",
+    "AgentScheduleDiscordDelivery",
+    "AgentScheduleExecutionMode",
+    "AgentScheduleProposal",
+    "AgentScheduleRecord",
+    "AgentScheduleRunRecord",
+    "AgentScheduleRunStatus",
+    "AgentScheduleRunTrigger",
+    "AgentScheduleStatus",
+    "AGENT_SCHEDULE_ALLOWED_TOOL_NAMES",
     "AgentToolAction",
     "ContextLoadBounds",
     "DEFAULT_AGENT_MODEL",
@@ -73,6 +100,7 @@ __all__ = [
     "MemoryFact",
     "MemoryStore",
     "InMemoryMemoryStore",
+    "PostgresMemoryStore",
     "InMemoryTaskStore",
     "ModelTier",
     "OpenAICompatibleIntentNormalizer",

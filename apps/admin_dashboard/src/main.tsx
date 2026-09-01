@@ -3,6 +3,7 @@ import {
   ArrowLeft,
   Bell,
   BriefcaseBusiness,
+  CalendarClock,
   ClipboardList,
   ExternalLink,
   FileClock,
@@ -13,6 +14,7 @@ import {
   RefreshCw,
   Search,
   Send,
+  Server,
   Settings,
   ShieldCheck,
   UserMinus,
@@ -22,6 +24,10 @@ import {
 } from "lucide-react"
 import { type ReactNode, StrictMode, useEffect, useMemo, useRef, useState } from "react"
 import { createRoot } from "react-dom/client"
+import {
+  type AgentScheduleRunResponse,
+  agentScheduleRunToastMessage,
+} from "@/agent-schedule-run-status"
 import { Empty } from "@/components/empty"
 import { SortableTableHead } from "@/components/sortable-table-head"
 import { Badge } from "@/components/ui/badge"
@@ -54,6 +60,13 @@ import {
 } from "@/dashboard-utils"
 import { cn } from "@/lib/utils"
 import {
+  type AgentSchedule,
+  type AgentScheduleCreateValues,
+  type AgentScheduleRun,
+  type AgentSchedulesResponse,
+  AgentSchedulesView,
+} from "@/views/agent-schedules-view"
+import {
   type ConfigurationItem,
   type ConfigurationResponse,
   ConfigurationView,
@@ -61,6 +74,10 @@ import {
   type JobPostChannel,
   type JobPostChannelTag,
 } from "@/views/configuration-view"
+import {
+  type DiscordDiagnosticsResponse,
+  DiscordDiagnosticsView,
+} from "@/views/discord-diagnostics-view"
 import {
   type NewsletterStatus,
   type NewsletterSuppression,
@@ -80,6 +97,8 @@ type View =
   | "jobs"
   | "agent"
   | "audit"
+  | "schedules"
+  | "diagnostics"
   | "configuration"
 type SortDirection = "asc" | "desc"
 type GigTab = "gigs" | "leads"
@@ -564,6 +583,8 @@ const routes: Record<View, string> = {
   jobs: "/dashboard/jobs",
   agent: "/dashboard/agent",
   audit: "/dashboard/audit",
+  schedules: "/dashboard/schedules",
+  diagnostics: "/dashboard/diagnostics",
   configuration: "/dashboard/configuration",
 }
 
@@ -576,6 +597,8 @@ const routePermissions: Record<View, string> = {
   jobs: "jobs:read",
   agent: "audit:read",
   audit: "audit:read",
+  schedules: "configuration:read",
+  diagnostics: "configuration:read",
   configuration: "configuration:read",
 }
 
@@ -977,6 +1000,14 @@ function App() {
   const [onboardingVolunteers, setOnboardingVolunteers] = useState<OnboardingVolunteer[]>([])
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([])
   const [agentReport, setAgentReport] = useState<AgentReport | null>(null)
+  const [agentSchedules, setAgentSchedules] = useState<AgentSchedule[]>([])
+  const [agentScheduleDeliveryAttention, setAgentScheduleDeliveryAttention] = useState<
+    AgentScheduleRun[]
+  >([])
+  const [agentScheduleDispatcherEnabled, setAgentScheduleDispatcherEnabled] = useState(false)
+  const [discordDiagnostics, setDiscordDiagnostics] = useState<DiscordDiagnosticsResponse | null>(
+    null,
+  )
   const [configurationItems, setConfigurationItems] = useState<ConfigurationItem[]>([])
   const [configurationFocus, setConfigurationFocus] = useState<{
     category: string
@@ -999,6 +1030,8 @@ function App() {
     people: { key: "name", direction: "asc" },
     agent: { key: "occurred_at", direction: "desc" },
     audit: { key: "occurred_at", direction: "desc" },
+    schedules: { key: "next_run_at", direction: "asc" },
+    diagnostics: { key: "position", direction: "desc" },
     configuration: { key: "category", direction: "asc" },
   })
 
@@ -2288,6 +2321,109 @@ function App() {
     }
   }
 
+  async function loadAgentSchedules() {
+    setBusy("agentSchedules", true)
+    try {
+      const schedules: AgentSchedule[] = []
+      let nextOffset: number | null = 0
+      let firstPage: AgentSchedulesResponse | null = null
+      while (nextOffset !== null) {
+        const currentOffset: number = nextOffset
+        const suffix: string = currentOffset === 0 ? "" : `?offset=${currentOffset}`
+        const payload: AgentSchedulesResponse = await requestJson<AgentSchedulesResponse>(
+          `/dashboard/api/agent-schedules${suffix}`,
+        )
+        firstPage ||= payload
+        schedules.push(...(payload.schedules || []))
+        nextOffset =
+          typeof payload.next_offset === "number" && payload.next_offset > currentOffset
+            ? payload.next_offset
+            : null
+      }
+      setAgentSchedules(schedules)
+      setAgentScheduleDeliveryAttention(firstPage?.delivery_attention || [])
+      setAgentScheduleDispatcherEnabled(Boolean(firstPage?.scheduler_enabled))
+    } catch (error) {
+      showError(error, "Unable to load recurring agent schedules")
+    } finally {
+      setBusy("agentSchedules", false)
+    }
+  }
+
+  async function createAgentSchedule(values: AgentScheduleCreateValues) {
+    setBusy("createAgentSchedule", true)
+    try {
+      await requestJson<unknown>("/dashboard/api/agent-schedules", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(values),
+      })
+      showToast("Created recurring agent schedule", "ok")
+      await loadAgentSchedules()
+      return true
+    } catch (error) {
+      showError(error, "Unable to create the recurring agent schedule")
+      return false
+    } finally {
+      setBusy("createAgentSchedule", false)
+    }
+  }
+
+  async function controlAgentSchedule(scheduleId: string, action: "pause" | "resume" | "archive") {
+    const key = `agentSchedule:${scheduleId}`
+    setBusy(key, true)
+    try {
+      await requestJson<unknown>(
+        `/dashboard/api/agent-schedules/${encodeURIComponent(scheduleId)}`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action }),
+        },
+      )
+      showToast(`${action[0].toUpperCase()}${action.slice(1)}d recurring schedule`, "ok")
+      await loadAgentSchedules()
+    } catch (error) {
+      showError(error, "Unable to update the recurring agent schedule")
+    } finally {
+      setBusy(key, false)
+    }
+  }
+
+  async function runAgentSchedule(scheduleId: string) {
+    const key = `agentScheduleRun:${scheduleId}`
+    setBusy(key, true)
+    try {
+      const response = await requestJson<AgentScheduleRunResponse>(
+        `/dashboard/api/agent-schedules/${encodeURIComponent(scheduleId)}/run`,
+        { method: "POST" },
+      )
+      showToast(agentScheduleRunToastMessage(response), "ok")
+      await loadAgentSchedules()
+    } catch (error) {
+      showError(error, "Unable to queue the recurring agent schedule")
+    } finally {
+      setBusy(key, false)
+    }
+  }
+
+  async function resolveAgentScheduleDelivery(runId: string) {
+    const key = `agentScheduleDelivery:${runId}`
+    setBusy(key, true)
+    try {
+      await requestJson<unknown>(
+        `/dashboard/api/agent-schedules/runs/${encodeURIComponent(runId)}/delivery/resolve`,
+        { method: "POST" },
+      )
+      showToast("Marked the uncertain report delivery as unknown", "warning")
+      await loadAgentSchedules()
+    } catch (error) {
+      showError(error, "Unable to resolve the uncertain report delivery")
+    } finally {
+      setBusy(key, false)
+    }
+  }
+
   async function loadConfiguration() {
     setBusy("configuration", true)
     try {
@@ -2297,6 +2433,20 @@ function App() {
       showError(error, "Unable to load configuration")
     } finally {
       setBusy("configuration", false)
+    }
+  }
+
+  async function loadDiscordDiagnostics(refresh = false) {
+    setBusy("diagnostics", true)
+    try {
+      const query = refresh ? "?refresh=true" : ""
+      setDiscordDiagnostics(
+        await requestJson<DiscordDiagnosticsResponse>(`/dashboard/api/discord-diagnostics${query}`),
+      )
+    } catch (error) {
+      showError(error, "Unable to load Discord diagnostics")
+    } finally {
+      setBusy("diagnostics", false)
     }
   }
 
@@ -2673,6 +2823,8 @@ function App() {
     if (view === "jobs") void loadJobs()
     if (view === "agent") void loadAgentReport()
     if (view === "audit") void loadAuditEvents()
+    if (view === "schedules") void loadAgentSchedules()
+    if (view === "diagnostics") void loadDiscordDiagnostics()
     if (view === "configuration") {
       void loadConfiguration()
       void loadJobPostChannels({ includeAvailable: true })
@@ -2699,6 +2851,8 @@ function App() {
     if (view === "jobs") void loadJobs()
     if (view === "agent") void loadAgentReport()
     if (view === "audit") void loadAuditEvents()
+    if (view === "schedules") void loadAgentSchedules()
+    if (view === "diagnostics") void loadDiscordDiagnostics()
     if (view === "configuration") {
       void loadConfiguration()
       void loadJobPostChannels({ includeAvailable: true })
@@ -2967,7 +3121,9 @@ function App() {
               ["newsletter", "Newsletter", Mail],
               ["jobs", "Background tasks", Activity],
               ["agent", "Agent", ShieldCheck],
+              ["schedules", "Agent schedules", CalendarClock],
               ["audit", "Audit", FileClock],
+              ["diagnostics", "Discord diagnostics", Server],
               ["configuration", "Configuration", Settings],
             ] as const
           )
@@ -3219,6 +3375,31 @@ function App() {
 
           {view === "agent" ? (
             <AgentView report={agentReport} loading={loading} onRefresh={loadAgentReport} />
+          ) : null}
+
+          {view === "schedules" ? (
+            <AgentSchedulesView
+              schedules={agentSchedules}
+              deliveryAttention={agentScheduleDeliveryAttention}
+              schedulerEnabled={agentScheduleDispatcherEnabled}
+              loading={loading}
+              canWrite={can("configuration:write")}
+              canCreate={can("configuration:write") && user?.actor_provider === "discord"}
+              onRefresh={loadAgentSchedules}
+              onCreate={createAgentSchedule}
+              onControl={controlAgentSchedule}
+              onRun={runAgentSchedule}
+              onResolveDelivery={resolveAgentScheduleDelivery}
+            />
+          ) : null}
+
+          {view === "diagnostics" ? (
+            <DiscordDiagnosticsView
+              diagnostics={discordDiagnostics}
+              loading={loading.diagnostics}
+              onRefresh={() => loadDiscordDiagnostics(true)}
+              onNotice={(message, tone = "ok") => showToast(message, tone)}
+            />
           ) : null}
 
           {view === "configuration" ? (

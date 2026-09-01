@@ -32,9 +32,30 @@ Discord slash command
   -> cog emits best-effort audit event when appropriate
 ```
 
-The bot uses `API_SHARED_SECRET` for protected backend/internal calls. That
-shared secret authenticates service-to-service traffic; command authorization
-still belongs in role checks, backend policy checks, and resource-level checks.
+The bot uses `API_SHARED_SECRET` for protected backend/internal calls, including
+agent routes. Command authorization still belongs in role checks, backend policy
+checks, and resource-level checks.
+
+In deployed environments, agent permissions are bound to the configured
+`DISCORD_SERVER_ID` and immutable role IDs, not mutable role names. Configure
+each capability bundle with the corresponding `AGENT_DISCORD_*_ROLE_IDS`
+variable. If the same Billing / ERP Dev role grants
+both bundles, list its ID in both variables. Missing mappings fail closed.
+
+## Server Diagnostics
+
+`/diagnostics` is a private, read-only role discovery panel for the one
+configured `DISCORD_SERVER_ID`. The Discord server owner and members with the
+native **Manage Server** permission can list role names and immutable IDs, view
+agent role-binding health, refresh the role snapshot, and download a copyable
+configuration export. It never grants a role, updates deployment configuration,
+or reveals secret values. Native Discord permission is intentionally used for
+this bootstrap utility so administrators can discover IDs before configuring
+`AGENT_DISCORD_ADMIN_ROLE_IDS`.
+
+The operations dashboard exposes the same snapshot at **Discord diagnostics**
+for users with `configuration:read`; it retrieves data through the bot's
+authenticated internal endpoint and remains read-only.
 
 ## Agent Gateway
 
@@ -52,9 +73,11 @@ Agent command flow:
   -> backend validates the typed plan and authorizes every proposed tool
   -> deterministic backend policy authorizes each proposed tool
   -> read actions execute synchronously
+  -> public web reads may return bounded observations to the planner for up to 3 turns
   -> write actions return a frozen confirmation plan
   -> Discord confirmation button calls POST /agent/confirmations/{plan_id}
-  -> backend executes the exact frozen plan inline and returns the result
+  -> backend executes the exact frozen plan inline, or creates a confirmed
+     recurring report through the schedule API, and returns the result
 ```
 
 The backend agent package keeps read and write tools separate, applies
@@ -62,7 +85,11 @@ capability checks before every tool call, requires confirmation for writes, and
 audits request/confirmation attempts. The model only drafts bounded tool calls;
 it cannot authorize users or execute integrations. Supported workflows include
 tasks, GitHub issues, CRM contacts, member agreements, account provisioning,
-and private memory according to the requester's roles.
+recurring reports, private memory, and bounded public-web research according to
+the requester's roles. Only public web tool output can enter the bounded planner
+follow-up loop; CRM, ERP, task, and private-memory results are never passed to
+it. Public web
+queries reject obvious private identifiers before a provider is contacted.
 Long-running service changes should be implemented as PR-based workflows rather
 than direct production mutations. Task reads require an explicit project filter
 to avoid guild-wide task enumeration.
@@ -98,20 +125,51 @@ agent behavior.
 Relevant configuration:
 
 - `BACKEND_API_BASE_URL`: backend API used by the bot.
-- `API_SHARED_SECRET`: shared service secret for protected backend calls.
+- `API_SHARED_SECRET`: shared service secret for protected backend calls,
+  including `/agent/*`.
+- `DISCORD_SERVER_ID`: the single guild allowlist for agent requests and
+  confirmations; production blocks an unset or mismatched guild before planning.
+- `AGENT_DISCORD_ADMIN_ROLE_IDS`, `AGENT_DISCORD_STEERING_COMMITTEE_ROLE_IDS`,
+  `AGENT_DISCORD_BILLING_ROLE_IDS`, `AGENT_DISCORD_ERP_DEVELOPER_ROLE_IDS`,
+  `AGENT_DISCORD_PROJECT_MANAGER_ROLE_IDS`, `AGENT_DISCORD_ENGINEER_ROLE_IDS`:
+  role-ID bindings for the corresponding agent capability bundles.
+- `AGENT_ALLOW_ROLE_NAME_FALLBACK`: explicit local/test-only migration aid;
+  role names never authorize deployed agent requests.
 - `AGENT_API_TIMEOUT_SECONDS`: timeout for synchronous agent gateway requests.
 - `AGENT_FAST_*`, `AGENT_STRONG_*`, `AGENT_REASONING_*`: backend model
   tier configuration for OpenAI-compatible providers. Credentials stay in the
   backend process; the bot only receives non-secret plan metadata.
+- `AGENT_PLANNING_MAX_STEPS`: cap for public-web research/answer turns.
+- `AGENT_REQUEST_RESPONSE_BUDGET_SECONDS`: backend caller-visible limit for
+  synchronous agent planning/reads; keep it below `AGENT_API_TIMEOUT_SECONDS`.
+- `AGENT_PUBLIC_WEB_DEADLINE_SECONDS`: best-effort public-web loop budget; keep
+  it below the response budget.
+- `AGENT_WEB_SEARCH_PROVIDER_ORDER`: configured fallback order for `searxng`,
+  `brave`, and `firecrawl`.
+- `SEARXNG_BASE_URL`, `BRAVE_SEARCH_API_KEY`, `FIRECRAWL_API_KEY`: configure
+  one or more web providers. Brave and Firecrawl keys stay in the backend.
+- `ERPNEXT_BASE_URL`, `ERPNEXT_API_KEY`, `AGENT_ERP_ORGANIZATION_ID`: enable
+  bounded Billing/ERP reads. The organization ID must exactly match the one
+  Discord guild/organization authorized to use the configured ERP credentials;
+  reads fail closed when it is missing or does not match.
 - `RESUME_AI_*`: optional resume-specific extraction provider for direct CRM
   resume parsing in the bot; falls back to the normal `OPENAI_*` settings.
 
 ## Permissions
 
-- **Everyone**: can see and invoke non-restricted commands.
-- **Member**: has member-only command access in addition to everyone commands.
-- **Steering Committee**: includes member permissions and adds additional moderation/admin-assist commands.
-- **Admin**: can run sensitive writes such as ID verification updates.
+- **Member**: receives no privileged agent scopes.
+- **Steering Committee**: project/task/CRM/member-agreement and scoped memory
+  workflows, plus agent chat and public-web research; it cannot provision
+  accounts, manage integrations, deploy, or inherit Admin automatically.
+- **Billing**: may read narrowly whitelisted Sales/Purchase invoice summaries
+  and supplier lookups, plus agent chat/public-web research. Billing writes,
+  CRM, provisioning, and Admin authority are not exposed through the agent.
+- **ERP Developer**: may read narrowly whitelisted ERP project summaries, plus
+  agent chat/public-web research. ERP writes, billing, CRM, provisioning, and
+  Admin authority are not exposed through the agent.
+- **Admin / Owner**: receives the full administrative and specialist scope set.
+  This includes `agent:schedule:manage`, which is required for persistent
+  recurring agent reports.
 
 ## Wiki Search
 
@@ -131,11 +189,13 @@ and result snippets are not audit logged.
 ## Slash Commands
 
 - `/agent`
-  - Description: Send a natural-language task request through the backend agent gateway.
+  - Description: Send a natural-language task or recurring-report request through the backend agent gateway.
   - Behavior:
     - Sends Discord user, guild, channel, role, and interaction context to the backend.
     - Executes allowed read-only task lookups synchronously.
     - Shows a frozen confirmation plan for task writes before execution.
+    - Admins can ask for a recurring report in the current channel; the plan
+      shows the exact five-field cron and IANA timezone before it is created.
     - Confirms or cancels writes through backend confirmation endpoints.
   - Guardrails:
     - The bot does not authorize agent tool calls itself.
@@ -149,6 +209,35 @@ and result snippets are not audit logged.
     - Replies in the same channel or thread.
     - Supports the same confirmation buttons for writes.
   - Example: `@508.dev Bot show tasks for project Atlas`
+
+- `/schedule-github-issues`
+  - Description: Create a durable GitHub issue report with a five-field cron
+    schedule and an explicit Discord destination channel.
+  - Required role: Admin / Owner.
+  - Guardrails: with the explicit public-data model-summary option, the saved
+    prompt can shape the report but cannot add tools, change the repository,
+    grant permissions, or change the delivery channel.
+    The initial envelope is read-only GitHub issue search only. Model summaries
+    require the explicit `public_sources:true` acknowledgement; otherwise the
+    delivery is a deterministic issue list.
+
+- `/schedule-agent`
+  - Description: Create a generic, durable, read-only agent report with a
+    five-field cron schedule and an explicit Discord destination channel.
+  - Required role: Admin / Owner.
+  - Guardrails: the schedule saves its objective and its current catalog of
+    approved GitHub, CRM, Billing/ERP, onboarding, and public-web tools. Each
+    run may take a short model-planned loop, but every action is rechecked
+    against that catalog and the owner's live Discord roles. Writes are never
+    available; raw CRM/ERP/billing/onboarding records are not fed to the model
+    or posted by the generic report.
+
+- `/schedules`, `/schedule-control`, `/schedule-run`
+  - Description: List, pause/resume/archive, or queue a manual run of retained
+    recurring reports.
+  - Required role: Admin / Owner. Every operation and background execution
+    refreshes the owner's current Discord roles; removing Admin stops future
+    executions before they read GitHub or post to Discord.
 
 - `/dashboard-login`
   - Description: Generate a one-time operations dashboard login link.

@@ -1,6 +1,7 @@
 """Configuration for webhook ingest and worker services."""
 
 from urllib.parse import urlparse
+from typing import Final
 
 from pydantic import AliasChoices, Field, PrivateAttr, field_validator, model_validator
 
@@ -9,6 +10,14 @@ from five08.openai_fallback import (
     build_openai_compatible_provider_attempts,
 )
 from five08.settings import SharedSettings
+
+
+# A schedule request refreshes the owner's roles, can make one bounded
+# public-data summary call, and delivers its report after the tool deadline.
+# Reserve a conservative minute for those endpoint steps around the configured
+# schedule execution window.
+_AGENT_SCHEDULE_ENDPOINT_OVERHEAD_SECONDS: Final[float] = 60.0
+_JOB_LEASE_EXPIRY_MARGIN_SECONDS: Final[float] = 5.0
 
 
 class WorkerSettings(SharedSettings):
@@ -20,6 +29,10 @@ class WorkerSettings(SharedSettings):
     worker_queue_names: str = "jobs.default"
     worker_burst: bool = False
     discord_bot_internal_base_url: str = "http://127.0.0.1:3000"
+    # The worker delegates schedule execution to the API because that service
+    # owns agent model credentials and the bot-internal Discord client.
+    agent_schedule_api_base_url: str = "http://127.0.0.1:8090"
+    agent_schedule_api_timeout_seconds: float = Field(default=360.0, gt=0, le=360.0)
 
     espo_base_url: str = ""
     espo_api_key: str = ""
@@ -131,7 +144,6 @@ class WorkerSettings(SharedSettings):
     dashboard_default_path: str = "/dashboard"
     dashboard_public_base_url: str | None = None
     discord_bot_token: str | None = None
-    discord_server_id: str | None = None
     discord_admin_roles: str = "Admin,Owner"
     discord_api_timeout_seconds: float = 8.0
     discord_link_ttl_seconds: int = 600
@@ -212,6 +224,34 @@ class WorkerSettings(SharedSettings):
             raise ValueError(
                 "INTAKE_RESUME_VIRUS_SCAN_COMMAND must be set when "
                 "INTAKE_RESUME_REQUIRE_VIRUS_SCAN=true"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_agent_schedule_timeout_settings(self) -> "WorkerSettings":
+        """Keep worker, API, and durable-job timeouts in one safe envelope."""
+
+        if not self.agent_schedule_enabled:
+            return self
+
+        minimum_api_timeout_seconds = (
+            self.agent_schedule_execution_timeout_seconds
+            + _AGENT_SCHEDULE_ENDPOINT_OVERHEAD_SECONDS
+        )
+        if self.agent_schedule_api_timeout_seconds < minimum_api_timeout_seconds:
+            raise ValueError(
+                "AGENT_SCHEDULE_API_TIMEOUT_SECONDS must be at least "
+                "AGENT_SCHEDULE_EXECUTION_TIMEOUT_SECONDS plus 60 seconds "
+                "for role refresh, summary, and report delivery"
+            )
+        minimum_job_timeout_seconds = (
+            self.agent_schedule_api_timeout_seconds + _JOB_LEASE_EXPIRY_MARGIN_SECONDS
+        )
+        if self.job_timeout_seconds <= minimum_job_timeout_seconds:
+            raise ValueError(
+                "JOB_TIMEOUT_SECONDS must exceed "
+                "AGENT_SCHEDULE_API_TIMEOUT_SECONDS plus the five-second "
+                "lease expiry margin"
             )
         return self
 

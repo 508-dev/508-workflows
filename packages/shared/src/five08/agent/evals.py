@@ -15,7 +15,7 @@ from typing import Any, Literal
 from uuid import uuid4
 
 import requests
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from five08.agent.models import (
     AgentContextSnippet,
@@ -291,10 +291,24 @@ class LivePlannerActionDraft(BaseModel):
 class LivePlannerDraft(BaseModel):
     """Structured planner output requested from live models."""
 
-    status: Literal["planned", "needs_clarification"]
+    status: Literal["planned", "needs_clarification", "answer"]
     intent: str | None = None
     clarification_question: str | None = None
+    answer: str | None = Field(default=None, max_length=4000)
     actions: list[LivePlannerActionDraft] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_status_shape(self) -> "LivePlannerDraft":
+        """Keep the live-eval contract aligned with production planner drafts."""
+
+        if self.status == "planned" and not self.actions:
+            raise ValueError("planned drafts require at least one action")
+        if self.status == "answer":
+            if not self.answer or not self.answer.strip():
+                raise ValueError("answer drafts require an answer")
+            if self.actions:
+                raise ValueError("answer drafts cannot include actions")
+        return self
 
 
 class LivePlannerCallResult(BaseModel):
@@ -330,6 +344,7 @@ class _EvalToolRegistry(ToolRegistry):
         actor_id: str | None,
         project_id: str | None = None,
         actor_scopes: set[str] | None = None,
+        deadline_monotonic: float | None = None,
     ) -> dict[str, Any]:
         if tool_name in self._stub_results:
             return deepcopy(self._stub_results[tool_name])
@@ -340,6 +355,7 @@ class _EvalToolRegistry(ToolRegistry):
             actor_id=actor_id,
             project_id=project_id,
             actor_scopes=actor_scopes,
+            deadline_monotonic=deadline_monotonic,
         )
 
 
@@ -646,9 +662,26 @@ def run_fixture_with_live_planner(
     )
     message = fixture.request.current_message()
     context = orchestrator._load_request_context(context)
-    deterministic_response = orchestrator._plan_deterministic_workflow(
-        message.strip(), context
-    )
+    # Mirror the production gateway's outer authorization checks before
+    # choosing the deterministic route. Calling the helper directly is useful
+    # here because an eval should still probe the provider for deterministic
+    # scenarios, but it must not bypass the gateway's fail-closed role guard.
+    if not orchestrator.policy.scopes_for_context(context):
+        deterministic_response: AgentResponse | None = AgentResponse(
+            status="denied",
+            message=(
+                "Your current Discord roles do not grant access to agent workflows."
+            ),
+        )
+    elif context.impersonation:
+        deterministic_response = AgentResponse(
+            status="denied",
+            message="Impersonated Discord requests cannot use agent tools",
+        )
+    else:
+        deterministic_response = orchestrator._plan_deterministic_workflow(
+            message.strip(), context
+        )
 
     # Probe the provider even for deterministic routes so its raw semantic
     # quality remains observable, but always execute the production routing
@@ -1182,11 +1215,35 @@ def _response_from_live_draft(
     profile: AgentEvalModelProfile,
     parse_error: str | None,
 ) -> AgentResponse:
+    # Keep live eval behavior aligned with the production gateway: a caller
+    # without any role-derived agent scope is rejected before a model draft can
+    # become an actionable plan.
+    if not orchestrator.policy.scopes_for_context(context):
+        return AgentResponse(
+            status="denied",
+            message=(
+                "Your current Discord roles do not grant access to agent workflows."
+            ),
+        )
     if draft is None:
         return AgentResponse(
             status="failed",
             message=f"Live planner failed: {parse_error or 'unknown error'}",
         )
+    if draft.status == "answer":
+        chat_decision = orchestrator.policy.authorize_chat(context=context)
+        if not chat_decision.allowed:
+            return AgentResponse(status="denied", message=chat_decision.reason)
+        if not orchestrator._is_direct_chat_request(message):
+            return AgentResponse(
+                status="needs_clarification",
+                message=(
+                    "I need a tool plan for that request rather than a "
+                    "model-only answer."
+                ),
+                clarification_question="What read-only question or workflow should I run?",
+            )
+        return AgentResponse(status="executed", message=draft.answer or "")
     if draft.status == "needs_clarification" or not draft.actions:
         question = draft.clarification_question or "What should I do next?"
         return AgentResponse(

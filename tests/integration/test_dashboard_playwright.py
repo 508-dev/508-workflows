@@ -1066,7 +1066,9 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             expect(page.get_by_role("link", name="View posted gig")).to_have_attribute(
                 "href", "/dashboard/gigs/66666666-6666-4666-8666-666666666666"
             )
-            expect(page.get_by_role("link", name="Discord")).to_have_attribute(
+            expect(
+                page.get_by_role("link", name="Discord", exact=True)
+            ).to_have_attribute(
                 "href", "https://discord.com/channels/guild-1/thread-lead-1"
             )
 

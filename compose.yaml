@@ -88,6 +88,14 @@ services:
       POSTGRES_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-workflows}
       BACKEND_API_BASE_URL: http://web:8090
       AUDIT_API_BASE_URL: ""
+      # Agent planning and public-web provider credentials belong only to the
+      # backend. The bot forwards role-bearing requests but never calls those
+      # providers directly.
+      AGENT_FAST_API_KEY: ""
+      AGENT_STRONG_API_KEY: ""
+      AGENT_REASONING_API_KEY: ""
+      BRAVE_SEARCH_API_KEY: ""
+      FIRECRAWL_API_KEY: ""
     restart: unless-stopped
     networks:
       - default
@@ -173,6 +181,13 @@ services:
       # allowing startup while /health reports degraded in non-local runtimes.
       INTAKE_RESUME_VIRUS_SCAN_COMMAND: ${INTAKE_RESUME_VIRUS_SCAN_COMMAND-clamdscan --stream --no-summary --config-file=/etc/clamav/clamdscan.conf}
       DISCORD_BOT_INTERNAL_BASE_URL: http://discord_bot:3000
+      AGENT_SCHEDULE_API_BASE_URL: http://web:8090
+      # The worker does not plan agent requests or call public-web providers.
+      AGENT_FAST_API_KEY: ""
+      AGENT_STRONG_API_KEY: ""
+      AGENT_REASONING_API_KEY: ""
+      BRAVE_SEARCH_API_KEY: ""
+      FIRECRAWL_API_KEY: ""
     restart: unless-stopped
     networks:
       - default

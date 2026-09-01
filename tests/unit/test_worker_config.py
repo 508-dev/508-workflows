@@ -39,6 +39,48 @@ def test_structured_planner_timeout_leaves_gateway_fallback_headroom() -> None:
     assert settings.agent_structured_planner_timeout_seconds == 6.0
 
 
+def test_agent_schedule_api_timeout_covers_the_entire_schedule_request() -> None:
+    settings = WorkerSettings(
+        agent_schedule_execution_timeout_seconds=300.0,
+        agent_schedule_api_timeout_seconds=360.0,
+        job_timeout_seconds=366,
+    )
+
+    assert settings.agent_schedule_api_timeout_seconds == 360.0
+
+
+def test_agent_schedule_api_timeout_requires_endpoint_headroom() -> None:
+    with pytest.raises(
+        ValidationError,
+        match="AGENT_SCHEDULE_API_TIMEOUT_SECONDS must be at least",
+    ):
+        WorkerSettings(
+            agent_schedule_execution_timeout_seconds=300.0,
+            agent_schedule_api_timeout_seconds=359.0,
+        )
+
+
+def test_agent_schedule_api_timeout_fits_inside_the_worker_lease() -> None:
+    with pytest.raises(ValidationError, match="JOB_TIMEOUT_SECONDS must exceed"):
+        WorkerSettings(
+            agent_schedule_execution_timeout_seconds=120.0,
+            agent_schedule_api_timeout_seconds=180.0,
+            job_timeout_seconds=185,
+        )
+
+
+def test_disabled_agent_schedules_skip_unused_timeout_relationships() -> None:
+    settings = WorkerSettings(
+        agent_schedule_enabled=False,
+        agent_schedule_execution_timeout_seconds=300.0,
+        agent_schedule_api_timeout_seconds=360.0,
+        job_timeout_seconds=300,
+    )
+
+    assert settings.agent_schedule_enabled is False
+    assert settings.job_timeout_seconds == 300
+
+
 def test_email_intake_requires_mailbox_credentials() -> None:
     with pytest.raises(ValidationError, match="EMAIL_PASSWORD must be set"):
         WorkerSettings(

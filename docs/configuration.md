@@ -11,8 +11,26 @@ that most often matter in local development and deployment.
   Missing runtime dependencies are reported through health/runtime failures
   where possible instead of eager settings-construction errors.
 - `LOG_LEVEL`: defaults to `INFO`.
-- `API_SHARED_SECRET`: required for protected non-dashboard API routes and for
-  `./scripts/dev.sh login`.
+- `API_SHARED_SECRET`: required for protected non-dashboard API routes,
+  including `/agent/*`, and for `./scripts/dev.sh login`.
+- `DISCORD_SERVER_ID`: the single Discord guild allowlist used before agent
+  planning or execution.
+- `AGENT_DISCORD_ADMIN_ROLE_IDS`, `AGENT_DISCORD_STEERING_COMMITTEE_ROLE_IDS`,
+  `AGENT_DISCORD_BILLING_ROLE_IDS`, `AGENT_DISCORD_ERP_DEVELOPER_ROLE_IDS`,
+  `AGENT_DISCORD_PROJECT_MANAGER_ROLE_IDS`, and
+  `AGENT_DISCORD_ENGINEER_ROLE_IDS`: comma-separated immutable Discord role
+  IDs for each capability bundle. Role names are display metadata only in
+  deployed environments. Put a combined Billing/ERP role ID in both bundles.
+  Never use an allowed guild ID as a role ID: Discord assigns that value to its
+  `@everyone` role, which would otherwise grant every member the bundle.
+- `AGENT_ALLOW_ROLE_NAME_FALLBACK`: defaults to `false`; it can take effect
+  only after explicit opt-in in local/dev/test, never in a deployed environment.
+- Use the read-only Discord `/diagnostics` panel or the dashboard's **Discord
+  diagnostics** page to discover role names and immutable IDs. These surfaces
+  only produce copyable configuration text; they never infer or apply role
+  grants. The Discord panel requires the configured server plus native Manage
+  Server permission, avoiding a circular dependency on the role-ID mapping it
+  helps configure.
 - `CONFIG_SECRET_KEY`: environment or `.env` key used to encrypt secret values
   saved from the admin dashboard configuration page. This key is not
   dashboard-managed, and dashboard-managed secret saves are rejected when it is
@@ -82,7 +100,8 @@ dashboard field.
 - `REDIS_URL`
 - `REDIS_QUEUE_NAME`
 - `REDIS_KEY_PREFIX`
-- `JOB_TIMEOUT_SECONDS`
+- `JOB_TIMEOUT_SECONDS` (minimum `6`; the worker reserves five seconds before
+  the durable lease expires for cancellation and recovery)
 - `JOB_RESULT_TTL_SECONDS`
 - `JOB_MAX_ATTEMPTS`
 - `JOB_RETRY_BASE_SECONDS`
@@ -260,6 +279,19 @@ Agent gateway:
 - `AGENT_STRUCTURED_PLANNER_TIMEOUT_SECONDS`
 - `AGENT_INTENT_NORMALIZER_ENABLED`
 - `AGENT_INTENT_NORMALIZER_TIMEOUT_SECONDS`
+- `DISCORD_SERVER_ID` and the `AGENT_DISCORD_*_ROLE_IDS` bundle
+  mappings: production authorization is ID-bound and fails closed if the guild
+  or a matching role-ID mapping is absent.
+- `AGENT_PLANNING_MAX_STEPS`: maximum public-web research/tool turns in one
+  request; defaults to `3` and is capped at `5`.
+- `AGENT_REQUEST_RESPONSE_BUDGET_SECONDS`: caller-visible timeout for a
+  synchronous planning/read request; defaults to `55` seconds and is capped at
+  `55` so it stays inside the bot's default 60-second transport timeout.
+- `AGENT_PUBLIC_WEB_DEADLINE_SECONDS`: best-effort per-request budget for the
+  public-web loop; defaults to `50` and must not exceed the response budget.
+  DNS
+  and third-party HTTP behavior cannot be force-canceled by the sync adapters,
+  but the API will return once the response budget expires.
 - `GITHUB_DEFAULT_REPO`: defaults to `508-dev/todos`.
 - `GITHUB_ORGANIZATION`: defaults to `508-dev` and scopes GitHub Projects.
 - `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_INSTALLATION_ID`,
@@ -276,6 +308,72 @@ Agent gateway:
   access is disabled.
 - `GITHUB_API_TOKEN`, `GITHUB_ALLOWED_REPOS`: temporary legacy fallback while
   migrating to the GitHub App.
+- `AGENT_WEB_SEARCH_PROVIDER_ORDER`: comma-separated configured fallback order
+  using `searxng`, `brave`, and/or `firecrawl`.
+- `AGENT_WEB_SEARCH_TIMEOUT_SECONDS`, `AGENT_WEB_DEFAULT_RESULT_LIMIT`
+- `SEARXNG_BASE_URL`, `SEARXNG_SEARCH_LANGUAGE`: an explicitly configured
+  SearXNG endpoint may use private in-cluster HTTP. Enable its JSON result
+  format in the SearXNG `search.formats` setting or it will reject agent
+  searches.
+- `BRAVE_SEARCH_API_KEY`, `BRAVE_SEARCH_BASE_URL`, `BRAVE_SEARCH_COUNTRY`,
+  `BRAVE_SEARCH_LANGUAGE`
+- `FIRECRAWL_API_KEY`, `FIRECRAWL_BASE_URL`: Firecrawl also supplies bounded
+  public-page extraction.
+- `ERPNEXT_BASE_URL`, `ERPNEXT_API_KEY`, `ERPNEXT_API_TIMEOUT_SECONDS`: ERPNext
+  credentials for the bounded Billing/ERP read tools.
+- `AGENT_ERP_ORGANIZATION_ID`: required exact Discord organization/guild ID for
+  those ERP credentials. The agent fails closed when it is unset or the request
+  comes from another organization; configure a separate deployment/credential
+  boundary before supporting more than one ERP tenant.
+- `AGENT_SCHEDULE_ENABLED`: enables the API dispatcher for durable recurring
+  agent reports. It defaults to `true`, but does not create work until an Admin
+  creates a schedule.
+- `AGENT_SCHEDULE_DISPATCH_INTERVAL_SECONDS`,
+  `AGENT_SCHEDULE_DISPATCH_BATCH_SIZE`,
+  `AGENT_SCHEDULE_MIN_INTERVAL_SECONDS`, and
+  `AGENT_SCHEDULE_EXECUTION_TIMEOUT_SECONDS`: dispatcher/runtime bounds. The
+  minimum supported cadence defaults to five minutes.
+- `AGENT_SCHEDULE_API_BASE_URL`, `AGENT_SCHEDULE_API_TIMEOUT_SECONDS`: worker
+  handoff to the API-owned agent runtime. The worker uses `API_SHARED_SECRET`
+  for this internal call and intentionally does not need model-provider keys.
+  Its timeout must cover the schedule execution window plus 60 seconds for
+  role refresh, summary, and report delivery, while fitting inside the worker
+  job lease.
+- `AGENT_MEMORY_CLEANUP_ENABLED`, `AGENT_MEMORY_CLEANUP_INTERVAL_SECONDS`:
+  enqueue a daily-by-default worker sweep of expired durable memory facts. The
+  job deletes only expired/deleted rows and reports a count; it never reads or
+  exposes memory content through a user-facing endpoint.
+
+### Recurring Agent Reports
+
+Only the configured **Admin / Owner** role receives `agent:schedule:manage`.
+New schedules created through `/schedule-agent`, a confirmed natural-language
+`/agent` request, or the **Agent schedules** dashboard page store a
+natural-language objective and an exact catalog of
+schedule-safe read-only tools. Today that catalog covers GitHub issues, CRM
+contact search, Billing/ERP reads, onboarding queue health, and public-web
+research. Adding a new source means registering one bounded tool; it does not
+require another scheduler feature. `/schedule-github-issues` remains available
+for the older fixed GitHub-report envelope.
+
+For `/agent`, ask for a recurring report with a clear recurrence and IANA
+timezone (for example, "every Monday at 9 AM Asia/Tokyo"). The confirmation
+view shows the proposed objective and generated five-field cron timing, then
+binds delivery to the channel where `/agent` was invoked. Use `/schedule-agent`
+when the destination channel needs to be chosen explicitly.
+
+The runtime lets the configured planner make at most three short planning steps
+and two read-only calls per step. Every proposal is validated against the
+saved tool catalog and the owner's freshly fetched Discord roles before it
+runs. It cannot write, request confirmation, add a tool, change a destination,
+or inherit a later-added capability. Removing the Admin role or any saved read
+scope skips later runs.
+
+Raw CRM, ERP, billing, and onboarding rows are never sent back to the model.
+The loop receives only bounded aggregate observations (counts/statuses), and
+generic reports post the same safe aggregate form to Discord. Legacy GitHub
+reports retain their explicit public-data summary option and deterministic
+fallback behavior.
 
 See [Discord GitHub Todos and Projects](./discord-github-todos.md) for the
 role model, required App permissions, and installation procedure.
@@ -283,6 +381,17 @@ role model, required App permissions, and installation procedure.
 Agent model base URLs must be HTTPS endpoints on allowed provider hosts, except
 the internal Docker-network Bifrost URL `http://bifrost:8080/openai` is allowed
 for same-host deployments.
+
+Web search uses only the providers whose endpoint/key is configured, trying the
+configured order when a provider fails. Search queries containing obvious
+private identifiers (email addresses, access tokens, payment-card numbers, or
+UUIDs) are rejected before either the planner or an outbound provider. Firecrawl
+extraction accepts only public HTTPS URLs without query strings and returns
+bounded main-page markdown. The loop carries a best-effort operation deadline;
+when too little time remains for a planner retry, it returns the completed
+public result instead of starting another model call. A separate API response
+budget guarantees Discord receives a bounded response even if an upstream DNS
+or HTTP operation fails to stop promptly.
 
 ## Migadu Mailbox And Newsletter Sync
 

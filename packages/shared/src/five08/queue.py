@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from enum import StrEnum
 from typing import Any, Protocol, cast
 from uuid import uuid4
@@ -19,6 +19,12 @@ from redis import Redis
 from five08.settings import SharedSettings
 
 logger = logging.getLogger(__name__)
+
+
+# An idempotent request can arrive again after the initial database insert but
+# before the first broker delivery. Reuse the durable queued-row reservation
+# rather than publishing a broker message for every upstream retry.
+_DUPLICATE_ENQUEUE_REDELIVERY_BACKOFF_SECONDS = 60.0
 
 
 def trusted_sql(query: str) -> SQL:
@@ -214,6 +220,93 @@ def get_job(settings: SharedSettings, job_id: str) -> JobRecord | None:
             return _as_record(row)
 
 
+def redeliver_queued_job(
+    queue: QueueClient,
+    *,
+    settings: SharedSettings,
+    job_id: str,
+    minimum_age_seconds: float,
+) -> bool:
+    """Redeliver one queued job after atomically reserving its broker retry.
+
+    A queue adapter is at-least-once, but a persisted queued row does not tell
+    us whether its original broker delivery survived.  ``updated_at`` acts as
+    a durable redelivery lease here: exactly one dispatcher may advance it
+    after the configured backoff window before it publishes another message.
+    A process crash after the reservation is safe--a later dispatcher retries
+    after the same bounded window.
+    """
+
+    normalized_job_id = str(job_id or "").strip()
+    if not normalized_job_id:
+        return False
+    backoff_seconds = max(1.0, float(minimum_age_seconds))
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                UPDATE jobs
+                SET updated_at = NOW()
+                WHERE id = %s
+                  AND status = %s
+                  AND updated_at <= NOW() - (%s * INTERVAL '1 second')
+                RETURNING id, run_after
+                """,
+                (normalized_job_id, JobStatus.QUEUED.value, backoff_seconds),
+            )
+            row = cursor.fetchone()
+    if row is None:
+        return False
+    queue.enqueue(str(row["id"]), run_at=row["run_after"])
+    return True
+
+
+def redeliver_due_failed_job(
+    queue: QueueClient,
+    *,
+    settings: SharedSettings,
+    job_id: str,
+    minimum_age_seconds: float,
+) -> bool:
+    """Recover a due retry whose delayed broker delivery may have been lost.
+
+    ``mark_job_retry`` durably records a retry as a failed job with a future
+    ``run_after`` before publishing its delayed Redis message. If the worker
+    exits between those operations, this helper leases and republishes the due
+    database row. The worker's atomic claim still owns execution, so a delayed
+    message that did survive can safely race this recovery delivery.
+    """
+
+    normalized_job_id = str(job_id or "").strip()
+    if not normalized_job_id:
+        return False
+    backoff_seconds = max(1.0, float(minimum_age_seconds))
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                UPDATE jobs
+                SET updated_at = NOW()
+                WHERE id = %s
+                  AND status = %s
+                  AND attempts < max_attempts
+                  AND run_after IS NOT NULL
+                  AND run_after <= NOW()
+                  AND updated_at <= GREATEST(
+                      run_after,
+                      NOW() - (%s * INTERVAL '1 second')
+                  )
+                RETURNING id, run_after
+                """,
+                (normalized_job_id, JobStatus.FAILED.value, backoff_seconds),
+            )
+            row = cursor.fetchone()
+    if row is None:
+        return False
+    queue.enqueue(str(row["id"]), run_at=row["run_after"])
+    return True
+
+
 def list_jobs(
     settings: SharedSettings,
     *,
@@ -262,7 +355,10 @@ def _mark_job(
     locked_by: Any = _UNSET,
     run_after: Any = _UNSET,
     last_error: Any = _UNSET,
-) -> None:
+    claim_token: str,
+) -> bool:
+    """Persist a job transition fenced to one active execution lease."""
+
     updates: list[str] = []
     params: list[Any] = []
 
@@ -288,34 +384,128 @@ def _mark_job(
         updates.append("last_error = %s")
         params.append(last_error)
     if not updates:
-        return
+        return False
 
     updates.append("updated_at = NOW()")
     params.append(job_id)
+    params.append(claim_token)
 
     query = f"""
         UPDATE jobs
         SET {", ".join(updates)}
-        WHERE id = %s;
+        WHERE id = %s
+          AND status = 'running'
+          AND locked_by = %s;
     """
     with get_postgres_connection(settings) as conn:
         with conn.cursor() as cursor:
             cursor.execute(trusted_sql(query), params)
+            return cursor.rowcount > 0
 
 
-def mark_job_running(
-    settings: SharedSettings, job_id: str, *, worker_name: str
-) -> None:
-    """Mark a job as actively executing."""
-    _mark_job(
-        settings,
-        job_id,
-        status=JobStatus.RUNNING,
-        locked_at=datetime.now(tz=timezone.utc),
-        locked_by=worker_name,
-        run_after=None,
-        last_error=None,
-    )
+def claim_job_for_execution(
+    settings: SharedSettings,
+    job_id: str,
+    *,
+    worker_name: str,
+) -> JobRecord | None:
+    """Atomically claim due work or safely recover an expired running lease.
+
+    Queue adapters provide at-least-once delivery, so duplicate broker messages
+    are expected. The conditional update is the execution boundary: only the
+    caller that transitions the persisted job to ``running`` may invoke its
+    side-effectful handler. A unique lease token fences stale workers from
+    recording a later success/retry/dead transition after their claim expires.
+    Reclaiming a stale running lease consumes one retry attempt; the final
+    expired lease becomes terminal rather than looping forever.
+    """
+
+    lease_seconds = max(1, int(settings.job_timeout_seconds))
+    claim_token = f"{worker_name}:{uuid4()}"
+    query = """
+        WITH claimed AS (
+            UPDATE jobs
+            SET status = CASE
+                    WHEN status = 'running' AND attempts + 1 >= max_attempts
+                        THEN 'dead'
+                    ELSE 'running'
+                END,
+                attempts = CASE
+                    WHEN status = 'running' AND attempts < max_attempts
+                        THEN attempts + 1
+                    ELSE attempts
+                END,
+                locked_at = CASE
+                    WHEN status = 'running' AND attempts + 1 >= max_attempts
+                        THEN NULL
+                    ELSE NOW()
+                END,
+                locked_by = CASE
+                    WHEN status = 'running' AND attempts + 1 >= max_attempts
+                        THEN NULL
+                    ELSE %s
+                END,
+                run_after = NULL,
+                last_error = CASE
+                    WHEN status = 'running' AND attempts + 1 >= max_attempts
+                        THEN 'execution_lease_expired'
+                    ELSE NULL
+                END,
+                updated_at = NOW()
+            WHERE id = %s
+              AND (
+                  (
+                      status IN (%s, %s)
+                      AND (run_after IS NULL OR run_after <= NOW())
+                  )
+                  OR (
+                      status = 'running'
+                      AND (
+                          locked_at IS NULL
+                          OR locked_at <= NOW() - (%s * INTERVAL '1 second')
+                      )
+                  )
+              )
+            RETURNING *
+        )
+        SELECT * FROM claimed
+        WHERE status = 'running';
+    """
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                query,
+                (
+                    claim_token,
+                    job_id,
+                    JobStatus.QUEUED.value,
+                    JobStatus.FAILED.value,
+                    lease_seconds,
+                ),
+            )
+            row = cursor.fetchone()
+    return _as_record(row) if row is not None else None
+
+
+def renew_job_execution_lease(
+    settings: SharedSettings,
+    job_id: str,
+    *,
+    claim_token: str,
+) -> bool:
+    """Extend a running job's lease only while the same worker still owns it."""
+    query = """
+        UPDATE jobs
+        SET locked_at = NOW(),
+            updated_at = NOW()
+        WHERE id = %s
+          AND status = 'running'
+          AND locked_by = %s;
+    """
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(query, (job_id, claim_token))
+            return cursor.rowcount > 0
 
 
 def mark_job_succeeded(
@@ -324,7 +514,8 @@ def mark_job_succeeded(
     *,
     result: Any | None = None,
     base_payload: dict[str, Any] | None = None,
-) -> None:
+    claim_token: str,
+) -> bool:
     """Mark successful completion."""
     payload: Any = _UNSET
     if result is not None:
@@ -332,7 +523,7 @@ def mark_job_succeeded(
         merged_payload["result"] = result
         payload = merged_payload
 
-    _mark_job(
+    return _mark_job(
         settings,
         job_id,
         status=JobStatus.SUCCEEDED,
@@ -341,6 +532,7 @@ def mark_job_succeeded(
         locked_by=None,
         run_after=None,
         last_error=None,
+        claim_token=claim_token,
     )
 
 
@@ -351,14 +543,15 @@ def mark_job_retry(
     attempts: int,
     run_after: datetime,
     last_error: str,
-) -> None:
+    claim_token: str,
+) -> bool:
     """Record a retryable failure using `_mark_job` with `JobStatus.FAILED`.
 
     This marks a non-terminal failure state while attempts are still below the
     max-attempts threshold. Callers should use this for retry scheduling paths;
     terminal failures should use `mark_job_dead`, which writes `JobStatus.DEAD`.
     """
-    _mark_job(
+    return _mark_job(
         settings,
         job_id,
         status=JobStatus.FAILED,
@@ -367,6 +560,7 @@ def mark_job_retry(
         last_error=last_error,
         locked_at=None,
         locked_by=None,
+        claim_token=claim_token,
     )
 
 
@@ -376,9 +570,10 @@ def mark_job_dead(
     *,
     attempts: int,
     last_error: str,
-) -> None:
+    claim_token: str,
+) -> bool:
     """Mark a job as permanently dead."""
-    _mark_job(
+    return _mark_job(
         settings,
         job_id,
         status=JobStatus.DEAD,
@@ -387,6 +582,7 @@ def mark_job_dead(
         last_error=last_error,
         locked_at=None,
         locked_by=None,
+        claim_token=claim_token,
     )
 
 
@@ -414,6 +610,18 @@ def enqueue_job(
     )
     if created:
         queue.enqueue(job_id, run_at=run_after)
+    else:
+        # A process can persist the idempotent row and fail before its first
+        # broker delivery. The conditional reservation in
+        # ``redeliver_queued_job`` both recovers that gap after a bounded
+        # backoff and prevents an upstream retry storm from appending a broker
+        # message for every duplicate request.
+        redeliver_queued_job(
+            queue,
+            settings=settings,
+            job_id=job_id,
+            minimum_age_seconds=_DUPLICATE_ENQUEUE_REDELIVERY_BACKOFF_SECONDS,
+        )
     return EnqueuedJob(id=job_id, created=created)
 
 
