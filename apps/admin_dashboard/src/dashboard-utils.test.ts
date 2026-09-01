@@ -9,6 +9,7 @@ import {
   jobLeadClassificationMethodLabel,
   labelForOnboardingState,
   linkedinUrl,
+  messageForApiError,
   onboardingStateValue,
   toneForOnboardingState,
 } from "./dashboard-utils"
@@ -69,5 +70,20 @@ describe("dashboard utility helpers", () => {
     expect(jobLeadClassificationMethodLabel("heuristic")).toBe("Keyword fallback")
     expect(jobLeadClassificationMethodLabel("unknown")).toBe("Unknown")
     expect(jobLeadClassificationMethodLabel()).toBe("Unknown")
+  })
+
+  it("turns malformed onboarding email requests into actionable messages", () => {
+    expect(messageForApiError({ error: "empty_email_body" }, "Request failed")).toBe(
+      "The email body is empty. Add content before sending.",
+    )
+    expect(messageForApiError({ error: "invalid_payload" }, "Request failed")).toBe(
+      "The request contains invalid information. Refresh the page and try again.",
+    )
+  })
+
+  it("keeps shared onboarding eligibility errors action-neutral", () => {
+    expect(messageForApiError({ error: "contact_not_onboarding_eligible" }, "Request failed")).toBe(
+      "This candidate is no longer eligible for onboarding. Refresh the queue and review their status.",
+    )
   })
 })

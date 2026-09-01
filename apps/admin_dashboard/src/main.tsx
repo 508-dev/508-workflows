@@ -23,6 +23,7 @@ import {
 import { type ReactNode, StrictMode, useEffect, useMemo, useRef, useState } from "react"
 import { createRoot } from "react-dom/client"
 import { Empty } from "@/components/empty"
+import { OnboardingEmailSendStatus } from "@/components/onboarding-email-send-status"
 import { SortableTableHead } from "@/components/sortable-table-head"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -48,6 +49,7 @@ import {
   jsonPreview,
   labelForOnboardingState,
   linkedinUrl,
+  messageForApiError,
   onboardingStateValue,
   type Tone,
   toneForOnboardingState,
@@ -674,38 +676,6 @@ function stringFieldFromPayload(payload: unknown, key: string) {
   return JSON.stringify(value)
 }
 
-function messageForApiError(record: Record<string, unknown>, fallback: string) {
-  const detail = record.detail
-  if (typeof detail === "string" && detail.trim()) return detail
-
-  const error = record.error
-  if (typeof error !== "string") return fallback
-  if (error === "person_not_found") {
-    const person =
-      typeof record.person === "string" && record.person.trim() ? record.person : "that person"
-    return `No CRM person, ERPNext user, or ERPNext supplier matched "${person}". Try an email address or an exact name from CRM/ERPNext.`
-  }
-  if (error === "candidate_not_found") {
-    return "The selected person record is no longer available. Search again and choose one of the current matches."
-  }
-  if (error === "invalid_crm_profile") {
-    return "Paste a valid CRM Contact profile URL or Contact id."
-  }
-  if (error === "crm_profile_not_found") {
-    return "That CRM Contact profile was not found."
-  }
-  if (error === "crm_profile_mismatch") {
-    return "CRM returned a different Contact than the profile requested. Check the profile URL and try again."
-  }
-  if (error === "crm_profile_lookup_failed") {
-    return "CRM profile lookup failed. Try again after CRM is reachable."
-  }
-  if (error === "ambiguous_person") {
-    return "Multiple people matched. Choose the matching person record."
-  }
-  return error || fallback
-}
-
 function messageFromUnknown(error: unknown, fallback: string) {
   if (typeof error === "string" && error.trim()) return error
   if (error instanceof Error && error.message.trim()) return error.message
@@ -984,6 +954,9 @@ function App() {
   } | null>(null)
   const [jobDetail, setJobDetail] = useState<JobDetail | null>(null)
   const [loading, setLoading] = useState<Record<string, boolean>>({})
+  const [onboardingEmailSendStartedAt, setOnboardingEmailSendStartedAt] = useState<
+    Record<string, number>
+  >({})
   const [devErrors, setDevErrors] = useState<DashboardDevError[]>([])
   const [historicalPersonChoice, setHistoricalPersonChoice] = useState<{
     projectId: string
@@ -2229,6 +2202,10 @@ function App() {
       return null
     }
     const key = `onboarding-email-send:${contactId}`
+    setOnboardingEmailSendStartedAt((current) => ({
+      ...current,
+      [contactId]: current[contactId] ?? Date.now(),
+    }))
     setBusy(key, true)
     try {
       const payload = await requestJson<OnboardingEmailDraft>(
@@ -2263,6 +2240,11 @@ function App() {
       return null
     } finally {
       setBusy(key, false)
+      setOnboardingEmailSendStartedAt((current) => {
+        const next = { ...current }
+        delete next[contactId]
+        return next
+      })
     }
   }
 
@@ -3138,6 +3120,7 @@ function App() {
               people={sortedOnboarding}
               sort={sort.onboarding}
               loading={loading}
+              emailSendStartedAt={onboardingEmailSendStartedAt}
               onboardingQuery={onboardingQuery}
               onboardingState={onboardingState}
               onboarderFilter={onboarderFilter}
@@ -7433,6 +7416,7 @@ function OnboardingView(props: {
   people: Person[]
   sort: { key: string; direction: SortDirection }
   loading: Record<string, boolean>
+  emailSendStartedAt: Record<string, number>
   canWrite: boolean
   onboardingQuery: string
   onboardingState: string
@@ -7655,6 +7639,7 @@ function OnboardingView(props: {
                   }
                   person={person}
                   loading={props.loading}
+                  sendStartedAt={props.emailSendStartedAt[person.crm_contact_id || ""]}
                   canWrite={props.canWrite}
                   onAssign={props.onAssign}
                   onSuggestions={props.onSuggestions}
@@ -8025,6 +8010,7 @@ function EngineerSetupPanel({
 function OnboardingRow({
   person,
   loading,
+  sendStartedAt,
   canWrite,
   onAssign,
   onSuggestions,
@@ -8038,6 +8024,7 @@ function OnboardingRow({
 }: {
   person: Person
   loading: Record<string, boolean>
+  sendStartedAt?: number
   canWrite: boolean
   onAssign: (contactId: string | undefined, onboarder: string) => void
   onSuggestions: (contactId: string | undefined) => Promise<OnboardingVolunteer[]>
@@ -8290,6 +8277,9 @@ function OnboardingRow({
                 {emailDraft ? "Edit draft" : "Draft email"}
               </Button>
             ) : null}
+            {sendBusy && sendStartedAt !== undefined && (!emailOpen || !emailDraft) ? (
+              <OnboardingEmailSendStatus startedAt={sendStartedAt} />
+            ) : null}
           </div>
         </TableCell>
         <TableCell>
@@ -8443,6 +8433,9 @@ function OnboardingRow({
                       <Send />
                       {sendBusy ? "Sending" : "Send"}
                     </Button>
+                    {sendBusy && sendStartedAt !== undefined ? (
+                      <OnboardingEmailSendStatus startedAt={sendStartedAt} />
+                    ) : null}
                     {sendUnavailableMessage ? (
                       <span className="text-sm text-muted-foreground">
                         {sendUnavailableMessage}
