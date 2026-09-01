@@ -3,7 +3,7 @@
 - Initial flash-model sweep: 2026-08-28
 - Qwen3.8 27B follow-up: 2026-08-30
 - Repository commit: `cb2bce89e545c97cf19db18ae5b39230aaa91622`
-- Runner: canonical Discord-agent live-planner eval, 27 scenarios, one automatic retry for any production or provider-draft failure
+- Runner: canonical Discord-agent live-planner eval, 27 scenarios, one harness retry after an unclassified production failure (`status == "failed"`) or any provider-draft failure; a production `known_failure` alone does not trigger a retry
 
 ## Decision
 
@@ -44,13 +44,13 @@ The exact IDs were resolved from OpenRouter's live model catalog. The dated Deep
 - `qwen/qwen3.8-flash`
 - `qwen/qwen3.8-27b`
 
-Each run used OpenRouter's default provider routing, JSON-object response format, temperature 0, a 1,200-token completion cap, and a 90-second Requests timeout. No provider was pinned. Because these new IDs are absent from the repository model catalog, the runner did not send model-specific reasoning-effort options; OpenRouter/model defaults therefore influenced latency and token use.
+Each run used OpenRouter's default provider routing, temperature 0, a 1,200-token completion cap, and a 90-second Requests timeout. No provider was pinned. The first HTTP request in each planner attempt included JSON-object `response_format`; after any HTTP error, including 429, the client immediately sent one more request without `response_format`. A subsequent scenario-level harness retry could repeat that pair, so one triggered scenario could make up to four provider requests. The report's `retries` metric counts only harness retries, not these inner HTTP fallback requests. Because these new IDs are absent from the repository model catalog, the runner did not send model-specific reasoning-effort options; OpenRouter/model defaults therefore influenced latency and token use.
 
 The Qwen3.8 27B follow-up used the same text-only fixtures and configuration as the initial sweep. The canonical harness has no image or video fixtures, so this result says nothing about vision quality.
 
 ## Full-sweep results
 
-The strict provider-draft result checks parsing, status, the free-form `intent` string, tool names, and expected argument values. Results below are the retained outcome after the harness's one automatic retry.
+The strict provider-draft result checks parsing, status, the free-form `intent` string, tool names, and expected argument values. Results below are the selected outcome after at most one harness retry.
 
 | Model | Production | Strict draft pass | Parse success | Non-`intent` failures | Retry triggers | Retained latency p50 / p95 / max | Full wall time |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -59,20 +59,20 @@ The strict provider-draft result checks parsing, status, the free-form `intent` 
 | Qwen3.8-Flash | 27/27 | 13/27 (48.1%) | 19/27 (70.4%) | 8/27 (29.6%) | 19/27 | 10.68s / 57.31s / 60.15s | 579.70s |
 | Qwen3.8 27B | 27/27 | 18/27 (66.7%) | 27/27 (100%) | 4/27 (14.8%) | 12/27 | 5.27s / 21.85s / 80.59s | 347.44s |
 
-“Non-`intent` failures” removes cases whose only failed check was the free-form `intent` label. It still includes provider/parse failures. “Retry triggers” is the number of scenarios whose first attempt failed either production or provider-draft checks; the retained pass rates therefore overstate first-attempt reliability.
+“Non-`intent` failures” removes cases whose only failed check was the free-form `intent` label. It still includes provider/parse failures. “Retry triggers” is the number of scenarios whose first harness attempt had `status == "failed"` or a non-passing provider draft. A production `known_failure` does not trigger a retry unless its provider draft also fails. The retry replaces the first result only when both its production and provider-draft checks pass; otherwise the first result remains selected. The retained pass rates therefore overstate first-attempt reliability, while retained failures describe the first attempt rather than the failed retry.
 
-Retained average latencies were 13.61 seconds for DeepSeek, 23.29 seconds for GLM, 13.92 seconds for Qwen3.8 Flash, and 9.45 seconds for Qwen3.8 27B. These averages exclude discarded attempts, while full wall time includes retry work.
+Retained average latencies were 13.61 seconds for DeepSeek, 23.29 seconds for GLM, 13.92 seconds for Qwen3.8 Flash, and 9.45 seconds for Qwen3.8 27B. These averages use the selected result and exclude the unselected harness attempt. A selected attempt's latency can include its inner no-`response_format` fallback, while full wall time includes all harness retry and HTTP fallback work.
 
 ### Token and estimated cost snapshot
 
-| Model | Retained input / cached / output tokens | Retained total tokens | Lower-bound list-price estimate |
-| --- | ---: | ---: | ---: |
-| DeepSeek V4 Flash 0731 | 33,127 / 11,264 / 7,988 | 41,115 | $0.00308 |
-| GLM-5.3-Flash | 32,155 / 9,344 / 6,750 | 38,905 | $0.00354 |
-| Qwen3.8-Flash | 25,184 / 18,688 / 4,717 | 29,901 | $0.00356 |
-| Qwen3.8 27B | 36,200 / 4,384 / 14,063 | 50,263 | $0.04996 |
+| Model | Retained input / cached / output tokens | Retained total tokens | Input / cache-read / output rate ($/1M) | Rate snapshot (UTC) | Lower-bound estimate |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| DeepSeek V4 Flash 0731 | 33,127 / 11,264 / 7,988 | 41,115 | $0.070 / $0.017 / $0.170 | 2026-08-28 | $0.00308 |
+| GLM-5.3-Flash | 32,155 / 9,344 / 6,750 | 38,905 | $0.075 / $0.015 / $0.250 | 2026-08-28 | $0.00354 |
+| Qwen3.8-Flash | 25,184 / 18,688 / 4,717 | 29,901 | $0.160 / $0.016 / $0.470 | 2026-08-28 | $0.00356 |
+| Qwen3.8 27B | 36,200 / 4,384 / 14,063 | 50,263 | $0.350 / $0.035 / $2.750 | 2026-08-29 | $0.04996 |
 
-These are lower bounds calculated from retained token usage and OpenRouter's model-page prices at run time. They exclude discarded retry attempts and calls that returned no usage, so they are not billing totals. The harness itself reported cost as `None` because these new model IDs are absent from the packaged model profile catalog.
+The estimate formula is `((input - cached) × input rate + cached × cache-read rate + output × output rate) / 1,000,000`. The rates above are the OpenRouter model-page values recorded when each estimate was calculated; the linked pages are mutable, and default routing could select a provider with different rates. These are lower bounds from the selected result's reported usage, not billing totals. They exclude the unselected harness attempt, failed HTTP and fallback calls that returned no usage, provider-specific or routing premiums, and cache-creation or cache-storage charges. No separate routing charge was added. The harness itself reported cost as `None` because these new model IDs are absent from the packaged model profile catalog.
 
 Pricing references: [DeepSeek V4 Flash 0731](https://openrouter.ai/deepseek/deepseek-v4-flash-0731), [GLM-5.3-Flash](https://openrouter.ai/z-ai/glm-5.3-flash), [Qwen3.8-Flash](https://openrouter.ai/qwen/qwen3.8-flash), and [Qwen3.8 27B](https://openrouter.ai/qwen/qwen3.8-27b).
 
@@ -102,7 +102,7 @@ The planner prompt defines `intent` only as `short_snake_case_or_null`, but the 
 
 ### Qwen3.8-Flash
 
-- Seven of the eight initial parse failures were OpenRouter HTTP 429 responses; the eighth returned `message.content = None`.
+- Seven of the eight initial parse failures were OpenRouter HTTP 429 scenario outcomes; the eighth returned `message.content = None`. Because every initial HTTP error caused an immediate second request without `response_format`, each 429 attempt represents two failed HTTP requests, although the artifacts record only the resulting scenario attempt.
 - A spaced recovery pass reran the seven 429 scenarios individually with a 15-second gap. Two passed, one returned valid JSON but used `state: all` instead of `open`, and four still ended in HTTP 429 after the harness retry.
 - One successful recovery call took 62.89 seconds.
 - In the original full sweep, every valid parsed failure was only an `intent` label mismatch. The recovery pass nevertheless found a substantive GitHub state mismatch, so valid-output quality is promising but not yet established.
@@ -132,7 +132,7 @@ Accordingly:
 1. Keep the current production default. If a canary is desired, test DeepSeek V4 Flash 0731 behind the existing deterministic gates, a hard deadline, and immediate fallback. Qwen3.8 27B is the second candidate, but its higher retained cost and latency tail need explicit acceptance.
 2. Rerun all candidates at least three times and include the current production baseline on the same commit and 27-scenario suite. Do not compare these numbers directly with the older 13-scenario results in `tests/evals/model-summary.md`.
 3. Fix provider-probe scoring so free-form `intent` synonyms do not fail an otherwise correct executable plan. Prefer stable action IDs and tool/argument contracts.
-4. Add paced 429 backoff, a hard suite/call deadline, and per-attempt records for latency, status, provider, token usage, and cost. Retaining only the final retry hides first-attempt behavior and billing.
+4. Add paced 429 backoff, restrict the no-`response_format` fallback to format-related errors, enforce a hard suite/call deadline, and record every harness attempt and HTTP fallback with latency, status, provider, token usage, and cost. The current selection rule keeps a successful retry but otherwise keeps the original failure, hiding the unselected attempt and its billing either way.
 5. Add the four model profiles and current OpenRouter pricing to the model catalog, or capture provider-reported cost directly.
 6. Before selecting Qwen3.8 27B for multimodal work, add sanitized image and video fixtures with assertions for extraction accuracy, tool arguments, and refusal behavior. The current suite does not exercise vision.
 7. Add sanitized golden corpora for resume/profile and skill extraction, HN lead classification, job requirement extraction, and candidate reranking. Score field accuracy and ranking quality, not only parse/completeness success.
