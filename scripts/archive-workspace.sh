@@ -26,6 +26,17 @@ normalize_decimal() {
   printf '%s' "$value"
 }
 
+paseo_port_range_is_valid() {
+  local base end
+  base=${PASEO_PORT_BASE:-}
+  end=${PASEO_PORT_END:-}
+  [[ "$base" =~ ^[0-9]+$ && "$end" =~ ^[0-9]+$ ]] || return 1
+
+  base=$(normalize_decimal "$base")
+  end=$(normalize_decimal "$end")
+  [ "$base" -ge 1 ] && [ "$end" -le 65535 ] && [ "$end" -ge $((base + 6)) ]
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -n|--dry-run)
@@ -237,17 +248,30 @@ def listening_pids_for_port(port: int) -> list[int]:
     return [int(line) for line in result.stdout.splitlines() if line.strip().isdigit()]
 
 
-def conductor_ports() -> list[int]:
-    value = os.environ.get("CONDUCTOR_PORT")
-    if not value:
-        return []
+def allocated_port_range() -> tuple[str, list[int]]:
+    paseo_base = os.environ.get("PASEO_PORT_BASE")
+    paseo_end = os.environ.get("PASEO_PORT_END")
+    if (
+        paseo_base
+        and paseo_end
+        and re.fullmatch(r"[0-9]+", paseo_base)
+        and re.fullmatch(r"[0-9]+", paseo_end)
+    ):
+        base = int(paseo_base)
+        end = int(paseo_end)
+        if 1 <= base <= end <= 65535 and end >= base + 6:
+            return "PASEO_PORT range", [base + offset for offset in range(7)]
+
+    conductor_port = os.environ.get("CONDUCTOR_PORT")
+    if not conductor_port:
+        return "", []
     try:
-        base = int(value)
+        base = int(conductor_port)
     except ValueError:
-        return []
+        return "", []
     if base < 1 or base > 65526:
-        return []
-    return [base + offset for offset in range(10)]
+        return "", []
+    return "CONDUCTOR_PORT range", [base + offset for offset in range(10)]
 
 
 processes = list_processes()
@@ -281,7 +305,8 @@ for pid in list(selected):
         "descendant of workspace dev process",
     )
 
-for port in conductor_ports():
+port_range_name, allocated_ports = allocated_port_range()
+for port in allocated_ports:
     for pid in listening_pids_for_port(port):
         process = processes.get(pid)
         if process is None or not is_alive(pid):
@@ -291,13 +316,13 @@ for port in conductor_ports():
         if command_mentions_workspace(process.command) or is_under_workspace(
             cached_cwd(pid)
         ):
-            selected.setdefault(pid, f"listening on CONDUCTOR_PORT range port {port}")
+            selected.setdefault(pid, f"listening on {port_range_name} port {port}")
             add_descendants(
                 pid,
                 processes,
                 children,
                 selected,
-                f"descendant of listener on CONDUCTOR_PORT range port {port}",
+                f"descendant of listener on {port_range_name} port {port}",
             )
 
 for pid in sorted(selected):
@@ -335,7 +360,13 @@ signal_processes() {
 }
 
 echo "Archiving workspace: $workspace"
-if [[ "${CONDUCTOR_PORT:-}" =~ ^[0-9]+$ ]]; then
+if [[ "${PASEO_PORT_BASE:-}" =~ ^[0-9]+$ && "${PASEO_PORT_END:-}" =~ ^[0-9]+$ ]]; then
+  paseo_port_base=$(normalize_decimal "$PASEO_PORT_BASE")
+  paseo_port_end=$(normalize_decimal "$PASEO_PORT_END")
+  if [ "$paseo_port_base" -ge 1 ] && [ "$paseo_port_end" -le 65535 ] && [ "$paseo_port_end" -ge $((paseo_port_base + 6)) ]; then
+    echo "PASEO port range: ${paseo_port_base}..${paseo_port_end}"
+  fi
+elif [[ "${CONDUCTOR_PORT:-}" =~ ^[0-9]+$ ]]; then
   conductor_port_base=$(normalize_decimal "$CONDUCTOR_PORT")
   echo "Conductor port range: ${conductor_port_base}..$((conductor_port_base + 9))"
 fi
@@ -356,5 +387,8 @@ if [ "$skip_docker" -eq 1 ]; then
 elif [ "$dry_run" -eq 1 ]; then
   echo "[dry-run] ./scripts/docker-compose.sh down --remove-orphans"
 else
+  if ! paseo_port_range_is_valid; then
+    unset PASEO_PORT_BASE PASEO_PORT_END
+  fi
   ./scripts/docker-compose.sh down --remove-orphans
 fi
