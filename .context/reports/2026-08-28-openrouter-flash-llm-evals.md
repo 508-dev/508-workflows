@@ -9,11 +9,11 @@
 
 Do not change the production planner model based on these runs.
 
-`deepseek/deepseek-v4-flash-0731` remains the best candidate for a guarded text-planner canary. It had the highest retained strict provider-draft pass rate, tied for the fewest non-`intent` failures, had a bounded observed latency tail, and was far cheaper than Qwen3.8 27B on retained usage. It was still not strong enough for an unguarded rollout: 8 of 27 retained provider drafts failed the harness after retry, including 4 failures beyond the free-form `intent` label check.
+`deepseek/deepseek-v4-flash-0731` remains the best candidate for a guarded text-planner canary. It had the highest retained provider-draft pass rate, tied for the fewest non-`intent` failures, had a bounded observed latency tail, and had a much lower retained-usage rate-card estimate than Qwen3.8 27B. It was still not strong enough for an unguarded rollout: 8 of 27 retained provider drafts failed the harness after retry, including 4 failures beyond the free-form `intent` label check.
 
 `z-ai/glm-5.3-flash` ranked second on availability but last on semantic quality among responses that parsed, and it had an extreme 383.8-second retained tail latency. `qwen/qwen3.8-flash` cannot be ranked fairly for production quality from this run because OpenRouter returned repeated HTTP 429 responses. Its valid JSON action drafts were promising, but the availability and latency observed here are disqualifying for an interactive Discord planner today.
 
-`qwen/qwen3.8-27b` is the strongest second canary candidate, especially if multimodal input becomes a requirement. It parsed 27/27 retained responses and tied DeepSeek at 4 non-`intent` failures, with a faster average and median retained latency. Its disadvantages were a higher 80.59-second maximum, 12 retry triggers, and an estimated $0.04996 in retained usage—about 16.2 times DeepSeek's lower-bound estimate. This run was text-only, so it did not evaluate the model's advertised image or video understanding.
+`qwen/qwen3.8-27b` is the strongest second canary candidate, especially if multimodal input becomes a requirement. It parsed 27/27 retained responses and tied DeepSeek at 4 non-`intent` failures, with a faster average and median retained latency. Its disadvantages were a higher 80.59-second maximum, 12 retry triggers, and a $0.04996 retained-usage rate-card estimate—about 16.2 times DeepSeek's corresponding estimate. This run was text-only, so it did not evaluate the model's advertised image or video understanding.
 
 The production safety result was good: all four runs produced 27/27 expected production outcomes with zero production failures. That is mainly evidence for the deterministic routing, validation, authorization, and confirmation boundaries—not model quality.
 
@@ -50,9 +50,9 @@ The Qwen3.8 27B follow-up used the same text-only fixtures and configuration as 
 
 ## Full-sweep results
 
-The strict provider-draft result checks parsing, status, the free-form `intent` string, tool names, and expected argument values. Results below are the selected outcome after at most one harness retry.
+The provider-draft score checks parse success; planned-versus-clarification status; expected `intent` and clarification text; required clarification presence; every drafted action's schema validity; expected action count; exact tool names; and expected argument values. Status, counts, schemas, and tool names use exact matching. Intent, clarification, and argument strings use tolerant matching: text is case-folded, punctuation and spacing are normalized, `documentation` is normalized to `docs`, and an observed string passes if it equals or starts with the expected string. Expected mappings may be subsets of observed mappings; lists must have equal length and match positionally. Results below are the selected outcome after at most one harness retry.
 
-| Model | Production | Strict draft pass | Parse success | Non-`intent` failures | Retry triggers | Retained latency p50 / p95 / max | Full wall time |
+| Model | Production | Provider-draft pass | Parse success | Non-`intent` failures | Retry triggers | Retained latency p50 / p95 / max | Full wall time |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | DeepSeek V4 Flash 0731 | 27/27 | 19/27 (70.4%) | 26/27 (96.3%) | 4/27 (14.8%) | 11/27 | 5.37s / 37.84s / 43.08s | 435.66s |
 | GLM-5.3-Flash | 27/27 | 16/27 (59.3%) | 26/27 (96.3%) | 5/27 (18.5%) | 13/27 | 5.92s / 38.75s / 383.81s | 733.39s |
@@ -65,14 +65,14 @@ Retained average latencies were 13.61 seconds for DeepSeek, 23.29 seconds for GL
 
 ### Token and estimated cost snapshot
 
-| Model | Retained input / cached / output tokens | Retained total tokens | Input / cache-read / output rate ($/1M) | Rate snapshot (UTC) | Lower-bound estimate |
+| Model | Retained input / cached / output tokens | Retained total tokens | Input / cache-read / output rate ($/1M) | Rate snapshot (UTC) | Retained-usage estimate |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | DeepSeek V4 Flash 0731 | 33,127 / 11,264 / 7,988 | 41,115 | $0.070 / $0.017 / $0.170 | 2026-08-28 | $0.00308 |
 | GLM-5.3-Flash | 32,155 / 9,344 / 6,750 | 38,905 | $0.075 / $0.015 / $0.250 | 2026-08-28 | $0.00354 |
 | Qwen3.8-Flash | 25,184 / 18,688 / 4,717 | 29,901 | $0.160 / $0.016 / $0.470 | 2026-08-28 | $0.00356 |
 | Qwen3.8 27B | 36,200 / 4,384 / 14,063 | 50,263 | $0.350 / $0.035 / $2.750 | 2026-08-29 | $0.04996 |
 
-The estimate formula is `((input - cached) × input rate + cached × cache-read rate + output × output rate) / 1,000,000`. The rates above are the OpenRouter model-page values recorded when each estimate was calculated; the linked pages are mutable, and default routing could select a provider with different rates. These are lower bounds from the selected result's reported usage, not billing totals. They exclude the unselected harness attempt, failed HTTP and fallback calls that returned no usage, provider-specific or routing premiums, and cache-creation or cache-storage charges. No separate routing charge was added. The harness itself reported cost as `None` because these new model IDs are absent from the packaged model profile catalog.
+The estimate formula is `((input - cached) × input rate + cached × cache-read rate + output × output rate) / 1,000,000`. The rates above are the OpenRouter model-page values recorded when each estimate was calculated; the linked pages are mutable, and default routing could select a provider with different rates. These are retained-usage rate-card estimates, not lower bounds or billing totals: routed-provider prices could make the retained calls cheaper or more expensive than shown. They also exclude the unselected harness attempt, failed HTTP and fallback calls that returned no usage, provider-specific or routing premiums, and cache-creation or cache-storage charges. No separate routing charge was added. The harness itself reported cost as `None` because these new model IDs are absent from the packaged model profile catalog.
 
 Pricing references: [DeepSeek V4 Flash 0731](https://openrouter.ai/deepseek/deepseek-v4-flash-0731), [GLM-5.3-Flash](https://openrouter.ai/z-ai/glm-5.3-flash), [Qwen3.8-Flash](https://openrouter.ai/qwen/qwen3.8-flash), and [Qwen3.8 27B](https://openrouter.ai/qwen/qwen3.8-27b).
 
@@ -103,18 +103,18 @@ The planner prompt defines `intent` only as `short_snake_case_or_null`, but the 
 ### Qwen3.8-Flash
 
 - Seven of the eight initial parse failures were OpenRouter HTTP 429 scenario outcomes; the eighth returned `message.content = None`. Because every initial HTTP error caused an immediate second request without `response_format`, each 429 attempt represents two failed HTTP requests, although the artifacts record only the resulting scenario attempt.
-- A spaced recovery pass reran the seven 429 scenarios individually with a 15-second gap. Two passed, one returned valid JSON but used `state: all` instead of `open`, and four still ended in HTTP 429 after the harness retry.
+- A spaced recovery pass reran the seven 429 scenarios individually with a 15-second gap. The selected results contain two passes, one valid JSON response that used `state: all` instead of `open`, and four HTTP 429 outcomes. For those four 429 selections, the unrecorded retry outcome is unknown unless it fully passed, because a failed retry does not replace the original result.
 - One successful recovery call took 62.89 seconds.
 - In the original full sweep, every valid parsed failure was only an `intent` label mismatch. The recovery pass nevertheless found a substantive GitHub state mismatch, so valid-output quality is promising but not yet established.
 
 ### Qwen3.8 27B
 
 - All 27 retained responses parsed successfully; there were no provider or parse failures.
-- Five of its nine strict failures were only free-form `intent` label differences.
+- Five of its nine provider-draft failures were only free-form `intent` label differences.
 - It asked for a concrete date instead of planning the task because “Friday” was ambiguous. This is defensible safety behavior but does not satisfy the fixture contract.
 - It used `state: all` or omitted state in two GitHub searches where the fixture expects `open`.
 - For the member-agreement scenario that requires resolving an email, it drafted a CRM lookup instead of returning the fixture's expected clarification. That is a reasonable first step, but the current one-shot provider-draft contract cannot chain the read result into a subsequent DocuSeal action.
-- Its retained p95 was 21.85 seconds, but the maximum was 80.59 seconds. Retained output usage was 14,063 tokens, contributing most of its approximately $0.04996 lower-bound cost.
+- Its retained p95 was 21.85 seconds, but the maximum was 80.59 seconds. Retained output usage was 14,063 tokens, contributing most of its approximately $0.04996 retained-usage rate-card estimate.
 
 ## Coverage caveat
 
