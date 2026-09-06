@@ -112,8 +112,13 @@ For local dev, `./scripts/dev.sh` and `./scripts/docker-compose.sh` compute
 deterministic per-worktree ports unless values are pinned in `.env` or the
 invoking shell.
 
-Inside Conductor, `CONDUCTOR_PORT` is treated as the first port in the
-workspace's 10-port range for unset worktree defaults: Redis uses `+0`,
+Inside PASEO, `PASEO_PORT_BASE` and `PASEO_PORT_END` reserve the inclusive
+range used for unset worktree defaults. The range must contain at least seven
+ports: Redis uses `+0`, Postgres `+1`, the Compose web port `+2`, MinIO API
+`+3`, MinIO Console `+4`, host-run web/API `+5`, and the bot health check `+6`.
+PASEO takes precedence over Conductor. Inside Conductor, `CONDUCTOR_PORT` is
+treated as the first port in the workspace's 10-port range for unset worktree
+defaults: Redis uses `+0`,
 Postgres `+1`, Compose web `+2`, MinIO API `+3`, MinIO console `+4`,
 host-run web/API `+5`, and bot health `+6`. Explicit service port overrides keep
 their current precedence rules.
