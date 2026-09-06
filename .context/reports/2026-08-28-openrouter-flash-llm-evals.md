@@ -142,4 +142,4 @@ Accordingly:
 - Focused harness tests: `22 passed` in `tests/unit/test_agent_evals.py`.
 - Deterministic canonical replay: 26 passed, 0 failed, 1 known failure.
 - Live runs: four complete 27-scenario sweeps plus the seven-scenario Qwen3.8 Flash recovery pass.
-- Raw machine reports and traces are retained locally in the ignored [eval artifact directory](../../tests/evals/discord-agent/reports/llm-workflow-flash-comparison-2026-08-28/) rather than committed as long-lived `.context` transcripts.
+- The sanitized, immutable [audit snapshot](../../tests/evals/discord-agent/artifacts/llm-workflow-flash-comparison-2026-08-28/README.md) includes the four full-sweep normalized observations and score summaries plus the seven Qwen3.8-Flash recovery observations. It supports the rankings, failure classifications, selected latencies, and token totals above; `SHA256SUMS` verifies its contents. The generated `reports/` directory remains local-only scratch output and is not an audit link.

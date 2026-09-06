@@ -1,0 +1,189 @@
+{
+  "version": "discord-agent-observed.v1",
+  "mode": "live_planner",
+  "generated_at": "2026-08-28T06:36:10.742782+00:00",
+  "suite": "canonical",
+  "model": "openrouter",
+  "summary": {
+    "scenarios": 1,
+    "passed": 1,
+    "failed": 0,
+    "known_failures": 0
+  },
+  "metrics": {
+    "total_elapsed_ms": 18642,
+    "time_to_first_turn_ms": 11254,
+    "parse_successes": 0,
+    "parse_failures": 1,
+    "parse_success_rate": 0.0,
+    "provider_draft_failures": 1,
+    "provider_draft_parse_failures": 1,
+    "bad_plans": 1,
+    "bad_plan_rate": 1.0,
+    "production_failures": 0,
+    "avg_latency_ms": 11248.0,
+    "max_latency_ms": 11248,
+    "estimated_cost_usd": null,
+    "pricing_source": "official provider pricing docs; OpenAI org usage/cost API requires api.usage.read",
+    "retries": 1
+  },
+  "scenarios": [
+    {
+      "id": "github_issue_search_default_repo_001",
+      "fixture_id": "github_issue_search_default_repo_001",
+      "status": "passed",
+      "known_failure": null,
+      "checks": [
+        {
+          "name": "status",
+          "passed": true,
+          "expected": "executed",
+          "observed": "executed"
+        },
+        {
+          "name": "intent",
+          "passed": true,
+          "expected": "search_github_issues",
+          "observed": "search_github_issues"
+        },
+        {
+          "name": "model_tier",
+          "passed": true,
+          "expected": "fast",
+          "observed": "fast"
+        },
+        {
+          "name": "requires_confirmation",
+          "passed": true,
+          "expected": false,
+          "observed": false
+        },
+        {
+          "name": "result_statuses",
+          "passed": true,
+          "expected": [
+            "succeeded"
+          ],
+          "observed": [
+            "succeeded"
+          ]
+        },
+        {
+          "name": "action_count",
+          "passed": true,
+          "expected": 1,
+          "observed": 1
+        },
+        {
+          "name": "actions[0].tool_name",
+          "passed": true,
+          "expected": "github_issue.search_issues",
+          "observed": "github_issue.search_issues"
+        },
+        {
+          "name": "actions[0].requires_confirmation",
+          "passed": true,
+          "expected": false,
+          "observed": false
+        },
+        {
+          "name": "actions[0].required_scopes",
+          "passed": true,
+          "expected": [
+            "github:repository:member:read"
+          ],
+          "observed": [
+            "github:repository:member:read"
+          ]
+        },
+        {
+          "name": "actions[0].arguments.query",
+          "passed": true,
+          "expected": "onboarding",
+          "observed": "onboarding"
+        },
+        {
+          "name": "actions[0].arguments.state",
+          "passed": true,
+          "expected": "open",
+          "observed": "open"
+        }
+      ],
+      "observed": {
+        "id": "github_issue_search_default_repo_001",
+        "fixture_id": "github_issue_search_default_repo_001",
+        "description": "Engineers can search GitHub issues without restating the default repository.",
+        "tags": [
+          "canonical",
+          "github",
+          "read",
+          "default-repo"
+        ],
+        "request_message": "Search GitHub issues matching onboarding",
+        "status": "executed",
+        "message": "Executed the approved agent plan.",
+        "clarification_question": null,
+        "intent": "search_github_issues",
+        "model_tier": "fast",
+        "model": {
+          "tier": "fast",
+          "model": "qwen/qwen3.8-flash",
+          "base_url": "https://openrouter.ai/api/v1",
+          "source_tier": "fast",
+          "fallback_used": false
+        },
+        "latency_ms": 11248,
+        "parse_success": false,
+        "parse_error": "429 Client Error: Too Many Requests for url: https://openrouter.ai/api/v1/chat/completions",
+        "raw_model_output": null,
+        "token_usage": null,
+        "estimated_cost_usd": null,
+        "requires_confirmation": false,
+        "actions": [
+          {
+            "tool_name": "github_issue.search_issues",
+            "arguments": {
+              "query": "onboarding",
+              "state": "open",
+              "repository": "508-dev/508-workflows"
+            },
+            "risk": "low",
+            "requires_confirmation": false,
+            "required_scopes": [
+              "github:repository:member:read"
+            ],
+            "summary": "Search GitHub issues matching: onboarding"
+          }
+        ],
+        "results": [
+          {
+            "tool_name": "github_issue.search_issues",
+            "status": "succeeded",
+            "result": {
+              "issues": [
+                {
+                  "number": 108,
+                  "title": "Onboarding queue filters",
+                  "html_url": "https://github.example/issues/108",
+                  "state": "open"
+                }
+              ]
+            },
+            "error": null
+          }
+        ]
+      },
+      "provider_draft": {
+        "status": "parse_failed",
+        "checks": [
+          {
+            "name": "provider_draft.parse_success",
+            "passed": false,
+            "expected": true,
+            "observed": false
+          }
+        ]
+      }
+    }
+  ]
+}
