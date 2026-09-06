@@ -45,6 +45,13 @@ The CLI loads `.env` by default without overriding exported environment values.
 Use `--no-env-file` to disable that behavior or `--env-file <path>` to point at
 another file.
 
+Generated reports remain ignored because they are ephemeral and can contain
+debugging detail. A reviewed historical run can instead publish a sanitized,
+immutable audit snapshot under `artifacts/<run-id>/`; see the
+[`2026-08-28` OpenRouter flash comparison](artifacts/llm-workflow-flash-comparison-2026-08-28/README.md).
+Those snapshots are evidence for a specific run, not a replacement for a fresh
+evaluation.
+
 ## Viewing Results
 
 Open `tests/evals/discord-agent/reports/index.html` after a run. GitHub Actions

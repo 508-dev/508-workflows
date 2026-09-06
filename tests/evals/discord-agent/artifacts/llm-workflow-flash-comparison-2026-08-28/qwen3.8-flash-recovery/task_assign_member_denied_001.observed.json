@@ -1,0 +1,171 @@
+{
+  "version": "discord-agent-observed.v1",
+  "mode": "live_planner",
+  "generated_at": "2026-08-28T06:34:59.960920+00:00",
+  "suite": "canonical",
+  "model": "openrouter",
+  "summary": {
+    "scenarios": 1,
+    "passed": 1,
+    "failed": 0,
+    "known_failures": 0
+  },
+  "metrics": {
+    "total_elapsed_ms": 17997,
+    "time_to_first_turn_ms": 9631,
+    "parse_successes": 0,
+    "parse_failures": 1,
+    "parse_success_rate": 0.0,
+    "provider_draft_failures": 1,
+    "provider_draft_parse_failures": 1,
+    "bad_plans": 1,
+    "bad_plan_rate": 1.0,
+    "production_failures": 0,
+    "avg_latency_ms": 9625.0,
+    "max_latency_ms": 9625,
+    "estimated_cost_usd": null,
+    "pricing_source": "official provider pricing docs; OpenAI org usage/cost API requires api.usage.read",
+    "retries": 1
+  },
+  "scenarios": [
+    {
+      "id": "task_assign_member_denied_001",
+      "fixture_id": "task_assign_member_denied_001",
+      "status": "passed",
+      "known_failure": null,
+      "checks": [
+        {
+          "name": "status",
+          "passed": true,
+          "expected": "denied",
+          "observed": "denied"
+        },
+        {
+          "name": "intent",
+          "passed": true,
+          "expected": "update_task",
+          "observed": "update_task"
+        },
+        {
+          "name": "model_tier",
+          "passed": true,
+          "expected": "strong",
+          "observed": "strong"
+        },
+        {
+          "name": "requires_confirmation",
+          "passed": true,
+          "expected": false,
+          "observed": false
+        },
+        {
+          "name": "message_contains",
+          "passed": true,
+          "expected": "task:assign",
+          "observed": "Missing required scopes: task:assign"
+        },
+        {
+          "name": "action_count",
+          "passed": true,
+          "expected": 1,
+          "observed": 1
+        },
+        {
+          "name": "actions[0].tool_name",
+          "passed": true,
+          "expected": "task_write.update_task",
+          "observed": "task_write.update_task"
+        },
+        {
+          "name": "actions[0].requires_confirmation",
+          "passed": true,
+          "expected": false,
+          "observed": false
+        },
+        {
+          "name": "actions[0].required_scopes",
+          "passed": true,
+          "expected": [
+            "task:update_own",
+            "task:assign"
+          ],
+          "observed": [
+            "task:update_own",
+            "task:assign"
+          ]
+        },
+        {
+          "name": "actions[0].arguments.task_id",
+          "passed": true,
+          "expected": "TASK-001",
+          "observed": "TASK-001"
+        },
+        {
+          "name": "actions[0].arguments.assignee",
+          "passed": true,
+          "expected": "Sarah",
+          "observed": "Sarah"
+        }
+      ],
+      "observed": {
+        "id": "task_assign_member_denied_001",
+        "fixture_id": "task_assign_member_denied_001",
+        "description": "Members cannot reassign tasks because assignment requires task:assign in addition to task:update_own.",
+        "tags": [
+          "weekly",
+          "task",
+          "policy",
+          "denied"
+        ],
+        "request_message": "Assign TASK-001 to Sarah",
+        "status": "denied",
+        "message": "Missing required scopes: task:assign",
+        "clarification_question": null,
+        "intent": "update_task",
+        "model_tier": "strong",
+        "model": {
+          "tier": "strong",
+          "model": "qwen/qwen3.8-flash",
+          "base_url": "https://openrouter.ai/api/v1",
+          "source_tier": "strong",
+          "fallback_used": false
+        },
+        "latency_ms": 9625,
+        "parse_success": false,
+        "parse_error": "429 Client Error: Too Many Requests for url: https://openrouter.ai/api/v1/chat/completions",
+        "raw_model_output": null,
+        "token_usage": null,
+        "estimated_cost_usd": null,
+        "requires_confirmation": false,
+        "actions": [
+          {
+            "tool_name": "task_write.update_task",
+            "arguments": {
+              "task_id": "TASK-001",
+              "assignee": "Sarah"
+            },
+            "risk": "medium",
+            "requires_confirmation": false,
+            "required_scopes": [
+              "task:update_own",
+              "task:assign"
+            ],
+            "summary": "Update TASK-001: assignee"
+          }
+        ],
+        "results": []
+      },
+      "provider_draft": {
+        "status": "parse_failed",
+        "checks": [
+          {
+            "name": "provider_draft.parse_success",
+            "passed": false,
+            "expected": true,
+            "observed": false
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,166 @@
+{
+  "version": "discord-agent-observed.v1",
+  "mode": "live_planner",
+  "generated_at": "2026-08-28T06:38:43.568021+00:00",
+  "suite": "canonical",
+  "model": "openrouter",
+  "summary": {
+    "scenarios": 1,
+    "passed": 1,
+    "failed": 0,
+    "known_failures": 0
+  },
+  "metrics": {
+    "total_elapsed_ms": 21082,
+    "time_to_first_turn_ms": 9938,
+    "parse_successes": 0,
+    "parse_failures": 1,
+    "parse_success_rate": 0.0,
+    "provider_draft_failures": 1,
+    "provider_draft_parse_failures": 1,
+    "bad_plans": 1,
+    "bad_plan_rate": 1.0,
+    "production_failures": 0,
+    "avg_latency_ms": 9934.0,
+    "max_latency_ms": 9934,
+    "estimated_cost_usd": null,
+    "pricing_source": "official provider pricing docs; OpenAI org usage/cost API requires api.usage.read",
+    "retries": 1
+  },
+  "scenarios": [
+    {
+      "id": "member_agreement_crm_resolve_001",
+      "fixture_id": "member_agreement_crm_resolve_001",
+      "status": "passed",
+      "known_failure": null,
+      "checks": [
+        {
+          "name": "status",
+          "passed": true,
+          "expected": "requires_confirmation",
+          "observed": "requires_confirmation"
+        },
+        {
+          "name": "intent",
+          "passed": true,
+          "expected": "send_member_agreement",
+          "observed": "send_member_agreement"
+        },
+        {
+          "name": "model_tier",
+          "passed": true,
+          "expected": "strong",
+          "observed": "strong"
+        },
+        {
+          "name": "requires_confirmation",
+          "passed": true,
+          "expected": true,
+          "observed": true
+        },
+        {
+          "name": "action_count",
+          "passed": true,
+          "expected": 1,
+          "observed": 1
+        },
+        {
+          "name": "actions[0].tool_name",
+          "passed": true,
+          "expected": "docuseal_write.create_member_agreement_submission",
+          "observed": "docuseal_write.create_member_agreement_submission"
+        },
+        {
+          "name": "actions[0].requires_confirmation",
+          "passed": true,
+          "expected": true,
+          "observed": true
+        },
+        {
+          "name": "actions[0].required_scopes",
+          "passed": true,
+          "expected": [
+            "docuseal:submission:create"
+          ],
+          "observed": [
+            "docuseal:submission:create"
+          ]
+        },
+        {
+          "name": "actions[0].arguments",
+          "passed": true,
+          "expected": {
+            "submitter_email": "caleb@example.com",
+            "submitter_name": "Caleb Example",
+            "send_email": true
+          },
+          "observed": {
+            "submitter_email": "caleb@example.com",
+            "submitter_name": "Caleb Example",
+            "send_email": true
+          }
+        }
+      ],
+      "observed": {
+        "id": "member_agreement_crm_resolve_001",
+        "fixture_id": "member_agreement_crm_resolve_001",
+        "description": "The agent resolves a named member agreement recipient through a single viable CRM contact.",
+        "tags": [
+          "canonical",
+          "docuseal",
+          "crm",
+          "write",
+          "confirmation"
+        ],
+        "request_message": "Send member agreement to Caleb",
+        "status": "requires_confirmation",
+        "message": "This action needs confirmation before execution.",
+        "clarification_question": null,
+        "intent": "send_member_agreement",
+        "model_tier": "strong",
+        "model": {
+          "tier": "strong",
+          "model": "qwen/qwen3.8-flash",
+          "base_url": "https://openrouter.ai/api/v1",
+          "source_tier": "strong",
+          "fallback_used": false
+        },
+        "latency_ms": 9934,
+        "parse_success": false,
+        "parse_error": "429 Client Error: Too Many Requests for url: https://openrouter.ai/api/v1/chat/completions",
+        "raw_model_output": null,
+        "token_usage": null,
+        "estimated_cost_usd": null,
+        "requires_confirmation": true,
+        "actions": [
+          {
+            "tool_name": "docuseal_write.create_member_agreement_submission",
+            "arguments": {
+              "submitter_email": "caleb@example.com",
+              "submitter_name": "Caleb Example",
+              "send_email": true
+            },
+            "risk": "high",
+            "requires_confirmation": true,
+            "required_scopes": [
+              "docuseal:submission:create"
+            ],
+            "summary": "Create DocuSeal member agreement submission for Caleb Example"
+          }
+        ],
+        "results": []
+      },
+      "provider_draft": {
+        "status": "parse_failed",
+        "checks": [
+          {
+            "name": "provider_draft.parse_success",
+            "passed": false,
+            "expected": true,
+            "observed": false
+          }
+        ]
+      }
+    }
+  ]
+}

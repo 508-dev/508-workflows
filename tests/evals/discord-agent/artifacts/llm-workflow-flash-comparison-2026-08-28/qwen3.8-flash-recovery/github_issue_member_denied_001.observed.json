@@ -1,0 +1,216 @@
+{
+  "version": "discord-agent-observed.v1",
+  "mode": "live_planner",
+  "generated_at": "2026-08-28T06:36:48.843654+00:00",
+  "suite": "canonical",
+  "model": "openrouter",
+  "summary": {
+    "scenarios": 1,
+    "passed": 1,
+    "failed": 0,
+    "known_failures": 0
+  },
+  "metrics": {
+    "total_elapsed_ms": 22711,
+    "time_to_first_turn_ms": 11782,
+    "parse_successes": 1,
+    "parse_failures": 0,
+    "parse_success_rate": 1.0,
+    "provider_draft_failures": 0,
+    "provider_draft_parse_failures": 0,
+    "bad_plans": 0,
+    "bad_plan_rate": 0.0,
+    "production_failures": 0,
+    "avg_latency_ms": 10929.0,
+    "max_latency_ms": 10929,
+    "estimated_cost_usd": null,
+    "pricing_source": "official provider pricing docs; OpenAI org usage/cost API requires api.usage.read",
+    "retries": 1
+  },
+  "scenarios": [
+    {
+      "id": "github_issue_member_denied_001",
+      "fixture_id": "github_issue_member_denied_001",
+      "status": "passed",
+      "known_failure": null,
+      "checks": [
+        {
+          "name": "status",
+          "passed": true,
+          "expected": "denied",
+          "observed": "denied"
+        },
+        {
+          "name": "intent",
+          "passed": true,
+          "expected": "create_github_issue",
+          "observed": "create_github_issue"
+        },
+        {
+          "name": "model_tier",
+          "passed": true,
+          "expected": "strong",
+          "observed": "strong"
+        },
+        {
+          "name": "requires_confirmation",
+          "passed": true,
+          "expected": false,
+          "observed": false
+        },
+        {
+          "name": "message_contains",
+          "passed": true,
+          "expected": "Missing required scopes",
+          "observed": "Missing required scopes: github:issue:create"
+        },
+        {
+          "name": "action_count",
+          "passed": true,
+          "expected": 1,
+          "observed": 1
+        },
+        {
+          "name": "actions[0].tool_name",
+          "passed": true,
+          "expected": "github_issue.create_issue",
+          "observed": "github_issue.create_issue"
+        },
+        {
+          "name": "actions[0].requires_confirmation",
+          "passed": true,
+          "expected": false,
+          "observed": false
+        },
+        {
+          "name": "actions[0].required_scopes",
+          "passed": true,
+          "expected": [
+            "github:issue:create"
+          ],
+          "observed": [
+            "github:issue:create"
+          ]
+        },
+        {
+          "name": "actions[0].arguments.repository",
+          "passed": true,
+          "expected": "508-dev/508-workflows",
+          "observed": "508-dev/508-workflows"
+        },
+        {
+          "name": "actions[0].arguments.title",
+          "passed": true,
+          "expected": "Fix onboarding sync",
+          "observed": "Fix onboarding sync"
+        }
+      ],
+      "observed": {
+        "id": "github_issue_member_denied_001",
+        "fixture_id": "github_issue_member_denied_001",
+        "description": "Member role cannot draft GitHub issue writes.",
+        "tags": [
+          "canonical",
+          "github",
+          "policy",
+          "denied"
+        ],
+        "request_message": "Create GitHub issue in repo 508-dev/508-workflows titled Fix onboarding sync",
+        "status": "denied",
+        "message": "Missing required scopes: github:issue:create",
+        "clarification_question": null,
+        "intent": "create_github_issue",
+        "model_tier": "strong",
+        "model": {
+          "tier": "strong",
+          "model": "qwen/qwen3.8-flash",
+          "base_url": "https://openrouter.ai/api/v1",
+          "source_tier": "strong",
+          "fallback_used": false
+        },
+        "latency_ms": 10929,
+        "parse_success": true,
+        "parse_error": null,
+        "raw_model_output": "{\n  \"status\": \"planned\",\n  \"intent\": \"create_github_issue\",\n  \"clarification_question\": null,\n  \"actions\": [\n    {\n      \"tool_name\": \"github_issue.create_issue\",\n      \"arguments\": {\n        \"title\": \"Fix onboarding sync\",\n        \"repository\": \"508-dev/508-workflows\"\n      },\n      \"summary\": \"Create a GitHub issue titled 'Fix onboarding sync' in 508-dev/508-workflows.\"\n    }\n  ]\n}",
+        "token_usage": {
+          "requests": 1,
+          "input_tokens": 1328,
+          "cached_input_tokens": 1024,
+          "output_tokens": 194,
+          "total_tokens": 1522
+        },
+        "estimated_cost_usd": null,
+        "requires_confirmation": false,
+        "actions": [
+          {
+            "tool_name": "github_issue.create_issue",
+            "arguments": {
+              "title": "Fix onboarding sync",
+              "repository": "508-dev/508-workflows"
+            },
+            "risk": "medium",
+            "requires_confirmation": false,
+            "required_scopes": [
+              "github:issue:create"
+            ],
+            "summary": "Create GitHub issue: \"Fix onboarding sync\""
+          }
+        ],
+        "results": []
+      },
+      "provider_draft": {
+        "status": "passed",
+        "checks": [
+          {
+            "name": "provider_draft.parse_success",
+            "passed": true,
+            "expected": true,
+            "observed": true
+          },
+          {
+            "name": "provider_draft.status",
+            "passed": true,
+            "expected": "planned",
+            "observed": "planned"
+          },
+          {
+            "name": "provider_draft.intent",
+            "passed": true,
+            "expected": "create_github_issue",
+            "observed": "create_github_issue"
+          },
+          {
+            "name": "provider_draft.actions[0].schema_valid",
+            "passed": true,
+            "expected": true,
+            "observed": true
+          },
+          {
+            "name": "provider_draft.action_count",
+            "passed": true,
+            "expected": 1,
+            "observed": 1
+          },
+          {
+            "name": "provider_draft.actions[0].tool_name",
+            "passed": true,
+            "expected": "github_issue.create_issue",
+            "observed": "github_issue.create_issue"
+          },
+          {
+            "name": "provider_draft.actions[0].arguments.repository",
+            "passed": true,
+            "expected": "508-dev/508-workflows",
+            "observed": "508-dev/508-workflows"
+          },
+          {
+            "name": "provider_draft.actions[0].arguments.title",
+            "passed": true,
+            "expected": "Fix onboarding sync",
+            "observed": "Fix onboarding sync"
+          }
+        ]
+      }
+    }
+  ]
+}

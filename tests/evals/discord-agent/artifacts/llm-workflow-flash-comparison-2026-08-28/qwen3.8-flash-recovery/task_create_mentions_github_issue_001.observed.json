@@ -1,0 +1,162 @@
+{
+  "version": "discord-agent-observed.v1",
+  "mode": "live_planner",
+  "generated_at": "2026-08-28T06:34:26.625415+00:00",
+  "suite": "canonical",
+  "model": "openrouter",
+  "summary": {
+    "scenarios": 1,
+    "passed": 1,
+    "failed": 0,
+    "known_failures": 0
+  },
+  "metrics": {
+    "total_elapsed_ms": 22086,
+    "time_to_first_turn_ms": 10195,
+    "parse_successes": 0,
+    "parse_failures": 1,
+    "parse_success_rate": 0.0,
+    "provider_draft_failures": 1,
+    "provider_draft_parse_failures": 1,
+    "bad_plans": 1,
+    "bad_plan_rate": 1.0,
+    "production_failures": 0,
+    "avg_latency_ms": 10189.0,
+    "max_latency_ms": 10189,
+    "estimated_cost_usd": null,
+    "pricing_source": "official provider pricing docs; OpenAI org usage/cost API requires api.usage.read",
+    "retries": 1
+  },
+  "scenarios": [
+    {
+      "id": "task_create_mentions_github_issue_001",
+      "fixture_id": "task_create_mentions_github_issue_001",
+      "status": "passed",
+      "known_failure": null,
+      "checks": [
+        {
+          "name": "status",
+          "passed": true,
+          "expected": "requires_confirmation",
+          "observed": "requires_confirmation"
+        },
+        {
+          "name": "intent",
+          "passed": true,
+          "expected": "create_task",
+          "observed": "create_task"
+        },
+        {
+          "name": "model_tier",
+          "passed": true,
+          "expected": "strong",
+          "observed": "strong"
+        },
+        {
+          "name": "requires_confirmation",
+          "passed": true,
+          "expected": true,
+          "observed": true
+        },
+        {
+          "name": "action_count",
+          "passed": true,
+          "expected": 1,
+          "observed": 1
+        },
+        {
+          "name": "actions[0].tool_name",
+          "passed": true,
+          "expected": "task_write.create_task",
+          "observed": "task_write.create_task"
+        },
+        {
+          "name": "actions[0].requires_confirmation",
+          "passed": true,
+          "expected": true,
+          "observed": true
+        },
+        {
+          "name": "actions[0].required_scopes",
+          "passed": true,
+          "expected": [
+            "task:create"
+          ],
+          "observed": [
+            "task:create"
+          ]
+        },
+        {
+          "name": "actions[0].arguments.title",
+          "passed": true,
+          "expected": "follow up on GitHub issue 123",
+          "observed": "follow up on GitHub issue 123"
+        },
+        {
+          "name": "actions[0].arguments.project",
+          "passed": true,
+          "expected": "Atlas",
+          "observed": "Atlas"
+        }
+      ],
+      "observed": {
+        "id": "task_create_mentions_github_issue_001",
+        "fixture_id": "task_create_mentions_github_issue_001",
+        "description": "Explicit task creation wins even when the task title mentions a GitHub issue.",
+        "tags": [
+          "canonical",
+          "task",
+          "write",
+          "routing"
+        ],
+        "request_message": "Create a task to follow up on GitHub issue 123 in project Atlas",
+        "status": "requires_confirmation",
+        "message": "This action needs confirmation before execution.",
+        "clarification_question": null,
+        "intent": "create_task",
+        "model_tier": "strong",
+        "model": {
+          "tier": "strong",
+          "model": "qwen/qwen3.8-flash",
+          "base_url": "https://openrouter.ai/api/v1",
+          "source_tier": "strong",
+          "fallback_used": false
+        },
+        "latency_ms": 10189,
+        "parse_success": false,
+        "parse_error": "429 Client Error: Too Many Requests for url: https://openrouter.ai/api/v1/chat/completions",
+        "raw_model_output": null,
+        "token_usage": null,
+        "estimated_cost_usd": null,
+        "requires_confirmation": true,
+        "actions": [
+          {
+            "tool_name": "task_write.create_task",
+            "arguments": {
+              "title": "follow up on GitHub issue 123",
+              "project": "Atlas"
+            },
+            "risk": "medium",
+            "requires_confirmation": true,
+            "required_scopes": [
+              "task:create"
+            ],
+            "summary": "Create task: \"follow up on GitHub issue 123\", project Atlas"
+          }
+        ],
+        "results": []
+      },
+      "provider_draft": {
+        "status": "parse_failed",
+        "checks": [
+          {
+            "name": "provider_draft.parse_success",
+            "passed": false,
+            "expected": true,
+            "observed": false
+          }
+        ]
+      }
+    }
+  ]
+}
