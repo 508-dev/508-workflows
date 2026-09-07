@@ -1,4 +1,4 @@
-79204c1c2c67d7afd80eec6e32c6a26251f898fed4aaa25ff1a41393a873a35e  tests/evals/discord-agent/artifacts/llm-workflow-flash-comparison-2026-08-28/README.md
+48991203545d8eade43af5cbf4836b7a7fdc798fdf274c8cd3770e1560dc2674  tests/evals/discord-agent/artifacts/llm-workflow-flash-comparison-2026-08-28/README.md
 f4e634d2ac5bc8435d28adf6b4064d723e896f56e463ab90acdbc6618168b437  tests/evals/discord-agent/artifacts/llm-workflow-flash-comparison-2026-08-28/full-sweeps/deepseek-v4-flash-0731.observed.json
 2307bacdafe24aa17a0aaaadd322c54f7658163659426934c8d49b3f06e3aa42  tests/evals/discord-agent/artifacts/llm-workflow-flash-comparison-2026-08-28/full-sweeps/deepseek-v4-flash-0731.score.md
 867d7669298d7792fe8e6149b535b15286415ffbfb8057937e693b09f1bbbfa0  tests/evals/discord-agent/artifacts/llm-workflow-flash-comparison-2026-08-28/full-sweeps/glm-5.3-flash.observed.json
@@ -11,6 +11,6 @@ a222ee1def026103c62bc48a5cd3edadb067dc655fcce7f5a719d13923095292  tests/evals/di
 5bce3a1e3088afcb124f30a6f93f28c824e70b954cccc9aca5b5284b07765df8  tests/evals/discord-agent/artifacts/llm-workflow-flash-comparison-2026-08-28/qwen3.8-flash-recovery/github_issue_search_001.observed.json
 d1939e18cf3fc6df0a3fc838e1a079851b42096a38783283b9ec50a884fdfbe0  tests/evals/discord-agent/artifacts/llm-workflow-flash-comparison-2026-08-28/qwen3.8-flash-recovery/github_issue_search_default_repo_001.observed.json
 5a9185fd291048b2906f8456f1f6a3f6a42ba27e0dc6464fa0e3431485d806e9  tests/evals/discord-agent/artifacts/llm-workflow-flash-comparison-2026-08-28/qwen3.8-flash-recovery/github_todo_member_confirmation_001.observed.json
-93042a18858e70545e0c4649a635098ee618ca6bb8d7b6f917a3ef7c87b22977  tests/evals/discord-agent/artifacts/llm-workflow-flash-comparison-2026-08-28/qwen3.8-flash-recovery/member_agreement_crm_resolve_001.observed.json
-0f5e484b451db611c40f6d5d58af149ef80b43b56879e992c4da305d7e913359  tests/evals/discord-agent/artifacts/llm-workflow-flash-comparison-2026-08-28/qwen3.8-flash-recovery/task_assign_member_denied_001.observed.json
-c82bd05de78475317a74114c032411e191661de5da961cf490484c3d4e01cbd1  tests/evals/discord-agent/artifacts/llm-workflow-flash-comparison-2026-08-28/qwen3.8-flash-recovery/task_create_mentions_github_issue_001.observed.json
+eee4565bb779c62c19ebb776b8aefca953bf1bcda25a027e872a8e043d7ae439  tests/evals/discord-agent/artifacts/llm-workflow-flash-comparison-2026-08-28/qwen3.8-flash-recovery/member_agreement_crm_resolve_001.observed.json
+4d692a689604bff788a00adeba6f1b30fdedeb610065fbb17646613a9e297a1c  tests/evals/discord-agent/artifacts/llm-workflow-flash-comparison-2026-08-28/qwen3.8-flash-recovery/task_assign_member_denied_001.observed.json
+948d4d71c262134c5bdd69afba245d3775fc60550aa8bf5e10d029d24f9d38f9  tests/evals/discord-agent/artifacts/llm-workflow-flash-comparison-2026-08-28/qwen3.8-flash-recovery/task_create_mentions_github_issue_001.observed.json

@@ -156,6 +156,14 @@
             "observed": false
           }
         ]
+      },
+      "result_provenance": {
+        "observed_source": "deterministic_response",
+        "selected_attempt": 1,
+        "selected_attempt_provider_probe_status": "parse_failed",
+        "retry_attempt": 2,
+        "retry_selected": false,
+        "retry_outcome": "unrecorded; did not satisfy the replacement condition"
       }
     }
   ]
