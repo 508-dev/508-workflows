@@ -38,6 +38,24 @@ def test_knowledge_intent_routing_is_narrow() -> None:
     assert AgentCog._is_knowledge_capture_request("Can you remeber this thred?") is True
     assert (
         AgentCog._is_knowledge_capture_request(
+            "Can you suggest facts worth saving from this thread?"
+        )
+        is True
+    )
+    assert (
+        AgentCog._is_knowledge_capture_request(
+            "Could you remember this thread for the team?"
+        )
+        is True
+    )
+    assert (
+        AgentCog._is_knowledge_capture_request(
+            "Can you save this conversation for the project?"
+        )
+        is True
+    )
+    assert (
+        AgentCog._is_knowledge_capture_request(
             "Could you remember the answer from last week?"
         )
         is False

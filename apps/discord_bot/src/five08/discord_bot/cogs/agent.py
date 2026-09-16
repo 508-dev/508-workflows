@@ -823,14 +823,30 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             normalized,
         )
         if polite_prefix is not None:
+            command = normalized[polite_prefix.end() :].rstrip(".!?")
+            if re.fullmatch(
+                r"(?i)suggest (?:facts|memories)(?: worth saving)? from "
+                r"(?:this|the) (?:thread|conversation)",
+                command,
+            ):
+                return True
             command_tokens = re.findall(
                 r"[a-z]+",
-                normalized[polite_prefix.end() :].casefold(),
+                command.casefold(),
             )
-            if len(command_tokens) not in {2, 3} or (
-                len(command_tokens) == 3 and command_tokens[1] not in {"this", "the"}
-            ):
+            short_command = len(command_tokens) in {2, 3} and (
+                len(command_tokens) == 2 or command_tokens[1] in {"this", "the"}
+            )
+            audience_command = (
+                len(command_tokens) in {5, 6}
+                and command_tokens[1] in {"this", "the"}
+                and command_tokens[3] == "for"
+                and command_tokens[-1] in {"team", "project"}
+                and (len(command_tokens) == 5 or command_tokens[4] == "the")
+            )
+            if not short_command and not audience_command:
                 return False
+            target_token = command_tokens[2] if audience_command else command_tokens[-1]
             return bool(
                 difflib.get_close_matches(
                     command_tokens[0],
@@ -839,7 +855,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                     cutoff=0.78,
                 )
                 and difflib.get_close_matches(
-                    command_tokens[-1],
+                    target_token,
                     _KNOWLEDGE_CAPTURE_TARGETS,
                     n=1,
                     cutoff=0.72,
