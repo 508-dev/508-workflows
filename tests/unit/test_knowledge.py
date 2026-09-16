@@ -441,6 +441,21 @@ def test_sensitive_additional_cited_message_forces_private_capture(
     assert preview.visibility == "private"
 
 
+@pytest.mark.parametrize("field", ["author_name", "source_title"])
+def test_sensitive_persisted_provenance_forces_private_capture(field: str) -> None:
+    request = _capture_request(answer="Yes, with Cloudflare Pages.")
+    if field == "author_name":
+        request.messages[1].author_name = "michael@example.com"
+    else:
+        request.source.title = "Deployments for michael@example.com"
+
+    preview = _service(InMemoryKnowledgeStore()).create_capture(request)
+
+    assert preview.status == "requires_confirmation"
+    assert preview.scope_type == "user"
+    assert preview.visibility == "private"
+
+
 def test_dates_and_identifiers_are_not_classified_as_phone_numbers() -> None:
     assert _contains_sensitive_output("The deadline is 2026-09-16.") is False
     assert _contains_sensitive_output("Build 123456789012345 completed.") is False

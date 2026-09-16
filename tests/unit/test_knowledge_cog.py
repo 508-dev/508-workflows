@@ -260,11 +260,14 @@ async def test_knowledge_confirmation_fails_closed_when_roles_cannot_refresh() -
         followup=SimpleNamespace(send=AsyncMock()),
     )
 
-    await KnowledgeCaptureView.confirm(view, interaction, None)
+    await view._finish(interaction, confirm=True)
 
     cog._post_knowledge_confirmation.assert_not_awaited()
     assert not view.is_finished()
-    assert all(not item.disabled for item in view.children)
+    assert all(
+        isinstance(item, KnowledgeCaptureDynamicButton) and not item.item.disabled
+        for item in view.children
+    )
 
 
 @pytest.mark.asyncio
@@ -316,7 +319,10 @@ async def test_dynamic_capture_button_rehydrates_after_restart() -> None:
     assert confirmation["context"]["roles"] == ["Member"]
     assert confirmation["confirm"] is True
     edited_view = interaction.message.edit.await_args.kwargs["view"]
-    assert all(item.disabled for item in edited_view.children)
+    assert all(
+        isinstance(item, KnowledgeCaptureDynamicButton) and item.item.disabled
+        for item in edited_view.children
+    )
 
 
 @pytest.mark.asyncio
@@ -327,6 +333,51 @@ async def test_agent_setup_registers_restart_safe_capture_buttons() -> None:
 
     bot.add_dynamic_items.assert_called_once_with(KnowledgeCaptureDynamicButton)
     bot.add_cog.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_capture_view_uses_only_dynamic_items_to_avoid_double_dispatch() -> None:
+    view = KnowledgeCaptureView(
+        cog=AgentCog.__new__(AgentCog),
+        requester_id=123,
+        draft_id="11111111-1111-1111-1111-111111111111",
+        context={"guild_id": "456", "channel_id": "789"},
+    )
+
+    assert len(view.children) == 2
+    assert all(
+        isinstance(item, KnowledgeCaptureDynamicButton) for item in view.children
+    )
+    view.stop()
+
+
+@pytest.mark.asyncio
+async def test_thread_capture_requires_requester_history_access(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DummyThread:
+        def __init__(self) -> None:
+            self.permissions_for = Mock(
+                return_value=SimpleNamespace(
+                    view_channel=True,
+                    read_message_history=False,
+                )
+            )
+            self.history = Mock()
+
+    monkeypatch.setattr(
+        "five08.discord_bot.cogs.agent.discord.Thread",
+        DummyThread,
+    )
+    cog = AgentCog.__new__(AgentCog)
+    channel = DummyThread()
+    trigger = SimpleNamespace(channel=channel, author=SimpleNamespace(id=123))
+
+    messages = await cog._knowledge_capture_messages(trigger)
+
+    assert messages == []
+    channel.permissions_for.assert_called_once_with(trigger.author)
+    channel.history.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -356,7 +407,12 @@ async def test_capture_mention_uses_replied_question_and_answer() -> None:
         id=789,
         name="general",
         typing=Mock(return_value=_AsyncTyping()),
-        permissions_for=Mock(return_value=SimpleNamespace(view_channel=True)),
+        permissions_for=Mock(
+            return_value=SimpleNamespace(
+                view_channel=True,
+                read_message_history=True,
+            )
+        ),
     )
     guild = SimpleNamespace(id=456, roles=[member_role])
     question = SimpleNamespace(
@@ -560,9 +616,12 @@ async def test_knowledge_confirmation_keeps_controls_after_backend_outage() -> N
         followup=SimpleNamespace(send=AsyncMock()),
     )
 
-    await KnowledgeCaptureView.confirm(view, interaction, None)
+    await view._finish(interaction, confirm=True)
 
     cog._post_knowledge_confirmation.assert_awaited_once()
     assert not view.is_finished()
-    assert all(not item.disabled for item in view.children)
+    assert all(
+        isinstance(item, KnowledgeCaptureDynamicButton) and not item.item.disabled
+        for item in view.children
+    )
     interaction.message.edit.assert_not_awaited()

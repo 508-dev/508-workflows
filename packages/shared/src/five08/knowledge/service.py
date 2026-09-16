@@ -186,16 +186,21 @@ class KnowledgeService:
         selected_messages = [
             message for message in messages if message.message_id in selected_ids
         ]
-        if visibility != "private" and (
-            any(
-                _contains_sensitive_output(candidate.question)
-                or _contains_sensitive_output(candidate.answer)
-                for candidate in candidates
+        persisted_text = [source.title, source.source_ref]
+        for candidate in candidates:
+            persisted_text.extend(
+                [candidate.question, candidate.answer, *candidate.aliases]
             )
-            or any(
-                _contains_sensitive_output(message.content)
-                for message in selected_messages
+        for message in selected_messages:
+            persisted_text.extend(
+                [
+                    message.author_name,
+                    message.content,
+                    message.jump_url or "",
+                ]
             )
+        if visibility != "private" and any(
+            _contains_sensitive_output(value) for value in persisted_text
         ):
             scope_type = "user"
             scope_id = context.discord_user_id

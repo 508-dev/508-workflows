@@ -378,15 +378,14 @@ class KnowledgeCaptureView(discord.ui.View):
         self.context = context
         guild_id = str(context.get("guild_id") or context.get("organization_id") or "0")
         channel_id = str(context.get("channel_id") or "0")
-        for item in self.children:
-            if not isinstance(item, discord.ui.Button):
-                continue
-            action: Literal["c", "x"] = "c" if item.label == "Remember" else "x"
-            item.custom_id = _knowledge_capture_component_id(
-                action=action,
-                draft_id=draft_id,
-                guild_id=guild_id,
-                channel_id=channel_id,
+        for action in ("c", "x"):
+            self.add_item(
+                KnowledgeCaptureDynamicButton(
+                    action=cast(Literal["c", "x"], action),
+                    draft_id=draft_id,
+                    guild_id=guild_id,
+                    channel_id=channel_id,
+                )
             )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -400,33 +399,9 @@ class KnowledgeCaptureView(discord.ui.View):
 
     def _disable(self) -> None:
         for item in self.children:
-            if isinstance(item, discord.ui.Button):
-                item.disabled = True
+            if isinstance(item, KnowledgeCaptureDynamicButton):
+                item.item.disabled = True
         self.stop()
-
-    @discord.ui.button(
-        label="Remember",
-        style=discord.ButtonStyle.primary,
-        custom_id="knowledge:capture:c:00000000-0000-0000-0000-000000000000:0:0",
-    )
-    async def confirm(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button["KnowledgeCaptureView"],
-    ) -> None:
-        await self._finish(interaction, confirm=True)
-
-    @discord.ui.button(
-        label="Cancel",
-        style=discord.ButtonStyle.secondary,
-        custom_id="knowledge:capture:x:00000000-0000-0000-0000-000000000000:0:0",
-    )
-    async def cancel(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button["KnowledgeCaptureView"],
-    ) -> None:
-        await self._finish(interaction, confirm=False)
 
     async def _finish(
         self,
@@ -837,6 +812,19 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         request: str,
     ) -> None:
         context = self._build_agent_context_from_message(message)
+        if not self._requester_can_read_capture_history(message):
+            self._audit_message_safe(
+                message=message,
+                action="knowledge.capture",
+                result="denied",
+                metadata={"reason": "requester_cannot_read_history"},
+            )
+            await message.reply(
+                "I can't capture this conversation because you don't currently have "
+                "permission to read its message history.",
+                mention_author=False,
+            )
+            return
         messages = await self._knowledge_capture_messages(message)
         if not messages:
             self._audit_message_safe(
@@ -1004,6 +992,8 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         trigger: discord.Message,
     ) -> list[dict[str, Any]]:
         source_messages: list[Any] = []
+        if not self._requester_can_read_capture_history(trigger):
+            return []
         if isinstance(trigger.channel, discord.Thread):
             try:
                 async for source_message in trigger.channel.history(
@@ -1034,6 +1024,20 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             is not None
         ]
         return serialized[: settings.knowledge_capture_max_messages]
+
+    @staticmethod
+    def _requester_can_read_capture_history(trigger: discord.Message) -> bool:
+        permissions_for = getattr(trigger.channel, "permissions_for", None)
+        if not callable(permissions_for):
+            return False
+        try:
+            permissions = permissions_for(trigger.author)
+        except (AttributeError, TypeError):
+            return False
+        return bool(
+            getattr(permissions, "view_channel", False)
+            and getattr(permissions, "read_message_history", False)
+        )
 
     async def _referenced_message(self, message: Any) -> Any | None:
         reference = getattr(message, "reference", None)
