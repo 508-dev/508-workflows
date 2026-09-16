@@ -62,6 +62,7 @@ class AgentStateStore(Protocol):
     def claim_plan(
         self, plan_id: str, actor_id: str
     ) -> tuple[str, PendingPlan | None]: ...
+    def purge_expired(self, *, now: datetime | None = None) -> int: ...
 
 
 class InMemoryAgentStateStore:
@@ -147,6 +148,28 @@ class InMemoryAgentStateStore:
                 if expired and expired <= datetime.now(timezone.utc)
                 else "claimed"
             ), pending
+
+    def purge_expired(self, *, now: datetime | None = None) -> int:
+        comparison_time = now or datetime.now(timezone.utc)
+        with self._lock:
+            expired_plan_ids = [
+                plan_id
+                for plan_id, (plan, _context) in self.plans.items()
+                if plan.expires_at is not None and plan.expires_at <= comparison_time
+            ]
+            expired_clarification_ids = {
+                state.id
+                for state in self.clarifications.values()
+                if state.expires_at <= comparison_time
+            }
+            for plan_id in expired_plan_ids:
+                del self.plans[plan_id]
+            self.clarifications = {
+                key: state
+                for key, state in self.clarifications.items()
+                if state.id not in expired_clarification_ids
+            }
+        return len(expired_plan_ids) + len(expired_clarification_ids)
 
 
 class PostgresAgentStateStore:
@@ -249,7 +272,9 @@ class PostgresAgentStateStore:
                     Jsonb(
                         {
                             "plan": plan.model_dump(mode="json"),
-                            "context": context.model_dump(mode="json"),
+                            "context": context.model_copy(
+                                update={"context_snippets": []}
+                            ).model_dump(mode="json"),
                         }
                     ),
                     plan.expires_at
@@ -279,3 +304,13 @@ class PostgresAgentStateStore:
                 if row["expires_at"] <= datetime.now(timezone.utc)
                 else "claimed"
             ), pending
+
+    def purge_expired(self, *, now: datetime | None = None) -> int:
+        comparison_time = now or datetime.now(timezone.utc)
+        with self._connection() as conn, conn.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM agent_states WHERE expires_at <= %s",
+                (comparison_time,),
+            )
+            deleted = cursor.rowcount
+        return max(0, deleted)

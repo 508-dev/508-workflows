@@ -1978,10 +1978,6 @@ def _agent_request_audit_metadata(
             }
         )
         return metadata
-    if not response.plan or not any(
-        action.tool_name.startswith("memory_") for action in response.plan.actions
-    ):
-        metadata["message"] = message[:256]
     return metadata
 
 
@@ -8300,6 +8296,12 @@ async def dashboard_update_configuration_handler(
     audit_action = "configuration.clear" if payload.clear else "configuration.update"
     try:
         if payload.clear:
+            if definition.key == "KNOWLEDGE_DISCORD_CHANNEL_IDS":
+                await _validated_configuration_value(
+                    request,
+                    definition.key,
+                    "",
+                )
             await asyncio.to_thread(delete_runtime_config_value, settings, definition)
         else:
             if definition.is_secret and not str(payload.value or "").strip():
@@ -8327,28 +8329,26 @@ async def dashboard_update_configuration_handler(
                 updated_by_provider=actor_provider.value,
                 updated_by_subject=actor_subject,
             )
-    except ValueError as exc:
-        status_code = 409 if "environment" in str(exc) else 400
+    except ValueError:
+        error = "configuration_value_invalid"
         await _audit_dashboard_configuration_change(
             session,
             result=AuditResult.ERROR,
             key=definition.key,
             action=audit_action,
-            metadata={**metadata, "error": str(exc)},
+            metadata={**metadata, "error": error},
         )
-        return JSONResponse({"error": str(exc)}, status_code=status_code)
-    except RuntimeError as exc:
-        status_code = (
-            503 if "Discord channel validation is unavailable" in str(exc) else 409
-        )
+        return JSONResponse({"error": error}, status_code=400)
+    except RuntimeError:
+        error = "configuration_update_unavailable"
         await _audit_dashboard_configuration_change(
             session,
             result=AuditResult.ERROR,
             key=definition.key,
             action=audit_action,
-            metadata={**metadata, "error": str(exc)},
+            metadata={**metadata, "error": error},
         )
-        return JSONResponse({"error": str(exc)}, status_code=status_code)
+        return JSONResponse({"error": error}, status_code=503)
 
     global _AGENT_ORCHESTRATOR, _KNOWLEDGE_SERVICE
     with _AGENT_ORCHESTRATOR_LOCK:
@@ -9427,11 +9427,8 @@ async def knowledge_capture_handler(request: Request) -> JSONResponse:
         return JSONResponse({"error": "payload_must_be_object"}, status_code=400)
     try:
         payload = KnowledgeCaptureRequest.model_validate(payload_data)
-    except ValidationError as exc:
-        return JSONResponse(
-            {"error": "invalid_payload", "detail": str(exc)},
-            status_code=400,
-        )
+    except ValidationError:
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
     if _agent_request_rate_limited(payload.context.discord_user_id):
         _schedule_agent_audit_event(
             context=payload.context,
@@ -9519,11 +9516,8 @@ async def knowledge_capture_confirmation_handler(
         return JSONResponse({"error": "payload_must_be_object"}, status_code=400)
     try:
         payload = KnowledgeCaptureConfirmationRequest.model_validate(payload_data)
-    except ValidationError as exc:
-        return JSONResponse(
-            {"error": "invalid_payload", "detail": str(exc)},
-            status_code=400,
-        )
+    except ValidationError:
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
 
     try:
         response = await asyncio.to_thread(
@@ -9629,11 +9623,8 @@ async def knowledge_query_handler(request: Request) -> JSONResponse:
         return JSONResponse({"error": "payload_must_be_object"}, status_code=400)
     try:
         payload = KnowledgeQueryRequest.model_validate(payload_data)
-    except ValidationError as exc:
-        return JSONResponse(
-            {"error": "invalid_payload", "detail": str(exc)},
-            status_code=400,
-        )
+    except ValidationError:
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
     if _agent_request_rate_limited(payload.context.discord_user_id):
         _schedule_agent_audit_event(
             context=payload.context,
@@ -10441,6 +10432,12 @@ async def _knowledge_capture_cleanup_scheduler() -> None:
             raise
         except Exception:
             logger.warning("Knowledge capture draft cleanup failed", exc_info=True)
+        try:
+            await asyncio.to_thread(_AGENT_STATE_STORE.purge_expired)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("Expired agent state cleanup failed", exc_info=True)
         await asyncio.sleep(interval_seconds)
 
 

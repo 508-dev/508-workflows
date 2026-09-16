@@ -133,15 +133,25 @@ class AgentOrchestrator:
     def plan(self, message: str, context: AgentIdentityContext) -> AgentResponse:
         state = self.state_store.take_clarification(context)
         text = message.strip()
-        if state is not None and re.fullmatch(r"[\w][\w /-]{0,79}[.!]?", text):
+        clarification_completed = False
+        if (
+            state is not None
+            and 0 < len(text) <= 80
+            and "\n" not in text
+            and not text.endswith("?")
+        ):
             # Complete only the known missing field. A new command/question must
             # never be interpreted as a project name or task title.
             if self._parse_action(text) is None and not re.match(
-                r"(?i)^(?:what|why|how|when|where|who|cancel|no|stop|do|can)\b", text
+                r"(?i)^(?:what|why|how|when|where|who|which|is|are|does|did|"
+                r"cancel|no|stop|do|can|could|would)\b",
+                text,
             ):
                 if state.field == "task_project":
                     project = re.sub(r"(?i)^project\s+", "", text).rstrip(".!")
-                    text = f"{state.request} in project {project}"
+                    if project:
+                        text = f"{state.request} in project {project}"
+                        clarification_completed = True
                 elif state.field == "task_title":
                     text = re.sub(
                         r"\bcreate\s+(?:a\s+)?task\b",
@@ -150,12 +160,20 @@ class AgentOrchestrator:
                         count=1,
                         flags=re.I,
                     )
-        response = self._plan(text, context)
+                    clarification_completed = True
+        try:
+            response = self._plan(text, context)
+        except Exception:
+            if state is not None:
+                self.state_store.save_clarification(context, state)
+            raise
         field = response.clarification_field
         if response.status == "needs_clarification" and field:
             self.state_store.save_clarification(
                 context, ClarificationState(field=field, request=text)
             )
+        elif state is not None and not clarification_completed:
+            self.state_store.save_clarification(context, state)
         return response
 
     def _plan(self, message: str, context: AgentIdentityContext) -> AgentResponse:
@@ -911,7 +929,9 @@ class AgentOrchestrator:
     def _parse_memory_action(self, text: str) -> AgentToolAction | None:
         lowered = text.casefold()
         edit = re.fullmatch(
-            r"update memory fact ([A-Za-z0-9_-]{8,}) to (.+)", text, re.IGNORECASE
+            r"update memory fact ([A-Za-z0-9_-]{8,}) to (.+)",
+            text,
+            re.IGNORECASE | re.DOTALL,
         )
         if edit:
             return AgentToolAction(
@@ -925,6 +945,30 @@ class AgentOrchestrator:
                 },
                 summary=f"Replace private memory {edit.group(1)} with: {edit.group(2).strip()}",
             )
+        remember_match = re.fullmatch(
+            r"(?:(?:please\s+)?remember|"
+            r"(?:(?:could|can|would)\s+you\s+remember))\s+"
+            r"(?:that\s+)?(.+?)(?:\s+for\s+me)?[.!?]?",
+            text,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if remember_match is not None:
+            fact_text = _clean_text(remember_match.group(1))
+            if fact_text:
+                key = self._memory_key_from_fact_text(fact_text)
+                return AgentToolAction(
+                    tool_name="memory_write.remember_fact",
+                    arguments={
+                        "scope_type": "user",
+                        "key": key,
+                        "value_json": {"text": fact_text},
+                        "visibility": "private",
+                        "source_type": "request",
+                        "source_ref": "agent_request",
+                        "source_excerpt": fact_text,
+                    },
+                    summary=f"Remember private user fact: {key}",
+                )
         if re.search(
             r"\bwhat\s+do\s+you\s+remember\s+about\s+me\b", lowered
         ) or re.match(
@@ -947,28 +991,6 @@ class AgentOrchestrator:
                 arguments={"fact_id": forget_match.group(1)},
                 summary=f"Forget memory fact {forget_match.group(1)}",
             )
-        remember_match = re.fullmatch(
-            r"(?:please\s+)?remember\s+(?:that\s+)?(.+?)(?:\s+for\s+me)?[.!]?",
-            text,
-            re.IGNORECASE,
-        )
-        if remember_match is not None:
-            fact_text = _clean_text(remember_match.group(1))
-            if fact_text:
-                key = self._memory_key_from_fact_text(fact_text)
-                return AgentToolAction(
-                    tool_name="memory_write.remember_fact",
-                    arguments={
-                        "scope_type": "user",
-                        "key": key,
-                        "value_json": {"text": fact_text},
-                        "visibility": "private",
-                        "source_type": "request",
-                        "source_ref": "agent_request",
-                        "source_excerpt": fact_text,
-                    },
-                    summary=f"Remember private user fact: {key}",
-                )
         return None
 
     @staticmethod

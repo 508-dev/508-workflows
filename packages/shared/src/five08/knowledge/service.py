@@ -26,7 +26,12 @@ from five08.knowledge.models import (
     KnowledgeVisibility,
 )
 from five08.knowledge.sources import KnowledgeSourceAdapters
-from five08.knowledge.store import KnowledgeStore, _fuzzy_relevance, _search_tokens
+from five08.knowledge.store import (
+    KnowledgeStore,
+    _dedupe_key,
+    _fuzzy_relevance,
+    _search_tokens,
+)
 from five08.settings import SharedSettings
 
 _CAPTURE_REQUEST_RE = re.compile(
@@ -62,7 +67,8 @@ _SECRET_PATTERNS = (
     re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
 )
 _EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I)
-_PHONE_RE = re.compile(r"(?<!\d)(?:\+?\d[\d .()-]{7,}\d)(?!\d)")
+_PHONE_CANDIDATE_RE = re.compile(r"(?<!\w)(?:\+?\d[\d .()-]{7,}\d)(?!\w)")
+_ISO_DATE_PREFIX_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(?:\b|[T ])")
 
 
 _SOURCE_EXECUTOR = ThreadPoolExecutor(
@@ -169,15 +175,6 @@ class KnowledgeService:
                     "`remember this answer`."
                 ),
             )
-        if visibility != "private" and any(
-            _contains_sensitive_output(candidate.question)
-            or _contains_sensitive_output(candidate.answer)
-            for candidate in candidates
-        ):
-            scope_type = "user"
-            scope_id = context.discord_user_id
-            visibility = "private"
-
         selected_ids = {
             message_id
             for candidate in candidates
@@ -186,6 +183,18 @@ class KnowledgeService:
         selected_messages = [
             message for message in messages if message.message_id in selected_ids
         ]
+        if visibility != "private" and (
+            any(
+                _contains_sensitive_output(candidate.question)
+                or _contains_sensitive_output(candidate.answer)
+                for candidate in candidates
+            )
+            or any(_contains_secret(message.content) for message in selected_messages)
+        ):
+            scope_type = "user"
+            scope_id = context.discord_user_id
+            visibility = "private"
+
         verification_status = self._verification_status(
             actor_id=context.discord_user_id,
             candidates=candidates,
@@ -357,17 +366,14 @@ class KnowledgeService:
             except Exception:
                 source_errors.append("identity/project access lookup failed")
 
+        search_deadline = time.monotonic() + timeout_seconds
         max_evidence = int(getattr(self.settings, "knowledge_query_max_evidence", 8))
-        semantic_limit = (
-            int(
-                getattr(
-                    self.settings,
-                    "knowledge_semantic_candidate_limit",
-                    24,
-                )
+        semantic_limit = int(
+            getattr(
+                self.settings,
+                "knowledge_semantic_candidate_limit",
+                24,
             )
-            if self.model is not None
-            else 0
         )
         searches: dict[str, Callable[[], list[KnowledgeEvidence]]] = {
             "memory": lambda: self.store.search_evidence(
@@ -401,7 +407,7 @@ class KnowledgeService:
         }
         completed, pending = wait(
             futures,
-            timeout=_remaining_seconds(deadline),
+            timeout=_remaining_seconds(search_deadline),
         )
         for future in completed:
             name = futures[future]
@@ -470,6 +476,14 @@ class KnowledgeService:
             visibility == "org"
             and all(item.visibility == "org" for item in evidence)
             and not _contains_sensitive_output(answer)
+            and not any(
+                _contains_sensitive_output(citation.title)
+                or (
+                    citation.url is not None
+                    and _contains_sensitive_output(citation.url)
+                )
+                for citation in citations
+            )
         )
         return KnowledgeQueryResponse(
             status="answered",
@@ -748,14 +762,14 @@ def _deduplicate_candidates(
     grouped: dict[str, KnowledgeCaptureCandidate] = {}
     conflicting_questions: set[str] = set()
     for candidate in candidates:
-        question_key = _normalize(candidate.question)
+        question_key = _dedupe_key(candidate.question)
         if question_key in conflicting_questions:
             continue
         existing = grouped.get(question_key)
         if existing is None:
             grouped[question_key] = candidate
             continue
-        if _normalize(existing.answer) != _normalize(candidate.answer):
+        if _dedupe_key(existing.answer) != _dedupe_key(candidate.answer):
             grouped.pop(question_key, None)
             conflicting_questions.add(question_key)
             continue
@@ -834,11 +848,25 @@ def _contains_secret(value: str) -> bool:
     return any(pattern.search(value) is not None for pattern in _SECRET_PATTERNS)
 
 
+def _contains_phone_number(value: str) -> bool:
+    for match in _PHONE_CANDIDATE_RE.finditer(value):
+        candidate = match.group(0).strip()
+        digits = re.sub(r"\D", "", candidate)
+        if not 10 <= len(digits) <= 15:
+            continue
+        if _ISO_DATE_PREFIX_RE.match(candidate):
+            continue
+        if not any(character in candidate for character in "+ .()-"):
+            continue
+        return True
+    return False
+
+
 def _contains_sensitive_output(value: str) -> bool:
     return (
         _contains_secret(value)
         or _EMAIL_RE.search(value) is not None
-        or _PHONE_RE.search(value) is not None
+        or _contains_phone_number(value)
     )
 
 

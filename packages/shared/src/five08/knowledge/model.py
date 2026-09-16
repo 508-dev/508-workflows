@@ -171,9 +171,7 @@ class OpenAICompatibleKnowledgeModel:
             return None
         draft = GroundedAnswerDraft.model_validate(result)
         if draft.status == "insufficient":
-            if draft.answer.strip() or draft.evidence_ids:
-                return None
-            return draft
+            return GroundedAnswerDraft(status="insufficient")
         if not draft.answer.strip() or not draft.evidence_ids:
             return None
         if not set(draft.evidence_ids).issubset(allowed_ids):

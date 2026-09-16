@@ -38,6 +38,11 @@ def test_knowledge_intent_routing_is_narrow() -> None:
         AgentCog._is_knowledge_capture_request("Do you remember this thread?") is False
     )
     assert AgentCog._is_knowledge_question("Do you remember this thread?") is True
+    assert AgentCog._is_knowledge_question("What do you remember about me?") is False
+    assert (
+        AgentCog._is_knowledge_question("Could you remember that my timezone is UTC?")
+        is False
+    )
     assert (
         AgentCog._is_knowledge_capture_request(
             "suggest facts worth saving from this thread"
@@ -65,6 +70,65 @@ def test_knowledge_answer_format_escapes_mentions_and_renders_citations() -> Non
     assert "\\*\\*deploys\\*\\*" in rendered
     assert "Website \\*deployment\\*" in rendered
     assert "<https://discord.example/message/101>" in rendered
+
+
+def test_long_knowledge_answer_keeps_at_least_one_citation() -> None:
+    rendered = AgentCog._format_knowledge_query_response(
+        {
+            "status": "answered",
+            "answer": "A" * 4000,
+            "citations": [
+                {
+                    "source_type": "outline",
+                    "title": "Deployment runbook",
+                    "url": "https://outline.example/doc/1",
+                }
+            ],
+        }
+    )
+
+    assert len(rendered) <= 1900
+    assert "Sources:" in rendered
+    assert "Deployment runbook" in rendered
+
+
+def test_capture_preview_parts_include_every_candidate_before_confirmation() -> None:
+    response = {
+        "status": "requires_confirmation",
+        "visibility": "org",
+        "candidates": [
+            {
+                "question": f"Question {index}",
+                "answer": "A" * 1400 + f" answer-tail-{index}",
+            }
+            for index in range(1, 4)
+        ],
+    }
+
+    parts = AgentCog._format_knowledge_capture_preview_parts(response)
+    rendered = "\n".join(parts)
+
+    assert all(len(part) <= 1900 for part in parts)
+    assert all(f"answer-tail-{index}" in rendered for index in range(1, 4))
+    assert rendered.endswith(
+        "Choose **Remember** to save exactly this preview, or cancel."
+    )
+
+
+def test_member_specific_view_overwrite_prevents_public_knowledge_reply() -> None:
+    member_role = SimpleNamespace(id=1, name="Member", managed=False)
+    guest = Mock()
+    guest.id = 999
+    channel = SimpleNamespace(
+        overwrites={guest: SimpleNamespace(view_channel=True)},
+        permissions_for=Mock(return_value=SimpleNamespace(view_channel=True)),
+    )
+    message = SimpleNamespace(
+        guild=SimpleNamespace(roles=[member_role]),
+        channel=channel,
+    )
+
+    assert AgentCog._discord_destination_is_org_only(message) is False
 
 
 @pytest.mark.asyncio

@@ -691,7 +691,8 @@ function ConfigurationView({
       !envLocked &&
       !busy &&
       draftValue !== currentValue &&
-      (knowledgeDraft.length > 0 ? knowledgeChannelsAvailable && !unresolvedDraft : true)
+      knowledgeChannelsAvailable &&
+      !unresolvedDraft
 
     function toggleKnowledgeChannel(channelId: string, checked: boolean) {
       setKnowledgeDraft((current) =>

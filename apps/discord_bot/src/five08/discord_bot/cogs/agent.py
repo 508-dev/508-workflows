@@ -7,6 +7,7 @@ import difflib
 import logging
 import re
 import time
+from collections.abc import Mapping
 from typing import Any, Awaitable, Callable, Literal, cast
 from uuid import uuid4
 
@@ -687,6 +688,12 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         normalized = re.sub(r"\s+", " ", request).strip()
         if not normalized:
             return False
+        if re.search(r"\bremember\b", normalized, re.I) and re.search(
+            r"\b(?:me|my|mine)\b",
+            normalized,
+            re.I,
+        ):
+            return False
         if _AGENT_LIVE_WORKFLOW_RE.search(normalized) is not None:
             return False
         if _KNOWLEDGE_RECALL_PREFIX_RE.search(normalized) is not None:
@@ -773,11 +780,14 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             )
 
         try:
-            preview = self._format_knowledge_capture_response(response)
+            preview_parts = self._format_knowledge_capture_preview_parts(response)
+            for preview_part in preview_parts[:-1]:
+                await message.author.send(preview_part)
+            final_part = preview_parts[-1]
             if view is None:
-                await message.author.send(preview)
+                await message.author.send(final_part)
             else:
-                await message.author.send(preview, view=view)
+                await message.author.send(final_part, view=view)
         except discord.HTTPException:
             logger.warning(
                 "Failed sending knowledge capture preview by DM user=%s",
@@ -978,6 +988,20 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         permissions_for = getattr(channel, "permissions_for", None)
         if not callable(permissions_for):
             return False
+
+        # Role checks do not reveal a guest granted access through an explicit
+        # member overwrite. Treat any such grant as non-organizational.
+        overwrite_source = getattr(channel, "parent", None) or channel
+        overwrites = getattr(overwrite_source, "overwrites", None)
+        if isinstance(overwrites, Mapping):
+            role_ids = {
+                getattr(role, "id", None) for role in getattr(guild, "roles", [])
+            }
+            for target, overwrite in overwrites.items():
+                if getattr(overwrite, "view_channel", None) is not True:
+                    continue
+                if getattr(target, "id", None) not in role_ids:
+                    return False
 
         member_can_view = False
         for role in getattr(guild, "roles", []):
@@ -1623,19 +1647,21 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         return "success"
 
     @staticmethod
-    def _format_knowledge_capture_response(response: dict[str, Any]) -> str:
+    def _format_knowledge_capture_preview_parts(
+        response: dict[str, Any],
+    ) -> list[str]:
         status = str(response.get("status") or "failed")
         message = str(response.get("message") or "").strip()
         if status != "requires_confirmation":
-            return (message or f"Knowledge capture status: {status}")[:1900]
+            return [(message or f"Knowledge capture status: {status}")[:1900]]
 
-        visibility = str(response.get("visibility") or "private")
-        candidates = response.get("candidates")
-        lines = [
-            "Review this knowledge capture",
-            f"Visibility: {visibility}",
-            "",
+        visibility = AgentCog._safe_discord_text(
+            str(response.get("visibility") or "private")
+        )
+        sections = [
+            f"Review this knowledge capture\nVisibility: {visibility}",
         ]
+        candidates = response.get("candidates")
         if isinstance(candidates, list):
             for index, candidate in enumerate(candidates[:3], start=1):
                 if not isinstance(candidate, dict):
@@ -1644,15 +1670,27 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                     str(candidate.get("question") or "")
                 )
                 answer = AgentCog._safe_discord_text(str(candidate.get("answer") or ""))
-                lines.extend(
-                    [
-                        f"{index}. Q: {question[:500]}",
-                        f"   A: {answer[:900]}",
-                        "",
-                    ]
-                )
-        lines.append("Choose **Remember** to save exactly this preview, or cancel.")
-        return "\n".join(lines)[:1900]
+                sections.append(f"{index}. Q: {question}\n   A: {answer}")
+        sections.append("Choose **Remember** to save exactly this preview, or cancel.")
+
+        parts: list[str] = []
+        for section in sections:
+            remaining = section
+            while remaining:
+                chunk = remaining[:1900]
+                remaining = remaining[1900:]
+                if parts and len(parts[-1]) + len(chunk) + 2 <= 1900:
+                    parts[-1] += "\n\n" + chunk
+                else:
+                    parts.append(chunk)
+        return parts or ["I could not render that knowledge capture."]
+
+    @staticmethod
+    def _format_knowledge_capture_response(response: dict[str, Any]) -> str:
+        parts = AgentCog._format_knowledge_capture_preview_parts(response)
+        if len(parts) == 1:
+            return parts[0]
+        return "The capture preview was sent in multiple messages."
 
     @staticmethod
     def _format_knowledge_query_response(response: dict[str, Any]) -> str:
@@ -1662,10 +1700,10 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             or response.get("error")
             or "I could not answer that question."
         ).strip()
-        lines = [AgentCog._safe_discord_text(answer)]
+        safe_answer = AgentCog._safe_discord_text(answer)
+        source_lines: list[str] = []
         citations = response.get("citations")
         if isinstance(citations, list) and citations:
-            lines.extend(["", "Sources:"])
             for index, citation in enumerate(citations[:8], start=1):
                 if not isinstance(citation, dict):
                     continue
@@ -1676,16 +1714,31 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                 )
                 url = str(citation.get("url") or "").strip()
                 stale = " (review due)" if citation.get("stale") else ""
-                if re.match(r"^https?://", url, flags=re.I):
-                    lines.append(f"{index}. {title}{stale} — <{url}>")
+                if re.match(r"^https?://", url, flags=re.I) and len(url) <= 500:
+                    source_lines.append(f"{index}. {title[:300]}{stale} — <{url}>")
                 else:
                     source_type = AgentCog._safe_discord_text(
                         str(citation.get("source_type") or "source")
                     )
-                    lines.append(f"{index}. {title}{stale} ({source_type})")
+                    source_lines.append(
+                        f"{index}. {title[:300]}{stale} ({source_type[:80]})"
+                    )
+
+        suffix_parts: list[str] = []
+        if source_lines:
+            included_sources: list[str] = []
+            for source_line in source_lines:
+                candidate = "\n".join([*included_sources, source_line])
+                if len(candidate) > 850 and included_sources:
+                    break
+                included_sources.append(source_line[:850])
+            suffix_parts.append("Sources:\n" + "\n".join(included_sources))
         if response.get("source_errors"):
-            lines.extend(["", "Some knowledge sources were temporarily unavailable."])
-        return "\n".join(lines)[:1900]
+            suffix_parts.append("Some knowledge sources were temporarily unavailable.")
+        suffix = "\n\n".join(suffix_parts)
+        answer_limit = 1900 - (len(suffix) + 2 if suffix else 0)
+        rendered_answer = safe_answer[: max(1, answer_limit)].rstrip()
+        return (f"{rendered_answer}\n\n{suffix}" if suffix else rendered_answer)[:1900]
 
     @staticmethod
     def _safe_discord_text(value: str) -> str:

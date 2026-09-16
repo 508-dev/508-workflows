@@ -15,15 +15,24 @@ from five08.queue import get_postgres_connection
 from five08.settings import SharedSettings
 
 _PROJECT_MARKER_RE = re.compile(r"\b(?:project|projects|erp|erpnext)\b", re.I)
-_PROJECT_NAME_RE = re.compile(
-    r"\bproject\s+(?:named\s+)?[\"']?([^?\"']+)",
-    re.I,
+_PROJECT_NAME_PATTERNS = (
+    re.compile(
+        r"\b(?:how\s+is|what\s+is)\s+(?:the\s+)?[\"']?(.+?)[\"']?\s+project(?:'s)?\b",
+        re.I,
+    ),
+    re.compile(r"\bproject\s+(?:named\s+)?[\"']?([^?\"']+)", re.I),
 )
 _PERSON_MARKER_RE = re.compile(
-    r"\b(?:member|person|contact|crm|email|profile|onboarding|who\s+is)\b",
+    r"\b(?:member|person|contact|crm|email|profile|onboarding|skills|phone|who\s+is)\b",
     re.I,
 )
 _PERSON_QUERY_PATTERNS = (
+    re.compile(
+        r"\bwhat\s+(?:is|are)\s+(.+?)(?:'s|’s)\s+"
+        r"(?:email|profile|onboarding(?:\s+state)?|phone|contact(?:\s+info)?)\b",
+        re.I,
+    ),
+    re.compile(r"\bwhat\s+(?:skills|email(?:es)?)\s+does\s+(.+?)\s+have\b", re.I),
     re.compile(r"\bwho\s+is\s+([^?]+)", re.I),
     re.compile(r"\b(?:about|for|on)\s+([^?]+)", re.I),
     re.compile(r"\b(?:member|contact|person)\s+([^?]+)", re.I),
@@ -176,6 +185,8 @@ class KnowledgeSourceAdapters:
         if _PROJECT_MARKER_RE.search(question) is None:
             return []
         query = _project_query(question)
+        if query is None and re.search(r"\bproject(?:'s)?\b", question, re.I):
+            return []
         rows = list_dashboard_projects(
             self.settings,
             query=query,
@@ -265,12 +276,17 @@ class KnowledgeSourceAdapters:
 
 
 def _project_query(question: str) -> str | None:
-    match = _PROJECT_NAME_RE.search(question)
-    if match is None:
+    candidate_text: str | None = None
+    for pattern in _PROJECT_NAME_PATTERNS:
+        match = pattern.search(question)
+        if match is not None:
+            candidate_text = match.group(1)
+            break
+    if candidate_text is None:
         return None
     candidate = re.split(
         r"\b(?:status|schedule|start|end|due|roster|team|doing|at)\b",
-        match.group(1),
+        candidate_text,
         maxsplit=1,
         flags=re.I,
     )[0]

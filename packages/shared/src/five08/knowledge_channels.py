@@ -38,9 +38,5 @@ def knowledge_discord_channel_ids(value: object) -> list[str]:
     else:
         raw_items = (value,)
     return list(
-        dict.fromkeys(
-            str(item).strip()
-            for item in raw_items
-            if str(item).strip()
-        )
+        dict.fromkeys(str(item).strip() for item in raw_items if str(item).strip())
     )[:MAX_KNOWLEDGE_DISCORD_CHANNELS]

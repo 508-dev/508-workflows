@@ -1058,9 +1058,7 @@ def test_agent_request_for_write_returns_confirmation_plan(
         "client_supplied_context"
     )
     assert "Ignore previous instructions" not in str(audit_kwargs["metadata"])
-    assert audit_kwargs["metadata"]["message"] == (
-        "Create a task for Sarah to update onboarding docs by Friday"
-    )
+    assert "message" not in audit_kwargs["metadata"]
 
 
 def test_agent_request_rejects_oversized_message(
@@ -2547,8 +2545,49 @@ def test_dashboard_knowledge_channel_update_rejects_stale_selection(
         )
 
     assert response.status_code == 400
-    assert "no longer accessible" in response.json()["error"]
+    assert response.json() == {"error": "configuration_value_invalid"}
     mock_set.assert_not_called()
+
+
+def test_dashboard_knowledge_channel_clear_fails_closed_when_bot_is_unavailable(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="validated",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._list_knowledge_channels_from_bot",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch("five08.backend.api.delete_runtime_config_value") as mock_delete,
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ),
+    ):
+        response = client.put(
+            "/dashboard/api/configuration/KNOWLEDGE_DISCORD_CHANNEL_IDS",
+            json={"clear": True},
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {"error": "configuration_update_unavailable"}
+    mock_delete.assert_not_called()
 
 
 def test_dashboard_configuration_update_audits_secret_value_required(

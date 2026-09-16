@@ -222,6 +222,30 @@ async def test_knowledge_handlers_require_internal_secret(
     assert response.status_code == 401
 
 
+@pytest.mark.parametrize(
+    ("handler", "args"),
+    [
+        (api.knowledge_capture_handler, ()),
+        (
+            api.knowledge_capture_confirmation_handler,
+            ("11111111-1111-1111-1111-111111111111",),
+        ),
+        (api.knowledge_query_handler, ()),
+    ],
+)
+async def test_knowledge_handlers_do_not_expose_validation_details(
+    monkeypatch: pytest.MonkeyPatch,
+    handler: Any,
+    args: tuple[str, ...],
+) -> None:
+    _configure(monkeypatch)
+
+    response = await handler(_request({}), *args)
+
+    assert response.status_code == 400
+    assert _response_json(response) == {"error": "invalid_payload"}
+
+
 def test_knowledge_routes_are_registered() -> None:
     paths = {
         getattr(route, "path", None)

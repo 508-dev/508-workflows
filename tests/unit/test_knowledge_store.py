@@ -108,3 +108,63 @@ def test_postgres_memory_adapter_preserves_retention_and_provenance(
     assert insert_params[11] > before
     assert fact.expires_at == insert_params[11]
     assert fact.source_excerpt_hash is not None
+
+
+def test_postgres_memory_adapter_rejects_oversized_key_before_writing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = _FakeConnection()
+    monkeypatch.setattr(
+        knowledge_store,
+        "get_postgres_connection",
+        lambda _settings, **_kwargs: connection,
+    )
+
+    with pytest.raises(ValueError, match="at most 128"):
+        PostgresKnowledgeStore(SimpleNamespace()).remember_fact(
+            scope_type="user",
+            scope_id="user-1",
+            key="x" * 129,
+            value_json={"text": "value"},
+            visibility="private",
+            source_type="request",
+            source_ref="agent_request",
+            source_excerpt="value",
+            created_by="user-1",
+            verification_status="user_confirmed",
+            organization_id="org-1",
+        )
+
+    assert connection.cursor_instance.calls == []
+
+
+def test_postgres_semantic_fallback_honors_smaller_candidate_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = _FakeConnection()
+    monkeypatch.setattr(
+        knowledge_store,
+        "get_postgres_connection",
+        lambda _settings, **_kwargs: connection,
+    )
+
+    evidence = PostgresKnowledgeStore(SimpleNamespace()).search_evidence(
+        question="wesbite depoly",
+        organization_id="org-1",
+        actor_id="user-1",
+        allow_private=False,
+        allow_project=False,
+        allow_org=True,
+        limit=8,
+        semantic_candidate_limit=4,
+    )
+
+    fallback_query, fallback_params = next(
+        call
+        for call in connection.cursor_instance.calls
+        if "0.0::float AS relevance" in call[0]
+    )
+    assert fallback_query
+    assert fallback_params is not None
+    assert fallback_params[-1] == 4
+    assert evidence == []

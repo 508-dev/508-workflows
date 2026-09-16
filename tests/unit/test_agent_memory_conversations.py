@@ -1,6 +1,7 @@
 """Conversation trajectories for private memory and clarification state."""
 
 from datetime import datetime, timedelta, timezone
+from unittest.mock import Mock
 
 import pytest
 
@@ -108,6 +109,84 @@ def test_task_title_followup_preserves_the_original_project():
     assert response.status == "requires_confirmation"
     assert response.plan.actions[0].arguments["project"] == "Atlas"
     assert response.plan.actions[0].arguments["title"] == "Refresh the docs"
+
+
+@pytest.mark.parametrize(
+    "title",
+    ["Update Alice's profile", "Fix API: retry errors"],
+)
+def test_task_title_followup_accepts_normal_punctuation(title):
+    agent = AgentOrchestrator()
+    agent.plan("Create a task in project Atlas", context())
+
+    response = agent.plan(title, context())
+
+    assert response.status == "requires_confirmation"
+    assert response.plan.actions[0].arguments["title"] == title
+
+
+def test_invalid_clarification_reply_keeps_state_for_retry():
+    state = InMemoryAgentStateStore()
+    agent = AgentOrchestrator(state_store=state)
+    agent.plan("Show tasks", context())
+
+    agent.plan("Which project?", context())
+    response = agent.plan("Atlas", context())
+
+    assert response.status == "executed"
+    assert response.plan.actions[0].arguments["project"] == "Atlas"
+
+
+def test_planner_failure_keeps_clarification_state_for_retry(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    state = InMemoryAgentStateStore()
+    agent = AgentOrchestrator(state_store=state)
+    agent.plan("Show tasks", context())
+    original_plan = agent._plan
+    monkeypatch.setattr(agent, "_plan", Mock(side_effect=RuntimeError("outage")))
+
+    with pytest.raises(RuntimeError, match="outage"):
+        agent.plan("Atlas", context())
+
+    monkeypatch.setattr(agent, "_plan", original_plan)
+    assert agent.plan("Atlas", context()).status == "executed"
+
+
+def test_polite_remember_request_is_a_private_write():
+    response = AgentOrchestrator().plan(
+        "Could you remember that my timezone is Asia/Tokyo?",
+        context(),
+    )
+
+    assert response.status == "requires_confirmation"
+    assert response.plan.actions[0].tool_name == "memory_write.remember_fact"
+
+
+def test_multiline_memory_edit_is_parsed():
+    response = AgentOrchestrator().plan(
+        "Update memory fact abcdefgh to first line\nsecond line",
+        context(),
+    )
+
+    assert response.status == "requires_confirmation"
+    assert response.plan.actions[0].arguments["replaces_id"] == "abcdefgh"
+    assert response.plan.actions[0].arguments["value_json"]["text"] == (
+        "first line\nsecond line"
+    )
+
+
+def test_expired_clarification_state_can_be_purged_without_another_write():
+    state = InMemoryAgentStateStore()
+    agent = AgentOrchestrator(state_store=state)
+    agent.plan("Show tasks", context())
+    for key, value in state.clarifications.items():
+        state.clarifications[key] = value.model_copy(
+            update={"expires_at": datetime.now(timezone.utc) - timedelta(seconds=1)}
+        )
+
+    assert state.purge_expired() == 1
+    assert state.clarifications == {}
 
 
 def test_personal_preference_suggestions_never_save_without_confirmation():

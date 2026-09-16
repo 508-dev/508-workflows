@@ -19,7 +19,11 @@ from five08.knowledge.models import (
     KnowledgeFact,
     KnowledgeQueryRequest,
 )
-from five08.knowledge.service import KnowledgeService
+from five08.knowledge.service import (
+    KnowledgeService,
+    _contains_sensitive_output,
+)
+from five08.knowledge.sources import _person_query, _project_query
 from five08.knowledge.store import InMemoryKnowledgeStore
 
 
@@ -386,6 +390,123 @@ def test_secret_like_org_capture_is_forced_to_private_user_scope() -> None:
     assert answer.public_safe is False
 
 
+def test_secret_in_an_additional_cited_message_forces_private_capture() -> None:
+    class _CitingModel(_SemanticModel):
+        def extract_candidates(
+            self,
+            _messages: list[KnowledgeDiscordMessage],
+        ) -> list[KnowledgeCaptureCandidate]:
+            return [
+                KnowledgeCaptureCandidate(
+                    question="Does the website auto deploy?",
+                    answer="Yes, with Cloudflare Pages.",
+                    source_message_ids=["100", "101", "102"],
+                )
+            ]
+
+    request = _capture_request(answer="Yes, with Cloudflare Pages.")
+    request.messages.append(
+        KnowledgeDiscordMessage(
+            message_id="102",
+            author_id="michael",
+            author_name="Michael",
+            content="deploy token=do-not-share",
+            created_at=datetime.now(timezone.utc),
+        )
+    )
+
+    preview = _service(
+        InMemoryKnowledgeStore(),
+        model=_CitingModel(),
+    ).create_capture(request)
+
+    assert preview.status == "requires_confirmation"
+    assert preview.scope_type == "user"
+    assert preview.visibility == "private"
+
+
+def test_dates_and_identifiers_are_not_classified_as_phone_numbers() -> None:
+    assert _contains_sensitive_output("The deadline is 2026-09-16.") is False
+    assert _contains_sensitive_output("Build 123456789012345 completed.") is False
+    assert _contains_sensitive_output("Call +1 (415) 555-0123.") is True
+
+
+def test_rendered_citation_pii_prevents_a_public_answer() -> None:
+    class _CitationSources(_NoExternalSources):
+        def search_outline(self, _question: str) -> list[KnowledgeEvidence]:
+            return [
+                KnowledgeEvidence(
+                    evidence_id="outline:1",
+                    source_type="outline",
+                    source_ref="outline:1",
+                    title="Owner alice@example.com",
+                    excerpt="The website deploys automatically.",
+                    visibility="org",
+                    authority=1.0,
+                    relevance=1.0,
+                )
+            ]
+
+    result = _service(
+        InMemoryKnowledgeStore(),
+        sources=_CitationSources(),
+        model=_SemanticModel(),
+    ).answer(
+        KnowledgeQueryRequest(
+            question="How does the website deploy?",
+            context=_context(),
+        )
+    )
+
+    assert result.status == "answered"
+    assert result.public_safe is False
+
+
+def test_same_answer_recapture_refreshes_aliases_and_verification() -> None:
+    class _AliasModel(_SemanticModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.alias = "homepage publishing"
+
+        def extract_candidates(
+            self,
+            _messages: list[KnowledgeDiscordMessage],
+        ) -> list[KnowledgeCaptureCandidate]:
+            return [
+                KnowledgeCaptureCandidate(
+                    question="Does our main website auto deploy now?",
+                    answer="Yes, it auto-deploys using Cloudflare Pages.",
+                    aliases=[self.alias],
+                    source_message_ids=["100", "101"],
+                )
+            ]
+
+    store = InMemoryKnowledgeStore()
+    model = _AliasModel()
+    service = _service(store, model=model)
+    first = service.create_capture(_capture_request())
+    first_saved = service.confirm_capture(
+        first.draft_id,
+        context=_context(),
+        confirm=True,
+    )
+    model.alias = "site release pipeline"
+    second_request = _capture_request(actor_id="michael")
+    second = service.create_capture(second_request)
+    second_saved = service.confirm_capture(
+        second.draft_id,
+        context=_context(user_id="michael"),
+        confirm=True,
+    )
+
+    assert second_saved.facts[0].id == first_saved.facts[0].id
+    assert second_saved.facts[0].verification_status == "author_confirmed"
+    assert second_saved.facts[0].aliases == [
+        "homepage publishing",
+        "site release pipeline",
+    ]
+
+
 def test_repeated_question_supersedes_changed_answer() -> None:
     store = InMemoryKnowledgeStore()
     service = _service(store)
@@ -607,7 +728,7 @@ def test_conflicting_duplicate_candidates_require_clarification() -> None:
                     source_message_ids=["100", "101"],
                 ),
                 KnowledgeCaptureCandidate(
-                    question="Does the website auto deploy?",
+                    question="Does the website auto deploy",
                     answer="It deploys with Cloudflare Pages.",
                     source_message_ids=["100", "101"],
                 ),
@@ -735,3 +856,50 @@ def test_consumed_draft_is_redacted_and_expired_draft_is_purged() -> None:
         store.purge_capture_drafts(now=preview.expires_at + timedelta(seconds=1)) == 1
     )
     assert store.get_capture_draft(preview.draft_id) is None
+
+
+def test_consumed_draft_retains_idempotency_metadata_until_retention_cutoff() -> None:
+    store = InMemoryKnowledgeStore()
+    service = _service(store)
+    preview = service.create_capture(_capture_request())
+    assert preview.draft_id is not None
+    service.confirm_capture(preview.draft_id, context=_context(), confirm=True)
+
+    assert (
+        store.purge_capture_drafts(
+            now=preview.expires_at + timedelta(seconds=1),
+            consumed_retention_seconds=1200,
+        )
+        == 0
+    )
+    assert store.get_capture_draft(preview.draft_id) is not None
+
+
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        ("How is the Atlas project doing?", "Atlas"),
+        ("What is Atlas project's status?", "Atlas"),
+        ("What is project Atlas status?", "Atlas"),
+    ],
+)
+def test_project_query_supports_name_first_forms(
+    question: str,
+    expected: str,
+) -> None:
+    assert _project_query(question) == expected
+
+
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        ("What is Alice's email?", "Alice"),
+        ("What is Alice's onboarding state?", "Alice"),
+        ("What skills does Alice have?", "Alice"),
+    ],
+)
+def test_person_query_supports_field_first_forms(
+    question: str,
+    expected: str,
+) -> None:
+    assert _person_query(question) == expected

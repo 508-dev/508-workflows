@@ -200,7 +200,7 @@ class InMemoryKnowledgeStore:
             expired_ids = [
                 draft_id
                 for draft_id, draft in self._drafts.items()
-                if draft.expires_at <= comparison_time
+                if (draft.consumed_at is None and draft.expires_at <= comparison_time)
                 or (
                     draft.consumed_at is not None
                     and draft.consumed_at <= consumed_cutoff
@@ -333,6 +333,7 @@ class InMemoryKnowledgeStore:
         replaces_id: str | None = None,
     ) -> MemoryFact:
         now = datetime.now(timezone.utc)
+        key = _validated_memory_key(key)
         fact_id = str(uuid4())
         answer = _memory_value_text(value_json)
         effective_expires_at = expires_at or now + timedelta(
@@ -541,8 +542,17 @@ class InMemoryKnowledgeStore:
         if existing is not None and _normalize(existing.answer) == _normalize(
             candidate.answer
         ):
+            aliases = list(dict.fromkeys([*existing.aliases, *candidate.aliases]))[:8]
             refreshed = existing.model_copy(
                 update={
+                    "key": _fact_key(candidate.question),
+                    "question": candidate.question,
+                    "answer": candidate.answer,
+                    "aliases": aliases,
+                    "verification_status": _stronger_verification(
+                        existing.verification_status,
+                        draft.verification_status,
+                    ),
                     "review_after": review_after,
                     "updated_at": now,
                     "confidence": max(existing.confidence, candidate.confidence),
@@ -756,7 +766,7 @@ class PostgresKnowledgeStore:
                 cursor.execute(
                     """
                     DELETE FROM knowledge_capture_drafts
-                    WHERE expires_at <= %s
+                    WHERE (consumed_at IS NULL AND expires_at <= %s)
                        OR (consumed_at IS NOT NULL AND consumed_at <= %s)
                     """,
                     (comparison_time, consumed_cutoff),
@@ -781,7 +791,6 @@ class PostgresKnowledgeStore:
         comparison_time = now or datetime.now(timezone.utc)
         normalized_limit = max(1, min(limit, 20))
         semantic_limit = max(0, min(semantic_candidate_limit, 64))
-        target_limit = max(normalized_limit, semantic_limit)
         visible_projects = [project_id for project_id in project_ids if project_id]
         rows: list[dict[str, Any]] = []
         with self._connection() as conn:
@@ -855,7 +864,7 @@ class PostgresKnowledgeStore:
                 )
                 rows.extend(cursor.fetchall())
 
-                remaining = target_limit - len(rows)
+                remaining = semantic_limit - len(rows)
                 if semantic_limit and remaining > 0:
                     cursor.execute(
                         """
@@ -958,6 +967,7 @@ class PostgresKnowledgeStore:
         replaces_id: str | None = None,
     ) -> MemoryFact:
         fact_id = str(uuid4())
+        key = _validated_memory_key(key)
         now = datetime.now(timezone.utc)
         answer = _memory_value_text(value_json)
         resolved_org_id = organization_id or scope_id
@@ -1282,17 +1292,57 @@ class PostgresKnowledgeStore:
         if existing is not None and _normalize(str(existing["answer"])) == _normalize(
             candidate.answer
         ):
+            aliases = list(
+                dict.fromkeys(
+                    [
+                        *[str(value) for value in existing.get("aliases") or []],
+                        *candidate.aliases,
+                    ]
+                )
+            )[:8]
+            key = _fact_key(candidate.question)
+            search_text = " ".join(
+                [key, candidate.question, candidate.answer, *aliases]
+            )
             cursor.execute(
                 """
                 UPDATE memory_facts
                 SET
+                    key = %s,
+                    question = %s,
+                    answer = %s,
+                    aliases = %s,
+                    value_json = %s,
+                    verification_status = %s,
                     review_after = %s,
                     confidence = GREATEST(confidence, %s),
+                    search_document = to_tsvector('english', %s),
                     updated_at = %s
                 WHERE id = %s::uuid
                 RETURNING *
                 """,
-                (review_after, candidate.confidence, now, str(existing["id"])),
+                (
+                    key,
+                    candidate.question,
+                    candidate.answer,
+                    aliases,
+                    Jsonb(
+                        {
+                            "question": candidate.question,
+                            "answer": candidate.answer,
+                            "aliases": aliases,
+                        }
+                    ),
+                    _stronger_verification(
+                        str(existing["verification_status"]),
+                        draft.verification_status,
+                    ),
+                    review_after,
+                    candidate.confidence,
+                    search_text,
+                    now,
+                    str(existing["id"]),
+                ),
             )
             row = cursor.fetchone()
             if row is None:  # pragma: no cover - row is locked above
@@ -1732,6 +1782,26 @@ def _source_excerpt_hash(value: str | None) -> str | None:
 
 def _dedupe_key(question: str) -> str:
     return hashlib.sha256(_normalize(question).encode("utf-8")).hexdigest()
+
+
+def _validated_memory_key(key: str) -> str:
+    normalized = key.strip()
+    if not normalized:
+        raise ValueError("memory key must not be blank")
+    if len(normalized) > 128:
+        raise ValueError("memory key must be at most 128 characters")
+    return normalized
+
+
+def _stronger_verification(
+    existing: str,
+    candidate: KnowledgeVerificationStatus,
+) -> KnowledgeVerificationStatus:
+    return (
+        candidate
+        if _verification_authority(candidate) > _verification_authority(existing)
+        else _knowledge_verification(existing)
+    )
 
 
 def _normalize(value: str) -> str:
