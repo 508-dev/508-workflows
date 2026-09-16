@@ -69,6 +69,9 @@ _SECRET_PATTERNS = (
 _EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I)
 _PHONE_CANDIDATE_RE = re.compile(r"(?<!\w)(?:\+?\d[\d .()-]{7,}\d)(?!\w)")
 _ISO_DATE_PREFIX_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(?:\b|[T ])")
+_PLAIN_PHONE_CONTEXT_RE = re.compile(
+    r"\b(?:call|contact|mobile|phone|sms|tel(?:ephone)?|text)\b", re.I
+)
 
 
 _SOURCE_EXECUTOR = ThreadPoolExecutor(
@@ -870,7 +873,10 @@ def _contains_phone_number(value: str) -> bool:
         if _ISO_DATE_PREFIX_RE.match(candidate):
             continue
         if not any(character in candidate for character in "+ .()-"):
-            continue
+            start, end = match.span()
+            context = value[max(0, start - 40) : min(len(value), end + 40)]
+            if _PLAIN_PHONE_CONTEXT_RE.search(context) is None:
+                continue
         return True
     return False
 

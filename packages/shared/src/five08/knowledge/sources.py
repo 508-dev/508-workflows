@@ -32,7 +32,7 @@ _PERSON_QUERY_PATTERNS = (
         r"(?:email|profile|onboarding(?:\s+state)?|phone|contact(?:\s+info)?)\b",
         re.I,
     ),
-    re.compile(r"\bwhat\s+(?:skills|email(?:es)?)\s+does\s+(.+?)\s+have\b", re.I),
+    re.compile(r"\bwhat\s+(?:skills|emails?)\s+does\s+(.+?)\s+have\b", re.I),
     re.compile(r"\bwho\s+is\s+([^?]+)", re.I),
     re.compile(r"\b(?:about|for|on)\s+([^?]+)", re.I),
     re.compile(r"\b(?:member|contact|person)\s+([^?]+)", re.I),
@@ -203,6 +203,8 @@ class KnowledgeSourceAdapters:
             include_roster=False,
             timeout_seconds=self._timeout_seconds,
         )
+        if query:
+            rows = _unambiguous_project_rows(rows, query)
         evidence: list[KnowledgeEvidence] = []
         for row in rows:
             display_name = str(row.get("display_name") or "ERPNext project")
@@ -316,6 +318,27 @@ def _person_query(question: str) -> str | None:
         if normalized:
             return normalized[:120]
     return None
+
+
+def _unambiguous_project_rows(
+    rows: list[dict[str, Any]],
+    query: str,
+) -> list[dict[str, Any]]:
+    """Return one project only when a name query resolves unambiguously."""
+    normalized_query = query.strip().casefold()
+    exact = [
+        row
+        for row in rows
+        if any(
+            str(row.get(field) or "").strip().casefold() == normalized_query
+            for field in ("display_name", "erpnext_project_id", "id")
+        )
+    ]
+    if len(exact) == 1:
+        return exact
+    if exact or len(rows) != 1:
+        return []
+    return rows
 
 
 def _unambiguous_crm_rows(

@@ -4724,7 +4724,7 @@ async def test_post_job_lead_to_discord_maps_bot_auth_failure(
     monkeypatch: pytest.MonkeyPatch,
     app: api.FastAPI,
 ) -> None:
-    monkeypatch.setattr(api.settings, "discord_bot_internal_base_url", "http://bot")
+    monkeypatch.setattr(api.settings, "discord_bot_internal_base_url", "https://bot")
     monkeypatch.setattr(api.settings, "api_shared_secret", "secret")
     http_client = Mock()
     http_client.post = AsyncMock(
@@ -4949,11 +4949,35 @@ async def test_post_job_lead_to_discord_requires_bot_endpoint(
     assert payload == {"error": "bot_endpoint_not_configured"}
 
 
+async def test_post_job_lead_to_discord_rejects_external_cleartext_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+    app: api.FastAPI,
+) -> None:
+    monkeypatch.setattr(
+        api.settings,
+        "discord_bot_internal_base_url",
+        "http://bot.example",
+    )
+    monkeypatch.setattr(api.settings, "api_shared_secret", "secret")
+    request = Mock(app=app)
+
+    with patch("five08.backend.api._http_client_from_app") as http_client:
+        payload, status_code = await api._post_job_lead_to_discord(
+            request,
+            lead_id="lead-1",
+            reviewer_discord_user_id="steering-1",
+        )
+
+    assert status_code == 503
+    assert payload == {"error": "bot_endpoint_not_configured"}
+    http_client.assert_not_called()
+
+
 async def test_post_job_lead_to_discord_requires_api_secret(
     monkeypatch: pytest.MonkeyPatch,
     app: api.FastAPI,
 ) -> None:
-    monkeypatch.setattr(api.settings, "discord_bot_internal_base_url", "http://bot")
+    monkeypatch.setattr(api.settings, "discord_bot_internal_base_url", "https://bot")
     monkeypatch.setattr(api.settings, "api_shared_secret", "")
     request = Mock(app=app)
 
@@ -4971,7 +4995,7 @@ async def test_post_job_lead_to_discord_adds_generic_error_for_empty_bot_failure
     monkeypatch: pytest.MonkeyPatch,
     app: api.FastAPI,
 ) -> None:
-    monkeypatch.setattr(api.settings, "discord_bot_internal_base_url", "http://bot")
+    monkeypatch.setattr(api.settings, "discord_bot_internal_base_url", "https://bot")
     monkeypatch.setattr(api.settings, "api_shared_secret", "secret")
     response = Mock(status_code=503)
     response.json.side_effect = ValueError("empty body")
@@ -4994,7 +5018,7 @@ async def test_post_job_lead_to_discord_handles_http_errors(
     monkeypatch: pytest.MonkeyPatch,
     app: api.FastAPI,
 ) -> None:
-    monkeypatch.setattr(api.settings, "discord_bot_internal_base_url", "http://bot")
+    monkeypatch.setattr(api.settings, "discord_bot_internal_base_url", "https://bot")
     monkeypatch.setattr(api.settings, "api_shared_secret", "secret")
     http_client = Mock()
     http_client.post = AsyncMock(side_effect=api.httpx.ConnectError("boom"))

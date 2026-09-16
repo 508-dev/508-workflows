@@ -134,6 +134,22 @@ def test_member_specific_view_overwrite_prevents_public_knowledge_reply() -> Non
     assert AgentCog._discord_destination_is_org_only(message) is False
 
 
+def test_bot_member_view_overwrite_does_not_make_channel_guest_visible() -> None:
+    member_role = SimpleNamespace(id=1, name="Member", managed=False)
+    bot_member = Mock()
+    bot_member.id = 999
+    channel = SimpleNamespace(
+        overwrites={bot_member: SimpleNamespace(view_channel=True)},
+        permissions_for=Mock(return_value=SimpleNamespace(view_channel=True)),
+    )
+    message = SimpleNamespace(
+        guild=SimpleNamespace(roles=[member_role], me=bot_member),
+        channel=channel,
+    )
+
+    assert AgentCog._discord_destination_is_org_only(message) is True
+
+
 def test_managed_role_visibility_prevents_public_knowledge_reply() -> None:
     member_role = SimpleNamespace(id=1, name="Member", managed=False)
     booster_role = SimpleNamespace(id=2, name="Server Booster", managed=True)
@@ -183,6 +199,35 @@ async def test_ask_command_returns_a_private_grounded_answer() -> None:
     interaction.followup.send.assert_awaited_once()
     assert interaction.followup.send.await_args.kwargs["ephemeral"] is True
     assert "Cloudflare Pages" in interaction.followup.send.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_disabled_knowledge_does_not_collect_discord_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    collect_sources = AsyncMock()
+    monkeypatch.setattr(settings, "knowledge_enabled", False)
+    monkeypatch.setattr(
+        "five08.discord_bot.cogs.agent.collect_discord_sources",
+        collect_sources,
+    )
+    cog = AgentCog.__new__(AgentCog)
+    cog.bot = SimpleNamespace()
+    cog._post_backend_json = Mock(
+        return_value={
+            "status": "denied",
+            "answer": "Organizational knowledge answers are disabled.",
+        }
+    )
+
+    response = await cog._post_knowledge_query(
+        question="What happened?",
+        context={"discord_user_id": "123"},
+    )
+
+    assert response["status"] == "denied"
+    collect_sources.assert_not_awaited()
+    assert "discord_sources" not in cog._post_backend_json.call_args.args[1]
 
 
 @pytest.mark.asyncio

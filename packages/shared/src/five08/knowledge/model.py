@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
@@ -185,6 +186,7 @@ class OpenAICompatibleKnowledgeModel:
         user_payload: dict[str, Any],
         max_tokens: int,
     ) -> dict[str, Any] | None:
+        deadline = time.monotonic() + self.timeout_seconds
         selection = self.config.resolve("strong")
         api_key = _api_key_for_selection(self.config, selection)
         base_url = _base_url_for_selection(self.config, selection, api_key)
@@ -220,11 +222,14 @@ class OpenAICompatibleKnowledgeModel:
                 "Content-Type": "application/json",
             },
             json=request_payload,
-            timeout=self.timeout_seconds,
+            timeout=max(deadline - time.monotonic(), 0.001),
             verify=default_ca_bundle_path(),
         )
         if _should_retry_without_response_format(response):
             request_payload.pop("response_format", None)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
             response = requests.post(
                 f"{base_url.rstrip('/')}/chat/completions",
                 headers={
@@ -232,7 +237,7 @@ class OpenAICompatibleKnowledgeModel:
                     "Content-Type": "application/json",
                 },
                 json=request_payload,
-                timeout=self.timeout_seconds,
+                timeout=remaining,
                 verify=default_ca_bundle_path(),
             )
         response.raise_for_status()

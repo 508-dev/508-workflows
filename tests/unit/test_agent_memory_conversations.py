@@ -99,6 +99,20 @@ def test_other_actor_or_expired_state_cannot_complete_previous_request():
     assert agent.plan("Atlas", context()).plan is None
 
 
+@pytest.mark.parametrize("reply", ["cancel", "Stop this request"])
+def test_explicit_cancellation_clears_pending_clarification(reply: str) -> None:
+    state = InMemoryAgentStateStore()
+    agent = AgentOrchestrator(state_store=state)
+    actor = context()
+    agent.plan("Show tasks", actor)
+
+    response = agent.plan(reply, actor)
+
+    assert response.status == "canceled"
+    assert response.message == "Canceled the pending request."
+    assert state.take_clarification(actor) is None
+
+
 def test_new_command_does_not_fill_pending_project():
     agent = AgentOrchestrator()
     agent.plan("Show tasks", context())

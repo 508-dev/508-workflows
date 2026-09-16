@@ -1052,7 +1052,7 @@ async def _sync_discord_gig_thread_status(
     if not normalized_thread_id:
         return {"status": "skipped", "reason": "missing_thread_id"}
 
-    base_url = settings.discord_bot_internal_base_url.strip()
+    base_url = settings.resolved_discord_bot_internal_base_url
     if not base_url:
         return {"status": "skipped", "reason": "bot_endpoint_not_configured"}
 
@@ -1062,7 +1062,7 @@ async def _sync_discord_gig_thread_status(
 
     try:
         response = await _http_client_from_app(request.app).post(
-            f"{base_url.rstrip('/')}/internal/jobs/thread-status",
+            f"{base_url}/internal/jobs/thread-status",
             headers={"X-API-Secret": api_secret},
             json={"thread_id": normalized_thread_id, "status": status.value},
             timeout=8.0,
@@ -1104,7 +1104,7 @@ async def _post_job_lead_to_discord(
     engagement_status: EngagementStatus = EngagementStatus.LEAD,
 ) -> tuple[dict[str, Any], int]:
     """Ask the Discord bot to promote a qualified lead into a jobs forum."""
-    base_url = settings.discord_bot_internal_base_url.strip()
+    base_url = settings.resolved_discord_bot_internal_base_url
     if not base_url:
         return {"error": "bot_endpoint_not_configured"}, 503
 
@@ -1114,7 +1114,7 @@ async def _post_job_lead_to_discord(
 
     try:
         response = await _http_client_from_app(request.app).post(
-            f"{base_url.rstrip('/')}/internal/jobs/job-leads/post",
+            f"{base_url}/internal/jobs/job-leads/post",
             headers={"X-API-Secret": api_secret},
             json={
                 "lead_id": lead_id,
@@ -1149,7 +1149,7 @@ async def _stage_job_lead_to_discord(
     reviewer_discord_user_id: str,
 ) -> tuple[dict[str, Any], int]:
     """Ask the Discord bot to create an unqualified holding thread for one lead."""
-    base_url = settings.discord_bot_internal_base_url.strip()
+    base_url = settings.resolved_discord_bot_internal_base_url
     if not base_url:
         return {"error": "bot_endpoint_not_configured"}, 503
 
@@ -1159,7 +1159,7 @@ async def _stage_job_lead_to_discord(
 
     try:
         response = await _http_client_from_app(request.app).post(
-            f"{base_url.rstrip('/')}/internal/jobs/job-leads/stage",
+            f"{base_url}/internal/jobs/job-leads/stage",
             headers={"X-API-Secret": api_secret},
             json={
                 "lead_id": lead_id,
@@ -1190,7 +1190,7 @@ async def _list_job_channels_from_bot(
     register_defaults: bool = True,
 ) -> dict[str, Any] | None:
     """Ask the Discord bot for registered job forums and live tag metadata."""
-    base_url = settings.discord_bot_internal_base_url.strip()
+    base_url = settings.resolved_discord_bot_internal_base_url
     api_secret = str(settings.api_shared_secret or "").strip()
     if not base_url or not api_secret:
         return None
@@ -1199,7 +1199,7 @@ async def _list_job_channels_from_bot(
         if not register_defaults:
             params["register_defaults"] = "false"
         response = await _http_client_from_app(request.app).get(
-            f"{base_url.rstrip('/')}/internal/jobs/channels",
+            f"{base_url}/internal/jobs/channels",
             headers={"X-API-Secret": api_secret},
             params=params,
             timeout=10.0,
@@ -1225,13 +1225,13 @@ async def _list_knowledge_channels_from_bot(
     request: Request,
 ) -> dict[str, Any] | None:
     """Ask the Discord bot for channels it can currently read."""
-    base_url = settings.discord_bot_internal_base_url.strip()
+    base_url = settings.resolved_discord_bot_internal_base_url
     api_secret = str(settings.api_shared_secret or "").strip()
     if not base_url or not api_secret:
         return None
     try:
         response = await _http_client_from_app(request.app).get(
-            f"{base_url.rstrip('/')}/internal/knowledge/channels",
+            f"{base_url}/internal/knowledge/channels",
             headers={"X-API-Secret": api_secret},
             timeout=10.0,
         )

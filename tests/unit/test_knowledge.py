@@ -28,6 +28,7 @@ from five08.knowledge.sources import (
     _person_query,
     _project_query,
     _unambiguous_crm_rows,
+    _unambiguous_project_rows,
 )
 from five08.knowledge.store import InMemoryKnowledgeStore
 
@@ -443,6 +444,8 @@ def test_sensitive_additional_cited_message_forces_private_capture(
 def test_dates_and_identifiers_are_not_classified_as_phone_numbers() -> None:
     assert _contains_sensitive_output("The deadline is 2026-09-16.") is False
     assert _contains_sensitive_output("Build 123456789012345 completed.") is False
+    assert _contains_sensitive_output("Reference 4155550123 completed.") is False
+    assert _contains_sensitive_output("Call 4155550123.") is True
     assert _contains_sensitive_output("Call +1 (415) 555-0123.") is True
 
 
@@ -1018,6 +1021,7 @@ def test_project_query_supports_name_first_forms(
     ("question", "expected"),
     [
         ("What is Alice's email?", "Alice"),
+        ("What emails does Alice have?", "Alice"),
         ("What is Alice's onboarding state?", "Alice"),
         ("What skills does Alice have?", "Alice"),
     ],
@@ -1027,6 +1031,28 @@ def test_person_query_supports_field_first_forms(
     expected: str,
 ) -> None:
     assert _person_query(question) == expected
+
+
+def test_project_rows_require_an_unambiguous_identity_match() -> None:
+    exact = {"id": "1", "display_name": "Atlas"}
+    partial = {"id": "2", "display_name": "Atlas Web"}
+
+    assert _unambiguous_project_rows([partial, exact], "atlas") == [exact]
+    assert _unambiguous_project_rows([partial], "atlas") == [partial]
+    assert (
+        _unambiguous_project_rows(
+            [partial, {"id": "3", "display_name": "Atlas Mobile"}],
+            "atlas",
+        )
+        == []
+    )
+    assert (
+        _unambiguous_project_rows(
+            [exact, {"id": "atlas", "display_name": "Other"}],
+            "atlas",
+        )
+        == []
+    )
 
 
 def test_crm_rows_require_an_unambiguous_identity_match() -> None:

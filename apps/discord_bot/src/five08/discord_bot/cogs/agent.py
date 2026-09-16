@@ -1120,10 +1120,13 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             role_ids = {
                 getattr(role, "id", None) for role in getattr(guild, "roles", [])
             }
+            bot_member_id = getattr(getattr(guild, "me", None), "id", None)
             for target, overwrite in overwrites.items():
                 if getattr(overwrite, "view_channel", None) is not True:
                     continue
-                if getattr(target, "id", None) not in role_ids:
+                target_id = getattr(target, "id", None)
+                is_bot_member = bot_member_id is not None and target_id == bot_member_id
+                if target_id not in role_ids and not is_bot_member:
                     return False
 
         member_can_view = False
@@ -1707,9 +1710,12 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         question: str,
         context: dict[str, Any],
     ) -> dict[str, Any]:
-        sources, source_errors = await collect_discord_sources(
-            self.bot, settings, context, question
-        )
+        sources: list[dict[str, Any]] = []
+        source_errors: list[str] = []
+        if settings.knowledge_enabled:
+            sources, source_errors = await collect_discord_sources(
+                self.bot, settings, context, question
+            )
         payload: dict[str, Any] = {"question": question, "context": context}
         if sources:
             payload["discord_sources"] = sources

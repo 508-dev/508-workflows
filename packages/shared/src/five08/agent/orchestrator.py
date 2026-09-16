@@ -134,6 +134,11 @@ class AgentOrchestrator:
         state = self.state_store.take_clarification(context)
         text = message.strip()
         clarification_completed = False
+        if state is not None and re.match(r"(?i)^(?:cancel|stop)\b", text):
+            return AgentResponse(
+                status="canceled",
+                message="Canceled the pending request.",
+            )
         if (
             state is not None
             and 0 < len(text) <= 80
