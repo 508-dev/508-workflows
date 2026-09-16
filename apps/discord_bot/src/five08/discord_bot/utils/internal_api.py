@@ -85,6 +85,10 @@ class InternalAPIRoutes:
             "/internal/jobs/channels",
             self.job_channels_handler,
         )
+        app.router.add_get(
+            "/internal/knowledge/channels",
+            self.knowledge_channels_handler,
+        )
 
     @staticmethod
     def _is_authorized(request: web.Request) -> bool:
@@ -525,6 +529,58 @@ class InternalAPIRoutes:
         result, status_code = await self._list_job_channels(
             register_defaults=register_defaults,
         )
+        return web.json_response(result, status=status_code)
+
+    def _list_knowledge_channels(self) -> tuple[dict[str, Any], int]:
+        """Return channels the bot can currently read as knowledge sources."""
+        guild = self._resolve_target_guild()
+        if guild is None:
+            return {"error": "guild_not_found"}, 404
+        bot_member = guild.me
+        if bot_member is None:
+            return {"error": "bot_member_unresolved"}, 503
+
+        channels: list[dict[str, str]] = []
+        for channel in [*guild.text_channels, *guild.threads]:
+            if isinstance(channel, discord.Thread) and channel.is_private():
+                continue
+            permissions = channel.permissions_for(bot_member)
+            if not (permissions.view_channel and permissions.read_message_history):
+                continue
+            if isinstance(channel, discord.Thread):
+                parent = channel.parent
+                channels.append(
+                    {
+                        "channel_id": str(channel.id),
+                        "channel_name": channel.name,
+                        "channel_type": "thread",
+                        "parent_name": parent.name if parent is not None else "",
+                    }
+                )
+            else:
+                category = channel.category
+                channels.append(
+                    {
+                        "channel_id": str(channel.id),
+                        "channel_name": channel.name,
+                        "channel_type": "text",
+                        "parent_name": category.name if category is not None else "",
+                    }
+                )
+        channels.sort(
+            key=lambda item: (
+                item["parent_name"].casefold(),
+                item["channel_type"],
+                item["channel_name"].casefold(),
+            )
+        )
+        return {"channels": channels, "guild_id": str(guild.id)}, 200
+
+    async def knowledge_channels_handler(self, request: web.Request) -> web.Response:
+        """Return bot-readable Discord channels for the admin source picker."""
+        if not self._is_authorized(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        result, status_code = self._list_knowledge_channels()
         return web.json_response(result, status=status_code)
 
     async def post_job_lead_handler(self, request: web.Request) -> web.Response:

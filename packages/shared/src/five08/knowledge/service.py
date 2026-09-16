@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 from five08.agent.policy import PolicyEngine
+from five08.knowledge_channels import knowledge_discord_channel_ids
 from five08.knowledge.model import KnowledgeModel
 from five08.knowledge.models import (
     KnowledgeCaptureCandidate,
@@ -512,13 +513,11 @@ class KnowledgeService:
         self, request: KnowledgeQueryRequest
     ) -> list[KnowledgeEvidence]:
         """Accept only bounded snapshots from the configured gateway allowlist."""
-        allowed = {
-            item.strip()
-            for item in str(
+        allowed = set(
+            knowledge_discord_channel_ids(
                 getattr(self.settings, "knowledge_discord_channel_ids", "")
-            ).split(",")
-            if item.strip()
-        }
+            )
+        )
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(
             days=int(getattr(self.settings, "knowledge_discord_history_days", 30))

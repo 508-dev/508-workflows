@@ -72,6 +72,11 @@ from five08.job_channels import (
     register_job_post_channel,
     unregister_job_post_channel,
 )
+from five08.knowledge_channels import (
+    MAX_KNOWLEDGE_DISCORD_CHANNELS,
+    knowledge_discord_channel_ids,
+    normalize_knowledge_discord_channel_ids,
+)
 from five08.knowledge.model import OpenAICompatibleKnowledgeModel
 from five08.knowledge.models import (
     KnowledgeCaptureConfirmationRequest,
@@ -1205,6 +1210,37 @@ async def _list_job_channels_from_bot(
     if response.status_code >= 400:
         logger.warning(
             "Discord job channel metadata request failed status=%s payload=%s",
+            response.status_code,
+            response.text[:500],
+        )
+        return None
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+async def _list_knowledge_channels_from_bot(
+    request: Request,
+) -> dict[str, Any] | None:
+    """Ask the Discord bot for channels it can currently read."""
+    base_url = settings.discord_bot_internal_base_url.strip()
+    api_secret = str(settings.api_shared_secret or "").strip()
+    if not base_url or not api_secret:
+        return None
+    try:
+        response = await _http_client_from_app(request.app).get(
+            f"{base_url.rstrip('/')}/internal/knowledge/channels",
+            headers={"X-API-Secret": api_secret},
+            timeout=10.0,
+        )
+    except httpx.HTTPError as exc:
+        logger.warning("Failed loading Discord knowledge channel metadata: %s", exc)
+        return None
+    if response.status_code >= 400:
+        logger.warning(
+            "Discord knowledge channel metadata request failed status=%s payload=%s",
             response.status_code,
             response.text[:500],
         )
@@ -8086,6 +8122,38 @@ async def dashboard_configuration_handler(request: Request) -> JSONResponse:
     return JSONResponse({"items": items})
 
 
+async def dashboard_knowledge_channels_handler(request: Request) -> JSONResponse:
+    """Return live Discord choices and the effective knowledge-source selection."""
+    _, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_CONFIGURATION_READ,
+    )
+    if error_response is not None:
+        return error_response
+
+    payload = await _list_knowledge_channels_from_bot(request)
+    channels: list[dict[str, Any]] = []
+    available = payload is not None and isinstance(payload.get("channels"), list)
+    if available:
+        assert payload is not None
+        channels = [
+            channel
+            for channel in payload["channels"]
+            if isinstance(channel, dict)
+            and str(channel.get("channel_id", "")).isdigit()
+        ]
+    return JSONResponse(
+        {
+            "channels": channels,
+            "selected_channel_ids": knowledge_discord_channel_ids(
+                settings.knowledge_discord_channel_ids
+            ),
+            "maximum_selected": MAX_KNOWLEDGE_DISCORD_CHANNELS,
+            "available": available,
+        }
+    )
+
+
 async def dashboard_newsletter_suppressions_handler(
     request: Request,
     limit: int = Query(default=200, ge=1, le=1000),
@@ -8246,11 +8314,16 @@ async def dashboard_update_configuration_handler(
                     {"error": "secret_value_required"},
                     status_code=400,
                 )
+            validated_value = await _validated_configuration_value(
+                request,
+                definition.key,
+                payload.value,
+            )
             await asyncio.to_thread(
                 set_runtime_config_value,
                 settings,
                 definition,
-                payload.value,
+                validated_value,
                 updated_by_provider=actor_provider.value,
                 updated_by_subject=actor_subject,
             )
@@ -8265,6 +8338,9 @@ async def dashboard_update_configuration_handler(
         )
         return JSONResponse({"error": str(exc)}, status_code=status_code)
     except RuntimeError as exc:
+        status_code = (
+            503 if "Discord channel validation is unavailable" in str(exc) else 409
+        )
         await _audit_dashboard_configuration_change(
             session,
             result=AuditResult.ERROR,
@@ -8272,7 +8348,7 @@ async def dashboard_update_configuration_handler(
             action=audit_action,
             metadata={**metadata, "error": str(exc)},
         )
-        return JSONResponse({"error": str(exc)}, status_code=409)
+        return JSONResponse({"error": str(exc)}, status_code=status_code)
 
     global _AGENT_ORCHESTRATOR, _KNOWLEDGE_SERVICE
     with _AGENT_ORCHESTRATOR_LOCK:
@@ -8288,6 +8364,33 @@ async def dashboard_update_configuration_handler(
     )
     items = await asyncio.to_thread(list_runtime_config, settings)
     return JSONResponse({"items": items})
+
+
+async def _validated_configuration_value(
+    request: Request,
+    key: str,
+    value: Any,
+) -> Any:
+    """Validate configuration values that depend on live provider state."""
+    if key != "KNOWLEDGE_DISCORD_CHANNEL_IDS":
+        return value
+    normalized = normalize_knowledge_discord_channel_ids(value)
+    payload = await _list_knowledge_channels_from_bot(request)
+    if payload is None or not isinstance(payload.get("channels"), list):
+        raise RuntimeError(
+            "Discord channel validation is unavailable; no changes were saved"
+        )
+    available_ids = {
+        str(channel.get("channel_id"))
+        for channel in payload["channels"]
+        if isinstance(channel, dict)
+    }
+    missing_ids = set(knowledge_discord_channel_ids(normalized)) - available_ids
+    if missing_ids:
+        raise ValueError(
+            "Some selected Discord channels are no longer accessible; refresh and try again"
+        )
+    return normalized
 
 
 async def dashboard_rerun_job_handler(

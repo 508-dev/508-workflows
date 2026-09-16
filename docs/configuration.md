@@ -262,9 +262,12 @@ Agent gateway:
 - `AGENT_INTENT_NORMALIZER_TIMEOUT_SECONDS`
 - `KNOWLEDGE_ENABLED`: enables `/ask`, knowledge questions in mentions, and
   confirmed Discord captures.
-- `KNOWLEDGE_DISCORD_CHANNEL_IDS`: up to eight comma-separated channel or
-  public-thread IDs. Configure the same list in the bot and API. Empty by
-  default; no Discord history is searched until IDs are selected. The bot
+- `KNOWLEDGE_DISCORD_CHANNEL_IDS`: selected from **Configuration → Knowledge
+  sources** in the admin dashboard, which lists bot-readable text channels and
+  active public threads by name. The shared runtime value updates the bot and
+  API without a restart. Up to eight sources may be selected; empty disables
+  Discord history search. A nonempty environment value remains supported but
+  locks the picker. The bot
   refreshes the caller's membership and checks both caller and bot history
   permissions before reading each source. Private threads are excluded.
 - `KNOWLEDGE_DISCORD_HISTORY_LIMIT`: recent messages per enabled location

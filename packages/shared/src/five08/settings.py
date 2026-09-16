@@ -6,6 +6,8 @@ import sys
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from five08.knowledge_channels import normalize_knowledge_discord_channel_ids
+
 
 def normalize_sqlalchemy_postgres_url(url: str) -> str:
     """Normalize psycopg DSN for SQLAlchemy usage."""
@@ -78,16 +80,7 @@ class SharedSettings(BaseSettings):
     @field_validator("knowledge_discord_channel_ids")
     @classmethod
     def _validate_knowledge_channels(cls, value: str) -> str:
-        channels = list(
-            dict.fromkeys(item.strip() for item in value.split(",") if item.strip())
-        )
-        if len(channels) > 8 or any(
-            not item.isascii() or not item.isdigit() for item in channels
-        ):
-            raise ValueError(
-                "Specify at most eight comma-separated Discord channel or thread IDs"
-            )
-        return ",".join(channels)
+        return normalize_knowledge_discord_channel_ids(value)
 
     minio_endpoint: str = "http://127.0.0.1:9000"
     minio_root_user: str = "internal"

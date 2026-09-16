@@ -59,13 +59,29 @@ type JobChannelsResponse = {
   available_channels?: JobPostChannel[]
 }
 
+type KnowledgeChannel = {
+  channel_id: string
+  channel_name: string
+  channel_type: "text" | "thread"
+  parent_name?: string
+}
+
+type KnowledgeChannelsResponse = {
+  channels: KnowledgeChannel[]
+  selected_channel_ids: string[]
+  maximum_selected: number
+  available: boolean
+}
+
 type ConfigurationGroupMetadata = {
   category: string
   label: string
   description: string
 }
 
-type ConfigurationTab = "settings" | "job-channels"
+type ConfigurationTab = "settings" | "knowledge-sources" | "job-channels"
+
+const knowledgeChannelsKey = "KNOWLEDGE_DISCORD_CHANNEL_IDS"
 
 const jobPostingTypeOptions: { value: JobPostingTypeValue; label: string }[] = [
   { value: "part_time", label: "Part-time / contract" },
@@ -137,11 +153,18 @@ function configurationGroupId(category: string) {
 }
 
 function configurationTabFromHash(hash = window.location.hash): ConfigurationTab {
-  return hash.replace(/^#/, "") === "job-channels" ? "job-channels" : "settings"
+  const tab = hash.replace(/^#/, "")
+  if (tab === "job-channels" || tab === "knowledge-sources") return tab
+  return "settings"
 }
 
 function updateConfigurationTabHash(tab: ConfigurationTab) {
-  const hash = tab === "job-channels" ? "#job-channels" : "#settings"
+  const hash =
+    tab === "job-channels"
+      ? "#job-channels"
+      : tab === "knowledge-sources"
+        ? "#knowledge-sources"
+        : "#settings"
   window.history.replaceState(
     window.history.state,
     "",
@@ -175,6 +198,11 @@ function ConfigurationView({
   jobChannels,
   availableJobChannels,
   onRefreshJobChannels,
+  knowledgeChannels,
+  selectedKnowledgeChannelIds,
+  knowledgeChannelsAvailable,
+  knowledgeChannelLimit,
+  onRefreshKnowledgeChannels,
   onSave,
   onClear,
   onSaveJobChannel,
@@ -189,6 +217,11 @@ function ConfigurationView({
   jobChannels: JobPostChannel[]
   availableJobChannels: JobPostChannel[]
   onRefreshJobChannels: () => void
+  knowledgeChannels: KnowledgeChannel[]
+  selectedKnowledgeChannelIds: string[]
+  knowledgeChannelsAvailable: boolean
+  knowledgeChannelLimit: number
+  onRefreshKnowledgeChannels: () => void
   onSave: (key: string, value: string) => Promise<boolean>
   onClear: (key: string) => void
   onSaveJobChannel: (channelId: string, postingType: JobPostingTypeValue) => Promise<boolean>
@@ -203,6 +236,8 @@ function ConfigurationView({
   const [selectedPostingType, setSelectedPostingType] = useState<JobPostingTypeValue>("part_time")
   const [drafts, setDrafts] = useState<Record<string, string>>({})
   const [generatedSecrets, setGeneratedSecrets] = useState<Record<string, string>>({})
+  const [knowledgeQuery, setKnowledgeQuery] = useState("")
+  const [knowledgeDraft, setKnowledgeDraft] = useState<string[]>(selectedKnowledgeChannelIds)
   const registeredChannelIds = useMemo(
     () => new Set(jobChannels.map((channel) => channel.channel_id)),
     [jobChannels],
@@ -220,11 +255,42 @@ function ConfigurationView({
       (left.channel_name || left.channel_id).localeCompare(right.channel_name || right.channel_id),
     )
   }, [availableJobChannels, jobChannels])
+  const knowledgeConfiguration = items.find((item) => item.key === knowledgeChannelsKey)
+  const settingsItems = items.filter((item) => item.key !== knowledgeChannelsKey)
+  const knowledgeChannelOptions = useMemo(() => {
+    const byId = new Map(knowledgeChannels.map((channel) => [channel.channel_id, channel]))
+    for (const channelId of selectedKnowledgeChannelIds) {
+      if (!byId.has(channelId)) {
+        byId.set(channelId, {
+          channel_id: channelId,
+          channel_name: channelId,
+          channel_type: "text",
+        })
+      }
+    }
+    return Array.from(byId.values()).sort((left, right) =>
+      `${left.parent_name || ""}/${left.channel_name}`.localeCompare(
+        `${right.parent_name || ""}/${right.channel_name}`,
+      ),
+    )
+  }, [knowledgeChannels, selectedKnowledgeChannelIds])
+  const visibleKnowledgeChannels = knowledgeChannelOptions.filter((channel) => {
+    const query = knowledgeQuery.trim().toLocaleLowerCase()
+    if (!query) return true
+    return [channel.channel_name, channel.parent_name, channel.channel_type, channel.channel_id]
+      .filter(Boolean)
+      .some((value) => String(value).toLocaleLowerCase().includes(query))
+  })
+  const unresolvedKnowledgeChannelIds = new Set(
+    selectedKnowledgeChannelIds.filter(
+      (channelId) => !knowledgeChannels.some((channel) => channel.channel_id === channelId),
+    ),
+  )
   const unregisteredChannelOptions = channelOptions.filter(
     (channel) => !registeredChannelIds.has(channel.channel_id),
   )
   const categories = useMemo(() => {
-    const present = new Set(items.map((item) => item.category))
+    const present = new Set(settingsItems.map((item) => item.category))
     const known = configurationGroups.filter((group) => present.has(group.category))
     const unknown = Array.from(present)
       .filter((category) => !configurationGroupByCategory.has(category))
@@ -235,10 +301,10 @@ function ConfigurationView({
         description: "Additional runtime settings.",
       }))
     return known.concat(unknown)
-  }, [items])
+  }, [settingsItems])
   const groupedItems = useMemo(() => {
     const groups = new Map<string, ConfigurationItem[]>()
-    for (const item of items) {
+    for (const item of settingsItems) {
       if (selectedCategory !== "All" && item.category !== selectedCategory) continue
       const current = groups.get(item.category) ?? []
       current.push(item)
@@ -265,14 +331,14 @@ function ConfigurationView({
         }
       })
       .sort((left, right) => left.order - right.order || left.label.localeCompare(right.label))
-  }, [items, selectedCategory])
+  }, [settingsItems, selectedCategory])
   const summary = useMemo(
     () => ({
-      configured: items.filter((item) => item.configured).length,
-      envLocked: items.filter((item) => item.env_locked).length,
-      missing: items.filter((item) => !item.configured).length,
+      configured: settingsItems.filter((item) => item.configured).length,
+      envLocked: settingsItems.filter((item) => item.env_locked).length,
+      missing: settingsItems.filter((item) => !item.configured).length,
     }),
-    [items],
+    [settingsItems],
   )
   const visibleItemCount = groupedItems.reduce((count, group) => count + group.items.length, 0)
 
@@ -281,6 +347,10 @@ function ConfigurationView({
     window.addEventListener("hashchange", onHashChange)
     return () => window.removeEventListener("hashchange", onHashChange)
   }, [])
+
+  useEffect(() => {
+    setKnowledgeDraft(selectedKnowledgeChannelIds)
+  }, [selectedKnowledgeChannelIds])
 
   useEffect(() => {
     if (
@@ -607,6 +677,145 @@ function ConfigurationView({
     )
   }
 
+  function renderKnowledgeSourcesTab() {
+    const busy = loading[`configuration:${knowledgeChannelsKey}`]
+    const envLocked = Boolean(knowledgeConfiguration?.env_locked)
+    const selectedSet = new Set(knowledgeDraft)
+    const currentValue = selectedKnowledgeChannelIds.join(",")
+    const draftValue = knowledgeDraft.join(",")
+    const unresolvedDraft = knowledgeDraft.some((channelId) =>
+      unresolvedKnowledgeChannelIds.has(channelId),
+    )
+    const canSaveSelection =
+      canWrite &&
+      !envLocked &&
+      !busy &&
+      draftValue !== currentValue &&
+      (knowledgeDraft.length > 0 ? knowledgeChannelsAvailable && !unresolvedDraft : true)
+
+    function toggleKnowledgeChannel(channelId: string, checked: boolean) {
+      setKnowledgeDraft((current) =>
+        checked
+          ? [...current, channelId].slice(0, knowledgeChannelLimit)
+          : current.filter((candidate) => candidate !== channelId),
+      )
+    }
+
+    function saveKnowledgeChannels() {
+      if (knowledgeDraft.length === 0) {
+        onClear(knowledgeChannelsKey)
+        return
+      }
+      void onSave(knowledgeChannelsKey, draftValue)
+    }
+
+    return (
+      <div className="grid gap-4">
+        <section className="grid gap-2 rounded-md border bg-background p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="grid gap-1">
+              <strong>Discord answer sources</strong>
+              <span className="text-sm text-muted-foreground">
+                Choose channels the bot may search when answering questions. Each answer still
+                checks that the requesting member can currently access a source before quoting it.
+              </span>
+            </div>
+            <div className="flex gap-2">
+              <Badge variant={knowledgeDraft.length ? "succeeded" : "missing"}>
+                {knowledgeDraft.length} / {knowledgeChannelLimit} selected
+              </Badge>
+              {envLocked ? <Badge variant="running">Environment locked</Badge> : null}
+            </div>
+          </div>
+          {!knowledgeChannelsAvailable ? (
+            <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
+              The Discord bot is unavailable, so channel choices cannot be refreshed or saved.
+              Existing selections are unchanged.
+            </div>
+          ) : null}
+          {unresolvedKnowledgeChannelIds.size > 0 ? (
+            <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
+              {unresolvedKnowledgeChannelIds.size} selected source
+              {unresolvedKnowledgeChannelIds.size === 1 ? " is" : "s are"} no longer readable by the
+              bot. Remove it before saving another selection.
+            </div>
+          ) : null}
+          {envLocked ? (
+            <span className="text-sm text-muted-foreground">
+              Remove KNOWLEDGE_DISCORD_CHANNEL_IDS from the service environment to manage this
+              selection here.
+            </span>
+          ) : null}
+        </section>
+
+        <Input
+          aria-label="Search Discord knowledge channels"
+          value={knowledgeQuery}
+          placeholder="Search channels, categories, or threads"
+          autoComplete="off"
+          onChange={(event) => setKnowledgeQuery(event.target.value)}
+        />
+
+        <Empty hidden={visibleKnowledgeChannels.length !== 0}>
+          No readable Discord channels match this search.
+        </Empty>
+        {visibleKnowledgeChannels.length ? (
+          <div className="grid max-h-[32rem] gap-2 overflow-y-auto rounded-md border bg-background p-2">
+            {visibleKnowledgeChannels.map((channel) => {
+              const checked = selectedSet.has(channel.channel_id)
+              const unresolved = unresolvedKnowledgeChannelIds.has(channel.channel_id)
+              const limitReached = knowledgeDraft.length >= knowledgeChannelLimit
+              return (
+                <label
+                  key={channel.channel_id}
+                  className="flex cursor-pointer items-center gap-3 rounded-md border p-3 hover:bg-secondary/40"
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    aria-label={`Use #${channel.channel_name} for Discord answers`}
+                    disabled={
+                      !canWrite ||
+                      envLocked ||
+                      busy ||
+                      (!checked && (!knowledgeChannelsAvailable || limitReached))
+                    }
+                    onChange={(event) =>
+                      toggleKnowledgeChannel(channel.channel_id, event.target.checked)
+                    }
+                  />
+                  <span className="min-w-0 flex-1">
+                    <strong className="block truncate">#{channel.channel_name}</strong>
+                    <span className="block truncate text-xs text-muted-foreground">
+                      {channel.parent_name || "No category"} · {channel.channel_id}
+                    </span>
+                  </span>
+                  <Badge variant={unresolved ? "missing" : "neutral"}>
+                    {unresolved ? "Unavailable" : channel.channel_type}
+                  </Badge>
+                </label>
+              )
+            })}
+          </div>
+        ) : null}
+
+        <div className="flex flex-wrap justify-end gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => setKnowledgeDraft(selectedKnowledgeChannelIds)}
+            disabled={busy || draftValue === currentValue}
+          >
+            Reset
+          </Button>
+          <Button type="button" onClick={saveKnowledgeChannels} disabled={!canSaveSelection}>
+            Save sources
+          </Button>
+        </div>
+      </div>
+    )
+  }
+
   function renderJobChannelsTab() {
     const selectedChannel = channelOptions.find(
       (channel) => channel.channel_id === selectedChannelId,
@@ -789,6 +998,17 @@ function ConfigurationView({
                 Settings
               </Button>
               <Button
+                id="configurationKnowledgeSourcesTab"
+                type="button"
+                size="sm"
+                variant={activeTab === "knowledge-sources" ? "default" : "ghost"}
+                aria-pressed={activeTab === "knowledge-sources"}
+                onClick={() => selectConfigurationTab("knowledge-sources")}
+              >
+                Knowledge sources
+                <span className="font-mono text-[11px]">{selectedKnowledgeChannelIds.length}</span>
+              </Button>
+              <Button
                 id="configurationJobChannelsTab"
                 type="button"
                 size="sm"
@@ -805,9 +1025,19 @@ function ConfigurationView({
             id="refreshConfiguration"
             type="button"
             variant="outline"
-            onClick={activeTab === "job-channels" ? onRefreshJobChannels : onRefresh}
+            onClick={
+              activeTab === "job-channels"
+                ? onRefreshJobChannels
+                : activeTab === "knowledge-sources"
+                  ? onRefreshKnowledgeChannels
+                  : onRefresh
+            }
             disabled={
-              activeTab === "job-channels" ? loading.jobPostChannels : loading.configuration
+              activeTab === "job-channels"
+                ? loading.jobPostChannels
+                : activeTab === "knowledge-sources"
+                  ? loading.knowledgeChannels
+                  : loading.configuration
             }
           >
             <RefreshCw />
@@ -821,7 +1051,7 @@ function ConfigurationView({
               aria-label="Configuration summary"
             >
               {[
-                ["Total", items.length],
+                ["Total", settingsItems.length],
                 ["Configured", summary.configured],
                 ["Missing", summary.missing],
                 ["Env locked", summary.envLocked],
@@ -843,10 +1073,12 @@ function ConfigurationView({
                 onClick={() => setSelectedCategory("All")}
               >
                 All groups
-                <span className="font-mono text-[11px]">{items.length}</span>
+                <span className="font-mono text-[11px]">{settingsItems.length}</span>
               </Button>
               {categories.map((group) => {
-                const count = items.filter((item) => item.category === group.category).length
+                const count = settingsItems.filter(
+                  (item) => item.category === group.category,
+                ).length
                 return (
                   <Button
                     key={group.category}
@@ -863,6 +1095,8 @@ function ConfigurationView({
               })}
             </section>
           </CardContent>
+        ) : activeTab === "knowledge-sources" ? (
+          <CardContent>{renderKnowledgeSourcesTab()}</CardContent>
         ) : (
           <CardContent>{renderJobChannelsTab()}</CardContent>
         )}
@@ -931,5 +1165,7 @@ export type {
   JobChannelsResponse,
   JobPostChannel,
   JobPostChannelTag,
+  KnowledgeChannel,
+  KnowledgeChannelsResponse,
 }
 export { ConfigurationView }

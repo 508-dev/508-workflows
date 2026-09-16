@@ -68,6 +68,11 @@ such as `@bot I forgot, does our main website auto deploy?` does not require
 - ERPNext project cache rows filtered by the caller's CRM-linked project roster
 - CRM people data only when the caller has the existing CRM read scope
 
+Admins choose Discord sources by name under **Configuration → Knowledge
+sources**. The picker shows only channels the bot can currently view and read,
+limits the selection to eight, and validates access again when saving. A source
+is still omitted from an answer whenever the asking member lacks current access.
+
 Recall is hybrid. PostgreSQL full-text ranking handles keyword matches, a
 conservative deterministic similarity score handles common typos, and the
 optional model selects semantically relevant facts for paraphrases and synonyms

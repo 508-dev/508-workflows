@@ -8,6 +8,8 @@ from typing import Any
 
 import discord
 
+from five08.knowledge_channels import knowledge_discord_channel_ids
+
 
 async def collect_thread_context(message: discord.Message) -> list[dict[str, Any]]:
     """Collect recent task discussion only from the current accessible thread."""
@@ -49,11 +51,7 @@ async def collect_discord_sources(
     bot: Any, settings: Any, context: dict[str, Any], question: str
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Read only allowlisted locations, never arbitrary model-selected channels."""
-    channel_ids = [
-        value.strip()
-        for value in settings.knowledge_discord_channel_ids.split(",")
-        if value.strip().isdigit()
-    ][:8]
+    channel_ids = knowledge_discord_channel_ids(settings.knowledge_discord_channel_ids)
     if not channel_ids or context.get("guild_id") != str(settings.discord_server_id):
         return [], []
     guild = bot.get_guild(int(context["guild_id"]))

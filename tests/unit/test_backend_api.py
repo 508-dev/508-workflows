@@ -2447,6 +2447,110 @@ def test_dashboard_configuration_requires_admin_permission(
     mock_forbidden_list.assert_not_called()
 
 
+def test_dashboard_knowledge_channels_returns_live_options_and_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="validated",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    monkeypatch.setattr(api.settings, "knowledge_discord_channel_ids", "111,222")
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._list_knowledge_channels_from_bot",
+            new_callable=AsyncMock,
+            return_value={
+                "channels": [
+                    {
+                        "channel_id": "111",
+                        "channel_name": "general",
+                        "channel_type": "text",
+                        "parent_name": "Community",
+                    }
+                ]
+            },
+        ),
+    ):
+        response = client.get("/dashboard/api/knowledge-channels")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "channels": [
+            {
+                "channel_id": "111",
+                "channel_name": "general",
+                "channel_type": "text",
+                "parent_name": "Community",
+            }
+        ],
+        "selected_channel_ids": ["111", "222"],
+        "maximum_selected": 8,
+        "available": True,
+    }
+
+
+def test_dashboard_knowledge_channel_update_rejects_stale_selection(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="validated",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._list_knowledge_channels_from_bot",
+            new_callable=AsyncMock,
+            return_value={
+                "channels": [
+                    {
+                        "channel_id": "111",
+                        "channel_name": "general",
+                        "channel_type": "text",
+                    }
+                ]
+            },
+        ),
+        patch("five08.backend.api.set_runtime_config_value") as mock_set,
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ),
+    ):
+        response = client.put(
+            "/dashboard/api/configuration/KNOWLEDGE_DISCORD_CHANNEL_IDS",
+            json={"value": "111,999"},
+        )
+
+    assert response.status_code == 400
+    assert "no longer accessible" in response.json()["error"]
+    mock_set.assert_not_called()
+
+
 def test_dashboard_configuration_update_audits_secret_value_required(
     client: TestClient,
 ) -> None:
