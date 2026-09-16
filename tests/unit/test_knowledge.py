@@ -1023,6 +1023,7 @@ def test_consumed_draft_retains_idempotency_metadata_until_retention_cutoff() ->
         ("How is the Atlas project doing?", "Atlas"),
         ("What is Atlas project's status?", "Atlas"),
         ("What is project Atlas status?", "Atlas"),
+        ("What is the status of the Atlas project?", "Atlas"),
     ],
 )
 def test_project_query_supports_name_first_forms(

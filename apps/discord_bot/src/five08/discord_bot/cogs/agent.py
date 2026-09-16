@@ -132,7 +132,6 @@ _AGENT_ACKNOWLEDGEMENTS = frozenset(
         "cool",
         "nevermind",
         "never mind",
-        "cancel",
     }
 )
 

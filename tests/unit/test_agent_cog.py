@@ -1213,6 +1213,36 @@ async def test_agent_thread_reply_continues_without_mention() -> None:
 
 
 @pytest.mark.asyncio
+async def test_agent_thread_cancel_reaches_gateway() -> None:
+    cog = AgentCog.__new__(AgentCog)
+    cog.bot = SimpleNamespace(user=SimpleNamespace(id=999))
+    cog._is_agent_thread = Mock(return_value=True)
+    response_thread = SimpleNamespace(send=AsyncMock())
+    cog._mention_response_thread = AsyncMock(return_value=response_thread)
+    cog._post_agent_request = AsyncMock(
+        return_value={"status": "canceled", "message": "Canceled."}
+    )
+    cog._audit_message_safe = Mock()
+    message = SimpleNamespace(
+        id=555,
+        content="cancel",
+        author=SimpleNamespace(id=123, bot=False, roles=[]),
+        mentions=[],
+        guild=SimpleNamespace(id=456),
+        channel=SimpleNamespace(id=789, typing=Mock(return_value=_AsyncTyping())),
+        reply=AsyncMock(),
+    )
+
+    await cog.agent_mention(message)
+
+    cog._post_agent_request.assert_awaited_once()
+    assert cog._post_agent_request.await_args.kwargs["message"] == "cancel"
+    response_thread.send.assert_awaited_once()
+    assert "Canceled." in response_thread.send.await_args.args[0]
+    cog._audit_message_safe.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_bot_owned_non_agent_thread_reply_without_mention_is_ignored() -> None:
     cog = AgentCog.__new__(AgentCog)
     cog.bot = SimpleNamespace(user=SimpleNamespace(id=999))

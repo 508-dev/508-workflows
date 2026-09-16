@@ -17,6 +17,11 @@ from five08.settings import SharedSettings
 _PROJECT_MARKER_RE = re.compile(r"\b(?:project|projects|erp|erpnext)\b", re.I)
 _PROJECT_NAME_PATTERNS = (
     re.compile(
+        r"\b(?:status|schedule|start|end|due|roster|team)\s+of\s+(?:the\s+)?"
+        r"[\"']?(.+?)[\"']?\s+project(?:'s)?\b",
+        re.I,
+    ),
+    re.compile(
         r"\b(?:how\s+is|what\s+is)\s+(?:the\s+)?[\"']?(.+?)[\"']?\s+project(?:'s)?\b",
         re.I,
     ),
