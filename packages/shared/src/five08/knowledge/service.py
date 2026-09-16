@@ -189,7 +189,10 @@ class KnowledgeService:
                 or _contains_sensitive_output(candidate.answer)
                 for candidate in candidates
             )
-            or any(_contains_secret(message.content) for message in selected_messages)
+            or any(
+                _contains_sensitive_output(message.content)
+                for message in selected_messages
+            )
         ):
             scope_type = "user"
             scope_id = context.discord_user_id
@@ -304,9 +307,23 @@ class KnowledgeService:
             review_after=datetime.now(timezone.utc)
             + timedelta(days=max(1, review_days)),
         )
+        disputed_count = sum(fact.status == "disputed" for fact in facts)
+        saved_count = len(facts) - disputed_count
+        if disputed_count and saved_count:
+            message = (
+                f"Saved {saved_count} remembered answer(s) and recorded "
+                f"{disputed_count} conflict(s) for review."
+            )
+        elif disputed_count:
+            message = (
+                f"Recorded {disputed_count} conflicting answer(s) for review "
+                "without replacing stronger knowledge."
+            )
+        else:
+            message = f"Saved {saved_count} remembered answer(s)."
         return KnowledgeCaptureResponse(
             status="saved",
-            message=f"Saved {len(facts)} remembered answer(s).",
+            message=message,
             draft_id=draft_id,
             scope_type=draft.scope_type,
             scope_id=draft.scope_id,
@@ -366,7 +383,6 @@ class KnowledgeService:
             except Exception:
                 source_errors.append("identity/project access lookup failed")
 
-        search_deadline = time.monotonic() + timeout_seconds
         max_evidence = int(getattr(self.settings, "knowledge_query_max_evidence", 8))
         semantic_limit = int(
             getattr(
@@ -407,7 +423,7 @@ class KnowledgeService:
         }
         completed, pending = wait(
             futures,
-            timeout=_remaining_seconds(search_deadline),
+            timeout=_remaining_seconds(deadline),
         )
         for future in completed:
             name = futures[future]

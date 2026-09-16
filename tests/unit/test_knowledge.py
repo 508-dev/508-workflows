@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from five08.knowledge import service as knowledge_service
 from five08.agent.models import AgentIdentityContext
 from five08.knowledge.model import GroundedAnswerDraft
 from five08.knowledge.models import (
@@ -390,7 +391,17 @@ def test_secret_like_org_capture_is_forced_to_private_user_scope() -> None:
     assert answer.public_safe is False
 
 
-def test_secret_in_an_additional_cited_message_forces_private_capture() -> None:
+@pytest.mark.parametrize(
+    "sensitive_content",
+    [
+        "deploy token=do-not-share",
+        "Contact alice@example.com for deploy access",
+        "Call +1 (415) 555-0123 for deploy access",
+    ],
+)
+def test_sensitive_additional_cited_message_forces_private_capture(
+    sensitive_content: str,
+) -> None:
     class _CitingModel(_SemanticModel):
         def extract_candidates(
             self,
@@ -410,7 +421,7 @@ def test_secret_in_an_additional_cited_message_forces_private_capture() -> None:
             message_id="102",
             author_id="michael",
             author_name="Michael",
-            content="deploy token=do-not-share",
+            content=sensitive_content,
             created_at=datetime.now(timezone.utc),
         )
     )
@@ -538,6 +549,45 @@ def test_repeated_question_supersedes_changed_answer() -> None:
     ]
 
 
+def test_lower_authority_conflict_does_not_supersede_stronger_fact() -> None:
+    store = InMemoryKnowledgeStore()
+    service = _service(store)
+    first = service.create_capture(
+        _capture_request(
+            actor_id="michael",
+            answer="It deploys with Cloudflare Pages.",
+        )
+    )
+    assert first.draft_id is not None
+    first_saved = service.confirm_capture(
+        first.draft_id,
+        context=_context(user_id="michael"),
+        confirm=True,
+    )
+    assert first_saved.facts[0].verification_status == "author_confirmed"
+
+    second = service.create_capture(_capture_request(answer="It deploys with Coolify."))
+    assert second.draft_id is not None
+    second_saved = service.confirm_capture(
+        second.draft_id,
+        context=_context(),
+        confirm=True,
+    )
+    evidence = store.search_evidence(
+        question="website deploy",
+        organization_id="guild-1",
+        actor_id="another-member",
+        allow_private=True,
+        allow_project=False,
+        allow_org=True,
+    )
+
+    assert second_saved.facts[0].status == "disputed"
+    assert "without replacing stronger knowledge" in second_saved.message
+    assert second_saved.facts[0].supersedes_id is None
+    assert [item.excerpt for item in evidence] == ["It deploys with Cloudflare Pages."]
+
+
 def test_author_saving_their_own_answer_marks_author_confirmed() -> None:
     store = InMemoryKnowledgeStore()
     service = _service(store)
@@ -587,6 +637,38 @@ def test_typo_tolerant_question_answers_without_slash_or_model() -> None:
 
     assert answer.status == "answered"
     assert answer.answer == "Yes, it auto-deploys using Cloudflare Pages."
+
+
+def test_identity_and_source_search_share_one_retrieval_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Clock:
+        calls = 0
+
+        def monotonic(self) -> float:
+            self.calls += 1
+            return 100.0
+
+    clock = _Clock()
+    monkeypatch.setattr(
+        knowledge_service,
+        "time",
+        SimpleNamespace(monotonic=clock.monotonic),
+    )
+    service = _service(
+        InMemoryKnowledgeStore(),
+        sources=_NoExternalSources(accessible_project_ids=["project-1"]),
+    )
+
+    result = service.answer(
+        KnowledgeQueryRequest(
+            question="How is the Atlas project doing?",
+            context=_context(roles=["Project Manager"]),
+        )
+    )
+
+    assert result.status == "insufficient"
+    assert clock.calls == 3
 
 
 def test_semantic_model_matches_a_paraphrase_from_authorized_candidates() -> None:

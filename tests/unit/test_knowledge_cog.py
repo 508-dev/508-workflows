@@ -34,6 +34,7 @@ def test_knowledge_intent_routing_is_narrow() -> None:
     )
     assert AgentCog._is_knowledge_question("create a task for the website") is False
     assert AgentCog._is_knowledge_question("what tasks are open?") is False
+    assert AgentCog._is_knowledge_question("Can you list GitHub repositories?") is False
     assert (
         AgentCog._is_knowledge_capture_request("Do you remember this thread?") is False
     )

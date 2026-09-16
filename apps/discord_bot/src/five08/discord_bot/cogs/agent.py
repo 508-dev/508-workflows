@@ -59,8 +59,8 @@ _AGENT_ACTION_RE = re.compile(
     re.I,
 )
 _AGENT_LIVE_WORKFLOW_RE = re.compile(
-    r"\b(?:github\s+(?:issue|project)|tasks?|onboarding\s+queue|"
-    r"unlinked\s+(?:discord\s+)?members?)\b",
+    r"\b(?:github\s+(?:issues?|projects?|repositor(?:y|ies)|repos?)|tasks?|"
+    r"onboarding\s+queue|unlinked\s+(?:discord\s+)?members?)\b",
     re.I,
 )
 _ORGANIZATION_AUDIENCE_ROLE_NAMES = frozenset(
@@ -1608,7 +1608,12 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             self._post_backend_json,
             "/knowledge/queries",
             payload,
-            settings.knowledge_api_timeout_seconds,
+            max(
+                settings.knowledge_api_timeout_seconds,
+                settings.knowledge_source_timeout_seconds
+                + settings.knowledge_model_timeout_seconds
+                + 1.0,
+            ),
         )
 
     def _post_backend_json(

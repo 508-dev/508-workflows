@@ -8329,8 +8329,9 @@ async def dashboard_update_configuration_handler(
                 updated_by_provider=actor_provider.value,
                 updated_by_subject=actor_subject,
             )
-    except ValueError:
-        error = "configuration_value_invalid"
+    except ValueError as exc:
+        error = str(exc)
+        status_code = 409 if "configured by environment" in error else 400
         await _audit_dashboard_configuration_change(
             session,
             result=AuditResult.ERROR,
@@ -8338,7 +8339,7 @@ async def dashboard_update_configuration_handler(
             action=audit_action,
             metadata={**metadata, "error": error},
         )
-        return JSONResponse({"error": error}, status_code=400)
+        return JSONResponse({"error": error}, status_code=status_code)
     except RuntimeError:
         error = "configuration_update_unavailable"
         await _audit_dashboard_configuration_change(

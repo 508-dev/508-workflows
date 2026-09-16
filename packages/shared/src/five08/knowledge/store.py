@@ -8,7 +8,7 @@ import json
 import re
 import threading
 from datetime import datetime, timedelta, timezone
-from typing import Any, Iterable, Protocol, cast
+from typing import Any, Iterable, Literal, Protocol, cast
 from uuid import uuid4
 
 from psycopg.rows import dict_row
@@ -561,10 +561,19 @@ class InMemoryKnowledgeStore:
             self._facts[existing.id] = refreshed
             fact = refreshed
         else:
-            if existing is not None:
+            candidate_is_weaker = existing is not None and _verification_is_weaker(
+                candidate=draft.verification_status,
+                existing=existing.verification_status,
+            )
+            fact_status: Literal["active", "disputed"] = (
+                "disputed" if candidate_is_weaker else "active"
+            )
+            supersedes_id: str | None = None
+            if existing is not None and not candidate_is_weaker:
                 self._facts[existing.id] = existing.model_copy(
                     update={"status": "superseded", "updated_at": now}
                 )
+                supersedes_id = existing.id
             fact = KnowledgeFact(
                 organization_id=draft.organization_id,
                 scope_type=draft.scope_type,
@@ -577,8 +586,9 @@ class InMemoryKnowledgeStore:
                 verification_status=draft.verification_status,
                 confidence=candidate.confidence,
                 created_by=draft.actor_id,
+                status=fact_status,
                 review_after=review_after,
-                supersedes_id=existing.id if existing is not None else None,
+                supersedes_id=supersedes_id,
                 created_at=now,
                 updated_at=now,
             )
@@ -1348,8 +1358,17 @@ class PostgresKnowledgeStore:
             if row is None:  # pragma: no cover - row is locked above
                 raise RuntimeError("failed refreshing knowledge fact")
         else:
-            supersedes_id = str(existing["id"]) if existing is not None else None
-            if supersedes_id is not None:
+            candidate_is_weaker = existing is not None and _verification_is_weaker(
+                candidate=draft.verification_status,
+                existing=str(existing["verification_status"]),
+            )
+            fact_status: Literal["active", "disputed"] = (
+                "disputed" if candidate_is_weaker else "active"
+            )
+            supersedes_id: str | None = None
+            if existing is not None and not candidate_is_weaker:
+                assert existing is not None
+                supersedes_id = str(existing["id"])
                 cursor.execute(
                     """
                     UPDATE memory_facts
@@ -1389,8 +1408,8 @@ class PostgresKnowledgeStore:
                     updated_at
                 ) VALUES (
                     %s::uuid, %s, %s, %s, 'qa', %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, 'active', %s, %s::uuid, %s,
-                    to_tsvector('english', %s), %s, %s
+                    %s, %s, %s, %s, %s, %s::uuid, %s, to_tsvector('english', %s),
+                    %s, %s
                 )
                 RETURNING *
                 """,
@@ -1414,6 +1433,7 @@ class PostgresKnowledgeStore:
                     draft.actor_id,
                     draft.verification_status,
                     candidate.confidence,
+                    fact_status,
                     review_after,
                     supersedes_id,
                     dedupe_key,
@@ -1802,6 +1822,14 @@ def _stronger_verification(
         if _verification_authority(candidate) > _verification_authority(existing)
         else _knowledge_verification(existing)
     )
+
+
+def _verification_is_weaker(
+    *,
+    candidate: KnowledgeVerificationStatus,
+    existing: str,
+) -> bool:
+    return _verification_authority(candidate) < _verification_authority(existing)
 
 
 def _normalize(value: str) -> str:
