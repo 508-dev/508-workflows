@@ -9401,7 +9401,6 @@ async def agent_confirmation_handler(
             "model_tier": plan.model_tier,
             "model_source_tier": plan.model.source_tier,
             "action_names": [action.tool_name for action in plan.actions],
-            "results": [result.model_dump(mode="json") for result in results],
             "tool_outcomes": [
                 {"tool_name": result.tool_name, "status": result.status}
                 for result in results

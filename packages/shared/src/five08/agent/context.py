@@ -53,6 +53,7 @@ class RequestContextLoader:
             context.context_snippets,
             bounds=bounds,
             now=datetime.now(timezone.utc),
+            preserve_backend_provenance=False,
         )
 
 
@@ -67,7 +68,11 @@ class PrivateMemoryContextLoader:
     ) -> list[AgentContextSnippet]:
         from five08.agent.policy import PolicyEngine
 
-        snippets = list(context.context_snippets)
+        # Client-supplied metadata cannot establish backend provenance.
+        snippets = [
+            snippet.model_copy(update={"backend_loaded": False})
+            for snippet in context.context_snippets
+        ]
         if (
             context.response_destination_visibility == "private"
             and not context.impersonation
@@ -88,10 +93,15 @@ class PrivateMemoryContextLoader:
                     source_ref=fact.id,
                     label=f"Your saved preference: {fact.key}",
                     text=f"{fact.key}: {fact.value_json}"[:2048],
+                    backend_loaded=True,
                 )
                 for fact in facts[:5]
             ] + snippets
-        return bound_context_snippets(snippets, bounds=bounds)
+        return bound_context_snippets(
+            snippets,
+            bounds=bounds,
+            preserve_backend_provenance=True,
+        )
 
 
 def bound_context_snippets(
@@ -99,6 +109,7 @@ def bound_context_snippets(
     *,
     bounds: ContextLoadBounds,
     now: datetime | None = None,
+    preserve_backend_provenance: bool = False,
 ) -> list[AgentContextSnippet]:
     """Apply deterministic count, age, and token bounds to context snippets."""
 
@@ -121,6 +132,9 @@ def bound_context_snippets(
                     "text": snippet.text[:2048],
                     "token_count": token_count,
                     "trusted": False,
+                    "backend_loaded": (
+                        snippet.backend_loaded if preserve_backend_provenance else False
+                    ),
                 }
             )
         )
@@ -137,7 +151,7 @@ def context_sources_for_snippets(
 
     sources: list[AgentContextSource] = []
     for index, snippet in enumerate(snippets):
-        if not snippet.trusted:
+        if not (snippet.trusted or snippet.backend_loaded):
             sources.append(
                 AgentContextSource(
                     source_id=f"request-context-{index}",

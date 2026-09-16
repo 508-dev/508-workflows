@@ -171,6 +171,9 @@ async def test_ask_command_returns_a_private_grounded_answer() -> None:
 async def test_knowledge_confirmation_fails_closed_when_roles_cannot_refresh() -> None:
     cog = AgentCog.__new__(AgentCog)
     cog.bot = SimpleNamespace(get_guild=Mock(return_value=None))
+    cog._post_knowledge_confirmation = AsyncMock()
+    cog._audit_command_safe = Mock()
+    cog._format_knowledge_capture_response = Mock(return_value="Capture failed")
     view = KnowledgeCaptureView(
         cog=cog,
         requester_id=123,
@@ -189,13 +192,16 @@ async def test_knowledge_confirmation_fails_closed_when_roles_cannot_refresh() -
         guild_id=None,
         channel_id=111,
         channel=SimpleNamespace(id=111),
-        message=SimpleNamespace(id=222),
+        message=SimpleNamespace(id=222, edit=AsyncMock()),
+        response=SimpleNamespace(defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
     )
 
-    context = await view._confirmation_context(interaction)
+    await KnowledgeCaptureView.confirm(view, interaction, None)
 
-    assert context["guild_id"] == "456"
-    assert context["roles"] == []
+    cog._post_knowledge_confirmation.assert_not_awaited()
+    assert not view.is_finished()
+    assert all(not item.disabled for item in view.children)
 
 
 @pytest.mark.asyncio

@@ -132,10 +132,14 @@ class MemoryFactsView(discord.ui.View):
             return
         await interaction.response.defer(ephemeral=True)
         context = dict(self.context)
-        context["roles"] = await self.cog._guild_role_names(
-            guild_id=str(context.get("guild_id") or ""), user_id=self.requester_id
-        )
         try:
+            fresh_roles = await self.cog._guild_role_names(
+                guild_id=str(context.get("guild_id") or ""),
+                user_id=self.requester_id,
+            )
+            if fresh_roles is None:
+                raise RuntimeError("Discord role refresh unavailable")
+            context["roles"] = fresh_roles
             response = await self.cog._post_agent_request(
                 message=request, context=context
             )

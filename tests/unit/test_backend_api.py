@@ -951,6 +951,45 @@ def test_private_memory_requests_do_not_log_raw_facts() -> None:
     assert "message" not in metadata
 
 
+def test_private_memory_confirmation_audit_omits_fact_values(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    context = {"discord_user_id": "123", "roles": ["Member"]}
+    with patch(
+        "five08.backend.api._write_agent_audit_event",
+        new_callable=AsyncMock,
+    ) as mock_write_audit:
+        draft = client.post(
+            "/agent/requests",
+            json={
+                "message": "Remember that my timezone is Asia/Tokyo",
+                "context": context,
+            },
+            headers=auth_headers,
+        )
+        assert draft.status_code == 202
+        plan_id = draft.json()["plan"]["plan_id"]
+        confirmed = client.post(
+            f"/agent/confirmations/{plan_id}",
+            json={
+                "confirm": True,
+                "context": context,
+            },
+            headers=auth_headers,
+        )
+
+    assert confirmed.status_code == 200
+    confirmation_audit = mock_write_audit.call_args_list[-1].kwargs
+    assert confirmation_audit["action"] == "agent.confirmation"
+    metadata = confirmation_audit["metadata"]
+    assert "results" not in metadata
+    assert metadata["tool_outcomes"] == [
+        {"tool_name": "memory_write.remember_fact", "status": "succeeded"}
+    ]
+    assert "Asia/Tokyo" not in json.dumps(metadata)
+
+
 def test_confirmation_storage_outage_is_retryable_and_does_not_consume_plan(
     client: TestClient,
     auth_headers: dict[str, str],

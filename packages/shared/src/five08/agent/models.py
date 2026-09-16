@@ -46,6 +46,7 @@ class AgentContextSnippet(BaseModel):
     message_id: str | None = None
     author_id: str | None = None
     created_at: datetime | None = None
+    backend_loaded: bool = False
     trusted: bool = False
 
 

@@ -11,7 +11,11 @@ from five08.agent import (
     InMemoryMemoryStore,
     ToolRegistry,
 )
-from five08.agent.context import PrivateMemoryContextLoader, ContextLoadBounds
+from five08.agent.context import (
+    ContextLoadBounds,
+    PrivateMemoryContextLoader,
+    context_sources_for_snippets,
+)
 from five08.agent.state import InMemoryAgentStateStore
 from five08.knowledge.store import InMemoryKnowledgeStore
 
@@ -240,12 +244,18 @@ def test_saved_preferences_are_context_only_for_owner_and_private_destination():
     store = InMemoryKnowledgeStore()
     agent = AgentOrchestrator(registry=ToolRegistry(memory_store=store))
     draft = agent.plan("Remember that my timezone is Asia/Tokyo", context())
-    agent.execute_plan(draft.plan, context(), confirmed=True)
+    fact = agent.execute_plan(draft.plan, context(), confirmed=True)[0].result["fact"]
     loader = PrivateMemoryContextLoader(store)
-    assert (
-        "Asia/Tokyo"
-        in loader.load(context=context(), bounds=ContextLoadBounds())[0].text
+    snippets = loader.load(context=context(), bounds=ContextLoadBounds())
+    assert "Asia/Tokyo" in snippets[0].text
+    assert snippets[0].backend_loaded is True
+    assert snippets[0].trusted is False
+    source = context_sources_for_snippets(
+        context=context(),
+        snippets=snippets,
     )
+    assert source[0].source_type == "memory_fact"
+    assert source[0].source_ref == fact["id"]
     assert loader.load(context=context("bob"), bounds=ContextLoadBounds()) == []
     assert (
         loader.load(

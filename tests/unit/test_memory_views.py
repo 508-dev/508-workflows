@@ -44,3 +44,32 @@ async def test_memory_controls_deny_other_users_and_prepare_confirmed_changes():
         interaction.followup.send.await_args.kwargs["view"], AgentConfirmationView
     )
     assert interaction.followup.send.await_args.kwargs["ephemeral"] is True
+
+
+@pytest.mark.asyncio
+async def test_memory_controls_do_not_prepare_changes_when_roles_cannot_refresh():
+    cog = SimpleNamespace(
+        _guild_role_names=AsyncMock(return_value=None),
+        _post_agent_request=AsyncMock(),
+    )
+    view = MemoryFactsView(
+        cog=cog,
+        requester_id=123,
+        context={"guild_id": "456", "discord_user_id": "123", "roles": ["Admin"]},
+        facts=[
+            {"id": "fact-12345678", "key": "timezone", "value_json": {"text": "UTC"}}
+        ],
+    )
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(id=123),
+        response=SimpleNamespace(defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+
+    await view.propose(interaction, "Forget memory fact fact-12345678")
+
+    cog._post_agent_request.assert_not_awaited()
+    assert interaction.followup.send.await_args.args[0] == (
+        "I couldn't prepare the memory change. Try again."
+    )
+    assert interaction.followup.send.await_args.kwargs["ephemeral"] is True

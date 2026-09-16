@@ -802,11 +802,12 @@ async def test_confirmation_context_in_dm_fetches_uncached_member_roles() -> Non
 
 
 @pytest.mark.asyncio
-async def test_confirmation_context_in_dm_denies_original_roles_when_guild_missing() -> (
-    None
-):
+async def test_confirmation_role_refresh_failure_keeps_plan_retryable() -> None:
     cog = AgentCog.__new__(AgentCog)
     cog.bot = SimpleNamespace(get_guild=Mock(return_value=None))
+    cog._post_agent_confirmation = AsyncMock()
+    cog._audit_command_safe = Mock()
+    cog._format_agent_response = Mock(return_value="Agent status: failed")
     view = AgentConfirmationView(
         cog=cog,
         requester_id=123,
@@ -824,16 +825,18 @@ async def test_confirmation_context_in_dm_denies_original_roles_when_guild_missi
         id=999,
         guild_id=None,
         channel_id=111,
-        message=SimpleNamespace(id=222),
+        message=SimpleNamespace(id=222, edit=AsyncMock()),
+        response=SimpleNamespace(defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
         user=SimpleNamespace(id=123),
     )
 
-    context = await view._confirmation_context(interaction)
+    await AgentConfirmationView.confirm(view, interaction, None)
 
-    assert context["organization_id"] == "456"
-    assert context["guild_id"] == "456"
-    assert context["roles"] == []
-    assert context["message_id"] == "555"
+    cog._post_agent_confirmation.assert_not_awaited()
+    assert not view.is_finished()
+    assert all(not item.disabled for item in view.children)
+    interaction.message.edit.assert_not_awaited()
 
 
 def test_mention_rate_limit_prunes_expired_user_entries() -> None:

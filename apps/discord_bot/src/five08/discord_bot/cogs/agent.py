@@ -166,7 +166,10 @@ class AgentConfirmationView(discord.ui.View):
             transport_failed = bool(response.get("retryable"))
         except Exception as exc:
             logger.warning("Agent confirmation request failed: %s", exc)
-            response = {"status": "failed", "message": str(exc)}
+            response = {
+                "status": "failed",
+                "message": "The agent service could not be reached. Try again.",
+            }
             transport_failed = True
         self.cog._audit_command_safe(
             interaction=interaction,
@@ -209,7 +212,10 @@ class AgentConfirmationView(discord.ui.View):
             transport_failed = bool(response.get("retryable"))
         except Exception as exc:
             logger.warning("Agent cancellation request failed: %s", exc)
-            response = {"status": "failed", "message": str(exc)}
+            response = {
+                "status": "failed",
+                "message": "The agent service could not be reached. Try again.",
+            }
             transport_failed = True
         self.cog._audit_command_safe(
             interaction=interaction,
@@ -249,6 +255,8 @@ class AgentConfirmationView(discord.ui.View):
                 guild_id=str(original_guild_id),
                 user_id=interaction.user.id,
             )
+            if fresh_roles is None:
+                raise RuntimeError("Discord role refresh unavailable")
             context["roles"] = fresh_roles
         original_message_id = self.context.get("message_id")
         if original_message_id:
@@ -372,6 +380,8 @@ class KnowledgeCaptureView(discord.ui.View):
                 guild_id=str(original_guild_id),
                 user_id=interaction.user.id,
             )
+            if fresh_roles is None:
+                raise RuntimeError("Discord role refresh unavailable")
             context["roles"] = fresh_roles
         original_message_id = self.context.get("message_id")
         if original_message_id:
@@ -1492,18 +1502,22 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             return []
         return self._role_names_from_user(member)
 
-    async def _guild_role_names(self, *, guild_id: str, user_id: int) -> list[str]:
+    async def _guild_role_names(
+        self, *, guild_id: str, user_id: int
+    ) -> list[str] | None:
         try:
             guild = self.bot.get_guild(int(guild_id))
         except (TypeError, ValueError):
-            return []
+            return None
         if guild is None:
-            return []
+            return None
         try:
             async with asyncio.timeout(3):
                 member = await guild.fetch_member(user_id)
-        except (TimeoutError, discord.HTTPException):
+        except discord.NotFound:
             return []
+        except (TimeoutError, discord.HTTPException):
+            return None
         return self._role_names_from_user(member)
 
     def _audit_message_safe(

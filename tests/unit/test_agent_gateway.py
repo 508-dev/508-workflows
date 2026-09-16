@@ -88,6 +88,7 @@ def test_agent_plan_carries_operation_id_and_bounded_context_sources() -> None:
             channel_id="789",
             message_id="1",
             created_at=now,
+            backend_loaded=True,
         ),
         AgentContextSnippet(
             source_type="discord_message",
