@@ -1080,6 +1080,7 @@ class ToolRegistry:
             verification_status=str(
                 arguments.get("verification_status") or "user_confirmed"
             ),
+            organization_id=organization_id,
             confidence=float(arguments.get("confidence") or 1.0),
         )
         return {"fact": _memory_fact_payload(fact)}

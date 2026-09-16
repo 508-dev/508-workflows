@@ -26,6 +26,9 @@ _ROLE_SCOPES: dict[str, frozenset[str]] = {
             "context:read_current_thread",
             "memory:read_self",
             "memory:write_self",
+            "knowledge:read_org",
+            "knowledge:capture_org",
+            "knowledge:read_wiki",
             "github:repository:member:read",
             "github:repository:member:write",
         }
@@ -44,6 +47,8 @@ _ROLE_SCOPES: dict[str, frozenset[str]] = {
             "memory:read_project",
             "memory:write_self",
             "memory:write_project",
+            "knowledge:read_project",
+            "knowledge:capture_project",
         }
     ),
     "engineer": frozenset(
@@ -58,6 +63,9 @@ _ROLE_SCOPES: dict[str, frozenset[str]] = {
             "context:read_current_thread",
             "memory:read_self",
             "memory:write_self",
+            "knowledge:read_org",
+            "knowledge:capture_org",
+            "knowledge:read_wiki",
         }
     ),
     "admin": frozenset(
@@ -92,6 +100,13 @@ _ROLE_SCOPES: dict[str, frozenset[str]] = {
             "memory:write_self",
             "memory:write_project",
             "memory:admin",
+            "knowledge:read_org",
+            "knowledge:capture_org",
+            "knowledge:read_wiki",
+            "knowledge:read_project",
+            "knowledge:capture_project",
+            "knowledge:verify_org",
+            "knowledge:admin",
         }
     ),
 }

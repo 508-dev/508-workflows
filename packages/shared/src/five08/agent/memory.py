@@ -28,6 +28,7 @@ class MemoryStore(Protocol):
         source_excerpt: str | None,
         created_by: str,
         verification_status: str,
+        organization_id: str | None = None,
         confidence: float = 1.0,
         expires_at: datetime | None = None,
     ) -> MemoryFact:
@@ -79,11 +80,13 @@ class InMemoryMemoryStore:
         source_excerpt: str | None,
         created_by: str,
         verification_status: str,
+        organization_id: str | None = None,
         confidence: float = 1.0,
         expires_at: datetime | None = None,
     ) -> MemoryFact:
         now = datetime.now(timezone.utc)
         fact = MemoryFact(
+            organization_id=organization_id,
             scope_type=scope_type,
             scope_id=scope_id,
             key=key.strip(),

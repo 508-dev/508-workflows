@@ -91,6 +91,9 @@ class BackendRouteSurface(Protocol):
     ingest_handler: RouteHandler
     job_status_handler: RouteHandler
     jobs_handler: RouteHandler
+    knowledge_capture_confirmation_handler: RouteHandler
+    knowledge_capture_handler: RouteHandler
+    knowledge_query_handler: RouteHandler
     process_contact_handler: RouteHandler
     rerun_job_handler: RouteHandler
     resume_apply_handler: RouteHandler
@@ -206,6 +209,9 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
     ingest_handler = api.ingest_handler
     job_status_handler = api.job_status_handler
     jobs_handler = api.jobs_handler
+    knowledge_capture_confirmation_handler = api.knowledge_capture_confirmation_handler
+    knowledge_capture_handler = api.knowledge_capture_handler
+    knowledge_query_handler = api.knowledge_query_handler
     process_contact_handler = api.process_contact_handler
     rerun_job_handler = api.rerun_job_handler
     resume_apply_handler = api.resume_apply_handler
@@ -554,6 +560,21 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
     app.add_api_route(
         "/agent/confirmations/{plan_id}",
         agent_confirmation_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/knowledge/captures",
+        knowledge_capture_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/knowledge/captures/{draft_id}/confirmation",
+        knowledge_capture_confirmation_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/knowledge/queries",
+        knowledge_query_handler,
         methods=["POST"],
     )
 

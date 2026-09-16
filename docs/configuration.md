@@ -260,6 +260,25 @@ Agent gateway:
 - `AGENT_STRUCTURED_PLANNER_TIMEOUT_SECONDS`
 - `AGENT_INTENT_NORMALIZER_ENABLED`
 - `AGENT_INTENT_NORMALIZER_TIMEOUT_SECONDS`
+- `KNOWLEDGE_ENABLED`: enables `/ask`, knowledge questions in mentions, and
+  confirmed Discord captures.
+- `KNOWLEDGE_API_TIMEOUT_SECONDS`: bot-to-backend request timeout (default: 15).
+- `KNOWLEDGE_MODEL_ENABLED`: uses the configured strong agent tier for bounded
+  extraction and grounded synthesis. Deterministic extraction and excerpts are
+  used when the model is disabled or unavailable.
+- `KNOWLEDGE_MODEL_TIMEOUT_SECONDS`
+- `KNOWLEDGE_SOURCE_TIMEOUT_SECONDS`: total concurrent retrieval window per
+  question (default: 6).
+- `KNOWLEDGE_CAPTURE_MAX_MESSAGES`: maximum messages read from one Discord
+  thread capture (default: 50).
+- `KNOWLEDGE_CAPTURE_MAX_CHARACTERS`: total capture text bound (default: 20000).
+- `KNOWLEDGE_CAPTURE_MAX_AGE_DAYS`: rejects older thread messages (default: 7).
+- `KNOWLEDGE_CAPTURE_DRAFT_TTL_SECONDS`: confirmation preview lifetime
+  (default: 600).
+- `KNOWLEDGE_REVIEW_AFTER_DAYS`: age at which a remembered answer is marked as
+  review due in citations (default: 180).
+- `KNOWLEDGE_QUERY_MAX_EVIDENCE`: maximum evidence items considered per answer
+  (default: 8).
 - `GITHUB_DEFAULT_REPO`: defaults to `508-dev/todos`.
 - `GITHUB_ORGANIZATION`: defaults to `508-dev` and scopes GitHub Projects.
 - `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_INSTALLATION_ID`,
@@ -279,6 +298,8 @@ Agent gateway:
 
 See [Discord GitHub Todos and Projects](./discord-github-todos.md) for the
 role model, required App permissions, and installation procedure.
+See [Discord Knowledge Memory](./discord-knowledge-memory.md) for capture,
+retrieval, visibility, and provenance behavior.
 
 Agent model base URLs must be HTTPS endpoints on allowed provider hosts, except
 the internal Docker-network Bifrost URL `http://bifrost:8080/openai` is allowed

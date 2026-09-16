@@ -69,6 +69,15 @@ from five08.job_channels import (
     register_job_post_channel,
     unregister_job_post_channel,
 )
+from five08.knowledge.model import OpenAICompatibleKnowledgeModel
+from five08.knowledge.models import (
+    KnowledgeCaptureConfirmationRequest,
+    KnowledgeCaptureRequest,
+    KnowledgeQueryRequest,
+)
+from five08.knowledge.service import KnowledgeService
+from five08.knowledge.sources import KnowledgeSourceAdapters
+from five08.knowledge.store import PostgresKnowledgeStore
 from five08.queue import (
     EnqueuedJob,
     JobRecord,
@@ -334,8 +343,11 @@ TALLY_INTAKE_FIELD_LABEL_MAP = {
 # task store and pending plans are non-durable; production task workflows should
 # swap this registry for a persistent task service before multi-worker use.
 _AGENT_TASK_STORE = InMemoryTaskStore()
+_KNOWLEDGE_STORE = PostgresKnowledgeStore(settings)
 _AGENT_ORCHESTRATOR: AgentOrchestrator | None = None
 _AGENT_ORCHESTRATOR_LOCK = threading.RLock()
+_KNOWLEDGE_SERVICE: KnowledgeService | None = None
+_KNOWLEDGE_SERVICE_LOCK = threading.RLock()
 _PENDING_AGENT_PLANS: dict[str, tuple[AgentPlan, AgentIdentityContext]] = {}
 _PENDING_AGENT_PLANS_LOCK: asyncio.Lock | None = None
 _PENDING_AGENT_PLANS_LOCK_LOOP: asyncio.AbstractEventLoop | None = None
@@ -358,6 +370,7 @@ def _get_agent_orchestrator() -> AgentOrchestrator:
             _AGENT_ORCHESTRATOR = AgentOrchestrator(
                 registry=ToolRegistry(
                     _AGENT_TASK_STORE,
+                    memory_store=_KNOWLEDGE_STORE,
                     runtime_config_factory=lambda: ToolRuntimeConfig.from_settings(
                         settings
                     ),
@@ -369,6 +382,22 @@ def _get_agent_orchestrator() -> AgentOrchestrator:
                 ),
             )
     return _AGENT_ORCHESTRATOR
+
+
+def _get_knowledge_service() -> KnowledgeService:
+    """Lazily construct source adapters and the optional model client."""
+    global _KNOWLEDGE_SERVICE
+    if _KNOWLEDGE_SERVICE is not None:
+        return _KNOWLEDGE_SERVICE
+    with _KNOWLEDGE_SERVICE_LOCK:
+        if _KNOWLEDGE_SERVICE is None:
+            _KNOWLEDGE_SERVICE = KnowledgeService(
+                settings=settings,
+                store=_KNOWLEDGE_STORE,
+                model=OpenAICompatibleKnowledgeModel.from_settings(settings),
+                sources=KnowledgeSourceAdapters(settings),
+            )
+    return _KNOWLEDGE_SERVICE
 
 
 def _is_authorized_with_secret(
@@ -8239,9 +8268,11 @@ async def dashboard_update_configuration_handler(
         )
         return JSONResponse({"error": str(exc)}, status_code=409)
 
-    global _AGENT_ORCHESTRATOR
+    global _AGENT_ORCHESTRATOR, _KNOWLEDGE_SERVICE
     with _AGENT_ORCHESTRATOR_LOCK:
         _AGENT_ORCHESTRATOR = None
+    with _KNOWLEDGE_SERVICE_LOCK:
+        _KNOWLEDGE_SERVICE = None
     await _audit_dashboard_configuration_change(
         session,
         result=AuditResult.SUCCESS,
@@ -9299,6 +9330,294 @@ async def agent_confirmation_handler(
         response.model_dump(mode="json"),
         status_code={"executed": 200, "denied": 403, "failed": 500}[status],
     )
+
+
+async def knowledge_capture_handler(request: Request) -> JSONResponse:
+    """Create a frozen, reviewable knowledge draft from Discord evidence."""
+    if not _is_authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    try:
+        payload_data = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid_json"}, status_code=400)
+    if not isinstance(payload_data, dict):
+        return JSONResponse({"error": "payload_must_be_object"}, status_code=400)
+    try:
+        payload = KnowledgeCaptureRequest.model_validate(payload_data)
+    except ValidationError as exc:
+        return JSONResponse(
+            {"error": "invalid_payload", "detail": str(exc)},
+            status_code=400,
+        )
+    if _agent_request_rate_limited(payload.context.discord_user_id):
+        _schedule_agent_audit_event(
+            context=payload.context,
+            action="knowledge.capture",
+            result=AuditResult.DENIED,
+            plan=None,
+            metadata={"status": "denied", "reason": "rate_limited"},
+        )
+        return JSONResponse(
+            {
+                "status": "denied",
+                "message": "Too many knowledge requests. Try again in a minute.",
+            },
+            status_code=429,
+        )
+
+    try:
+        response = await asyncio.to_thread(
+            _get_knowledge_service().create_capture,
+            payload,
+        )
+    except Exception:
+        logger.exception("Knowledge capture failed")
+        response_payload = {
+            "status": "failed",
+            "message": "I could not prepare that knowledge capture.",
+        }
+        _schedule_agent_audit_event(
+            context=payload.context,
+            action="knowledge.capture",
+            result=AuditResult.ERROR,
+            plan=None,
+            metadata={"status": "failed", "reason": "service_error"},
+        )
+        return JSONResponse(response_payload, status_code=500)
+
+    audit_result = (
+        AuditResult.DENIED
+        if response.status == "denied"
+        else AuditResult.ERROR
+        if response.status == "failed"
+        else AuditResult.SUCCESS
+    )
+    _schedule_agent_audit_event(
+        context=payload.context,
+        action="knowledge.capture",
+        result=audit_result,
+        plan=None,
+        metadata={
+            "status": response.status,
+            "draft_id": response.draft_id,
+            "source_type": payload.source.source_type,
+            "source_visibility": payload.source.source_visibility,
+            "message_count": len(payload.messages),
+            "candidate_count": len(response.candidates),
+        },
+    )
+    status_code = {
+        "requires_confirmation": 202,
+        "saved": 200,
+        "canceled": 200,
+        "needs_clarification": 422,
+        "denied": 403,
+        "failed": 500,
+    }[response.status]
+    return JSONResponse(response.model_dump(mode="json"), status_code=status_code)
+
+
+async def knowledge_capture_confirmation_handler(
+    request: Request,
+    draft_id: str,
+) -> JSONResponse:
+    """Reauthorize and atomically confirm or cancel a frozen capture."""
+    if not _is_authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        normalized_draft_id = str(UUID(draft_id))
+    except ValueError:
+        return JSONResponse({"error": "invalid_draft_id"}, status_code=400)
+    try:
+        payload_data = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid_json"}, status_code=400)
+    if not isinstance(payload_data, dict):
+        return JSONResponse({"error": "payload_must_be_object"}, status_code=400)
+    try:
+        payload = KnowledgeCaptureConfirmationRequest.model_validate(payload_data)
+    except ValidationError as exc:
+        return JSONResponse(
+            {"error": "invalid_payload", "detail": str(exc)},
+            status_code=400,
+        )
+
+    try:
+        response = await asyncio.to_thread(
+            _get_knowledge_service().confirm_capture,
+            normalized_draft_id,
+            context=payload.context,
+            confirm=payload.confirm,
+        )
+    except KeyError:
+        _schedule_agent_audit_event(
+            context=payload.context,
+            action="knowledge.capture.confirmation",
+            result=AuditResult.DENIED,
+            plan=None,
+            metadata={"draft_id": normalized_draft_id, "reason": "not_found"},
+        )
+        return JSONResponse({"error": "draft_not_found"}, status_code=404)
+    except PermissionError:
+        _schedule_agent_audit_event(
+            context=payload.context,
+            action="knowledge.capture.confirmation",
+            result=AuditResult.DENIED,
+            plan=None,
+            metadata={"draft_id": normalized_draft_id, "reason": "actor_mismatch"},
+        )
+        return JSONResponse({"error": "actor_mismatch"}, status_code=403)
+    except TimeoutError:
+        _schedule_agent_audit_event(
+            context=payload.context,
+            action="knowledge.capture.confirmation",
+            result=AuditResult.DENIED,
+            plan=None,
+            metadata={"draft_id": normalized_draft_id, "reason": "expired"},
+        )
+        return JSONResponse({"error": "draft_expired"}, status_code=410)
+    except ValueError:
+        _schedule_agent_audit_event(
+            context=payload.context,
+            action="knowledge.capture.confirmation",
+            result=AuditResult.DENIED,
+            plan=None,
+            metadata={"draft_id": normalized_draft_id, "reason": "consumed"},
+        )
+        return JSONResponse({"error": "draft_already_consumed"}, status_code=409)
+    except Exception:
+        logger.exception("Knowledge capture confirmation failed")
+        _schedule_agent_audit_event(
+            context=payload.context,
+            action="knowledge.capture.confirmation",
+            result=AuditResult.ERROR,
+            plan=None,
+            metadata={
+                "status": "failed",
+                "draft_id": normalized_draft_id,
+                "reason": "service_error",
+            },
+        )
+        return JSONResponse(
+            {
+                "status": "failed",
+                "message": "I could not save that knowledge capture.",
+            },
+            status_code=500,
+        )
+
+    _schedule_agent_audit_event(
+        context=payload.context,
+        action="knowledge.capture.confirmation",
+        result=(
+            AuditResult.DENIED
+            if response.status == "denied"
+            else AuditResult.ERROR
+            if response.status == "failed"
+            else AuditResult.SUCCESS
+        ),
+        plan=None,
+        metadata={
+            "status": response.status,
+            "draft_id": normalized_draft_id,
+            "fact_count": len(response.facts),
+        },
+    )
+    status_code = {
+        "requires_confirmation": 409,
+        "saved": 200,
+        "canceled": 200,
+        "needs_clarification": 422,
+        "denied": 403,
+        "failed": 500,
+    }[response.status]
+    return JSONResponse(response.model_dump(mode="json"), status_code=status_code)
+
+
+async def knowledge_query_handler(request: Request) -> JSONResponse:
+    """Answer one question from authorized, source-grounded knowledge."""
+    if not _is_authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        payload_data = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid_json"}, status_code=400)
+    if not isinstance(payload_data, dict):
+        return JSONResponse({"error": "payload_must_be_object"}, status_code=400)
+    try:
+        payload = KnowledgeQueryRequest.model_validate(payload_data)
+    except ValidationError as exc:
+        return JSONResponse(
+            {"error": "invalid_payload", "detail": str(exc)},
+            status_code=400,
+        )
+    if _agent_request_rate_limited(payload.context.discord_user_id):
+        _schedule_agent_audit_event(
+            context=payload.context,
+            action="knowledge.query",
+            result=AuditResult.DENIED,
+            plan=None,
+            metadata={"status": "denied", "reason": "rate_limited"},
+        )
+        return JSONResponse(
+            {
+                "status": "denied",
+                "answer": "Too many knowledge requests. Try again in a minute.",
+            },
+            status_code=429,
+        )
+
+    try:
+        response = await asyncio.to_thread(
+            _get_knowledge_service().answer,
+            payload,
+        )
+    except Exception:
+        logger.exception("Knowledge query failed")
+        _schedule_agent_audit_event(
+            context=payload.context,
+            action="knowledge.query",
+            result=AuditResult.ERROR,
+            plan=None,
+            metadata={"status": "failed", "reason": "service_error"},
+        )
+        return JSONResponse(
+            {
+                "status": "failed",
+                "answer": "I could not search organizational knowledge right now.",
+            },
+            status_code=500,
+        )
+
+    _schedule_agent_audit_event(
+        context=payload.context,
+        action="knowledge.query",
+        result=(
+            AuditResult.DENIED
+            if response.status == "denied"
+            else AuditResult.ERROR
+            if response.status == "failed"
+            else AuditResult.SUCCESS
+        ),
+        plan=None,
+        metadata={
+            "status": response.status,
+            "citation_count": len(response.citations),
+            "citation_source_types": sorted(
+                {citation.source_type for citation in response.citations}
+            ),
+            "source_error_count": len(response.source_errors),
+            "public_safe": response.public_safe,
+        },
+    )
+    status_code = {
+        "answered": 200,
+        "insufficient": 200,
+        "denied": 403,
+        "failed": 500,
+    }[response.status]
+    return JSONResponse(response.model_dump(mode="json"), status_code=status_code)
 
 
 async def auth_login_handler(
