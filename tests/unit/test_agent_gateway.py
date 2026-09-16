@@ -448,6 +448,7 @@ def test_project_memory_visibility_requires_matching_project_scope() -> None:
 
 def test_forget_memory_fact_denies_non_creator_without_admin() -> None:
     fact = MemoryFact(
+        organization_id="org-1",
         scope_type="user",
         scope_id="123",
         key="timezone",
@@ -469,6 +470,14 @@ def test_forget_memory_fact_denies_non_creator_without_admin() -> None:
             actor_id="456",
             actor_scopes={"memory:write_self"},
         )
+    with pytest.raises(PermissionError, match="only to its owner"):
+        registry.execute(
+            "memory_write.forget_fact",
+            {"fact_id": fact.id},
+            organization_id="org-2",
+            actor_id="123",
+            actor_scopes={"memory:write_self"},
+        )
 
     assert memory_store.list_facts(
         scope_type="user",
@@ -477,6 +486,87 @@ def test_forget_memory_fact_denies_non_creator_without_admin() -> None:
         visible_to_project_id=None,
         visible_to_org_id="org-1",
     ) == [fact]
+
+
+def test_forget_org_memory_requires_current_admin_authority() -> None:
+    fact = MemoryFact(
+        organization_id="org-1",
+        scope_type="org",
+        scope_id="org-1",
+        key="policy",
+        value_json={"text": "Use private confirmations"},
+        visibility="org",
+        source_type="request",
+        source_ref="agent_request",
+        created_by="123",
+        verification_status="user_confirmed",
+    )
+    registry = ToolRegistry(memory_store=InMemoryMemoryStore([fact]))
+
+    with pytest.raises(PermissionError, match="current memory admin access"):
+        registry.execute(
+            "memory_write.forget_fact",
+            {"fact_id": fact.id},
+            organization_id="org-1",
+            actor_id="123",
+            actor_scopes={"memory:write_self"},
+        )
+
+    result = registry.execute(
+        "memory_write.forget_fact",
+        {"fact_id": fact.id},
+        organization_id="org-1",
+        actor_id="456",
+        actor_scopes={"memory:admin"},
+    )
+
+    assert result["fact"]["status"] == "deleted"
+
+
+def test_forget_project_memory_requires_current_project_authority() -> None:
+    fact = MemoryFact(
+        organization_id="org-1",
+        scope_type="project",
+        scope_id="project-1",
+        key="policy",
+        value_json={"text": "Use GitHub issues"},
+        visibility="project",
+        source_type="request",
+        source_ref="agent_request",
+        created_by="123",
+        verification_status="user_confirmed",
+    )
+    registry = ToolRegistry(memory_store=InMemoryMemoryStore([fact]))
+
+    with pytest.raises(PermissionError, match="current project access"):
+        registry.execute(
+            "memory_write.forget_fact",
+            {"fact_id": fact.id},
+            organization_id="org-1",
+            actor_id="123",
+            project_id="project-1",
+            actor_scopes={"memory:write_self"},
+        )
+    with pytest.raises(PermissionError, match="current project access"):
+        registry.execute(
+            "memory_write.forget_fact",
+            {"fact_id": fact.id},
+            organization_id="org-1",
+            actor_id="123",
+            project_id="project-2",
+            actor_scopes={"memory:write_project"},
+        )
+
+    result = registry.execute(
+        "memory_write.forget_fact",
+        {"fact_id": fact.id},
+        organization_id="org-1",
+        actor_id="456",
+        project_id="project-1",
+        actor_scopes={"memory:write_project"},
+    )
+
+    assert result["fact"]["status"] == "deleted"
 
 
 def test_private_memory_is_not_echoed_to_public_destination() -> None:

@@ -24,7 +24,11 @@ from five08.knowledge.service import (
     KnowledgeService,
     _contains_sensitive_output,
 )
-from five08.knowledge.sources import _person_query, _project_query
+from five08.knowledge.sources import (
+    _person_query,
+    _project_query,
+    _unambiguous_crm_rows,
+)
 from five08.knowledge.store import InMemoryKnowledgeStore
 
 
@@ -985,3 +989,25 @@ def test_person_query_supports_field_first_forms(
     expected: str,
 ) -> None:
     assert _person_query(question) == expected
+
+
+def test_crm_rows_require_an_unambiguous_identity_match() -> None:
+    exact = {"crm_contact_id": "1", "name": "Alice"}
+    partial = {"crm_contact_id": "2", "name": "Alice Chen"}
+
+    assert _unambiguous_crm_rows([partial, exact], "alice") == [exact]
+    assert _unambiguous_crm_rows([partial], "alice") == [partial]
+    assert (
+        _unambiguous_crm_rows(
+            [partial, {"crm_contact_id": "3", "name": "Alice Smith"}],
+            "alice",
+        )
+        == []
+    )
+    assert (
+        _unambiguous_crm_rows(
+            [exact, {"crm_contact_id": "4", "email": "alice"}],
+            "alice",
+        )
+        == []
+    )

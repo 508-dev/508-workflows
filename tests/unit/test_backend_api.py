@@ -2630,7 +2630,7 @@ def test_dashboard_configuration_update_preserves_environment_lock_conflict(
     assert response.json() == {"error": error}
 
 
-def test_dashboard_knowledge_channel_clear_fails_closed_when_bot_is_unavailable(
+def test_dashboard_knowledge_channel_clear_remains_available_during_bot_outage(
     client: TestClient,
 ) -> None:
     session = api.AuthSession(
@@ -2654,7 +2654,7 @@ def test_dashboard_knowledge_channel_clear_fails_closed_when_bot_is_unavailable(
             "five08.backend.api._list_knowledge_channels_from_bot",
             new_callable=AsyncMock,
             return_value=None,
-        ),
+        ) as mock_list,
         patch("five08.backend.api.delete_runtime_config_value") as mock_delete,
         patch(
             "five08.backend.api._write_auth_audit_event",
@@ -2666,9 +2666,9 @@ def test_dashboard_knowledge_channel_clear_fails_closed_when_bot_is_unavailable(
             json={"clear": True},
         )
 
-    assert response.status_code == 503
-    assert response.json() == {"error": "configuration_update_unavailable"}
-    mock_delete.assert_not_called()
+    assert response.status_code == 200
+    mock_list.assert_not_awaited()
+    mock_delete.assert_called_once()
 
 
 def test_dashboard_configuration_update_audits_secret_value_required(

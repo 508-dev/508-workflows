@@ -274,7 +274,7 @@ describe("ConfigurationView", () => {
     )
   })
 
-  it("cannot clear saved knowledge sources while the Discord bot is unavailable", () => {
+  it("can disable saved knowledge sources while the Discord bot is unavailable", () => {
     window.history.replaceState({}, "", "/dashboard/configuration#knowledge-sources")
     const onClear = vi.fn()
     renderConfigurationView({
@@ -299,13 +299,13 @@ describe("ConfigurationView", () => {
 
     expect(
       screen.getByText(
-        "The Discord bot is unavailable, so channel choices cannot be refreshed or saved. Existing selections are unchanged.",
+        "The Discord bot is unavailable, so channel choices cannot be refreshed or changed. You can still disable all Discord answer sources below.",
       ),
     ).toBeVisible()
-    fireEvent.click(screen.getByLabelText("Use #111 for Discord answers"))
+    fireEvent.click(screen.getByRole("button", { name: "Disable all sources" }))
 
     expect(screen.getByRole("button", { name: "Save sources" })).toBeDisabled()
-    expect(onClear).not.toHaveBeenCalled()
+    expect(onClear).toHaveBeenCalledWith("KNOWLEDGE_DISCORD_CHANNEL_IDS")
   })
 
   it("keeps the job channels tab selected from the hash and manages channels", async () => {

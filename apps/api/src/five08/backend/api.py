@@ -8376,6 +8376,8 @@ async def _validated_configuration_value(
     if key != "KNOWLEDGE_DISCORD_CHANNEL_IDS":
         return value
     normalized = normalize_knowledge_discord_channel_ids(value)
+    if not normalized:
+        return normalized
     payload = await _list_knowledge_channels_from_bot(request)
     if payload is None or not isinstance(payload.get("channels"), list):
         raise RuntimeError(

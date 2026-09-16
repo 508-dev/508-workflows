@@ -2362,6 +2362,7 @@ function App() {
       )
       setConfigurationItems(payload.items)
       if (key === "KNOWLEDGE_DISCORD_CHANNEL_IDS") {
+        setSelectedKnowledgeChannelIds([])
         await loadKnowledgeChannels()
       }
       showToast(`Cleared ${key}`, "ok")

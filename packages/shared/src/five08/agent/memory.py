@@ -55,6 +55,9 @@ class MemoryStore(Protocol):
         fact_id: str,
         actor_id: str,
         actor_is_admin: bool = False,
+        organization_id: str | None = None,
+        project_id: str | None = None,
+        actor_can_write_project: bool = False,
         now: datetime | None = None,
     ) -> MemoryFact:
         """Soft-delete one fact the actor may manage."""
@@ -185,16 +188,26 @@ class InMemoryMemoryStore:
         fact_id: str,
         actor_id: str,
         actor_is_admin: bool = False,
+        organization_id: str | None = None,
+        project_id: str | None = None,
+        actor_can_write_project: bool = False,
         now: datetime | None = None,
     ) -> MemoryFact:
         with self._lock:
             fact = self._facts.get(fact_id)
             if fact is None:
                 raise KeyError(f"Memory fact {fact_id} was not found")
-            if fact.visibility == "private" and fact.scope_id != actor_id:
-                raise PermissionError("Private memory belongs only to its owner")
-            if not actor_is_admin and fact.created_by != actor_id:
-                raise PermissionError("Memory fact can only be deleted by its creator")
+            authorize_memory_fact_deletion(
+                scope_type=fact.scope_type,
+                scope_id=fact.scope_id,
+                visibility=fact.visibility,
+                fact_organization_id=fact.organization_id,
+                actor_id=actor_id,
+                actor_is_admin=actor_is_admin,
+                organization_id=organization_id,
+                project_id=project_id,
+                actor_can_write_project=actor_can_write_project,
+            )
             deleted_at = now or datetime.now(timezone.utc)
             deleted = fact.model_copy(
                 update={
@@ -205,6 +218,54 @@ class InMemoryMemoryStore:
             )
             self._facts[fact_id] = deleted
             return deleted
+
+
+def authorize_memory_fact_deletion(
+    *,
+    scope_type: MemoryScopeType,
+    scope_id: str,
+    visibility: MemoryVisibility,
+    fact_organization_id: str | None,
+    actor_id: str,
+    actor_is_admin: bool,
+    organization_id: str | None,
+    project_id: str | None,
+    actor_can_write_project: bool,
+) -> None:
+    """Require current authority over the fact's scope before deleting it."""
+    if visibility == "private":
+        if (
+            scope_type != "user"
+            or scope_id != actor_id
+            or organization_id is None
+            or fact_organization_id != organization_id
+        ):
+            raise PermissionError("Private memory belongs only to its owner")
+        return
+    if visibility == "project":
+        if (
+            scope_type != "project"
+            or not actor_can_write_project
+            or project_id != scope_id
+            or organization_id is None
+            or fact_organization_id != organization_id
+        ):
+            raise PermissionError(
+                "Project memory deletion requires current project access"
+            )
+        return
+    if visibility == "org":
+        if (
+            scope_type != "org"
+            or not actor_is_admin
+            or organization_id != scope_id
+            or fact_organization_id != organization_id
+        ):
+            raise PermissionError(
+                "Org memory deletion requires current memory admin access"
+            )
+        return
+    raise PermissionError("Memory fact has an unsupported visibility")
 
 
 def _fact_is_visible(

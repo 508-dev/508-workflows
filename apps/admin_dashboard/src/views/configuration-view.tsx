@@ -693,6 +693,8 @@ function ConfigurationView({
       draftValue !== currentValue &&
       knowledgeChannelsAvailable &&
       !unresolvedDraft
+    const canDisableSources =
+      canWrite && !envLocked && !busy && selectedKnowledgeChannelIds.length > 0
 
     function toggleKnowledgeChannel(channelId: string, checked: boolean) {
       setKnowledgeDraft((current) =>
@@ -730,8 +732,8 @@ function ConfigurationView({
           </div>
           {!knowledgeChannelsAvailable ? (
             <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
-              The Discord bot is unavailable, so channel choices cannot be refreshed or saved.
-              Existing selections are unchanged.
+              The Discord bot is unavailable, so channel choices cannot be refreshed or changed. You
+              can still disable all Discord answer sources below.
             </div>
           ) : null}
           {unresolvedKnowledgeChannelIds.size > 0 ? (
@@ -808,6 +810,14 @@ function ConfigurationView({
             disabled={busy || draftValue === currentValue}
           >
             Reset
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => onClear(knowledgeChannelsKey)}
+            disabled={!canDisableSources}
+          >
+            Disable all sources
           </Button>
           <Button type="button" onClick={saveKnowledgeChannels} disabled={!canSaveSelection}>
             Save sources

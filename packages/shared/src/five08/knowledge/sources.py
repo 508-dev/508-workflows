@@ -37,6 +37,13 @@ _PERSON_QUERY_PATTERNS = (
     re.compile(r"\b(?:about|for|on)\s+([^?]+)", re.I),
     re.compile(r"\b(?:member|contact|person)\s+([^?]+)", re.I),
 )
+_CRM_IDENTITY_FIELDS = (
+    "name",
+    "email",
+    "email_508",
+    "discord_username",
+    "github_username",
+)
 
 
 class KnowledgeSourceAdapters:
@@ -269,10 +276,10 @@ class KnowledgeSourceAdapters:
                     ORDER BY updated_at DESC
                     LIMIT %s
                     """,
-                    (token, token, token, token, token, max(1, min(limit, 10))),
+                    (token, token, token, token, token, max(2, min(limit, 10))),
                 )
                 rows = cursor.fetchall()
-        return [_crm_evidence(row) for row in rows]
+        return [_crm_evidence(row) for row in _unambiguous_crm_rows(rows, query)]
 
 
 def _project_query(question: str) -> str | None:
@@ -309,6 +316,27 @@ def _person_query(question: str) -> str | None:
         if normalized:
             return normalized[:120]
     return None
+
+
+def _unambiguous_crm_rows(
+    rows: list[dict[str, Any]],
+    query: str,
+) -> list[dict[str, Any]]:
+    """Return one contact only when the identity match is unambiguous."""
+    normalized_query = query.strip().casefold()
+    exact = [
+        row
+        for row in rows
+        if any(
+            str(row.get(field) or "").strip().casefold() == normalized_query
+            for field in _CRM_IDENTITY_FIELDS
+        )
+    ]
+    if len(exact) == 1:
+        return exact
+    if exact or len(rows) != 1:
+        return []
+    return rows
 
 
 def _crm_evidence(row: dict[str, Any]) -> KnowledgeEvidence:

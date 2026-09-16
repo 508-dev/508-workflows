@@ -14,7 +14,11 @@ from uuid import uuid4
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from five08.agent.memory import DEFAULT_MEMORY_RETENTION_DAYS, memory_slot
+from five08.agent.memory import (
+    DEFAULT_MEMORY_RETENTION_DAYS,
+    authorize_memory_fact_deletion,
+    memory_slot,
+)
 from five08.agent.models import (
     AgentContextSourceType,
     MemoryFact,
@@ -471,6 +475,9 @@ class InMemoryKnowledgeStore:
         fact_id: str,
         actor_id: str,
         actor_is_admin: bool = False,
+        organization_id: str | None = None,
+        project_id: str | None = None,
+        actor_can_write_project: bool = False,
         now: datetime | None = None,
     ) -> MemoryFact:
         comparison_time = now or datetime.now(timezone.utc)
@@ -478,10 +485,17 @@ class InMemoryKnowledgeStore:
             fact = self._facts.get(fact_id)
             if fact is None:
                 raise KeyError(f"Memory fact {fact_id} was not found")
-            if fact.visibility == "private" and fact.scope_id != actor_id:
-                raise PermissionError("Private memory belongs only to its owner")
-            if not actor_is_admin and fact.created_by != actor_id:
-                raise PermissionError("Memory fact can only be deleted by its creator")
+            authorize_memory_fact_deletion(
+                scope_type=fact.scope_type,
+                scope_id=fact.scope_id,
+                visibility=fact.visibility,
+                fact_organization_id=fact.organization_id,
+                actor_id=actor_id,
+                actor_is_admin=actor_is_admin,
+                organization_id=organization_id,
+                project_id=project_id,
+                actor_can_write_project=actor_can_write_project,
+            )
             deleted = fact.model_copy(
                 update={
                     "status": "deleted",
@@ -1169,6 +1183,9 @@ class PostgresKnowledgeStore:
         fact_id: str,
         actor_id: str,
         actor_is_admin: bool = False,
+        organization_id: str | None = None,
+        project_id: str | None = None,
+        actor_can_write_project: bool = False,
         now: datetime | None = None,
     ) -> MemoryFact:
         comparison_time = now or datetime.now(timezone.utc)
@@ -1186,15 +1203,21 @@ class PostgresKnowledgeStore:
                 existing = cursor.fetchone()
                 if existing is None:
                     raise KeyError(f"Memory fact {fact_id} was not found")
-                if (
-                    existing["visibility"] == "private"
-                    and str(existing["scope_id"]) != actor_id
-                ):
-                    raise PermissionError("Private memory belongs only to its owner")
-                if not actor_is_admin and str(existing["created_by"]) != actor_id:
-                    raise PermissionError(
-                        "Memory fact can only be deleted by its creator"
-                    )
+                authorize_memory_fact_deletion(
+                    scope_type=cast(MemoryScopeType, existing["scope_type"]),
+                    scope_id=str(existing["scope_id"]),
+                    visibility=cast(MemoryVisibility, existing["visibility"]),
+                    fact_organization_id=(
+                        str(existing["organization_id"])
+                        if existing["organization_id"] is not None
+                        else None
+                    ),
+                    actor_id=actor_id,
+                    actor_is_admin=actor_is_admin,
+                    organization_id=organization_id,
+                    project_id=project_id,
+                    actor_can_write_project=actor_can_write_project,
+                )
                 cursor.execute(
                     """
                     UPDATE memory_facts

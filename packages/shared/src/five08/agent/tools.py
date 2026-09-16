@@ -975,6 +975,8 @@ class ToolRegistry:
                 arguments,
                 actor_id=actor_id,
                 actor_scopes=actor_scopes or set(),
+                organization_id=organization_id,
+                project_id=project_id,
             )
         raise KeyError(f"Unknown tool {tool_name}")
 
@@ -1100,6 +1102,8 @@ class ToolRegistry:
         *,
         actor_id: str | None,
         actor_scopes: set[str],
+        organization_id: str | None,
+        project_id: str | None,
     ) -> dict[str, Any]:
         if actor_id is None:
             raise ValueError("actor_id is required")
@@ -1110,6 +1114,9 @@ class ToolRegistry:
             fact_id=fact_id,
             actor_id=actor_id,
             actor_is_admin="memory:admin" in actor_scopes,
+            organization_id=organization_id,
+            project_id=project_id,
+            actor_can_write_project="memory:write_project" in actor_scopes,
         )
         return {"fact": _memory_fact_payload(fact)}
 
