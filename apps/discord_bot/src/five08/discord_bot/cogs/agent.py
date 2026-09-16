@@ -77,6 +77,26 @@ _ORGANIZATION_AUDIENCE_ROLE_NAMES = frozenset(
 )
 _KNOWLEDGE_CAPTURE_ACTIONS = ("remember", "save")
 _KNOWLEDGE_CAPTURE_TARGETS = ("thread", "conversation", "answer", "discussion")
+_KNOWLEDGE_CAPTURE_COMPONENT_RE = re.compile(
+    r"^knowledge:capture:(?P<action>[cx]):"
+    r"(?P<draft_id>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}):"
+    r"(?P<guild_id>\d+):(?P<channel_id>\d+)$"
+)
+
+
+def _knowledge_capture_component_id(
+    *,
+    action: Literal["c", "x"],
+    draft_id: str,
+    guild_id: str,
+    channel_id: str,
+) -> str:
+    custom_id = f"knowledge:capture:{action}:{draft_id}:{guild_id}:{channel_id}"
+    if len(custom_id) > 100:
+        raise ValueError("Knowledge capture component ID exceeds Discord's limit")
+    return custom_id
+
+
 _AGENT_HELP_REQUESTS = frozenset(
     {
         "help",
@@ -267,6 +287,79 @@ class AgentConfirmationView(discord.ui.View):
         return context
 
 
+class KnowledgeCaptureDynamicButton(
+    discord.ui.DynamicItem[discord.ui.Button[Any]],
+    template=_KNOWLEDGE_CAPTURE_COMPONENT_RE,
+):
+    """Restart-safe dispatcher for persisted knowledge capture controls."""
+
+    def __init__(
+        self,
+        *,
+        action: Literal["c", "x"],
+        draft_id: str,
+        guild_id: str,
+        channel_id: str,
+    ) -> None:
+        self.action = action
+        self.draft_id = draft_id
+        self.guild_id = guild_id
+        self.channel_id = channel_id
+        super().__init__(
+            discord.ui.Button(
+                label="Remember" if action == "c" else "Cancel",
+                style=(
+                    discord.ButtonStyle.primary
+                    if action == "c"
+                    else discord.ButtonStyle.secondary
+                ),
+                custom_id=_knowledge_capture_component_id(
+                    action=action,
+                    draft_id=draft_id,
+                    guild_id=guild_id,
+                    channel_id=channel_id,
+                ),
+            )
+        )
+
+    @classmethod
+    async def from_custom_id(
+        cls,
+        interaction: discord.Interaction,
+        item: discord.ui.Item[Any],
+        match: re.Match[str],
+        /,
+    ) -> "KnowledgeCaptureDynamicButton":
+        del interaction, item
+        return cls(
+            action=cast(Literal["c", "x"], match["action"]),
+            draft_id=match["draft_id"],
+            guild_id=match["guild_id"],
+            channel_id=match["channel_id"],
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        get_cog = getattr(interaction.client, "get_cog", None)
+        cog = get_cog("AgentCog") if callable(get_cog) else None
+        if not isinstance(cog, AgentCog):
+            await interaction.response.send_message(
+                "Knowledge confirmation is temporarily unavailable. Try again.",
+                ephemeral=True,
+            )
+            return
+        view = KnowledgeCaptureView(
+            cog=cog,
+            requester_id=interaction.user.id,
+            draft_id=self.draft_id,
+            context={
+                "organization_id": self.guild_id,
+                "guild_id": self.guild_id,
+                "channel_id": self.channel_id,
+            },
+        )
+        await view._finish(interaction, confirm=self.action == "c")
+
+
 class KnowledgeCaptureView(discord.ui.View):
     """Confirmation controls for one frozen backend knowledge draft."""
 
@@ -283,6 +376,18 @@ class KnowledgeCaptureView(discord.ui.View):
         self.requester_id = requester_id
         self.draft_id = draft_id
         self.context = context
+        guild_id = str(context.get("guild_id") or context.get("organization_id") or "0")
+        channel_id = str(context.get("channel_id") or "0")
+        for item in self.children:
+            if not isinstance(item, discord.ui.Button):
+                continue
+            action: Literal["c", "x"] = "c" if item.label == "Remember" else "x"
+            item.custom_id = _knowledge_capture_component_id(
+                action=action,
+                draft_id=draft_id,
+                guild_id=guild_id,
+                channel_id=channel_id,
+            )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id == self.requester_id:
@@ -299,7 +404,11 @@ class KnowledgeCaptureView(discord.ui.View):
                 item.disabled = True
         self.stop()
 
-    @discord.ui.button(label="Remember", style=discord.ButtonStyle.primary)
+    @discord.ui.button(
+        label="Remember",
+        style=discord.ButtonStyle.primary,
+        custom_id="knowledge:capture:c:00000000-0000-0000-0000-000000000000:0:0",
+    )
     async def confirm(
         self,
         interaction: discord.Interaction,
@@ -307,7 +416,11 @@ class KnowledgeCaptureView(discord.ui.View):
     ) -> None:
         await self._finish(interaction, confirm=True)
 
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(
+        label="Cancel",
+        style=discord.ButtonStyle.secondary,
+        custom_id="knowledge:capture:x:00000000-0000-0000-0000-000000000000:0:0",
+    )
     async def cancel(
         self,
         interaction: discord.Interaction,
@@ -1015,8 +1128,6 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
 
         member_can_view = False
         for role in getattr(guild, "roles", []):
-            if bool(getattr(role, "managed", False)):
-                continue
             role_name = str(getattr(role, "name", "") or "").strip().casefold()
             try:
                 can_view = bool(getattr(permissions_for(role), "view_channel", False))
@@ -1979,4 +2090,5 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
 
 async def setup(bot: commands.Bot) -> None:
     """Load the agent cog."""
+    bot.add_dynamic_items(KnowledgeCaptureDynamicButton)
     await bot.add_cog(AgentCog(bot))

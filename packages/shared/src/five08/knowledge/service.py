@@ -623,13 +623,10 @@ class KnowledgeService:
     ) -> bool:
         if include_all:
             return True
-        try:
-            _emails, project_ids = self._resolve_actor_access(
-                discord_user_id,
-                False,
-            )
-        except Exception:
-            return False
+        _emails, project_ids = self._resolve_actor_access(
+            discord_user_id,
+            False,
+        )
         return project_id in project_ids
 
     def _resolve_actor_access(

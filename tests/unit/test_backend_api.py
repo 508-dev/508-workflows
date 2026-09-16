@@ -2630,6 +2630,49 @@ def test_dashboard_configuration_update_preserves_environment_lock_conflict(
     assert response.json() == {"error": error}
 
 
+def test_dashboard_configuration_update_redacts_unexpected_value_errors(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="validated",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    sensitive_error = "Traceback: provider secret leaked"
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api.set_runtime_config_value",
+            side_effect=ValueError(sensitive_error),
+        ),
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as mock_audit,
+    ):
+        response = client.put(
+            "/dashboard/api/configuration/OPENAI_MODEL",
+            json={"value": "gpt-4.1-mini"},
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "Invalid value for OPENAI_MODEL"}
+    assert mock_audit.await_args.kwargs["metadata"]["error"] == (
+        "Invalid value for OPENAI_MODEL"
+    )
+    assert sensitive_error not in response.text
+
+
 def test_dashboard_knowledge_channel_clear_remains_available_during_bot_outage(
     client: TestClient,
 ) -> None:

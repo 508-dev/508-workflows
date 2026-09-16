@@ -8267,6 +8267,7 @@ async def dashboard_update_configuration_handler(
             await request.json()
         )
     except ValidationError as exc:
+        validation_errors = exc.errors(include_input=False, include_context=False)
         await _audit_dashboard_configuration_change(
             session,
             result=AuditResult.ERROR,
@@ -8275,20 +8276,20 @@ async def dashboard_update_configuration_handler(
             metadata={
                 **metadata,
                 "error": "invalid_configuration_payload",
-                "detail": exc.errors(),
+                "detail": validation_errors,
             },
         )
         return JSONResponse(
-            {"error": "invalid_configuration_payload", "detail": exc.errors()},
+            {"error": "invalid_configuration_payload", "detail": validation_errors},
             status_code=400,
         )
-    except Exception as exc:
+    except Exception:
         await _audit_dashboard_configuration_change(
             session,
             result=AuditResult.ERROR,
             key=definition.key,
             action="configuration.update",
-            metadata={**metadata, "error": "invalid_json", "detail": str(exc)},
+            metadata={**metadata, "error": "invalid_json"},
         )
         return JSONResponse({"error": "invalid_json"}, status_code=400)
 
@@ -8330,8 +8331,17 @@ async def dashboard_update_configuration_handler(
                 updated_by_subject=actor_subject,
             )
     except ValueError as exc:
-        error = str(exc)
-        status_code = 409 if "configured by environment" in error else 400
+        environment_error = f"{definition.key} is configured by environment"
+        inaccessible_channels_error = "Some selected Discord channels are no longer accessible; refresh and try again"
+        if exc.args == (environment_error,):
+            error = environment_error
+            status_code = 409
+        elif exc.args == (inaccessible_channels_error,):
+            error = inaccessible_channels_error
+            status_code = 400
+        else:
+            error = f"Invalid value for {definition.key}"
+            status_code = 400
         await _audit_dashboard_configuration_change(
             session,
             result=AuditResult.ERROR,

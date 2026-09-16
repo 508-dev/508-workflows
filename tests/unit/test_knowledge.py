@@ -764,6 +764,44 @@ def test_project_thread_capture_uses_trusted_mapping_and_rechecks_membership() -
     assert "no longer have access" in confirmed.message
 
 
+def test_project_confirmation_access_outage_keeps_draft_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sources = _NoExternalSources(
+        capture_project_id="project-1",
+        accessible_project_ids=["project-1"],
+    )
+    store = InMemoryKnowledgeStore()
+    service = _service(store, sources=sources)
+    preview = service.create_capture(
+        _capture_request(roles=["Project Manager"], thread_id="thread-1")
+    )
+    assert preview.draft_id is not None
+
+    def unavailable_project_ids(
+        *,
+        actor_emails: list[str],
+        include_all: bool,
+    ) -> list[str]:
+        del actor_emails, include_all
+        raise RuntimeError("project lookup unavailable")
+
+    monkeypatch.setattr(sources, "accessible_project_ids", unavailable_project_ids)
+    confirmation_context = _context(roles=["Project Manager"])
+    confirmation_context.thread_id = "thread-1"
+
+    with pytest.raises(RuntimeError, match="project lookup unavailable"):
+        service.confirm_capture(
+            preview.draft_id,
+            context=confirmation_context,
+            confirm=True,
+        )
+
+    draft = store.get_capture_draft(preview.draft_id)
+    assert draft is not None
+    assert draft.consumed_at is None
+
+
 def test_secret_like_project_capture_is_forced_to_private_scope() -> None:
     sources = _NoExternalSources(
         capture_project_id="project-1",

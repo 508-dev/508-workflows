@@ -65,6 +65,14 @@ async def collect_discord_sources(
             member = await guild.fetch_member(int(context["discord_user_id"]))
             for channel_id in dict.fromkeys(channel_ids):
                 channel = guild.get_channel_or_thread(int(channel_id))
+                if channel is None:
+                    try:
+                        channel = await guild.fetch_channel(int(channel_id))
+                    except discord.NotFound:
+                        continue
+                    except discord.HTTPException:
+                        errors = ["discord_unavailable"]
+                        continue
                 if not isinstance(channel, (discord.TextChannel, discord.Thread)):
                     continue
                 # Private-thread membership is a separate ACL; do not infer it from

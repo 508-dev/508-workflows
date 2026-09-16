@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable, Protocol
@@ -12,6 +13,8 @@ from five08.agent.models import (
     AgentContextSource,
     AgentIdentityContext,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -78,16 +81,20 @@ class PrivateMemoryContextLoader:
             and not context.impersonation
             and "memory:read_self" in PolicyEngine().scopes_for_context(context)
         ):
-            facts = self.store.list_facts(
-                scope_type="user",
-                scope_id=context.discord_user_id,
-                visible_to_user_id=context.discord_user_id,
-                visible_to_project_id=None,
-                visible_to_org_id=context.organization_id,
-            )
-            # Long-term facts have their own expiry; their age is not the age of
-            # a Discord message. They remain quoted data, never instructions.
-            snippets = [
+            try:
+                facts = self.store.list_facts(
+                    scope_type="user",
+                    scope_id=context.discord_user_id,
+                    visible_to_user_id=context.discord_user_id,
+                    visible_to_project_id=None,
+                    visible_to_org_id=context.organization_id,
+                )
+            except Exception:
+                logger.warning("Private memory context unavailable", exc_info=True)
+                facts = []
+            # Current conversation snippets stay first so long-term memory cannot
+            # consume their bounded token or message budget.
+            snippets.extend(
                 AgentContextSnippet(
                     source_type="memory_fact",
                     source_ref=fact.id,
@@ -96,7 +103,7 @@ class PrivateMemoryContextLoader:
                     backend_loaded=True,
                 )
                 for fact in facts[:5]
-            ] + snippets
+            )
         return bound_context_snippets(
             snippets,
             bounds=bounds,

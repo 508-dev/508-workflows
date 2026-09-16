@@ -40,6 +40,7 @@ def setup_source():
         id=1,
         me=bot_member,
         fetch_member=AsyncMock(return_value=member),
+        fetch_channel=AsyncMock(return_value=channel),
         get_channel_or_thread=Mock(return_value=channel),
     )
     bot = SimpleNamespace(get_guild=Mock(return_value=guild))
@@ -95,3 +96,20 @@ async def test_member_refresh_failure_does_not_fall_back_to_cached_roles():
     assert sources == []
     assert errors == ["discord_unavailable"]
     channel.history.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_configured_archived_thread_is_fetched_when_not_cached():
+    bot, settings, guild, channel, _ = setup_source()
+    guild.get_channel_or_thread.return_value = None
+
+    sources, errors = await collect_discord_sources(
+        bot,
+        settings,
+        {"guild_id": "1", "discord_user_id": "50"},
+        "website deploy",
+    )
+
+    guild.fetch_channel.assert_awaited_once_with(100)
+    assert sources[0]["source"]["channel_id"] == "100"
+    assert errors == []

@@ -6,6 +6,7 @@ from unittest.mock import Mock
 import pytest
 
 from five08.agent import (
+    AgentContextSnippet,
     AgentIdentityContext,
     AgentOrchestrator,
     InMemoryMemoryStore,
@@ -266,3 +267,59 @@ def test_saved_preferences_are_context_only_for_owner_and_private_destination():
         )
         == []
     )
+
+
+def test_memory_lookup_outage_does_not_block_unrelated_agent_workflows() -> None:
+    store = Mock()
+    store.list_facts.side_effect = RuntimeError("memory unavailable")
+    actor = context()
+    actor.context_snippets = [
+        AgentContextSnippet(
+            source_type="discord_message",
+            source_ref="current-thread",
+            label="Current conversation",
+            text="The current task is Atlas.",
+            token_count=6,
+        )
+    ]
+    agent = AgentOrchestrator(context_loader=PrivateMemoryContextLoader(store))
+
+    response = agent.plan("Show tasks for project Atlas", actor)
+
+    assert response.status == "executed"
+    assert response.plan is not None
+    assert response.plan.context_sources[0].source_type == "request"
+
+
+def test_current_conversation_precedes_saved_memory_in_bounded_context() -> None:
+    store = InMemoryMemoryStore()
+    store.remember_fact(
+        scope_type="user",
+        scope_id="alice",
+        key="long_note",
+        value_json={"text": "memory " * 1000},
+        visibility="private",
+        source_type="request",
+        source_ref="agent_request",
+        source_excerpt=None,
+        created_by="alice",
+        verification_status="user_confirmed",
+        organization_id="guild",
+    )
+    actor = context()
+    actor.context_snippets = [
+        AgentContextSnippet(
+            source_type="discord_message",
+            source_ref="current-thread",
+            label="Current conversation",
+            text="Use the current conversation.",
+            token_count=6,
+        )
+    ]
+
+    snippets = PrivateMemoryContextLoader(store).load(
+        context=actor,
+        bounds=ContextLoadBounds(max_messages=1, max_tokens=6),
+    )
+
+    assert [snippet.source_ref for snippet in snippets] == ["current-thread"]

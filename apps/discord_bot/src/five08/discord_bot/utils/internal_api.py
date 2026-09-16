@@ -11,6 +11,7 @@ from discord.ext import commands
 from pydantic import BaseModel, ValidationError
 
 from five08.discord_bot.config import settings
+from five08.knowledge_channels import knowledge_discord_channel_ids
 from five08.engagements import (
     EngagementStatus,
     normalize_engagement_status,
@@ -531,7 +532,7 @@ class InternalAPIRoutes:
         )
         return web.json_response(result, status=status_code)
 
-    def _list_knowledge_channels(self) -> tuple[dict[str, Any], int]:
+    async def _list_knowledge_channels(self) -> tuple[dict[str, Any], int]:
         """Return channels the bot can currently read as knowledge sources."""
         guild = self._resolve_target_guild()
         if guild is None:
@@ -541,7 +542,22 @@ class InternalAPIRoutes:
             return {"error": "bot_member_unresolved"}, 503
 
         channels: list[dict[str, str]] = []
-        for channel in [*guild.text_channels, *guild.threads]:
+        available_channels: dict[str, Any] = {
+            str(channel.id): channel
+            for channel in [*guild.text_channels, *guild.threads]
+        }
+        for channel_id in knowledge_discord_channel_ids(
+            settings.knowledge_discord_channel_ids
+        ):
+            if channel_id in available_channels:
+                continue
+            try:
+                channel = await guild.fetch_channel(int(channel_id))
+            except discord.HTTPException:
+                continue
+            if isinstance(channel, (discord.TextChannel, discord.Thread)):
+                available_channels[channel_id] = channel
+        for channel in available_channels.values():
             if isinstance(channel, discord.Thread) and channel.is_private():
                 continue
             permissions = channel.permissions_for(bot_member)
@@ -580,7 +596,7 @@ class InternalAPIRoutes:
         """Return bot-readable Discord channels for the admin source picker."""
         if not self._is_authorized(request):
             return web.json_response({"error": "unauthorized"}, status=401)
-        result, status_code = self._list_knowledge_channels()
+        result, status_code = await self._list_knowledge_channels()
         return web.json_response(result, status=status_code)
 
     async def post_job_lead_handler(self, request: web.Request) -> web.Response:

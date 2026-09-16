@@ -11,8 +11,10 @@ import pytest
 from five08.discord_bot.cogs.agent import (
     AgentCog,
     AgentConfirmationView,
+    KnowledgeCaptureDynamicButton,
     KnowledgeCaptureView,
     settings,
+    setup as setup_agent_cog,
 )
 
 
@@ -132,6 +134,21 @@ def test_member_specific_view_overwrite_prevents_public_knowledge_reply() -> Non
     assert AgentCog._discord_destination_is_org_only(message) is False
 
 
+def test_managed_role_visibility_prevents_public_knowledge_reply() -> None:
+    member_role = SimpleNamespace(id=1, name="Member", managed=False)
+    booster_role = SimpleNamespace(id=2, name="Server Booster", managed=True)
+    channel = SimpleNamespace(
+        overwrites={},
+        permissions_for=Mock(return_value=SimpleNamespace(view_channel=True)),
+    )
+    message = SimpleNamespace(
+        guild=SimpleNamespace(roles=[member_role, booster_role]),
+        channel=channel,
+    )
+
+    assert AgentCog._discord_destination_is_org_only(message) is False
+
+
 @pytest.mark.asyncio
 async def test_ask_command_returns_a_private_grounded_answer() -> None:
     cog = AgentCog.__new__(AgentCog)
@@ -203,6 +220,68 @@ async def test_knowledge_confirmation_fails_closed_when_roles_cannot_refresh() -
     cog._post_knowledge_confirmation.assert_not_awaited()
     assert not view.is_finished()
     assert all(not item.disabled for item in view.children)
+
+
+@pytest.mark.asyncio
+async def test_dynamic_capture_button_rehydrates_after_restart() -> None:
+    cog = AgentCog.__new__(AgentCog)
+    cog._build_agent_context = Mock(
+        return_value={"discord_user_id": "123", "organization_id": None}
+    )
+    cog._guild_role_names = AsyncMock(return_value=["Member"])
+    cog._post_knowledge_confirmation = AsyncMock(
+        return_value={
+            "status": "saved",
+            "message": "Saved 1 remembered answer.",
+            "http_status": 200,
+        }
+    )
+    cog._audit_command_safe = Mock()
+    cog._format_knowledge_capture_response = Mock(return_value="Saved")
+    interaction = SimpleNamespace(
+        id=999,
+        client=SimpleNamespace(get_cog=Mock(return_value=cog)),
+        user=SimpleNamespace(id=123, roles=[]),
+        guild_id=None,
+        channel_id=111,
+        channel=SimpleNamespace(id=111),
+        message=SimpleNamespace(id=222, edit=AsyncMock()),
+        response=SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+    original = KnowledgeCaptureDynamicButton(
+        action="c",
+        draft_id="11111111-1111-1111-1111-111111111111",
+        guild_id="456",
+        channel_id="789",
+    )
+    match = original.template.fullmatch(original.custom_id)
+    assert match is not None
+    restored = await KnowledgeCaptureDynamicButton.from_custom_id(
+        interaction,
+        original.item,
+        match,
+    )
+
+    await restored.callback(interaction)
+
+    confirmation = cog._post_knowledge_confirmation.await_args.kwargs
+    assert confirmation["draft_id"] == "11111111-1111-1111-1111-111111111111"
+    assert confirmation["context"]["guild_id"] == "456"
+    assert confirmation["context"]["roles"] == ["Member"]
+    assert confirmation["confirm"] is True
+    edited_view = interaction.message.edit.await_args.kwargs["view"]
+    assert all(item.disabled for item in edited_view.children)
+
+
+@pytest.mark.asyncio
+async def test_agent_setup_registers_restart_safe_capture_buttons() -> None:
+    bot = SimpleNamespace(add_dynamic_items=Mock(), add_cog=AsyncMock())
+
+    await setup_agent_cog(bot)
+
+    bot.add_dynamic_items.assert_called_once_with(KnowledgeCaptureDynamicButton)
+    bot.add_cog.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -397,3 +476,48 @@ async def test_knowledge_view_uses_draft_ttl_without_changing_agent_timeout(
     assert agent_view.timeout == 600
     knowledge_view.stop()
     agent_view.stop()
+
+
+@pytest.mark.asyncio
+async def test_knowledge_confirmation_keeps_controls_after_backend_outage() -> None:
+    cog = AgentCog.__new__(AgentCog)
+    cog._build_agent_context = Mock(
+        return_value={"discord_user_id": "123", "organization_id": None}
+    )
+    cog._guild_role_names = AsyncMock(return_value=["Project Manager"])
+    cog._post_knowledge_confirmation = AsyncMock(
+        return_value={
+            "status": "failed",
+            "message": "The knowledge service could not be reached. Try again.",
+            "http_status": 500,
+        }
+    )
+    cog._audit_command_safe = Mock()
+    cog._format_knowledge_capture_response = Mock(return_value="Try again")
+    view = KnowledgeCaptureView(
+        cog=cog,
+        requester_id=123,
+        draft_id="11111111-1111-1111-1111-111111111111",
+        context={
+            "organization_id": "456",
+            "guild_id": "456",
+            "channel_id": "789",
+        },
+    )
+    interaction = SimpleNamespace(
+        id=999,
+        user=SimpleNamespace(id=123, roles=[]),
+        guild_id=None,
+        channel_id=111,
+        channel=SimpleNamespace(id=111),
+        message=SimpleNamespace(id=222, edit=AsyncMock()),
+        response=SimpleNamespace(defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+
+    await KnowledgeCaptureView.confirm(view, interaction, None)
+
+    cog._post_knowledge_confirmation.assert_awaited_once()
+    assert not view.is_finished()
+    assert all(not item.disabled for item in view.children)
+    interaction.message.edit.assert_not_awaited()
