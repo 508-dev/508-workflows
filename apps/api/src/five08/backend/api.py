@@ -41,6 +41,9 @@ from five08.audit import (
     AuditSource,
     insert_audit_event,
 )
+from five08.agent.state import PostgresAgentStateStore
+from five08.agent.context import PrivateMemoryContextLoader
+
 from five08.agent import (
     AgentIdentityContext,
     AgentModelConfig,
@@ -339,18 +342,15 @@ TALLY_INTAKE_FIELD_LABEL_MAP = {
     "beyond your resume / linkedin, what would you say your primary skills and interests are": "primary_skills_interests",
 }
 
-# Process-local MVP agent tools stay synchronous for Discord button UX. Both the
-# task store and pending plans are non-durable; production task workflows should
-# swap this registry for a persistent task service before multi-worker use.
+# Only the MVP task store remains process-local. Memory, pending confirmations,
+# and clarification state use Postgres across API workers and restarts.
 _AGENT_TASK_STORE = InMemoryTaskStore()
 _KNOWLEDGE_STORE = PostgresKnowledgeStore(settings)
+_AGENT_STATE_STORE = PostgresAgentStateStore(settings)
 _AGENT_ORCHESTRATOR: AgentOrchestrator | None = None
 _AGENT_ORCHESTRATOR_LOCK = threading.RLock()
 _KNOWLEDGE_SERVICE: KnowledgeService | None = None
 _KNOWLEDGE_SERVICE_LOCK = threading.RLock()
-_PENDING_AGENT_PLANS: dict[str, tuple[AgentPlan, AgentIdentityContext]] = {}
-_PENDING_AGENT_PLANS_LOCK: asyncio.Lock | None = None
-_PENDING_AGENT_PLANS_LOCK_LOOP: asyncio.AbstractEventLoop | None = None
 _MAX_PENDING_AGENT_PLANS = 1000
 _MAX_PENDING_AGENT_PLANS_PER_ACTOR = 25
 _AGENT_REQUEST_RATE_LIMIT_WINDOW_SECONDS = 60.0
@@ -375,6 +375,9 @@ def _get_agent_orchestrator() -> AgentOrchestrator:
                         settings
                     ),
                 ),
+                state_store=_AGENT_STATE_STORE,
+                context_loader=PrivateMemoryContextLoader(_KNOWLEDGE_STORE),
+                memory_suggestions_enabled=settings.agent_memory_suggestions_enabled,
                 model_config=AgentModelConfig.from_settings(settings),
                 planner=OpenAICompatibleAgentPlanner.from_settings(settings),
                 intent_normalizer=OpenAICompatibleIntentNormalizer.from_settings(
@@ -1939,7 +1942,10 @@ def _agent_request_audit_metadata(
             }
         )
         return metadata
-    metadata["message"] = message[:256]
+    if not response.plan or not any(
+        action.tool_name.startswith("memory_") for action in response.plan.actions
+    ):
+        metadata["message"] = message[:256]
     return metadata
 
 
@@ -8940,35 +8946,6 @@ def _schedule_agent_audit_event(
     task.add_done_callback(_AGENT_AUDIT_TASKS.discard)
 
 
-def _is_agent_plan_expired(plan: AgentPlan, *, now: datetime | None = None) -> bool:
-    if plan.expires_at is None:
-        return False
-    expires_at = plan.expires_at
-    if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
-    comparison_time = now or datetime.now(timezone.utc)
-    return comparison_time > expires_at.astimezone(timezone.utc)
-
-
-def _cleanup_expired_pending_agent_plans(*, now: datetime | None = None) -> None:
-    comparison_time = now or datetime.now(timezone.utc)
-    expired_plan_ids = [
-        plan_id
-        for plan_id, (plan, _context) in _PENDING_AGENT_PLANS.items()
-        if _is_agent_plan_expired(plan, now=comparison_time)
-    ]
-    for plan_id in expired_plan_ids:
-        _PENDING_AGENT_PLANS.pop(plan_id, None)
-
-
-def _pending_agent_plan_count_for_actor(discord_user_id: str) -> int:
-    return sum(
-        1
-        for _plan, context in _PENDING_AGENT_PLANS.values()
-        if context.discord_user_id == discord_user_id
-    )
-
-
 def _confirmation_execution_context(
     *,
     original_context: AgentIdentityContext,
@@ -9013,29 +8990,17 @@ def _confirmation_execution_scopes(
     return original_scopes & confirmation_scopes
 
 
-def _pending_agent_plans_lock() -> asyncio.Lock:
-    global _PENDING_AGENT_PLANS_LOCK, _PENDING_AGENT_PLANS_LOCK_LOOP
-    loop = asyncio.get_running_loop()
-    if _PENDING_AGENT_PLANS_LOCK is None or _PENDING_AGENT_PLANS_LOCK_LOOP is not loop:
-        _PENDING_AGENT_PLANS_LOCK = asyncio.Lock()
-        _PENDING_AGENT_PLANS_LOCK_LOOP = loop
-    return _PENDING_AGENT_PLANS_LOCK
-
-
 async def _store_pending_agent_plan(
     plan: AgentPlan,
     context: AgentIdentityContext,
 ) -> bool:
-    async with _pending_agent_plans_lock():
-        _cleanup_expired_pending_agent_plans()
-        if (
-            len(_PENDING_AGENT_PLANS) >= _MAX_PENDING_AGENT_PLANS
-            or _pending_agent_plan_count_for_actor(context.discord_user_id)
-            >= _MAX_PENDING_AGENT_PLANS_PER_ACTOR
-        ):
-            return False
-        _PENDING_AGENT_PLANS[plan.plan_id] = (plan, context)
-        return True
+    return await asyncio.to_thread(
+        _AGENT_STATE_STORE.save_plan,
+        plan,
+        context,
+        maximum=_MAX_PENDING_AGENT_PLANS,
+        per_actor=_MAX_PENDING_AGENT_PLANS_PER_ACTOR,
+    )
 
 
 async def _claim_pending_agent_plan(
@@ -9043,26 +9008,9 @@ async def _claim_pending_agent_plan(
     *,
     discord_user_id: str,
 ) -> tuple[str, tuple[AgentPlan, AgentIdentityContext] | None]:
-    async with _pending_agent_plans_lock():
-        now = datetime.now(timezone.utc)
-        pending = _PENDING_AGENT_PLANS.get(plan_id)
-        if pending is None:
-            _cleanup_expired_pending_agent_plans(now=now)
-            return "not_found", None
-
-        plan, original_context = pending
-        if original_context.discord_user_id != discord_user_id:
-            _cleanup_expired_pending_agent_plans(now=now)
-            return "actor_mismatch", pending
-
-        if _is_agent_plan_expired(plan, now=now):
-            _PENDING_AGENT_PLANS.pop(plan_id, None)
-            _cleanup_expired_pending_agent_plans(now=now)
-            return "expired", pending
-
-        claimed = _PENDING_AGENT_PLANS.pop(plan_id, pending)
-        _cleanup_expired_pending_agent_plans(now=now)
-        return "claimed", claimed
+    return await asyncio.to_thread(
+        _AGENT_STATE_STORE.claim_plan, plan_id, discord_user_id
+    )
 
 
 async def agent_request_handler(request: Request) -> JSONResponse:
@@ -9093,7 +9041,6 @@ async def agent_request_handler(request: Request) -> JSONResponse:
             metadata={
                 "status": "denied",
                 "reason": "rate_limited",
-                "message": payload.message[:256],
             },
         )
         return JSONResponse(
@@ -9117,13 +9064,35 @@ async def agent_request_handler(request: Request) -> JSONResponse:
             status_code=503,
         )
 
-    response = await asyncio.to_thread(
-        orchestrator.plan,
-        payload.message,
-        payload.context,
-    )
+    try:
+        response = await asyncio.to_thread(
+            orchestrator.plan,
+            payload.message,
+            payload.context,
+        )
+    except Exception:
+        logger.exception("Agent planning or conversation storage failed")
+        return JSONResponse(
+            {
+                "status": "failed",
+                "message": "Agent memory or conversation storage is temporarily unavailable. Try again.",
+                "retryable": True,
+            },
+            status_code=503,
+        )
     if response.plan is not None and response.status == "requires_confirmation":
-        stored = await _store_pending_agent_plan(response.plan, payload.context)
+        try:
+            stored = await _store_pending_agent_plan(response.plan, payload.context)
+        except Exception:
+            logger.exception("Agent confirmation storage failed")
+            return JSONResponse(
+                {
+                    "status": "failed",
+                    "message": "I couldn't save the confirmation plan. Please try again.",
+                    "retryable": True,
+                },
+                status_code=503,
+            )
         if not stored:
             _schedule_agent_audit_event(
                 context=payload.context,
@@ -9133,7 +9102,6 @@ async def agent_request_handler(request: Request) -> JSONResponse:
                 metadata={
                     "status": "failed",
                     "reason": "pending_plan_capacity_exceeded",
-                    "message": payload.message[:256],
                 },
             )
             response = AgentResponse(
@@ -9210,10 +9178,21 @@ async def agent_confirmation_handler(
                 status_code=503,
             )
 
-    claim_status, pending = await _claim_pending_agent_plan(
-        plan_id,
-        discord_user_id=payload.context.discord_user_id,
-    )
+    try:
+        claim_status, pending = await _claim_pending_agent_plan(
+            plan_id,
+            discord_user_id=payload.context.discord_user_id,
+        )
+    except Exception:
+        logger.exception("Agent confirmation claim failed")
+        return JSONResponse(
+            {
+                "status": "failed",
+                "message": "Confirmation storage is temporarily unavailable. Please retry.",
+                "retryable": True,
+            },
+            status_code=503,
+        )
     if pending is None:
         _schedule_agent_audit_event(
             context=payload.context,

@@ -49,6 +49,9 @@ class _FakeCursor:
             "updated_at": params[14],
         }
 
+    def fetchall(self) -> list[dict[str, Any]]:
+        return []
+
     def fetchone(self) -> dict[str, Any] | None:
         return self.row
 
@@ -92,7 +95,11 @@ def test_postgres_memory_adapter_preserves_retention_and_provenance(
         organization_id="org-1",
     )
 
-    insert_query, insert_params = connection.cursor_instance.calls[0]
+    insert_query, insert_params = next(
+        call
+        for call in connection.cursor_instance.calls
+        if "INSERT INTO memory_facts" in call[0]
+    )
     assert "verification_status" in insert_query
     assert "expires_at" in insert_query
     assert "normalized_verification" not in insert_query

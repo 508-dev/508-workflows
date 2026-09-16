@@ -23,6 +23,11 @@ from five08.agent.context import (
     RequestContextLoader,
     context_sources_for_snippets,
 )
+from five08.agent.state import (
+    AgentStateStore,
+    ClarificationState,
+    InMemoryAgentStateStore,
+)
 from five08.agent.model_routing import AgentModelConfig
 from five08.agent.planner import AgentPlanner, AgentPlannerResult
 from five08.agent.policy import PolicyEngine
@@ -103,6 +108,8 @@ class AgentOrchestrator:
         context_loader: AgentContextLoader | None = None,
         context_bounds: ContextLoadBounds | None = None,
         today: date | None = None,
+        state_store: AgentStateStore | None = None,
+        memory_suggestions_enabled: bool = False,
     ) -> None:
         self.registry = registry or ToolRegistry()
         self._explicit_policy = policy
@@ -112,6 +119,8 @@ class AgentOrchestrator:
         self.context_loader = context_loader or RequestContextLoader()
         self.context_bounds = context_bounds or ContextLoadBounds()
         self.today = today
+        self.state_store = state_store or InMemoryAgentStateStore()
+        self.memory_suggestions_enabled = memory_suggestions_enabled
 
     @property
     def policy(self) -> PolicyEngine:
@@ -122,6 +131,34 @@ class AgentOrchestrator:
         )
 
     def plan(self, message: str, context: AgentIdentityContext) -> AgentResponse:
+        state = self.state_store.take_clarification(context)
+        text = message.strip()
+        if state is not None and re.fullmatch(r"[\w][\w /-]{0,79}[.!]?", text):
+            # Complete only the known missing field. A new command/question must
+            # never be interpreted as a project name or task title.
+            if self._parse_action(text) is None and not re.match(
+                r"(?i)^(?:what|why|how|when|where|who|cancel|no|stop|do|can)\b", text
+            ):
+                if state.field == "task_project":
+                    project = re.sub(r"(?i)^project\s+", "", text).rstrip(".!")
+                    text = f"{state.request} in project {project}"
+                elif state.field == "task_title":
+                    text = re.sub(
+                        r"\bcreate\s+(?:a\s+)?task\b",
+                        lambda _: f"Create a task to {text.rstrip('.!')}",
+                        state.request,
+                        count=1,
+                        flags=re.I,
+                    )
+        response = self._plan(text, context)
+        field = response.clarification_field
+        if response.status == "needs_clarification" and field:
+            self.state_store.save_clarification(
+                context, ClarificationState(field=field, request=text)
+            )
+        return response
+
+    def _plan(self, message: str, context: AgentIdentityContext) -> AgentResponse:
         text = message.strip()
         context = self._load_request_context(context)
         if not text:
@@ -130,6 +167,26 @@ class AgentOrchestrator:
                 message="I need a task request to work from.",
                 clarification_question="What task or project action should I take?",
             )
+
+        if self.memory_suggestions_enabled and re.fullmatch(
+            r"(?i)(?:my timezone is [A-Za-z_]+/[A-Za-z_/-]+|"
+            r"i prefer (?:short|concise|detailed) (?:answers|responses))\.?",
+            text,
+        ):
+            action = self._parse_memory_action("Remember that " + text)
+            assert action is not None
+            if text.casefold().startswith("i prefer"):
+                action.arguments["key"] = "response_style"
+            action.summary = "Suggested private memory: " + text
+            response = self._response_for_deterministic_action(
+                action=action,
+                context=context,
+                planning_text=text,
+                planner="deterministic_regex",
+            )
+            if response.status == "requires_confirmation":
+                response.message = "Would you like me to remember this privately? Nothing is saved until you confirm."
+            return response
 
         deterministic_response = self._plan_deterministic_workflow(text, context)
         if deterministic_response is not None:
@@ -158,6 +215,7 @@ class AgentOrchestrator:
                     status="needs_clarification",
                     message="I need a task title before I can create it.",
                     clarification_question="What should the task be?",
+                    clarification_field="task_title",
                 )
             return AgentResponse(
                 status="needs_clarification",
@@ -268,6 +326,7 @@ class AgentOrchestrator:
                 status="needs_clarification",
                 message="Task search requires a project filter.",
                 clarification_question="Which project should I search?",
+                clarification_field="task_project",
             )
 
         return self._response_for_action(
@@ -851,14 +910,34 @@ class AgentOrchestrator:
 
     def _parse_memory_action(self, text: str) -> AgentToolAction | None:
         lowered = text.casefold()
-        if re.search(r"\bwhat\s+do\s+you\s+remember\s+about\s+me\b", lowered):
+        edit = re.fullmatch(
+            r"update memory fact ([A-Za-z0-9_-]{8,}) to (.+)", text, re.IGNORECASE
+        )
+        if edit:
+            return AgentToolAction(
+                tool_name="memory_write.remember_fact",
+                arguments={
+                    "scope_type": "user",
+                    "key": "note",
+                    "value_json": {"text": edit.group(2).strip()},
+                    "visibility": "private",
+                    "replaces_id": edit.group(1),
+                },
+                summary=f"Replace private memory {edit.group(1)} with: {edit.group(2).strip()}",
+            )
+        if re.search(
+            r"\bwhat\s+do\s+you\s+remember\s+about\s+me\b", lowered
+        ) or re.match(
+            r"^(?:do|can|could|what|which)\b.*\bremember\b.*\b(?:my|me)\b",
+            lowered,
+        ):
             return AgentToolAction(
                 tool_name="memory_read.get_user_facts",
                 arguments={},
                 summary="List durable facts remembered about the requester",
             )
-        forget_match = re.search(
-            r"\bforget\s+(?:memory\s+)?(?:fact\s+)?([A-Za-z0-9_-]{8,})\b",
+        forget_match = re.fullmatch(
+            r"(?:please\s+)?forget\s+(?:memory\s+)?(?:fact\s+)?([A-Za-z0-9_-]{8,})[.!]?",
             text,
             re.IGNORECASE,
         )
@@ -868,8 +947,8 @@ class AgentOrchestrator:
                 arguments={"fact_id": forget_match.group(1)},
                 summary=f"Forget memory fact {forget_match.group(1)}",
             )
-        remember_match = re.search(
-            r"\bremember\s+(?:that\s+)?(.+?)(?:\s+for\s+me)?$",
+        remember_match = re.fullmatch(
+            r"(?:please\s+)?remember\s+(?:that\s+)?(.+?)(?:\s+for\s+me)?[.!]?",
             text,
             re.IGNORECASE,
         )
@@ -2071,7 +2150,6 @@ class AgentOrchestrator:
             "account_write.create_user_accounts": "create_user_accounts",
             "memory_read.get_user_facts": "read_user_memory",
             "memory_read.get_project_facts": "read_project_memory",
-            "memory_read.search_context": "search_context",
             "memory_write.remember_fact": "remember_fact",
             "memory_write.forget_fact": "forget_fact",
         }.get(tool_name, "unknown")

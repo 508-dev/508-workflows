@@ -18,6 +18,11 @@ from discord.ext import commands
 from five08.agent import AgentIdentityContext, PolicyEngine, ToolRuntimeConfig
 from five08.discord_bot.config import settings
 from five08.discord_bot.utils.audit import DiscordAuditCogMixin
+from five08.discord_bot.utils.knowledge_context import (
+    collect_discord_sources,
+    collect_thread_context,
+)
+from five08.discord_bot.utils.memory_views import MemoryFactsView
 from five08.tls import default_ca_bundle_path
 
 logger = logging.getLogger(__name__)
@@ -157,7 +162,7 @@ class AgentConfirmationView(discord.ui.View):
                 context=confirmation_context,
                 confirm=True,
             )
-            transport_failed = False
+            transport_failed = bool(response.get("retryable"))
         except Exception as exc:
             logger.warning("Agent confirmation request failed: %s", exc)
             response = {"status": "failed", "message": str(exc)}
@@ -200,7 +205,7 @@ class AgentConfirmationView(discord.ui.View):
                 context=confirmation_context,
                 confirm=False,
             )
-            transport_failed = False
+            transport_failed = bool(response.get("retryable"))
         except Exception as exc:
             logger.warning("Agent cancellation request failed: %s", exc)
             response = {"status": "failed", "message": str(exc)}
@@ -243,7 +248,7 @@ class AgentConfirmationView(discord.ui.View):
                 guild_id=str(original_guild_id),
                 user_id=interaction.user.id,
             )
-            context["roles"] = fresh_roles or self._original_roles()
+            context["roles"] = fresh_roles
         original_message_id = self.context.get("message_id")
         if original_message_id:
             context["message_id"] = original_message_id
@@ -251,16 +256,6 @@ class AgentConfirmationView(discord.ui.View):
         if original_operation_id:
             context["operation_id"] = original_operation_id
         return context
-
-    def _original_roles(self) -> list[str]:
-        roles = self.context.get("roles")
-        if not isinstance(roles, list):
-            return []
-        return [
-            str(role).strip()
-            for role in roles
-            if isinstance(role, str) and str(role).strip()
-        ]
 
 
 class KnowledgeCaptureView(discord.ui.View):
@@ -447,7 +442,9 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             },
         )
 
-        view: AgentConfirmationView | None = None
+        view: discord.ui.View | None = self._memory_view(
+            response, interaction.user.id, context
+        )
         plan = response.get("plan") if isinstance(response.get("plan"), dict) else None
         if response.get("status") == "requires_confirmation" and plan is not None:
             plan_id = str(plan.get("plan_id") or "")
@@ -474,7 +471,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
 
     @app_commands.command(
         name="ask",
-        description="Ask the wiki, ERP, CRM, and remembered organizational knowledge",
+        description="Ask Outline, selected Discord channels, and remembered knowledge",
     )
     @app_commands.describe(question="The organizational question to answer")
     async def ask_command(
@@ -584,6 +581,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                 context=context,
             )
             return
+        context["context_snippets"] = await collect_thread_context(message)
         try:
             async with message.channel.typing():
                 response = await self._post_agent_request(
@@ -614,7 +612,9 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             },
         )
 
-        view: AgentConfirmationView | None = None
+        view: discord.ui.View | None = self._memory_view(
+            response, message.author.id, context
+        )
         plan = response.get("plan") if isinstance(response.get("plan"), dict) else None
         if response.get("status") == "requires_confirmation" and plan is not None:
             plan_id = str(plan.get("plan_id") or "")
@@ -648,6 +648,15 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
 
     @staticmethod
     def _is_knowledge_capture_request(request: str) -> bool:
+        if re.match(
+            r"(?i)^(?:do|did|what|how|why|where|when|can|could)\b", request.strip()
+        ):
+            return False
+        if re.fullmatch(
+            r"(?i)suggest (?:facts|memories)(?: worth saving)? from (?:this|the) (?:thread|conversation)",
+            request.strip().rstrip(".!"),
+        ):
+            return True
         if _KNOWLEDGE_CAPTURE_RE.search(request) is not None:
             return True
         tokens = re.findall(r"[a-z]+", request.casefold())
@@ -682,6 +691,8 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             return False
         if _KNOWLEDGE_RECALL_PREFIX_RE.search(normalized) is not None:
             return True
+        if re.match(r"(?i)^(?:do|did|what|how|where|when)\b.*\bremember\b", normalized):
+            return True
         if _AGENT_ACTION_RE.search(normalized) is not None:
             return False
         return (
@@ -713,6 +724,15 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             "context": context,
             "source": self._knowledge_source_payload(message),
             "messages": messages,
+            "requested_visibility": (
+                "project"
+                if re.search(r"\bfor (?:the )?project\b", request, re.I)
+                else "org"
+                if re.search(
+                    r"\bfor (?:the )?(?:team|everyone|organization)\b", request, re.I
+                )
+                else "private"
+            ),
         }
         try:
             async with message.channel.typing():
@@ -1251,7 +1271,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
     def _should_reply_publicly_to_mention(
         *,
         response: dict[str, Any],
-        view: AgentConfirmationView | None,
+        view: discord.ui.View | None,
     ) -> bool:
         if view is not None:
             return False
@@ -1316,7 +1336,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         self,
         message: discord.Message,
         response: dict[str, Any],
-        view: AgentConfirmationView | None,
+        view: discord.ui.View | None,
     ) -> bool:
         try:
             formatted_response = self._format_agent_response(response)
@@ -1455,13 +1475,10 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             return []
         if guild is None:
             return []
-        member = guild.get_member(user_id)
-        if member is None and hasattr(guild, "fetch_member"):
-            try:
+        try:
+            async with asyncio.timeout(3):
                 member = await guild.fetch_member(user_id)
-            except (discord.HTTPException, discord.NotFound, discord.Forbidden):
-                member = None
-        if member is None:
+        except (TimeoutError, discord.HTTPException):
             return []
         return self._role_names_from_user(member)
 
@@ -1541,10 +1558,18 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         question: str,
         context: dict[str, Any],
     ) -> dict[str, Any]:
+        sources, source_errors = await collect_discord_sources(
+            self.bot, settings, context, question
+        )
+        payload: dict[str, Any] = {"question": question, "context": context}
+        if sources:
+            payload["discord_sources"] = sources
+        if source_errors:
+            payload["source_errors"] = source_errors
         return await asyncio.to_thread(
             self._post_backend_json,
             "/knowledge/queries",
-            {"question": question, "context": context},
+            payload,
             settings.knowledge_api_timeout_seconds,
         )
 
@@ -1746,6 +1771,14 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                     lines.extend(
                         self._format_memory_fact_result_lines(tool_name, result_payload)
                     )
+                elif isinstance(result_payload, dict) and isinstance(
+                    result_payload.get("fact"), dict
+                ):
+                    lines.extend(
+                        self._format_memory_fact_result_lines(
+                            tool_name, {"facts": [result_payload["fact"]]}
+                        )
+                    )
                 else:
                     result_error = str(result.get("error") or "").strip()
                     if result_error:
@@ -1759,6 +1792,28 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                         lines.append(f"  Recovery email failed: {recovery_email_error}")
 
         return "\n".join(lines)[:1900]
+
+    def _memory_view(
+        self, response: dict[str, Any], user_id: int, context: dict[str, Any]
+    ) -> MemoryFactsView | None:
+        for result in response.get("results") or []:
+            if (
+                result.get("tool_name") != "memory_read.get_user_facts"
+                or result.get("status") != "succeeded"
+            ):
+                continue
+            facts = [
+                fact
+                for fact in (result.get("result") or {}).get("facts") or []
+                if fact.get("id")
+                and fact.get("visibility") == "private"
+                and fact.get("scope_id") == str(user_id)
+            ]
+            if facts:
+                return MemoryFactsView(
+                    cog=self, requester_id=user_id, context=context, facts=facts
+                )
+        return None
 
     @staticmethod
     def _format_memory_fact_result_lines(
@@ -1775,9 +1830,13 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             key = str(fact.get("key") or "memory").strip()
             value = AgentCog._format_memory_fact_value(fact.get("value_json"))
             if value:
-                lines.append(f"  - {key}: {value}")
+                lines.append(
+                    f"  - {AgentCog._safe_discord_text(key)}: {AgentCog._safe_discord_text(value)}"
+                )
             else:
                 lines.append(f"  - {key}")
+            if fact.get("id"):
+                lines.append(f"    ID: {fact['id']}")
         return lines
 
     @staticmethod

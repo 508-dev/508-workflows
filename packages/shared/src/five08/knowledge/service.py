@@ -25,7 +25,7 @@ from five08.knowledge.models import (
     KnowledgeVisibility,
 )
 from five08.knowledge.sources import KnowledgeSourceAdapters
-from five08.knowledge.store import KnowledgeStore
+from five08.knowledge.store import KnowledgeStore, _fuzzy_relevance, _search_tokens
 from five08.settings import SharedSettings
 
 _CAPTURE_REQUEST_RE = re.compile(
@@ -112,7 +112,7 @@ class KnowledgeService:
         scopes = self.policy.scopes_for_context(context)
         resolved_project_id: str | None = None
         source = request.source
-        if source.thread_id:
+        if source.thread_id and request.requested_visibility == "project":
             try:
                 resolved_project_id = self.sources.resolve_capture_project(
                     organization_id=organization_id,
@@ -169,7 +169,8 @@ class KnowledgeService:
                 ),
             )
         if visibility != "private" and any(
-            _contains_secret(candidate.question) or _contains_secret(candidate.answer)
+            _contains_sensitive_output(candidate.question)
+            or _contains_sensitive_output(candidate.answer)
             for candidate in candidates
         ):
             scope_type = "user"
@@ -331,7 +332,7 @@ class KnowledgeService:
                 answer="Your Discord roles cannot search organizational knowledge.",
             )
 
-        source_errors: list[str] = []
+        source_errors: list[str] = list(request.source_errors)
         actor_emails: list[str] = []
         accessible_project_ids: list[str] = []
         timeout_seconds = max(
@@ -391,7 +392,9 @@ class KnowledgeService:
         if allow_private and "crm:contact:read" in scopes:
             searches["crm"] = lambda: self.sources.search_crm(request.question)
 
-        evidence: list[KnowledgeEvidence] = []
+        evidence: list[KnowledgeEvidence] = (
+            self._discord_evidence(request) if allow_org else []
+        )
         futures = {
             _SOURCE_EXECUTOR.submit(search): name for name, search in searches.items()
         }
@@ -447,7 +450,7 @@ class KnowledgeService:
                 answer = draft.answer
                 confidence = draft.confidence
 
-        visibility = _combined_visibility(selected)
+        visibility = _combined_visibility(evidence)
         citations = [
             KnowledgeCitation(
                 citation_id=str(index),
@@ -460,7 +463,13 @@ class KnowledgeService:
             )
             for index, item in enumerate(selected, start=1)
         ]
-        public_safe = visibility == "org" and not _contains_sensitive_output(answer)
+        # A model sees every candidate, so its citation selection cannot declassify
+        # private material that may have influenced the generated answer.
+        public_safe = (
+            visibility == "org"
+            and all(item.visibility == "org" for item in evidence)
+            and not _contains_sensitive_output(answer)
+        )
         return KnowledgeQueryResponse(
             status="answered",
             answer=answer,
@@ -483,16 +492,83 @@ class KnowledgeService:
         str | None,
         KnowledgeVisibility | None,
     ]:
-        if resolved_project_id and "knowledge:capture_project" in scopes:
+        if request.requested_visibility == "private" and "memory:write_self" in scopes:
+            return "user", request.context.discord_user_id, "private"
+        if (
+            request.requested_visibility == "project"
+            and resolved_project_id
+            and "knowledge:capture_project" in scopes
+        ):
             return "project", resolved_project_id, "project"
         if (
-            request.source.source_visibility == "org"
+            request.requested_visibility == "org"
+            and request.source.source_visibility == "org"
             and "knowledge:capture_org" in scopes
         ):
             return "org", organization_id, "org"
-        if "memory:write_self" in scopes:
-            return "user", request.context.discord_user_id, "private"
         return None, None, None
+
+    def _discord_evidence(
+        self, request: KnowledgeQueryRequest
+    ) -> list[KnowledgeEvidence]:
+        """Accept only bounded snapshots from the configured gateway allowlist."""
+        allowed = {
+            item.strip()
+            for item in str(
+                getattr(self.settings, "knowledge_discord_channel_ids", "")
+            ).split(",")
+            if item.strip()
+        }
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(
+            days=int(getattr(self.settings, "knowledge_discord_history_days", 30))
+        )
+        remaining = 20_000
+        evidence: list[KnowledgeEvidence] = []
+        seen: set[str] = set()
+        query_tokens = _search_tokens(request.question)
+        for batch in request.discord_sources:
+            source = batch.source
+            if (
+                source.guild_id != request.context.guild_id
+                or source.channel_id not in allowed
+            ):
+                continue
+            for message in batch.messages:
+                if message.author_is_bot or not cutoff <= message.created_at <= now:
+                    continue
+                evidence_id = f"discord:{source.guild_id}:{source.channel_id}:{message.message_id}"
+                if evidence_id in seen:
+                    continue
+                seen.add(evidence_id)
+                excerpt = message.content[: min(2000, remaining)]
+                remaining -= len(excerpt)
+                if not excerpt:
+                    break
+                score = max(
+                    len(query_tokens & _search_tokens(excerpt))
+                    / max(len(query_tokens), 1),
+                    _fuzzy_relevance(request.question, excerpt),
+                )
+                # Unmatched messages are not useful deterministic fallback evidence.
+                if score <= 0 and self.model is None:
+                    continue
+                url = f"https://discord.com/channels/{source.guild_id}/{source.channel_id}/{message.message_id}"
+                evidence.append(
+                    KnowledgeEvidence(
+                        evidence_id=evidence_id,
+                        source_type="discord_message",
+                        source_ref=url,
+                        title=f"#{source.title}: {message.author_name}"[:300],
+                        excerpt=excerpt,
+                        url=url,
+                        visibility="private",
+                        authority=0.55,
+                        relevance=score,
+                        updated_at=message.created_at,
+                    )
+                )
+        return evidence
 
     def _organization_allowed(
         self,

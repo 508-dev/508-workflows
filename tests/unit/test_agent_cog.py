@@ -322,9 +322,16 @@ async def test_confirmation_view_disable_stops_listener() -> None:
 
 
 @pytest.mark.asyncio
-async def test_confirmation_transport_failure_keeps_view_retryable() -> None:
+@pytest.mark.parametrize("transport_error", [True, False])
+async def test_confirmation_transport_failure_keeps_view_retryable(
+    transport_error,
+) -> None:
     cog = SimpleNamespace(
-        _post_agent_confirmation=AsyncMock(side_effect=RuntimeError("timeout")),
+        _build_agent_context=Mock(return_value={"discord_user_id": "123"}),
+        _post_agent_confirmation=AsyncMock(
+            side_effect=RuntimeError("timeout") if transport_error else None,
+            return_value={"status": "failed", "retryable": True},
+        ),
         _audit_command_safe=Mock(),
         _format_agent_response=Mock(return_value="Agent status: failed"),
     )
@@ -343,6 +350,7 @@ async def test_confirmation_transport_failure_keeps_view_retryable() -> None:
 
     await AgentConfirmationView.confirm(view, interaction, None)
 
+    cog._post_agent_confirmation.assert_awaited_once()
     assert not view.is_finished()
     assert all(not item.disabled for item in view.children)
     interaction.message.edit.assert_not_awaited()
@@ -711,9 +719,16 @@ async def test_agent_command_member_info_lookup_reaches_gateway() -> None:
 
 
 @pytest.mark.asyncio
-async def test_confirmation_context_in_dm_uses_cached_original_guild_roles() -> None:
+async def test_confirmation_context_in_dm_refreshes_cached_original_guild_roles() -> (
+    None
+):
     member = SimpleNamespace(roles=[SimpleNamespace(name="Member")])
-    guild = SimpleNamespace(get_member=Mock(return_value=member))
+    guild = SimpleNamespace(
+        get_member=Mock(
+            return_value=SimpleNamespace(roles=[SimpleNamespace(name="Admin")])
+        ),
+        fetch_member=AsyncMock(return_value=member),
+    )
     cog = AgentCog.__new__(AgentCog)
     cog.bot = SimpleNamespace(get_guild=Mock(return_value=guild))
     view = AgentConfirmationView(
@@ -787,7 +802,7 @@ async def test_confirmation_context_in_dm_fetches_uncached_member_roles() -> Non
 
 
 @pytest.mark.asyncio
-async def test_confirmation_context_in_dm_preserves_original_roles_when_guild_missing() -> (
+async def test_confirmation_context_in_dm_denies_original_roles_when_guild_missing() -> (
     None
 ):
     cog = AgentCog.__new__(AgentCog)
@@ -817,7 +832,7 @@ async def test_confirmation_context_in_dm_preserves_original_roles_when_guild_mi
 
     assert context["organization_id"] == "456"
     assert context["guild_id"] == "456"
-    assert context["roles"] == ["Admin", "Member"]
+    assert context["roles"] == []
     assert context["message_id"] == "555"
 
 

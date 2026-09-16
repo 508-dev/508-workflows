@@ -79,13 +79,13 @@ _PLANNER_TOOL_ARGUMENTS: dict[str, frozenset[str]] = {
     ),
     "memory_read.get_user_facts": frozenset({"user_id"}),
     "memory_read.get_project_facts": frozenset(),
-    "memory_read.search_context": frozenset(),
     "memory_write.remember_fact": frozenset(
         {
             "scope_type",
             "key",
             "value_json",
             "visibility",
+            "replaces_id",
         }
     ),
     "memory_write.forget_fact": frozenset({"fact_id", "admin"}),
@@ -621,14 +621,6 @@ class ToolRegistry:
                 idempotent=True,
                 write=False,
             ),
-            "memory_read.search_context": ToolManifest(
-                name="memory_read.search_context",
-                risk="low",
-                required_scopes=("context:read_current_thread",),
-                tenant_scoped=False,
-                idempotent=True,
-                write=False,
-            ),
             "memory_write.remember_fact": ToolManifest(
                 name="memory_write.remember_fact",
                 risk="medium",
@@ -970,8 +962,6 @@ class ToolRegistry:
                 project_id=project_id,
                 actor_scopes=actor_scopes or set(),
             )
-        if tool_name == "memory_read.search_context":
-            return {"snippets": []}
         if tool_name == "memory_write.remember_fact":
             return self._remember_memory_fact(
                 arguments,
@@ -999,7 +989,7 @@ class ToolRegistry:
         user_id = _optional_str(arguments.get("user_id")) or actor_id
         if user_id is None:
             raise ValueError("user_id is required")
-        if user_id != actor_id and "memory:admin" not in actor_scopes:
+        if user_id != actor_id:
             raise PermissionError("Cannot read another user's private memory")
         facts = self.memory_store.list_facts(
             scope_type="user",
@@ -1063,10 +1053,28 @@ class ToolRegistry:
             raise ValueError("Memory key is required")
         if not isinstance(value, dict) or not value:
             raise ValueError("Memory value_json object is required")
+        replaces_id = _optional_str(arguments.get("replaces_id"))
+        if replaces_id:
+            owned = self.memory_store.list_facts(
+                scope_type="user",
+                scope_id=actor_id,
+                visible_to_user_id=actor_id,
+                visible_to_project_id=None,
+                visible_to_org_id=organization_id,
+            )
+            previous = next((fact for fact in owned if fact.id == replaces_id), None)
+            if previous is None or scope_type != "user":
+                raise PermissionError(
+                    "Memory to edit is unavailable or not owned by you"
+                )
+            key = previous.key
         visibility = _memory_visibility(
             arguments.get("visibility"),
             default="private" if scope_type == "user" else scope_type,
         )
+        expected_visibility = "private" if scope_type == "user" else scope_type
+        if visibility != expected_visibility:
+            raise ValueError("Memory visibility must match its owner scope")
         fact = self.memory_store.remember_fact(
             scope_type=scope_type,
             scope_id=scope_id,
@@ -1082,6 +1090,7 @@ class ToolRegistry:
             ),
             organization_id=organization_id,
             confidence=float(arguments.get("confidence") or 1.0),
+            replaces_id=replaces_id,
         )
         return {"fact": _memory_fact_payload(fact)}
 
@@ -2302,9 +2311,7 @@ def _memory_scope_id(
     scope_id = _optional_str(value)
     if scope_type == "user":
         if scope_id is not None and scope_id != actor_id:
-            if "memory:admin" not in actor_scopes:
-                raise PermissionError("User memory writes are limited to the actor")
-            return scope_id
+            raise PermissionError("User memory writes are limited to the actor")
         return actor_id
     if scope_type == "project":
         return _trusted_project_scope_id(scope_id, project_id=project_id)

@@ -313,7 +313,7 @@ def test_memory_read_denies_cross_user_without_admin_scope() -> None:
         )
 
 
-def test_memory_read_admin_can_read_another_users_private_facts() -> None:
+def test_memory_read_admin_cannot_read_another_users_private_facts() -> None:
     memory_store = InMemoryMemoryStore(
         [
             MemoryFact(
@@ -331,15 +331,14 @@ def test_memory_read_admin_can_read_another_users_private_facts() -> None:
     )
     registry = ToolRegistry(memory_store=memory_store)
 
-    result = registry.execute(
-        "memory_read.get_user_facts",
-        {"user_id": "456"},
-        organization_id="org-1",
-        actor_id="123",
-        actor_scopes={"memory:admin"},
-    )
-
-    assert result["facts"][0]["key"] == "timezone"
+    with pytest.raises(PermissionError, match="another user's private memory"):
+        registry.execute(
+            "memory_read.get_user_facts",
+            {"user_id": "456"},
+            organization_id="org-1",
+            actor_id="123",
+            actor_scopes={"memory:admin"},
+        )
 
 
 def test_project_memory_read_requires_trusted_project_context() -> None:
@@ -461,7 +460,7 @@ def test_forget_memory_fact_denies_non_creator_without_admin() -> None:
     memory_store = InMemoryMemoryStore([fact])
     registry = ToolRegistry(memory_store=memory_store)
 
-    with pytest.raises(PermissionError, match="deleted by its creator"):
+    with pytest.raises(PermissionError, match="only to its owner"):
         registry.execute(
             "memory_write.forget_fact",
             {"fact_id": fact.id},

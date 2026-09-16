@@ -34,6 +34,16 @@ def test_knowledge_intent_routing_is_narrow() -> None:
     )
     assert AgentCog._is_knowledge_question("create a task for the website") is False
     assert AgentCog._is_knowledge_question("what tasks are open?") is False
+    assert (
+        AgentCog._is_knowledge_capture_request("Do you remember this thread?") is False
+    )
+    assert AgentCog._is_knowledge_question("Do you remember this thread?") is True
+    assert (
+        AgentCog._is_knowledge_capture_request(
+            "suggest facts worth saving from this thread"
+        )
+        is True
+    )
 
 
 def test_knowledge_answer_format_escapes_mentions_and_renders_citations() -> None:

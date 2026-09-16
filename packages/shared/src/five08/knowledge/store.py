@@ -14,7 +14,7 @@ from uuid import uuid4
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from five08.agent.memory import DEFAULT_MEMORY_RETENTION_DAYS
+from five08.agent.memory import DEFAULT_MEMORY_RETENTION_DAYS, memory_slot
 from five08.agent.models import (
     AgentContextSourceType,
     MemoryFact,
@@ -330,6 +330,7 @@ class InMemoryKnowledgeStore:
         organization_id: str | None = None,
         confidence: float = 1.0,
         expires_at: datetime | None = None,
+        replaces_id: str | None = None,
     ) -> MemoryFact:
         now = datetime.now(timezone.utc)
         fact_id = str(uuid4())
@@ -354,6 +355,43 @@ class InMemoryKnowledgeStore:
             updated_at=now,
         )
         with self._lock:
+            existing = (
+                self._facts.get(replaces_id)
+                if replaces_id
+                else next(
+                    (
+                        old
+                        for old in reversed(list(self._facts.values()))
+                        if old.organization_id == fact.organization_id
+                        and old.scope_type == scope_type
+                        and old.scope_id == scope_id
+                        and old.status == "active"
+                        and old.deleted_at is None
+                        and memory_slot(
+                            old.key,
+                            self._memory_values.get(old.id, {"text": old.answer}),
+                        )
+                        == memory_slot(key, value_json)
+                    ),
+                    None,
+                )
+            )
+            if replaces_id and (
+                existing is None
+                or existing.organization_id != fact.organization_id
+                or existing.scope_type != scope_type
+                or existing.scope_id != scope_id
+                or existing.created_by != created_by
+                or existing.status != "active"
+            ):
+                raise PermissionError(
+                    "Memory to edit is unavailable or not owned by you"
+                )
+            if existing is not None:
+                fact = fact.model_copy(update={"supersedes_id": existing.id})
+                self._facts[existing.id] = existing.model_copy(
+                    update={"status": "superseded", "updated_at": now}
+                )
             self._facts[fact.id] = fact
             self._memory_values[fact.id] = dict(value_json)
             self._sources[fact.id] = KnowledgeEvidence(
@@ -387,6 +425,8 @@ class InMemoryKnowledgeStore:
         with self._lock:
             facts = []
             for fact in self._facts.values():
+                if fact.organization_id != visible_to_org_id:
+                    continue
                 if fact.scope_type != scope_type or fact.scope_id != scope_id:
                     continue
                 if not include_deleted and (
@@ -437,6 +477,8 @@ class InMemoryKnowledgeStore:
             fact = self._facts.get(fact_id)
             if fact is None:
                 raise KeyError(f"Memory fact {fact_id} was not found")
+            if fact.visibility == "private" and fact.scope_id != actor_id:
+                raise PermissionError("Private memory belongs only to its owner")
             if not actor_is_admin and fact.created_by != actor_id:
                 raise PermissionError("Memory fact can only be deleted by its creator")
             deleted = fact.model_copy(
@@ -913,6 +955,7 @@ class PostgresKnowledgeStore:
         organization_id: str | None = None,
         confidence: float = 1.0,
         expires_at: datetime | None = None,
+        replaces_id: str | None = None,
     ) -> MemoryFact:
         fact_id = str(uuid4())
         now = datetime.now(timezone.utc)
@@ -924,6 +967,45 @@ class PostgresKnowledgeStore:
         normalized_verification = _knowledge_verification(verification_status)
         with self._connection() as conn:
             with conn.cursor(row_factory=dict_row) as cursor:
+                slot = memory_slot(key, value_json)
+                cursor.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (json.dumps([resolved_org_id, scope_type, scope_id, slot]),),
+                )
+                cursor.execute(
+                    """
+                    SELECT * FROM memory_facts
+                    WHERE organization_id = %s AND scope_type = %s AND scope_id = %s
+                      AND status = 'active' AND deleted_at IS NULL
+                      AND ((%s::uuid IS NOT NULL AND id = %s::uuid)
+                           OR (%s::uuid IS NULL AND kind = 'fact'
+                               AND (dedupe_key = %s OR (dedupe_key IS NULL AND key = %s AND key <> 'note'))))
+                    ORDER BY updated_at DESC FOR UPDATE
+                    """,
+                    (
+                        resolved_org_id,
+                        scope_type,
+                        scope_id,
+                        replaces_id,
+                        replaces_id,
+                        replaces_id,
+                        slot,
+                        key,
+                    ),
+                )
+                previous = cursor.fetchall()
+                if replaces_id and (
+                    not previous or str(previous[0]["created_by"]) != created_by
+                ):
+                    raise PermissionError(
+                        "Memory to edit is unavailable or not owned by you"
+                    )
+                supersedes_id = str(previous[0]["id"]) if previous else None
+                if previous:
+                    cursor.execute(
+                        "UPDATE memory_facts SET status = 'superseded', updated_at = %s WHERE id = ANY(%s::uuid[])",
+                        (now, [str(row["id"]) for row in previous]),
+                    )
                 cursor.execute(
                     """
                     INSERT INTO memory_facts (
@@ -942,12 +1024,14 @@ class PostgresKnowledgeStore:
                         expires_at,
                         search_document,
                         created_at,
-                        updated_at
+                        updated_at,
+                        supersedes_id,
+                        dedupe_key
                     ) VALUES (
                         %s::uuid, %s, %s, %s, 'fact', %s, %s, %s, %s, %s,
                         %s, %s, %s,
                         to_tsvector('english', %s),
-                        %s, %s
+                        %s, %s, %s::uuid, %s
                     )
                     RETURNING *
                     """,
@@ -967,6 +1051,8 @@ class PostgresKnowledgeStore:
                         f"{key} {answer}",
                         now,
                         now,
+                        supersedes_id,
+                        slot,
                     ),
                 )
                 row = cursor.fetchone()
@@ -1020,7 +1106,8 @@ class PostgresKnowledgeStore:
                         ORDER BY created_at DESC
                         LIMIT 1
                     ) mfs ON TRUE
-                    WHERE mf.scope_type = %s
+                    WHERE mf.organization_id = %s
+                      AND mf.scope_type = %s
                       AND mf.scope_id = %s
                       AND (
                           %s
@@ -1035,6 +1122,7 @@ class PostgresKnowledgeStore:
                     ORDER BY mf.updated_at DESC
                     """,
                     (
+                        visible_to_org_id,
                         scope_type,
                         scope_id,
                         include_deleted,
@@ -1078,6 +1166,11 @@ class PostgresKnowledgeStore:
                 existing = cursor.fetchone()
                 if existing is None:
                     raise KeyError(f"Memory fact {fact_id} was not found")
+                if (
+                    existing["visibility"] == "private"
+                    and str(existing["scope_id"]) != actor_id
+                ):
+                    raise PermissionError("Private memory belongs only to its owner")
                 if not actor_is_admin and str(existing["created_by"]) != actor_id:
                     raise PermissionError(
                         "Memory fact can only be deleted by its creator"

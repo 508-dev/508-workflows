@@ -185,3 +185,4 @@ class AgentResponse(BaseModel):
     results: list[AgentExecutionResult] = Field(default_factory=list)
     message: str
     clarification_question: str | None = None
+    clarification_field: Literal["task_project", "task_title"] | None = None

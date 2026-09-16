@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable, Protocol
+from five08.agent.memory import MemoryStore
 
 from five08.agent.models import (
     AgentContextSnippet,
@@ -53,6 +54,44 @@ class RequestContextLoader:
             bounds=bounds,
             now=datetime.now(timezone.utc),
         )
+
+
+class PrivateMemoryContextLoader:
+    """Add the actor's active private preferences to bounded planner context."""
+
+    def __init__(self, store: MemoryStore) -> None:
+        self.store = store
+
+    def load(
+        self, *, context: AgentIdentityContext, bounds: ContextLoadBounds
+    ) -> list[AgentContextSnippet]:
+        from five08.agent.policy import PolicyEngine
+
+        snippets = list(context.context_snippets)
+        if (
+            context.response_destination_visibility == "private"
+            and not context.impersonation
+            and "memory:read_self" in PolicyEngine().scopes_for_context(context)
+        ):
+            facts = self.store.list_facts(
+                scope_type="user",
+                scope_id=context.discord_user_id,
+                visible_to_user_id=context.discord_user_id,
+                visible_to_project_id=None,
+                visible_to_org_id=context.organization_id,
+            )
+            # Long-term facts have their own expiry; their age is not the age of
+            # a Discord message. They remain quoted data, never instructions.
+            snippets = [
+                AgentContextSnippet(
+                    source_type="memory_fact",
+                    source_ref=fact.id,
+                    label=f"Your saved preference: {fact.key}",
+                    text=f"{fact.key}: {fact.value_json}"[:2048],
+                )
+                for fact in facts[:5]
+            ] + snippets
+        return bound_context_snippets(snippets, bounds=bounds)
 
 
 def bound_context_snippets(

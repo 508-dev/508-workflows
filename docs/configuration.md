@@ -262,6 +262,18 @@ Agent gateway:
 - `AGENT_INTENT_NORMALIZER_TIMEOUT_SECONDS`
 - `KNOWLEDGE_ENABLED`: enables `/ask`, knowledge questions in mentions, and
   confirmed Discord captures.
+- `KNOWLEDGE_DISCORD_CHANNEL_IDS`: up to eight comma-separated channel or
+  public-thread IDs. Configure the same list in the bot and API. Empty by
+  default; no Discord history is searched until IDs are selected. The bot
+  refreshes the caller's membership and checks both caller and bot history
+  permissions before reading each source. Private threads are excluded.
+- `KNOWLEDGE_DISCORD_HISTORY_LIMIT`: recent messages per enabled location
+  (default and maximum: 100).
+- `KNOWLEDGE_DISCORD_HISTORY_DAYS`: maximum source age (default: 30).
+  Query snapshots are capped at 20,000 characters and are not indexed or saved.
+- `AGENT_MEMORY_SUGGESTIONS_ENABLED`: suggest saving a timezone or response
+  style stated directly to the agent (default: true). This does not enable
+  automatic saving; each suggestion uses the existing confirmation flow.
 - `KNOWLEDGE_API_TIMEOUT_SECONDS`: bot-to-backend request timeout (default: 15).
 - `KNOWLEDGE_MODEL_ENABLED`: uses the configured strong agent tier for bounded
   extraction, semantic evidence selection, and grounded synthesis. Deterministic

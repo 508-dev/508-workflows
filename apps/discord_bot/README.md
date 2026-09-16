@@ -108,12 +108,11 @@ Audit writes are best-effort and do not block command execution. If the audit
 store is unavailable, treat the agent surface as temporarily untraced until the
 audit pipeline is healthy again.
 
-Pending confirmation plans and the MVP task store are currently process-local in
-the backend API. Confirmation plans expire after 10 minutes with opportunistic
-cleanup during agent requests and confirmations. A production multi-process
-deployment should move pending plans to Redis or another shared TTL store and
-swap the task registry for a durable task service before relying on cross-process
-agent behavior.
+Pending confirmations and missing task fields use Postgres TTL storage and
+survive API restarts. Confirmations expire after 10 minutes and are atomically
+claimed before execution. Private memory is durable, owner-only, and supports
+confirmed edits and deletion. The separate MVP task registry remains
+process-local and needs a durable task service for production task workflows.
 
 Relevant configuration:
 

@@ -85,6 +85,72 @@ def _settings(**overrides: Any) -> SimpleNamespace:
     return SimpleNamespace(**values)
 
 
+def test_capture_is_private_unless_audience_is_explicit():
+    store = InMemoryKnowledgeStore()
+    request = _capture_request()
+    payload = request.model_dump()
+    payload.pop("requested_visibility")
+    request = KnowledgeCaptureRequest.model_validate(payload)
+    service = _service(store)
+    preview = service.create_capture(request)
+    assert preview.visibility == "private"
+    service.confirm_capture(preview.draft_id, context=request.context, confirm=True)
+    other = service.answer(
+        KnowledgeQueryRequest(
+            question="Does the main website auto deploy?",
+            context=_context(user_id="another"),
+        )
+    )
+    assert other.status == "insufficient"
+
+
+def test_selected_discord_evidence_is_cited_privately_and_unselected_sources_are_ignored():
+    from five08.knowledge.models import KnowledgeDiscordContext
+
+    request = _capture_request()
+    batch = KnowledgeDiscordContext(source=request.source, messages=request.messages)
+    service = KnowledgeService(
+        settings=_settings(knowledge_discord_channel_ids="channel-1"),
+        store=InMemoryKnowledgeStore(),
+        sources=_NoExternalSources(),
+    )
+    question = KnowledgeQueryRequest(
+        question="Cloudflare Pages deploy", context=_context(), discord_sources=[batch]
+    )
+    result = service.answer(question)
+    assert result.status == "answered"
+    assert result.public_safe is False
+    assert (
+        result.citations[0].url == "https://discord.com/channels/guild-1/channel-1/101"
+    )
+    service.settings.knowledge_discord_channel_ids = "other-channel"
+    assert service.answer(question).status == "insufficient"
+
+
+def test_expired_discord_messages_and_cross_guild_snapshots_are_not_used():
+    from five08.knowledge.models import KnowledgeDiscordContext
+
+    capture = _capture_request()
+    capture.messages[1].created_at = datetime.now(timezone.utc) - timedelta(days=91)
+    capture.messages = [capture.messages[1]]
+    service = KnowledgeService(
+        settings=_settings(knowledge_discord_channel_ids="channel-1"),
+        store=InMemoryKnowledgeStore(),
+        sources=_NoExternalSources(),
+    )
+    request = KnowledgeQueryRequest(
+        question="Cloudflare Pages deploy",
+        context=_context(),
+        discord_sources=[
+            KnowledgeDiscordContext(source=capture.source, messages=capture.messages)
+        ],
+    )
+    assert service.answer(request).status == "insufficient"
+    capture.messages[0].created_at = datetime.now(timezone.utc)
+    request.discord_sources[0].source.guild_id = "other-guild"
+    assert service.answer(request).status == "insufficient"
+
+
 def _context(
     *, user_id: str = "caleb", roles: list[str] | None = None
 ) -> AgentIdentityContext:
@@ -109,6 +175,7 @@ def _capture_request(
     context.thread_id = thread_id
     return KnowledgeCaptureRequest(
         context=context,
+        requested_visibility="project" if thread_id else "org",
         source=KnowledgeDiscordSource(
             source_type="discord_thread",
             source_ref="https://discord.example/thread/1",
@@ -238,6 +305,42 @@ def test_capture_confirmation_rejects_a_different_actor() -> None:
             context=_context(user_id="michael"),
             confirm=True,
         )
+
+
+def test_model_cannot_make_private_context_public_by_citing_only_org_evidence() -> None:
+    from five08.knowledge.models import KnowledgeDiscordContext
+
+    class OrgCitationModel(_SemanticModel):
+        def answer(self, *, question, evidence):
+            assert any(item.visibility == "private" for item in evidence)
+            public = next(item for item in evidence if item.visibility == "org")
+            return GroundedAnswerDraft(
+                answer="A private discussion influenced this answer.",
+                evidence_ids=[public.evidence_id],
+                confidence=0.9,
+            )
+
+    store = InMemoryKnowledgeStore()
+    service = _service(store)
+    capture = _capture_request()
+    preview = service.create_capture(capture)
+    service.confirm_capture(preview.draft_id, context=capture.context, confirm=True)
+    service.model = OrgCitationModel()
+    service.settings.knowledge_discord_channel_ids = "channel-1"
+    answer = service.answer(
+        KnowledgeQueryRequest(
+            question="Does the main website auto deploy?",
+            context=_context(),
+            discord_sources=[
+                KnowledgeDiscordContext(
+                    source=capture.source, messages=capture.messages
+                )
+            ],
+        )
+    )
+    assert answer.status == "answered"
+    assert answer.public_safe is False
+    assert answer.visibility == "private"
 
 
 def test_capture_confirmation_rejects_a_different_organization() -> None:

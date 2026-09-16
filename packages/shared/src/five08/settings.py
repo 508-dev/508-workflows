@@ -69,6 +69,26 @@ class SharedSettings(BaseSettings):
     knowledge_review_after_days: int = Field(default=180, ge=1)
     knowledge_query_max_evidence: int = Field(default=8, ge=1, le=20)
     knowledge_semantic_candidate_limit: int = Field(default=24, ge=1, le=64)
+    # Explicit channel/thread IDs; an empty allowlist disables Discord retrieval.
+    knowledge_discord_channel_ids: str = ""
+    knowledge_discord_history_limit: int = Field(default=100, ge=1, le=100)
+    knowledge_discord_history_days: int = Field(default=30, ge=1, le=90)
+    agent_memory_suggestions_enabled: bool = True
+
+    @field_validator("knowledge_discord_channel_ids")
+    @classmethod
+    def _validate_knowledge_channels(cls, value: str) -> str:
+        channels = list(
+            dict.fromkeys(item.strip() for item in value.split(",") if item.strip())
+        )
+        if len(channels) > 8 or any(
+            not item.isascii() or not item.isdigit() for item in channels
+        ):
+            raise ValueError(
+                "Specify at most eight comma-separated Discord channel or thread IDs"
+            )
+        return ",".join(channels)
+
     minio_endpoint: str = "http://127.0.0.1:9000"
     minio_root_user: str = "internal"
     minio_root_password: str = ""

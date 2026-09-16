@@ -103,6 +103,7 @@ class KnowledgeCaptureRequest(BaseModel):
     context: AgentIdentityContext
     source: KnowledgeDiscordSource
     messages: list[KnowledgeDiscordMessage] = Field(min_length=1, max_length=100)
+    requested_visibility: KnowledgeVisibility = "private"
 
     @model_validator(mode="after")
     def _validate_source_context(self) -> "KnowledgeCaptureRequest":
@@ -216,11 +217,24 @@ class KnowledgeCaptureResponse(BaseModel):
     expires_at: datetime | None = None
 
 
+class KnowledgeDiscordContext(BaseModel):
+    """Gateway-authorized snapshot of one explicitly enabled Discord source."""
+
+    source: KnowledgeDiscordSource
+    messages: list[KnowledgeDiscordMessage] = Field(max_length=100)
+
+
 class KnowledgeQueryRequest(BaseModel):
     """A natural-language organizational knowledge question."""
 
     question: str = Field(min_length=1, max_length=1000)
     context: AgentIdentityContext
+    discord_sources: list[KnowledgeDiscordContext] = Field(
+        default_factory=list, max_length=8
+    )
+    source_errors: list[Literal["discord_unavailable", "discord_timeout"]] = Field(
+        default_factory=list, max_length=2
+    )
 
     @field_validator("question")
     @classmethod

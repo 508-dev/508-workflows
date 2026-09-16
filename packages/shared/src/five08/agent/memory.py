@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Protocol
@@ -31,6 +32,7 @@ class MemoryStore(Protocol):
         organization_id: str | None = None,
         confidence: float = 1.0,
         expires_at: datetime | None = None,
+        replaces_id: str | None = None,
     ) -> MemoryFact:
         """Persist one memory fact."""
 
@@ -83,6 +85,7 @@ class InMemoryMemoryStore:
         organization_id: str | None = None,
         confidence: float = 1.0,
         expires_at: datetime | None = None,
+        replaces_id: str | None = None,
     ) -> MemoryFact:
         now = datetime.now(timezone.utc)
         fact = MemoryFact(
@@ -104,6 +107,40 @@ class InMemoryMemoryStore:
             updated_at=now,
         )
         with self._lock:
+            existing = (
+                self._facts.get(replaces_id)
+                if replaces_id
+                else next(
+                    (
+                        old
+                        for old in reversed(list(self._facts.values()))
+                        if old.organization_id == organization_id
+                        and old.scope_type == scope_type
+                        and old.scope_id == scope_id
+                        and old.status == "active"
+                        and old.deleted_at is None
+                        and memory_slot(old.key, old.value_json)
+                        == memory_slot(key, value_json)
+                    ),
+                    None,
+                )
+            )
+            if replaces_id and (
+                existing is None
+                or existing.scope_type != scope_type
+                or existing.scope_id != scope_id
+                or existing.organization_id != organization_id
+                or existing.created_by != created_by
+                or existing.status != "active"
+            ):
+                raise PermissionError(
+                    "Memory to edit is unavailable or not owned by you"
+                )
+            if existing is not None:
+                fact = fact.model_copy(update={"supersedes_id": existing.id})
+                self._facts[existing.id] = existing.model_copy(
+                    update={"status": "superseded", "updated_at": now}
+                )
             self._facts[fact.id] = fact
         return fact
 
@@ -131,7 +168,14 @@ class InMemoryMemoryStore:
                     project_id=visible_to_project_id,
                     org_id=visible_to_org_id,
                 )
-                and (include_deleted or fact.deleted_at is None)
+                and (
+                    fact.organization_id is None
+                    or fact.organization_id == visible_to_org_id
+                )
+                and (
+                    include_deleted
+                    or (fact.deleted_at is None and fact.status == "active")
+                )
                 and not _fact_is_expired(fact, now=comparison_time)
             ]
 
@@ -147,6 +191,8 @@ class InMemoryMemoryStore:
             fact = self._facts.get(fact_id)
             if fact is None:
                 raise KeyError(f"Memory fact {fact_id} was not found")
+            if fact.visibility == "private" and fact.scope_id != actor_id:
+                raise PermissionError("Private memory belongs only to its owner")
             if not actor_is_admin and fact.created_by != actor_id:
                 raise PermissionError("Memory fact can only be deleted by its creator")
             deleted_at = now or datetime.now(timezone.utc)
@@ -190,3 +236,16 @@ def _excerpt_hash(source_excerpt: str | None) -> str | None:
     if source_excerpt is None:
         return None
     return hashlib.sha256(source_excerpt.encode("utf-8")).hexdigest()
+
+
+def memory_slot(key: str, value: dict[str, Any]) -> str:
+    """Named facts replace their prior value; independent notes retain separate slots."""
+    normalized = key.strip().casefold()
+    if normalized == "note":
+        normalized += (
+            ":"
+            + hashlib.sha256(
+                json.dumps(value, sort_keys=True).encode("utf-8")
+            ).hexdigest()
+        )
+    return "fact:" + normalized
