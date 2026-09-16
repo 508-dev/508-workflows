@@ -82,6 +82,10 @@ _KNOWLEDGE_CAPTURE_COMPONENT_RE = re.compile(
     r"(?P<draft_id>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}):"
     r"(?P<guild_id>\d+):(?P<channel_id>\d+)$"
 )
+_AGENT_CONFIRMATION_COMPONENT_RE = re.compile(
+    r"^agent:plan:(?P<action>[cx]):(?P<plan_id>[A-Za-z0-9_-]{1,64}):"
+    r"(?P<guild_id>\d+):(?P<message_id>\d+)$"
+)
 
 
 def _knowledge_capture_component_id(
@@ -94,6 +98,19 @@ def _knowledge_capture_component_id(
     custom_id = f"knowledge:capture:{action}:{draft_id}:{guild_id}:{channel_id}"
     if len(custom_id) > 100:
         raise ValueError("Knowledge capture component ID exceeds Discord's limit")
+    return custom_id
+
+
+def _agent_confirmation_component_id(
+    *,
+    action: Literal["c", "x"],
+    plan_id: str,
+    guild_id: str,
+    message_id: str,
+) -> str:
+    custom_id = f"agent:plan:{action}:{plan_id}:{guild_id}:{message_id}"
+    if len(custom_id) > 100:
+        raise ValueError("Agent confirmation component ID exceeds Discord's limit")
     return custom_id
 
 
@@ -130,10 +147,83 @@ _AGENT_ACKNOWLEDGEMENTS = frozenset(
         "okay",
         "got it",
         "cool",
-        "nevermind",
-        "never mind",
     }
 )
+
+
+class AgentConfirmationDynamicButton(
+    discord.ui.DynamicItem[discord.ui.Button[Any]],
+    template=_AGENT_CONFIRMATION_COMPONENT_RE,
+):
+    """Restart-safe dispatcher for persisted agent plan controls."""
+
+    def __init__(
+        self,
+        *,
+        action: Literal["c", "x"],
+        plan_id: str,
+        guild_id: str,
+        message_id: str,
+    ) -> None:
+        self.action = action
+        self.plan_id = plan_id
+        self.guild_id = guild_id
+        self.message_id = message_id
+        super().__init__(
+            discord.ui.Button(
+                label="Confirm" if action == "c" else "Cancel",
+                style=(
+                    discord.ButtonStyle.primary
+                    if action == "c"
+                    else discord.ButtonStyle.secondary
+                ),
+                custom_id=_agent_confirmation_component_id(
+                    action=action,
+                    plan_id=plan_id,
+                    guild_id=guild_id,
+                    message_id=message_id,
+                ),
+            )
+        )
+
+    @classmethod
+    async def from_custom_id(
+        cls,
+        interaction: discord.Interaction,
+        item: discord.ui.Item[Any],
+        match: re.Match[str],
+        /,
+    ) -> "AgentConfirmationDynamicButton":
+        del interaction, item
+        return cls(
+            action=cast(Literal["c", "x"], match["action"]),
+            plan_id=match["plan_id"],
+            guild_id=match["guild_id"],
+            message_id=match["message_id"],
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        get_cog = getattr(interaction.client, "get_cog", None)
+        cog = get_cog("AgentCog") if callable(get_cog) else None
+        if not isinstance(cog, AgentCog):
+            await interaction.response.send_message(
+                "Agent confirmation is temporarily unavailable. Try again.",
+                ephemeral=True,
+            )
+            return
+        guild_id = None if self.guild_id == "0" else self.guild_id
+        message_id = None if self.message_id == "0" else self.message_id
+        view = AgentConfirmationView(
+            cog=cog,
+            requester_id=interaction.user.id,
+            plan_id=self.plan_id,
+            context={
+                "organization_id": guild_id,
+                "guild_id": guild_id,
+                "message_id": message_id,
+            },
+        )
+        await view._finish(interaction, confirm=self.action == "c")
 
 
 class AgentConfirmationView(discord.ui.View):
@@ -152,6 +242,17 @@ class AgentConfirmationView(discord.ui.View):
         self.requester_id = requester_id
         self.plan_id = plan_id
         self.context = context
+        guild_id = str(context.get("guild_id") or context.get("organization_id") or "0")
+        message_id = str(context.get("message_id") or "0")
+        for action in ("c", "x"):
+            self.add_item(
+                AgentConfirmationDynamicButton(
+                    action=cast(Literal["c", "x"], action),
+                    plan_id=plan_id,
+                    guild_id=guild_id,
+                    message_id=message_id,
+                )
+            )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id == self.requester_id:
@@ -164,61 +265,31 @@ class AgentConfirmationView(discord.ui.View):
 
     def _disable(self) -> None:
         for item in self.children:
-            if isinstance(item, discord.ui.Button):
-                item.disabled = True
+            if isinstance(item, AgentConfirmationDynamicButton):
+                item.item.disabled = True
         self.stop()
 
-    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.primary)
     async def confirm(
         self,
         interaction: discord.Interaction,
-        button: discord.ui.Button["AgentConfirmationView"],
+        button: discord.ui.Button["AgentConfirmationView"] | None,
     ) -> None:
-        await interaction.response.defer(ephemeral=True)
-        try:
-            confirmation_context = await self._confirmation_context(interaction)
-            response = await self.cog._post_agent_confirmation(
-                plan_id=self.plan_id,
-                context=confirmation_context,
-                confirm=True,
-            )
-            transport_failed = bool(response.get("retryable"))
-        except Exception as exc:
-            logger.warning("Agent confirmation request failed: %s", exc)
-            response = {
-                "status": "failed",
-                "message": "The agent service could not be reached. Try again.",
-            }
-            transport_failed = True
-        self.cog._audit_command_safe(
-            interaction=interaction,
-            action="agent.confirm",
-            result=AgentCog._audit_result_for_agent_response(response),
-            metadata={
-                "plan_id": self.plan_id,
-                "status": response.get("status"),
-                "error": response.get("error"),
-            },
-        )
-        if not transport_failed:
-            self._disable()
-        await interaction.followup.send(
-            self.cog._format_agent_response(response),
-            ephemeral=True,
-        )
-        if not transport_failed and interaction.message is not None:
-            try:
-                await interaction.message.edit(view=self)
-            except discord.HTTPException:
-                logger.warning(
-                    "Failed disabling agent confirmation view", exc_info=True
-                )
+        del button
+        await self._finish(interaction, confirm=True)
 
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(
         self,
         interaction: discord.Interaction,
-        button: discord.ui.Button["AgentConfirmationView"],
+        button: discord.ui.Button["AgentConfirmationView"] | None,
+    ) -> None:
+        del button
+        await self._finish(interaction, confirm=False)
+
+    async def _finish(
+        self,
+        interaction: discord.Interaction,
+        *,
+        confirm: bool,
     ) -> None:
         await interaction.response.defer(ephemeral=True)
         try:
@@ -226,11 +297,11 @@ class AgentConfirmationView(discord.ui.View):
             response = await self.cog._post_agent_confirmation(
                 plan_id=self.plan_id,
                 context=confirmation_context,
-                confirm=False,
+                confirm=confirm,
             )
             transport_failed = bool(response.get("retryable"))
         except Exception as exc:
-            logger.warning("Agent cancellation request failed: %s", exc)
+            logger.warning("Agent plan response request failed: %s", exc)
             response = {
                 "status": "failed",
                 "message": "The agent service could not be reached. Try again.",
@@ -238,7 +309,7 @@ class AgentConfirmationView(discord.ui.View):
             transport_failed = True
         self.cog._audit_command_safe(
             interaction=interaction,
-            action="agent.cancel",
+            action="agent.confirm" if confirm else "agent.cancel",
             result=AgentCog._audit_result_for_agent_response(response),
             metadata={
                 "plan_id": self.plan_id,
@@ -746,18 +817,25 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
 
     @staticmethod
     def _is_knowledge_capture_request(request: str) -> bool:
-        if re.match(
-            r"(?i)^(?:do|did|what|how|why|where|when|can|could)\b", request.strip()
+        normalized = request.strip()
+        polite_prefix = re.match(
+            r"(?i)^(?:can|could)\s+you(?:\s+please)?\s+",
+            normalized,
+        )
+        if polite_prefix is not None:
+            normalized = normalized[polite_prefix.end() :]
+        elif re.match(
+            r"(?i)^(?:do|did|what|how|why|where|when|can|could)\b", normalized
         ):
             return False
         if re.fullmatch(
             r"(?i)suggest (?:facts|memories)(?: worth saving)? from (?:this|the) (?:thread|conversation)",
-            request.strip().rstrip(".!"),
+            normalized.rstrip(".!"),
         ):
             return True
-        if _KNOWLEDGE_CAPTURE_RE.search(request) is not None:
+        if _KNOWLEDGE_CAPTURE_RE.search(normalized) is not None:
             return True
-        tokens = re.findall(r"[a-z]+", request.casefold())
+        tokens = re.findall(r"[a-z]+", normalized.casefold())
         if len(tokens) < 2:
             return False
         has_action = any(
@@ -2099,5 +2177,5 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
 
 async def setup(bot: commands.Bot) -> None:
     """Load the agent cog."""
-    bot.add_dynamic_items(KnowledgeCaptureDynamicButton)
+    bot.add_dynamic_items(AgentConfirmationDynamicButton, KnowledgeCaptureDynamicButton)
     await bot.add_cog(AgentCog(bot))

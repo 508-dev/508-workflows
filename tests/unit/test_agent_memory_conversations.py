@@ -99,7 +99,9 @@ def test_other_actor_or_expired_state_cannot_complete_previous_request():
     assert agent.plan("Atlas", context()).plan is None
 
 
-@pytest.mark.parametrize("reply", ["cancel", "Stop this request"])
+@pytest.mark.parametrize(
+    "reply", ["cancel", "Stop this request", "nevermind", "never mind"]
+)
 def test_explicit_cancellation_clears_pending_clarification(reply: str) -> None:
     state = InMemoryAgentStateStore()
     agent = AgentOrchestrator(state_store=state)

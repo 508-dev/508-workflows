@@ -1033,6 +1033,11 @@ def test_project_query_supports_name_first_forms(
     assert _project_query(question) == expected
 
 
+@pytest.mark.parametrize("article", ["the", "a", "an"])
+def test_project_query_does_not_treat_article_as_project_name(article: str) -> None:
+    assert _project_query(f"What is the status of {article} project?") is None
+
+
 @pytest.mark.parametrize(
     ("question", "expected"),
     [

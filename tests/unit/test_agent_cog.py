@@ -8,7 +8,11 @@ from unittest.mock import AsyncMock, Mock, patch
 import discord
 import pytest
 
-from five08.discord_bot.cogs.agent import AgentCog, AgentConfirmationView
+from five08.discord_bot.cogs.agent import (
+    AgentCog,
+    AgentConfirmationDynamicButton,
+    AgentConfirmationView,
+)
 from five08.tls import default_ca_bundle_path
 
 
@@ -319,6 +323,55 @@ async def test_confirmation_view_disable_stops_listener() -> None:
     view._disable()
 
     assert view.is_finished()
+    assert all(
+        isinstance(item, AgentConfirmationDynamicButton) and item.item.disabled
+        for item in view.children
+    )
+
+
+@pytest.mark.asyncio
+async def test_dynamic_agent_confirmation_rehydrates_after_restart() -> None:
+    plan_id = "11111111-1111-1111-1111-111111111111"
+    cog = AgentCog.__new__(AgentCog)
+    cog._guild_role_names = AsyncMock(return_value=["Member"])
+    cog._post_agent_confirmation = AsyncMock(
+        return_value={"status": "executed", "message": "Done"}
+    )
+    cog._audit_command_safe = Mock()
+    cog._format_agent_response = Mock(return_value="Agent status: executed")
+    button = AgentConfirmationDynamicButton(
+        action="c",
+        plan_id=plan_id,
+        guild_id="456",
+        message_id="555",
+    )
+    interaction = SimpleNamespace(
+        id=999,
+        guild_id=None,
+        channel_id=111,
+        channel=None,
+        client=SimpleNamespace(get_cog=Mock(return_value=cog)),
+        response=SimpleNamespace(defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+        message=SimpleNamespace(id=222, edit=AsyncMock()),
+        user=SimpleNamespace(id=123, roles=[]),
+    )
+
+    await button.callback(interaction)
+
+    cog._post_agent_confirmation.assert_awaited_once()
+    confirmation = cog._post_agent_confirmation.await_args.kwargs
+    assert confirmation["plan_id"] == plan_id
+    assert confirmation["confirm"] is True
+    assert confirmation["context"]["organization_id"] == "456"
+    assert confirmation["context"]["guild_id"] == "456"
+    assert confirmation["context"]["roles"] == ["Member"]
+    assert confirmation["context"]["message_id"] == "555"
+    edited_view = interaction.message.edit.await_args.kwargs["view"]
+    assert all(
+        isinstance(item, AgentConfirmationDynamicButton) and item.item.disabled
+        for item in edited_view.children
+    )
 
 
 @pytest.mark.asyncio
@@ -352,7 +405,10 @@ async def test_confirmation_transport_failure_keeps_view_retryable(
 
     cog._post_agent_confirmation.assert_awaited_once()
     assert not view.is_finished()
-    assert all(not item.disabled for item in view.children)
+    assert all(
+        isinstance(item, AgentConfirmationDynamicButton) and not item.item.disabled
+        for item in view.children
+    )
     interaction.message.edit.assert_not_awaited()
 
 
@@ -379,7 +435,10 @@ async def test_cancellation_transport_failure_keeps_view_retryable() -> None:
     await AgentConfirmationView.cancel(view, interaction, None)
 
     assert not view.is_finished()
-    assert all(not item.disabled for item in view.children)
+    assert all(
+        isinstance(item, AgentConfirmationDynamicButton) and not item.item.disabled
+        for item in view.children
+    )
     interaction.message.edit.assert_not_awaited()
 
 
@@ -397,7 +456,7 @@ async def test_confirmation_uses_fresh_button_context() -> None:
         plan_id="plan-1",
         context={
             "discord_user_id": "123",
-            "message_id": "original-message",
+            "message_id": "555",
             "roles": ["Member"],
         },
     )
@@ -420,7 +479,7 @@ async def test_confirmation_uses_fresh_button_context() -> None:
     assert context["roles"] == ["@everyone", "Admin"]
     assert context["interaction_id"] == "999"
     assert context["channel_id"] == "789"
-    assert context["message_id"] == "original-message"
+    assert context["message_id"] == "555"
 
 
 @pytest.mark.asyncio
@@ -437,7 +496,7 @@ async def test_cancellation_uses_fresh_button_context() -> None:
         plan_id="plan-1",
         context={
             "discord_user_id": "123",
-            "message_id": "original-message",
+            "message_id": "555",
             "roles": ["Member"],
         },
     )
@@ -456,7 +515,7 @@ async def test_cancellation_uses_fresh_button_context() -> None:
     context = cog._post_agent_confirmation.await_args.kwargs["context"]
     assert context["roles"] == []
     assert context["interaction_id"] == "999"
-    assert context["message_id"] == "original-message"
+    assert context["message_id"] == "555"
 
 
 def test_build_agent_context_separates_interaction_and_message_ids() -> None:
@@ -835,7 +894,10 @@ async def test_confirmation_role_refresh_failure_keeps_plan_retryable() -> None:
 
     cog._post_agent_confirmation.assert_not_awaited()
     assert not view.is_finished()
-    assert all(not item.disabled for item in view.children)
+    assert all(
+        isinstance(item, AgentConfirmationDynamicButton) and not item.item.disabled
+        for item in view.children
+    )
     interaction.message.edit.assert_not_awaited()
 
 
@@ -1213,7 +1275,8 @@ async def test_agent_thread_reply_continues_without_mention() -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_thread_cancel_reaches_gateway() -> None:
+@pytest.mark.parametrize("request_text", ["cancel", "nevermind", "never mind"])
+async def test_agent_thread_cancel_reaches_gateway(request_text: str) -> None:
     cog = AgentCog.__new__(AgentCog)
     cog.bot = SimpleNamespace(user=SimpleNamespace(id=999))
     cog._is_agent_thread = Mock(return_value=True)
@@ -1225,7 +1288,7 @@ async def test_agent_thread_cancel_reaches_gateway() -> None:
     cog._audit_message_safe = Mock()
     message = SimpleNamespace(
         id=555,
-        content="cancel",
+        content=request_text,
         author=SimpleNamespace(id=123, bot=False, roles=[]),
         mentions=[],
         guild=SimpleNamespace(id=456),
@@ -1236,7 +1299,7 @@ async def test_agent_thread_cancel_reaches_gateway() -> None:
     await cog.agent_mention(message)
 
     cog._post_agent_request.assert_awaited_once()
-    assert cog._post_agent_request.await_args.kwargs["message"] == "cancel"
+    assert cog._post_agent_request.await_args.kwargs["message"] == request_text
     response_thread.send.assert_awaited_once()
     assert "Canceled." in response_thread.send.await_args.args[0]
     cog._audit_message_safe.assert_not_called()

@@ -10,6 +10,7 @@ import pytest
 
 from five08.discord_bot.cogs.agent import (
     AgentCog,
+    AgentConfirmationDynamicButton,
     AgentConfirmationView,
     KnowledgeCaptureDynamicButton,
     KnowledgeCaptureView,
@@ -30,6 +31,10 @@ def test_knowledge_intent_routing_is_narrow() -> None:
     assert AgentCog._is_knowledge_capture_request("remember this thread") is True
     assert AgentCog._is_knowledge_capture_request("remeber this thred") is True
     assert AgentCog._is_knowledge_capture_request("save this answr") is True
+    assert (
+        AgentCog._is_knowledge_capture_request("Can you remember this thread?") is True
+    )
+    assert AgentCog._is_knowledge_capture_request("Could you save this answer?") is True
     assert (
         AgentCog._is_knowledge_question("I forgot, does our main website auto deploy?")
         is True
@@ -331,7 +336,9 @@ async def test_agent_setup_registers_restart_safe_capture_buttons() -> None:
 
     await setup_agent_cog(bot)
 
-    bot.add_dynamic_items.assert_called_once_with(KnowledgeCaptureDynamicButton)
+    bot.add_dynamic_items.assert_called_once_with(
+        AgentConfirmationDynamicButton, KnowledgeCaptureDynamicButton
+    )
     bot.add_cog.assert_awaited_once()
 
 
