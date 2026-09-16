@@ -53,7 +53,7 @@ class SharedSettings(BaseSettings):
     knowledge_api_timeout_seconds: float = Field(default=15.0, gt=0)
     knowledge_model_enabled: bool = True
     knowledge_model_timeout_seconds: float = Field(default=6.0, gt=0)
-    knowledge_source_timeout_seconds: float = Field(default=6.0, gt=0)
+    knowledge_source_timeout_seconds: float = Field(default=6.0, ge=1.0)
     knowledge_capture_max_messages: int = Field(default=50, ge=2, le=100)
     knowledge_capture_max_characters: int = Field(
         default=20_000,
@@ -68,6 +68,7 @@ class SharedSettings(BaseSettings):
     )
     knowledge_review_after_days: int = Field(default=180, ge=1)
     knowledge_query_max_evidence: int = Field(default=8, ge=1, le=20)
+    knowledge_semantic_candidate_limit: int = Field(default=24, ge=1, le=64)
     minio_endpoint: str = "http://127.0.0.1:9000"
     minio_root_user: str = "internal"
     minio_root_password: str = ""

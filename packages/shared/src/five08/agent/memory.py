@@ -149,10 +149,12 @@ class InMemoryMemoryStore:
                 raise KeyError(f"Memory fact {fact_id} was not found")
             if not actor_is_admin and fact.created_by != actor_id:
                 raise PermissionError("Memory fact can only be deleted by its creator")
+            deleted_at = now or datetime.now(timezone.utc)
             deleted = fact.model_copy(
                 update={
-                    "deleted_at": now or datetime.now(timezone.utc),
-                    "updated_at": now or datetime.now(timezone.utc),
+                    "status": "deleted",
+                    "deleted_at": deleted_at,
+                    "updated_at": deleted_at,
                 }
             )
             self._facts[fact_id] = deleted

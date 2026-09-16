@@ -42,6 +42,11 @@ _KNOWLEDGE_QUESTION_RE = re.compile(
     r"(?:who|what|where|when|why|how|does|do|did|is|are|can|could|has|have)\b",
     re.I,
 )
+_KNOWLEDGE_RECALL_PREFIX_RE = re.compile(
+    r"^(?:i\s+(?:forgot|forget)[,;:]?\s*|remind\s+me\s+)"
+    r"(?:who|what|where|when|why|how|does|do|did|is|are|can|could|has|have)\b",
+    re.I,
+)
 _AGENT_ACTION_RE = re.compile(
     r"\b(?:add|approve|assign|cancel|create|delete|forget|invite|post|reject|"
     r"remember|remove|save|send|submit|sync|update)\b",
@@ -52,7 +57,20 @@ _AGENT_LIVE_WORKFLOW_RE = re.compile(
     r"unlinked\s+(?:discord\s+)?members?)\b",
     re.I,
 )
-_ORGANIZATION_MEMBER_ROLE_NAMES = frozenset({"member"})
+_ORGANIZATION_AUDIENCE_ROLE_NAMES = frozenset(
+    {
+        "admin",
+        "engineer",
+        "member",
+        "owner",
+        "project manager",
+        "project_manager",
+        "steering committee",
+        "workflows engineer",
+    }
+)
+_KNOWLEDGE_CAPTURE_ACTIONS = ("remember", "save")
+_KNOWLEDGE_CAPTURE_TARGETS = ("thread", "conversation", "answer", "discussion")
 _AGENT_HELP_REQUESTS = frozenset(
     {
         "help",
@@ -104,7 +122,7 @@ class AgentConfirmationView(discord.ui.View):
         plan_id: str,
         context: dict[str, Any],
     ) -> None:
-        super().__init__(timeout=settings.knowledge_capture_draft_ttl_seconds)
+        super().__init__(timeout=600)
         self.cog = cog
         self.requester_id = requester_id
         self.plan_id = plan_id
@@ -256,7 +274,7 @@ class KnowledgeCaptureView(discord.ui.View):
         draft_id: str,
         context: dict[str, Any],
     ) -> None:
-        super().__init__(timeout=600)
+        super().__init__(timeout=settings.knowledge_capture_draft_ttl_seconds)
         self.cog = cog
         self.requester_id = requester_id
         self.draft_id = draft_id
@@ -630,16 +648,41 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
 
     @staticmethod
     def _is_knowledge_capture_request(request: str) -> bool:
-        return _KNOWLEDGE_CAPTURE_RE.search(request) is not None
+        if _KNOWLEDGE_CAPTURE_RE.search(request) is not None:
+            return True
+        tokens = re.findall(r"[a-z]+", request.casefold())
+        if len(tokens) < 2:
+            return False
+        has_action = any(
+            difflib.get_close_matches(
+                token,
+                _KNOWLEDGE_CAPTURE_ACTIONS,
+                n=1,
+                cutoff=0.78,
+            )
+            for token in tokens[:4]
+        )
+        has_target = any(
+            difflib.get_close_matches(
+                token,
+                _KNOWLEDGE_CAPTURE_TARGETS,
+                n=1,
+                cutoff=0.72,
+            )
+            for token in tokens
+        )
+        return has_action and has_target
 
     @staticmethod
     def _is_knowledge_question(request: str) -> bool:
         normalized = re.sub(r"\s+", " ", request).strip()
         if not normalized:
             return False
-        if _AGENT_ACTION_RE.search(normalized) is not None:
-            return False
         if _AGENT_LIVE_WORKFLOW_RE.search(normalized) is not None:
+            return False
+        if _KNOWLEDGE_RECALL_PREFIX_RE.search(normalized) is not None:
+            return True
+        if _AGENT_ACTION_RE.search(normalized) is not None:
             return False
         return (
             normalized.endswith("?")
@@ -774,7 +817,11 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                 },
             )
         formatted = self._format_knowledge_query_response(response)
-        if response.get("status") == "answered" and response.get("public_safe"):
+        if (
+            response.get("status") == "answered"
+            and response.get("public_safe")
+            and self._discord_destination_is_org_only(message)
+        ):
             await self._send_mention_public_response(
                 message=message,
                 request=question,
@@ -894,26 +941,40 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
 
     @staticmethod
     def _discord_source_visibility(message: discord.Message) -> str:
+        return (
+            "org" if AgentCog._discord_destination_is_org_only(message) else "private"
+        )
+
+    @staticmethod
+    def _discord_destination_is_org_only(message: discord.Message) -> bool:
+        """Return whether every role that can view the channel is organizational."""
         guild = message.guild
         channel = message.channel
         if guild is None:
-            return "private"
+            return False
         is_private = getattr(channel, "is_private", None)
         if callable(is_private) and is_private():
-            return "private"
+            return False
         permissions_for = getattr(channel, "permissions_for", None)
         if not callable(permissions_for):
-            return "private"
+            return False
+
+        member_can_view = False
         for role in getattr(guild, "roles", []):
+            if bool(getattr(role, "managed", False)):
+                continue
             role_name = str(getattr(role, "name", "") or "").strip().casefold()
-            if role_name not in _ORGANIZATION_MEMBER_ROLE_NAMES:
-                continue
             try:
-                if bool(getattr(permissions_for(role), "view_channel", False)):
-                    return "org"
+                can_view = bool(getattr(permissions_for(role), "view_channel", False))
             except (AttributeError, TypeError):
+                return False
+            if not can_view:
                 continue
-        return "private"
+            if role_name == "member":
+                member_can_view = True
+            if role_name not in _ORGANIZATION_AUDIENCE_ROLE_NAMES:
+                return False
+        return member_can_view
 
     @staticmethod
     def _extract_mention_request(content: str, bot_user_id: int) -> str:

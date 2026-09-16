@@ -8,7 +8,12 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from five08.discord_bot.cogs.agent import AgentCog, KnowledgeCaptureView
+from five08.discord_bot.cogs.agent import (
+    AgentCog,
+    AgentConfirmationView,
+    KnowledgeCaptureView,
+    settings,
+)
 
 
 class _AsyncTyping:
@@ -21,6 +26,8 @@ class _AsyncTyping:
 
 def test_knowledge_intent_routing_is_narrow() -> None:
     assert AgentCog._is_knowledge_capture_request("remember this thread") is True
+    assert AgentCog._is_knowledge_capture_request("remeber this thred") is True
+    assert AgentCog._is_knowledge_capture_request("save this answr") is True
     assert (
         AgentCog._is_knowledge_question("I forgot, does our main website auto deploy?")
         is True
@@ -212,14 +219,20 @@ async def test_public_safe_knowledge_question_can_reply_in_channel() -> None:
     )
     cog._send_mention_public_response = AsyncMock()
     cog._audit_message_safe = Mock()
+    member_role = SimpleNamespace(name="Member", managed=False)
+    channel = SimpleNamespace(
+        id=789,
+        typing=Mock(return_value=_AsyncTyping()),
+        permissions_for=Mock(return_value=SimpleNamespace(view_channel=True)),
+    )
     author = SimpleNamespace(id=123, bot=False, roles=[], send=AsyncMock())
     message = SimpleNamespace(
         id=555,
         content="<@999> I forgot, does our main website auto deploy?",
         author=author,
         mentions=[SimpleNamespace(id=999)],
-        guild=SimpleNamespace(id=456),
-        channel=SimpleNamespace(id=789, typing=Mock(return_value=_AsyncTyping())),
+        guild=SimpleNamespace(id=456, roles=[member_role]),
+        channel=channel,
         reply=AsyncMock(),
     )
 
@@ -229,3 +242,77 @@ async def test_public_safe_knowledge_question_can_reply_in_channel() -> None:
     cog._post_agent_request.assert_not_awaited()
     cog._send_mention_public_response.assert_awaited_once()
     author.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_public_safe_answer_is_dmed_when_guests_can_view_channel() -> None:
+    cog = AgentCog.__new__(AgentCog)
+    cog.bot = SimpleNamespace(user=SimpleNamespace(id=999))
+    cog._mention_request_timestamps = {}
+    cog._post_agent_request = AsyncMock()
+    cog._post_knowledge_query = AsyncMock(
+        return_value={
+            "status": "answered",
+            "answer": "Yes, with Cloudflare Pages.",
+            "citations": [],
+            "public_safe": True,
+        }
+    )
+    cog._send_mention_public_response = AsyncMock()
+    cog._audit_message_safe = Mock()
+    member_role = SimpleNamespace(name="Member", managed=False)
+    guest_role = SimpleNamespace(name="Guest", managed=False)
+    channel = SimpleNamespace(
+        id=789,
+        typing=Mock(return_value=_AsyncTyping()),
+        permissions_for=Mock(return_value=SimpleNamespace(view_channel=True)),
+    )
+    author = SimpleNamespace(id=123, bot=False, roles=[], send=AsyncMock())
+    message = SimpleNamespace(
+        id=555,
+        content="<@999> I forgot, does our main website auto deploy?",
+        author=author,
+        mentions=[SimpleNamespace(id=999)],
+        guild=SimpleNamespace(id=456, roles=[member_role, guest_role]),
+        channel=channel,
+        reply=AsyncMock(),
+    )
+
+    await cog.agent_mention(message)
+
+    cog._send_mention_public_response.assert_not_awaited()
+    author.send.assert_awaited_once()
+    message.reply.assert_awaited_once_with(
+        "I sent the knowledge answer by DM.",
+        mention_author=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_knowledge_view_uses_draft_ttl_without_changing_agent_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        settings,
+        "knowledge_capture_draft_ttl_seconds",
+        777,
+    )
+    cog = AgentCog.__new__(AgentCog)
+
+    knowledge_view = KnowledgeCaptureView(
+        cog=cog,
+        requester_id=123,
+        draft_id="11111111-1111-1111-1111-111111111111",
+        context={},
+    )
+    agent_view = AgentConfirmationView(
+        cog=cog,
+        requester_id=123,
+        plan_id="11111111-1111-1111-1111-111111111111",
+        context={},
+    )
+
+    assert knowledge_view.timeout == 777
+    assert agent_view.timeout == 600
+    knowledge_view.stop()
+    agent_view.stop()

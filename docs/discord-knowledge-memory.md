@@ -30,24 +30,31 @@ Discord mention
 Only the requester can confirm the draft. Drafts expire after 10 minutes by
 default. Repeated confirmation is idempotent; a changed answer to the same
 normalized question supersedes the previous active answer instead of silently
-overwriting its history. Secret-like text is never promoted to organization
-visibility.
+overwriting its history. Secret-like text is never promoted to organization or
+project visibility. Consumed previews are immediately stripped of raw Discord
+messages and candidates; expired preview records are deleted automatically.
 
 ## Asking Questions
 
 `/ask` is always private. Questions in direct bot mentions use the knowledge
-path after local help and dedicated live-workflow routing. Search runs across:
+path after local help and dedicated live-workflow routing, so a natural question
+such as `@bot I forgot, does our main website auto deploy?` does not require
+`/ask`. Search runs across:
 
 - Active remembered facts visible to the caller
 - The member-safe Outline integration account
 - ERPNext project cache rows filtered by the caller's CRM-linked project roster
 - CRM people data only when the caller has the existing CRM read scope
 
-The optional model sees only normalized, already-authorized evidence. It may
-propose an answer and evidence IDs, but code rejects unknown citations and owns
-the final visibility decision. When the model is unavailable, the highest
-ranked evidence excerpt is returned. No evidence produces an explicit
-insufficient result.
+Recall is hybrid. PostgreSQL full-text ranking handles keyword matches, a
+conservative deterministic similarity score handles common typos, and the
+optional model selects semantically relevant facts for paraphrases and synonyms
+from a small candidate pool. Authorization and source visibility are applied
+before that candidate pool is constructed. The model may propose an answer and
+evidence IDs, but code rejects unknown citations and owns the final visibility
+decision. An explicit model abstention remains an insufficient result. When the
+model is unavailable, only positively matched keyword or fuzzy evidence can be
+returned; unrelated semantic candidates are never used as fallback.
 
 A mention answer is channel-visible only when all cited evidence is
 organization-visible and the answer contains no detected secrets, email
@@ -72,7 +79,8 @@ Every remembered answer stores:
 
 `memory_facts` is the searchable source of truth, `memory_fact_sources` stores
 provenance, and `knowledge_capture_drafts` stores immutable confirmation
-previews. PostgreSQL full-text search is used for the first implementation.
+previews until they are confirmed, canceled, or expire. PostgreSQL full-text
+search and bounded semantic selection provide recall without a vector database.
 
 Human-triggered capture, confirmation, and query attempts emit best-effort
 audit metadata. Raw conversation text and answers are not copied into audit

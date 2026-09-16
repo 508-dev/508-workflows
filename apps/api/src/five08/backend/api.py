@@ -10343,6 +10343,25 @@ async def auth_discord_link_consume_handler(
     return RedirectResponse(url=f"/auth/login?{login_query}", status_code=302)
 
 
+async def _knowledge_capture_cleanup_scheduler() -> None:
+    retention_seconds = max(
+        60,
+        int(settings.knowledge_capture_draft_ttl_seconds),
+    )
+    interval_seconds = max(60, min(retention_seconds, 300))
+    while True:
+        try:
+            await asyncio.to_thread(
+                _KNOWLEDGE_STORE.purge_capture_drafts,
+                consumed_retention_seconds=retention_seconds,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("Knowledge capture draft cleanup failed", exc_info=True)
+        await asyncio.sleep(interval_seconds)
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> Any:
     redis_conn = get_redis_connection(settings)
@@ -10368,6 +10387,9 @@ async def _lifespan(app: FastAPI) -> Any:
     app.state.discord_admin_verifier = DiscordAdminVerifier(settings)
     app.state.http_client = httpx.AsyncClient(follow_redirects=False)
 
+    app.state.knowledge_capture_cleanup_task = asyncio.create_task(
+        _knowledge_capture_cleanup_scheduler()
+    )
     crm_sync_skip_reason = _crm_sync_scheduler_skip_reason()
     if crm_sync_skip_reason is None:
         app.state.crm_sync_task = asyncio.create_task(_crm_sync_scheduler(app))
@@ -10393,6 +10415,11 @@ async def _lifespan(app: FastAPI) -> Any:
     try:
         yield
     finally:
+        cleanup_task = app.state.knowledge_capture_cleanup_task
+        cleanup_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await cleanup_task
+
         if hasattr(app.state, "crm_sync_task"):
             task = app.state.crm_sync_task
             task.cancel()

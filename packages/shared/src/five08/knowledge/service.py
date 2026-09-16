@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime, timedelta, timezone
 from typing import Callable
@@ -63,6 +64,12 @@ _EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I)
 _PHONE_RE = re.compile(r"(?<!\d)(?:\+?\d[\d .()-]{7,}\d)(?!\d)")
 
 
+_SOURCE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=8,
+    thread_name_prefix="knowledge-source",
+)
+
+
 class KnowledgeService:
     """Coordinate policy, retrieval, model proposals, and durable persistence."""
 
@@ -93,16 +100,51 @@ class KnowledgeService:
             )
         context = request.context
         organization_id = context.organization_id or context.guild_id
-        if not organization_id:
+        if not organization_id or not self._organization_allowed(
+            organization_id=organization_id,
+            guild_id=context.guild_id,
+        ):
             return KnowledgeCaptureResponse(
                 status="denied",
-                message="Knowledge capture requires a resolved organization.",
+                message="Knowledge capture is limited to the configured Discord server.",
             )
+
         scopes = self.policy.scopes_for_context(context)
+        resolved_project_id: str | None = None
+        source = request.source
+        if source.thread_id:
+            try:
+                resolved_project_id = self.sources.resolve_capture_project(
+                    organization_id=organization_id,
+                    thread_id=source.thread_id,
+                )
+            except Exception:
+                return KnowledgeCaptureResponse(
+                    status="failed",
+                    message="I could not verify whether this thread belongs to a project.",
+                )
+            if resolved_project_id:
+                if "knowledge:capture_project" not in scopes:
+                    return KnowledgeCaptureResponse(
+                        status="denied",
+                        message="Your Discord roles cannot capture project knowledge.",
+                    )
+                if not self._actor_can_access_project(
+                    discord_user_id=context.discord_user_id,
+                    project_id=resolved_project_id,
+                    include_all="knowledge:admin" in scopes,
+                ):
+                    return KnowledgeCaptureResponse(
+                        status="denied",
+                        message="You do not have access to this project's knowledge.",
+                    )
+                source = source.model_copy(update={"source_visibility": "project"})
+
         scope_type, scope_id, visibility = self._capture_scope(
             request,
             scopes=scopes,
             organization_id=organization_id,
+            resolved_project_id=resolved_project_id,
         )
         if scope_type is None or scope_id is None or visibility is None:
             return KnowledgeCaptureResponse(
@@ -121,11 +163,12 @@ class KnowledgeService:
             return KnowledgeCaptureResponse(
                 status="needs_clarification",
                 message=(
-                    "I could not identify a reusable question and answer in that "
-                    "conversation. Reply to the answer and try `remember this answer`."
+                    "I could not identify one unambiguous reusable question and answer "
+                    "in that conversation. Reply to the answer and try "
+                    "`remember this answer`."
                 ),
             )
-        if visibility == "org" and any(
+        if visibility != "private" and any(
             _contains_secret(candidate.question) or _contains_secret(candidate.answer)
             for candidate in candidates
         ):
@@ -157,7 +200,7 @@ class KnowledgeService:
             scope_id=scope_id,
             visibility=visibility,
             verification_status=verification_status,
-            source=request.source,
+            source=source,
             messages=selected_messages,
             candidates=candidates,
             expires_at=now + timedelta(seconds=max(60, ttl_seconds)),
@@ -196,6 +239,13 @@ class KnowledgeService:
             raise PermissionError(
                 "knowledge capture must be confirmed in its original organization"
             )
+        if not self._organization_allowed(
+            organization_id=confirmation_org_id,
+            guild_id=identity.guild_id,
+        ):
+            raise PermissionError(
+                "knowledge capture is limited to the configured Discord server"
+            )
         if not confirm:
             self.store.cancel_capture_draft(
                 draft_id,
@@ -204,6 +254,12 @@ class KnowledgeService:
             return KnowledgeCaptureResponse(
                 status="canceled",
                 message="Knowledge capture canceled.",
+                draft_id=draft_id,
+            )
+        if not getattr(self.settings, "knowledge_enabled", True):
+            return KnowledgeCaptureResponse(
+                status="denied",
+                message="Knowledge capture is disabled.",
                 draft_id=draft_id,
             )
 
@@ -219,6 +275,17 @@ class KnowledgeService:
                 message="Your current Discord roles cannot confirm this capture.",
                 draft_id=draft_id,
             )
+        if draft.scope_type == "project" and not self._actor_can_access_project(
+            discord_user_id=identity.discord_user_id,
+            project_id=draft.scope_id,
+            include_all="knowledge:admin" in scopes,
+        ):
+            return KnowledgeCaptureResponse(
+                status="denied",
+                message="You no longer have access to this project's knowledge.",
+                draft_id=draft_id,
+            )
+
         review_days = int(getattr(self.settings, "knowledge_review_after_days", 180))
         _confirmed, facts = self.store.confirm_capture_draft(
             draft_id,
@@ -245,13 +312,20 @@ class KnowledgeService:
             )
         context = request.context
         organization_id = context.organization_id or context.guild_id
-        if not organization_id:
+        if not organization_id or not self._organization_allowed(
+            organization_id=organization_id,
+            guild_id=context.guild_id,
+        ):
             return KnowledgeQueryResponse(
                 status="denied",
-                answer="I need a resolved organization before searching knowledge.",
+                answer="Knowledge search is limited to the configured Discord server.",
             )
+
         scopes = self.policy.scopes_for_context(context)
-        if not ({"knowledge:read_org", "memory:read_self"} & scopes):
+        allow_private = "memory:read_self" in scopes
+        allow_project = bool({"knowledge:read_project", "memory:read_project"} & scopes)
+        allow_org = "knowledge:read_org" in scopes
+        if not (allow_private or allow_project or allow_org):
             return KnowledgeQueryResponse(
                 status="denied",
                 answer="Your Discord roles cannot search organizational knowledge.",
@@ -260,72 +334,87 @@ class KnowledgeService:
         source_errors: list[str] = []
         actor_emails: list[str] = []
         accessible_project_ids: list[str] = []
-        try:
-            actor_emails = self.sources.resolve_actor_emails(context.discord_user_id)
-            if "project:read" in scopes:
-                accessible_project_ids = self.sources.accessible_project_ids(
-                    actor_emails=actor_emails,
-                    include_all="knowledge:admin" in scopes,
+        timeout_seconds = max(
+            1.0,
+            float(getattr(self.settings, "knowledge_source_timeout_seconds", 6.0)),
+        )
+        deadline = time.monotonic() + timeout_seconds
+        if allow_project:
+            identity_future = _SOURCE_EXECUTOR.submit(
+                self._resolve_actor_access,
+                context.discord_user_id,
+                "knowledge:admin" in scopes,
+            )
+            try:
+                actor_emails, accessible_project_ids = identity_future.result(
+                    timeout=_remaining_seconds(deadline)
                 )
-        except Exception:
-            source_errors.append("identity/project access lookup failed")
+            except TimeoutError:
+                identity_future.cancel()
+                source_errors.append("identity/project access lookup timed out")
+            except Exception:
+                source_errors.append("identity/project access lookup failed")
 
+        max_evidence = int(getattr(self.settings, "knowledge_query_max_evidence", 8))
+        semantic_limit = (
+            int(
+                getattr(
+                    self.settings,
+                    "knowledge_semantic_candidate_limit",
+                    24,
+                )
+            )
+            if self.model is not None
+            else 0
+        )
         searches: dict[str, Callable[[], list[KnowledgeEvidence]]] = {
             "memory": lambda: self.store.search_evidence(
                 question=request.question,
                 organization_id=organization_id,
                 actor_id=context.discord_user_id,
                 project_ids=accessible_project_ids,
-                limit=int(getattr(self.settings, "knowledge_query_max_evidence", 8)),
+                allow_private=allow_private,
+                allow_project=allow_project,
+                allow_org=allow_org,
+                limit=max_evidence,
+                semantic_candidate_limit=semantic_limit,
             )
         }
-        if "knowledge:read_wiki" in scopes:
+        if allow_org and "knowledge:read_wiki" in scopes:
             searches["wiki"] = lambda: self.sources.search_outline(request.question)
-        if "project:read" in scopes:
+        if allow_project and "project:read" in scopes:
             searches["erp"] = lambda: self.sources.search_erp_projects(
                 request.question,
                 actor_emails=actor_emails,
                 include_all="knowledge:admin" in scopes,
             )
-        if "crm:contact:read" in scopes:
+        if allow_private and "crm:contact:read" in scopes:
             searches["crm"] = lambda: self.sources.search_crm(request.question)
 
         evidence: list[KnowledgeEvidence] = []
-        executor = ThreadPoolExecutor(max_workers=min(4, len(searches)))
-        try:
-            futures = {
-                executor.submit(search): name for name, search in searches.items()
-            }
-            completed, pending = wait(
-                futures,
-                timeout=float(
-                    getattr(self.settings, "knowledge_source_timeout_seconds", 6.0)
-                ),
-            )
-            for future in completed:
-                name = futures[future]
-                try:
-                    evidence.extend(future.result())
-                except Exception:
-                    source_errors.append(f"{name} search failed")
-            for future in pending:
-                source_errors.append(f"{futures[future]} search timed out")
-                future.cancel()
-        finally:
-            executor.shutdown(wait=False, cancel_futures=True)
+        futures = {
+            _SOURCE_EXECUTOR.submit(search): name for name, search in searches.items()
+        }
+        completed, pending = wait(
+            futures,
+            timeout=_remaining_seconds(deadline),
+        )
+        for future in completed:
+            name = futures[future]
+            try:
+                evidence.extend(future.result())
+            except Exception:
+                source_errors.append(f"{name} search failed")
+        for future in pending:
+            source_errors.append(f"{futures[future]} search timed out")
+            future.cancel()
 
         evidence = self._rank_evidence(evidence)
-        max_evidence = int(getattr(self.settings, "knowledge_query_max_evidence", 8))
-        evidence = evidence[: max(1, min(max_evidence, 20))]
+        candidate_limit = max(max_evidence, semantic_limit)
+        evidence = evidence[: max(1, min(candidate_limit, 64))]
+        relevant_evidence = [item for item in evidence if item.relevance > 0]
         if not evidence:
-            message = "I could not find enough authorized evidence to answer that."
-            if source_errors:
-                message += " Some sources were temporarily unavailable."
-            return KnowledgeQueryResponse(
-                status="insufficient",
-                answer=message,
-                source_errors=source_errors,
-            )
+            return _insufficient_response(source_errors)
 
         draft = None
         if self.model is not None:
@@ -336,15 +425,22 @@ class KnowledgeService:
                 )
             except Exception:
                 source_errors.append("answer synthesis failed")
+        if draft is not None and draft.status == "insufficient":
+            return _insufficient_response(source_errors)
+
         if draft is None:
-            selected = [evidence[0]]
+            if not relevant_evidence:
+                return _insufficient_response(source_errors)
+            selected = [relevant_evidence[0]]
             answer = _fallback_answer(selected[0])
             confidence = min(0.75, selected[0].authority)
         else:
             selected_ids = set(draft.evidence_ids)
             selected = [item for item in evidence if item.evidence_id in selected_ids]
             if not selected:
-                selected = [evidence[0]]
+                if not relevant_evidence:
+                    return _insufficient_response(source_errors)
+                selected = [relevant_evidence[0]]
                 answer = _fallback_answer(selected[0])
                 confidence = min(0.75, selected[0].authority)
             else:
@@ -381,25 +477,67 @@ class KnowledgeService:
         *,
         scopes: set[str],
         organization_id: str,
+        resolved_project_id: str | None,
     ) -> tuple[
         KnowledgeScopeType | None,
         str | None,
         KnowledgeVisibility | None,
     ]:
+        if resolved_project_id and "knowledge:capture_project" in scopes:
+            return "project", resolved_project_id, "project"
         if (
             request.source.source_visibility == "org"
             and "knowledge:capture_org" in scopes
         ):
             return "org", organization_id, "org"
-        if (
-            request.source.source_visibility == "project"
-            and request.context.project_id
-            and "knowledge:capture_project" in scopes
-        ):
-            return "project", request.context.project_id, "project"
         if "memory:write_self" in scopes:
             return "user", request.context.discord_user_id, "private"
         return None, None, None
+
+    def _organization_allowed(
+        self,
+        *,
+        organization_id: str | None,
+        guild_id: str | None,
+    ) -> bool:
+        configured_guild_id = str(
+            getattr(self.settings, "discord_server_id", "") or ""
+        ).strip()
+        return bool(
+            configured_guild_id
+            and organization_id == configured_guild_id
+            and guild_id == configured_guild_id
+        )
+
+    def _actor_can_access_project(
+        self,
+        *,
+        discord_user_id: str,
+        project_id: str,
+        include_all: bool,
+    ) -> bool:
+        if include_all:
+            return True
+        try:
+            _emails, project_ids = self._resolve_actor_access(
+                discord_user_id,
+                False,
+            )
+        except Exception:
+            return False
+        return project_id in project_ids
+
+    def _resolve_actor_access(
+        self,
+        discord_user_id: str,
+        include_all: bool,
+    ) -> tuple[list[str], list[str]]:
+        actor_emails = self.sources.resolve_actor_emails(discord_user_id)
+        project_ids = self.sources.accessible_project_ids(
+            actor_emails=actor_emails,
+            include_all=include_all,
+        )
+        return actor_emails, project_ids
 
     def _bounded_messages(
         self,
@@ -449,7 +587,7 @@ class KnowledgeService:
                 and set(candidate.source_message_ids).issubset(allowed_message_ids)
             ]
             if validated_candidates:
-                return validated_candidates
+                return _deduplicate_candidates(validated_candidates)
         return _heuristic_candidates(messages)
 
     @staticmethod
@@ -463,7 +601,7 @@ class KnowledgeService:
         authored_every_answer = bool(candidates) and all(
             any(
                 message.author_id == actor_id
-                and _normalize(message.content) in _normalize(candidate.answer)
+                and _normalize(message.content) == _normalize(candidate.answer)
                 for message in (
                     messages_by_id[message_id]
                     for message_id in candidate.source_message_ids
@@ -529,6 +667,49 @@ def _heuristic_candidates(
     return []
 
 
+def _deduplicate_candidates(
+    candidates: list[KnowledgeCaptureCandidate],
+) -> list[KnowledgeCaptureCandidate]:
+    grouped: dict[str, KnowledgeCaptureCandidate] = {}
+    conflicting_questions: set[str] = set()
+    for candidate in candidates:
+        question_key = _normalize(candidate.question)
+        if question_key in conflicting_questions:
+            continue
+        existing = grouped.get(question_key)
+        if existing is None:
+            grouped[question_key] = candidate
+            continue
+        if _normalize(existing.answer) != _normalize(candidate.answer):
+            grouped.pop(question_key, None)
+            conflicting_questions.add(question_key)
+            continue
+        aliases = list(
+            dict.fromkeys(
+                [
+                    *existing.aliases,
+                    *candidate.aliases,
+                ]
+            )
+        )[:8]
+        source_message_ids = list(
+            dict.fromkeys(
+                [
+                    *existing.source_message_ids,
+                    *candidate.source_message_ids,
+                ]
+            )
+        )[:12]
+        grouped[question_key] = existing.model_copy(
+            update={
+                "aliases": aliases,
+                "source_message_ids": source_message_ids,
+                "confidence": max(existing.confidence, candidate.confidence),
+            }
+        )
+    return list(grouped.values())
+
+
 def _looks_like_question(value: str) -> bool:
     normalized = value.strip()
     return "?" in normalized or _QUESTION_START_RE.search(normalized) is not None
@@ -542,6 +723,21 @@ def _question_alias(question: str) -> str:
         flags=re.I,
     )
     return " ".join(normalized.strip(" ?!.").split())[:200]
+
+
+def _remaining_seconds(deadline: float) -> float:
+    return max(0.0, deadline - time.monotonic())
+
+
+def _insufficient_response(source_errors: list[str]) -> KnowledgeQueryResponse:
+    message = "I could not find enough authorized evidence to answer that."
+    if source_errors:
+        message += " Some sources were temporarily unavailable."
+    return KnowledgeQueryResponse(
+        status="insufficient",
+        answer=message,
+        source_errors=source_errors,
+    )
 
 
 def _fallback_answer(evidence: KnowledgeEvidence) -> str:

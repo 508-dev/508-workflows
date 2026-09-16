@@ -74,7 +74,7 @@ def test_postgres_memory_adapter_preserves_retention_and_provenance(
     monkeypatch.setattr(
         knowledge_store,
         "get_postgres_connection",
-        lambda _settings: connection,
+        lambda _settings, **_kwargs: connection,
     )
     before = datetime.now(timezone.utc)
 

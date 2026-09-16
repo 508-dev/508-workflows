@@ -264,8 +264,9 @@ Agent gateway:
   confirmed Discord captures.
 - `KNOWLEDGE_API_TIMEOUT_SECONDS`: bot-to-backend request timeout (default: 15).
 - `KNOWLEDGE_MODEL_ENABLED`: uses the configured strong agent tier for bounded
-  extraction and grounded synthesis. Deterministic extraction and excerpts are
-  used when the model is disabled or unavailable.
+  extraction, semantic evidence selection, and grounded synthesis. Deterministic
+  extraction plus keyword and typo-tolerant recall remain available when the
+  model is disabled or unavailable.
 - `KNOWLEDGE_MODEL_TIMEOUT_SECONDS`
 - `KNOWLEDGE_SOURCE_TIMEOUT_SECONDS`: total concurrent retrieval window per
   question (default: 6).
@@ -278,7 +279,10 @@ Agent gateway:
 - `KNOWLEDGE_REVIEW_AFTER_DAYS`: age at which a remembered answer is marked as
   review due in citations (default: 180).
 - `KNOWLEDGE_QUERY_MAX_EVIDENCE`: maximum evidence items considered per answer
-  (default: 8).
+  or deterministic fallback (default: 8).
+- `KNOWLEDGE_SEMANTIC_CANDIDATE_LIMIT`: maximum authorization-filtered remembered
+  facts offered to the model for paraphrase and synonym matching (default: 24,
+  maximum: 64).
 - `GITHUB_DEFAULT_REPO`: defaults to `508-dev/todos`.
 - `GITHUB_ORGANIZATION`: defaults to `508-dev` and scopes GitHub Projects.
 - `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_INSTALLATION_ID`,

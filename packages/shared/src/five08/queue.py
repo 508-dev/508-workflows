@@ -85,9 +85,23 @@ def get_redis_connection(settings: SharedSettings) -> Redis:
     )
 
 
-def get_postgres_connection(settings: SharedSettings) -> Connection:
-    """Create a PostgreSQL connection from shared settings."""
-    return connect(settings.postgres_url)
+def get_postgres_connection(
+    settings: SharedSettings,
+    *,
+    connect_timeout_seconds: float | None = None,
+    statement_timeout_seconds: float | None = None,
+) -> Connection:
+    """Create a PostgreSQL connection with optional operation deadlines."""
+    kwargs: dict[str, Any] = {}
+    if connect_timeout_seconds is not None:
+        kwargs["connect_timeout"] = max(
+            1,
+            int(float(connect_timeout_seconds)),
+        )
+    if statement_timeout_seconds is not None:
+        statement_timeout_ms = max(1, int(float(statement_timeout_seconds) * 1000))
+        kwargs["options"] = f"-c statement_timeout={statement_timeout_ms}"
+    return connect(settings.postgres_url, **kwargs)
 
 
 def is_postgres_healthy(settings: SharedSettings) -> bool:

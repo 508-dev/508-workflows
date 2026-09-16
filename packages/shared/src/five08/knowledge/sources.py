@@ -36,9 +36,23 @@ class KnowledgeSourceAdapters:
     def __init__(self, settings: SharedSettings) -> None:
         self.settings = settings
 
+    @property
+    def _timeout_seconds(self) -> float:
+        return max(
+            1.0,
+            float(getattr(self.settings, "knowledge_source_timeout_seconds", 6.0)),
+        )
+
+    def _connection(self) -> Any:
+        return get_postgres_connection(
+            self.settings,
+            connect_timeout_seconds=self._timeout_seconds,
+            statement_timeout_seconds=self._timeout_seconds,
+        )
+
     def resolve_actor_emails(self, discord_user_id: str) -> list[str]:
         """Resolve trusted local identities used for project roster filtering."""
-        with get_postgres_connection(self.settings) as conn:
+        with self._connection() as conn:
             with conn.cursor(row_factory=dict_row) as cursor:
                 cursor.execute(
                     """
@@ -73,8 +87,46 @@ class KnowledgeSourceAdapters:
             include_all=include_all,
             limit=500,
             include_roster=False,
+            timeout_seconds=self._timeout_seconds,
         )
         return [str(row["id"]) for row in rows if row.get("id")]
+
+    def resolve_capture_project(
+        self,
+        *,
+        organization_id: str,
+        thread_id: str | None,
+    ) -> str | None:
+        """Resolve a Discord engagement thread to one canonical project."""
+        if not thread_id:
+            return None
+        with self._connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cursor:
+                cursor.execute(
+                    """
+                    SELECT DISTINCT p.id::text AS project_id
+                    FROM engagements e
+                    JOIN project_external_ids pei
+                      ON pei.source = 'erpnext'
+                     AND pei.external_id = e.erpnext_project_id
+                     AND pei.active IS TRUE
+                    JOIN projects p ON p.id = pei.project_id
+                    WHERE e.discord_guild_id = %s
+                      AND e.discord_thread_id = %s
+                      AND e.erpnext_project_id IS NOT NULL
+                    LIMIT 2
+                    """,
+                    (organization_id, thread_id),
+                )
+                rows = cursor.fetchall()
+        project_ids = {
+            str(row.get("project_id") or "").strip()
+            for row in rows
+            if str(row.get("project_id") or "").strip()
+        }
+        if len(project_ids) != 1:
+            return None
+        return next(iter(project_ids))
 
     def search_outline(
         self,
@@ -107,7 +159,7 @@ class KnowledgeSourceAdapters:
                 url=(result.document.url or "")[:1000] or None,
                 visibility="org",
                 authority=0.95,
-                relevance=max(float(result.ranking or 0.0), 0.0),
+                relevance=max(float(result.ranking or 0.0), 0.1),
                 updated_at=_parse_datetime(result.document.updated_at),
             )
             for result in results
@@ -131,6 +183,7 @@ class KnowledgeSourceAdapters:
             include_all=include_all,
             limit=limit,
             include_roster=False,
+            timeout_seconds=self._timeout_seconds,
         )
         evidence: list[KnowledgeEvidence] = []
         for row in rows:
@@ -177,7 +230,7 @@ class KnowledgeSourceAdapters:
         if not query:
             return []
         token = f"%{query}%"
-        with get_postgres_connection(self.settings) as conn:
+        with self._connection() as conn:
             with conn.cursor(row_factory=dict_row) as cursor:
                 cursor.execute(
                     """

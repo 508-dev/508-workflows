@@ -174,6 +174,7 @@ class KnowledgeEvidence(BaseModel):
     source_ref: str
     title: str = Field(min_length=1, max_length=300)
     excerpt: str = Field(min_length=1, max_length=4000)
+    retrieval_text: str | None = Field(default=None, exclude=True, max_length=5000)
     url: str | None = Field(default=None, max_length=1000)
     visibility: KnowledgeVisibility
     authority: float = Field(default=0.5, ge=0.0, le=1.0)

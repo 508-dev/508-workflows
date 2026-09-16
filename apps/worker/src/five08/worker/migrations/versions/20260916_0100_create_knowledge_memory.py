@@ -229,7 +229,9 @@ def upgrade() -> None:
         CREATE FUNCTION memory_facts_set_updated_at_fn()
         RETURNS TRIGGER AS $$
         BEGIN
-            NEW.updated_at = NOW();
+            IF NEW.updated_at IS NOT DISTINCT FROM OLD.updated_at THEN
+                NEW.updated_at = NOW();
+            END IF;
             RETURN NEW;
         END;
         $$ LANGUAGE plpgsql;

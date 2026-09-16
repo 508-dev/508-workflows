@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import json
 import re
@@ -66,6 +67,14 @@ class KnowledgeStore(Protocol):
     ) -> tuple[KnowledgeCaptureDraft, list[KnowledgeFact]]:
         """Atomically consume a draft and persist its frozen candidates."""
 
+    def purge_capture_drafts(
+        self,
+        *,
+        now: datetime | None = None,
+        consumed_retention_seconds: int = 600,
+    ) -> int:
+        """Delete expired drafts and retained consumed metadata."""
+
     def search_evidence(
         self,
         *,
@@ -73,7 +82,11 @@ class KnowledgeStore(Protocol):
         organization_id: str,
         actor_id: str,
         project_ids: Iterable[str] = (),
+        allow_private: bool,
+        allow_project: bool,
+        allow_org: bool,
         limit: int = 8,
+        semantic_candidate_limit: int = 0,
         now: datetime | None = None,
     ) -> list[KnowledgeEvidence]:
         """Return visible active knowledge matching a question."""
@@ -116,7 +129,13 @@ class InMemoryKnowledgeStore:
                 raise ValueError("knowledge capture draft was already confirmed")
             if draft.consumed_at is not None:
                 return draft.model_copy(deep=True)
-            canceled = draft.model_copy(update={"consumed_at": comparison_time})
+            canceled = draft.model_copy(
+                update={
+                    "consumed_at": comparison_time,
+                    "messages": [],
+                    "candidates": [],
+                }
+            )
             self._drafts[draft_id] = canceled
             return canceled.model_copy(deep=True)
 
@@ -158,12 +177,38 @@ class InMemoryKnowledgeStore:
                 update={
                     "consumed_at": comparison_time,
                     "confirmed_fact_ids": [fact.id for fact in facts],
+                    "messages": [],
+                    "candidates": [],
                 }
             )
             self._drafts[draft_id] = confirmed
             return confirmed.model_copy(deep=True), [
                 fact.model_copy(deep=True) for fact in facts
             ]
+
+    def purge_capture_drafts(
+        self,
+        *,
+        now: datetime | None = None,
+        consumed_retention_seconds: int = 600,
+    ) -> int:
+        comparison_time = now or datetime.now(timezone.utc)
+        consumed_cutoff = comparison_time - timedelta(
+            seconds=max(0, consumed_retention_seconds)
+        )
+        with self._lock:
+            expired_ids = [
+                draft_id
+                for draft_id, draft in self._drafts.items()
+                if draft.expires_at <= comparison_time
+                or (
+                    draft.consumed_at is not None
+                    and draft.consumed_at <= consumed_cutoff
+                )
+            ]
+            for draft_id in expired_ids:
+                del self._drafts[draft_id]
+        return len(expired_ids)
 
     def search_evidence(
         self,
@@ -172,7 +217,11 @@ class InMemoryKnowledgeStore:
         organization_id: str,
         actor_id: str,
         project_ids: Iterable[str] = (),
+        allow_private: bool,
+        allow_project: bool,
+        allow_org: bool,
         limit: int = 8,
+        semantic_candidate_limit: int = 0,
         now: datetime | None = None,
     ) -> list[KnowledgeEvidence]:
         comparison_time = now or datetime.now(timezone.utc)
@@ -180,7 +229,7 @@ class InMemoryKnowledgeStore:
         if not query_tokens:
             return []
         visible_projects = set(project_ids)
-        scored: list[tuple[float, KnowledgeFact]] = []
+        scored: list[tuple[float, KnowledgeFact, str]] = []
         with self._lock:
             for fact in self._facts.values():
                 if fact.organization_id != organization_id or fact.status != "active":
@@ -191,21 +240,26 @@ class InMemoryKnowledgeStore:
                     fact,
                     actor_id=actor_id,
                     project_ids=visible_projects,
+                    allow_private=allow_private,
+                    allow_project=allow_project,
+                    allow_org=allow_org,
                 ):
                     continue
-                searchable = " ".join(
+                retrieval_text = " ".join(
                     [
                         fact.key,
                         fact.question or "",
-                        fact.answer,
                         *fact.aliases,
+                        fact.answer,
                     ]
-                ).casefold()
-                matched = sum(1 for token in query_tokens if token in searchable)
-                if query_tokens and matched == 0:
-                    continue
-                relevance = matched / max(len(query_tokens), 1)
-                scored.append((relevance, fact))
+                )
+                searchable_tokens = _search_tokens(retrieval_text)
+                matched = len(query_tokens & searchable_tokens)
+                lexical_relevance = matched / max(len(query_tokens), 1)
+                fuzzy_relevance = _fuzzy_relevance(question, retrieval_text)
+                scored.append(
+                    (max(lexical_relevance, fuzzy_relevance), fact, retrieval_text)
+                )
 
             scored.sort(
                 key=lambda item: (
@@ -215,8 +269,22 @@ class InMemoryKnowledgeStore:
                 ),
                 reverse=True,
             )
+            relevant = [item for item in scored if item[0] > 0]
+            selected = relevant[: max(1, min(limit, 20))]
+            selected_ids = {item[1].id for item in selected}
+            semantic_limit = max(0, min(semantic_candidate_limit, 64))
+            if semantic_limit > len(selected):
+                semantic_candidates = sorted(
+                    (item for item in scored if item[1].id not in selected_ids),
+                    key=lambda item: (
+                        item[1].confidence,
+                        item[1].updated_at,
+                    ),
+                    reverse=True,
+                )
+                selected.extend(semantic_candidates[: semantic_limit - len(selected)])
             evidence: list[KnowledgeEvidence] = []
-            for relevance, fact in scored[: max(1, min(limit, 20))]:
+            for relevance, fact, retrieval_text in selected:
                 source = self._sources.get(fact.id)
                 evidence.append(
                     KnowledgeEvidence(
@@ -231,6 +299,7 @@ class InMemoryKnowledgeStore:
                             else fact.question or fact.key
                         ),
                         excerpt=fact.answer,
+                        retrieval_text=retrieval_text,
                         url=source.url if source is not None else None,
                         visibility=fact.visibility,
                         authority=_verification_authority(
@@ -479,8 +548,19 @@ class PostgresKnowledgeStore:
     def __init__(self, settings: SharedSettings) -> None:
         self.settings = settings
 
+    def _connection(self) -> Any:
+        timeout_seconds = max(
+            1.0,
+            float(getattr(self.settings, "knowledge_source_timeout_seconds", 6.0)),
+        )
+        return get_postgres_connection(
+            self.settings,
+            connect_timeout_seconds=timeout_seconds,
+            statement_timeout_seconds=timeout_seconds,
+        )
+
     def create_capture_draft(self, draft: KnowledgeCaptureDraft) -> None:
-        with get_postgres_connection(self.settings) as conn:
+        with self._connection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(
                     """
@@ -528,7 +608,7 @@ class PostgresKnowledgeStore:
                 )
 
     def get_capture_draft(self, draft_id: str) -> KnowledgeCaptureDraft | None:
-        with get_postgres_connection(self.settings) as conn:
+        with self._connection() as conn:
             with conn.cursor(row_factory=dict_row) as cursor:
                 cursor.execute(
                     """
@@ -549,7 +629,7 @@ class PostgresKnowledgeStore:
         now: datetime | None = None,
     ) -> KnowledgeCaptureDraft:
         comparison_time = now or datetime.now(timezone.utc)
-        with get_postgres_connection(self.settings) as conn:
+        with self._connection() as conn:
             with conn.cursor(row_factory=dict_row) as cursor:
                 draft = self._locked_draft(cursor, draft_id, actor_id=actor_id)
                 if draft.confirmed_fact_ids:
@@ -558,7 +638,9 @@ class PostgresKnowledgeStore:
                     cursor.execute(
                         """
                         UPDATE knowledge_capture_drafts
-                        SET consumed_at = %s
+                        SET consumed_at = %s,
+                            message_payload = '[]'::jsonb,
+                            candidate_payload = '[]'::jsonb
                         WHERE id = %s::uuid
                         RETURNING *
                         """,
@@ -579,7 +661,7 @@ class PostgresKnowledgeStore:
         now: datetime | None = None,
     ) -> tuple[KnowledgeCaptureDraft, list[KnowledgeFact]]:
         comparison_time = now or datetime.now(timezone.utc)
-        with get_postgres_connection(self.settings) as conn:
+        with self._connection() as conn:
             with conn.cursor(row_factory=dict_row) as cursor:
                 draft = self._locked_draft(cursor, draft_id, actor_id=actor_id)
                 if draft.expires_at <= comparison_time and draft.consumed_at is None:
@@ -603,7 +685,10 @@ class PostgresKnowledgeStore:
                 cursor.execute(
                     """
                     UPDATE knowledge_capture_drafts
-                    SET consumed_at = %s, confirmed_fact_ids = %s::uuid[]
+                    SET consumed_at = %s,
+                        confirmed_fact_ids = %s::uuid[],
+                        message_payload = '[]'::jsonb,
+                        candidate_payload = '[]'::jsonb
                     WHERE id = %s::uuid
                     RETURNING *
                     """,
@@ -614,6 +699,29 @@ class PostgresKnowledgeStore:
                     raise RuntimeError("failed confirming knowledge capture draft")
                 return _capture_draft_from_row(row), facts
 
+    def purge_capture_drafts(
+        self,
+        *,
+        now: datetime | None = None,
+        consumed_retention_seconds: int = 600,
+    ) -> int:
+        comparison_time = now or datetime.now(timezone.utc)
+        consumed_cutoff = comparison_time - timedelta(
+            seconds=max(0, consumed_retention_seconds)
+        )
+        with self._connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    DELETE FROM knowledge_capture_drafts
+                    WHERE expires_at <= %s
+                       OR (consumed_at IS NOT NULL AND consumed_at <= %s)
+                    """,
+                    (comparison_time, consumed_cutoff),
+                )
+                deleted = cursor.rowcount
+        return max(0, deleted)
+
     def search_evidence(
         self,
         *,
@@ -621,13 +729,20 @@ class PostgresKnowledgeStore:
         organization_id: str,
         actor_id: str,
         project_ids: Iterable[str] = (),
+        allow_private: bool,
+        allow_project: bool,
+        allow_org: bool,
         limit: int = 8,
+        semantic_candidate_limit: int = 0,
         now: datetime | None = None,
     ) -> list[KnowledgeEvidence]:
         comparison_time = now or datetime.now(timezone.utc)
         normalized_limit = max(1, min(limit, 20))
+        semantic_limit = max(0, min(semantic_candidate_limit, 64))
+        target_limit = max(normalized_limit, semantic_limit)
         visible_projects = [project_id for project_id in project_ids if project_id]
-        with get_postgres_connection(self.settings) as conn:
+        rows: list[dict[str, Any]] = []
+        with self._connection() as conn:
             with conn.cursor(row_factory=dict_row) as cursor:
                 cursor.execute(
                     """
@@ -641,7 +756,6 @@ class PostgresKnowledgeStore:
                         mfs.source_ref AS citation_source_ref,
                         mfs.source_title AS citation_source_title,
                         mfs.source_url AS citation_source_url,
-                        mfs.source_excerpt AS citation_source_excerpt,
                         mfs.source_updated_at AS citation_source_updated_at
                     FROM memory_facts mf
                     LEFT JOIN LATERAL (
@@ -656,14 +770,16 @@ class PostgresKnowledgeStore:
                       AND mf.deleted_at IS NULL
                       AND (mf.expires_at IS NULL OR mf.expires_at > %s)
                       AND (
-                          (mf.visibility = 'org' AND mf.scope_type = 'org')
+                          (%s AND mf.visibility = 'org' AND mf.scope_type = 'org')
                           OR (
-                              mf.visibility = 'private'
+                              %s
+                              AND mf.visibility = 'private'
                               AND mf.scope_type = 'user'
                               AND mf.scope_id = %s
                           )
                           OR (
-                              mf.visibility = 'project'
+                              %s
+                              AND mf.visibility = 'project'
                               AND mf.scope_type = 'project'
                               AND mf.scope_id = ANY(%s)
                           )
@@ -686,14 +802,100 @@ class PostgresKnowledgeStore:
                         question,
                         organization_id,
                         comparison_time,
+                        allow_org,
+                        allow_private,
                         actor_id,
+                        allow_project,
                         visible_projects,
                         question,
                         normalized_limit,
                     ),
                 )
-                rows = cursor.fetchall()
-        return [_knowledge_evidence_from_row(row, now=comparison_time) for row in rows]
+                rows.extend(cursor.fetchall())
+
+                remaining = target_limit - len(rows)
+                if semantic_limit and remaining > 0:
+                    cursor.execute(
+                        """
+                        SELECT
+                            mf.*,
+                            0.0::float AS relevance,
+                            mfs.source_type AS citation_source_type,
+                            mfs.source_ref AS citation_source_ref,
+                            mfs.source_title AS citation_source_title,
+                            mfs.source_url AS citation_source_url,
+                            mfs.source_updated_at AS citation_source_updated_at
+                        FROM memory_facts mf
+                        LEFT JOIN LATERAL (
+                            SELECT *
+                            FROM memory_fact_sources
+                            WHERE fact_id = mf.id
+                            ORDER BY created_at DESC
+                            LIMIT 1
+                        ) mfs ON TRUE
+                        WHERE mf.organization_id = %s
+                          AND mf.status = 'active'
+                          AND mf.deleted_at IS NULL
+                          AND (mf.expires_at IS NULL OR mf.expires_at > %s)
+                          AND (
+                              (%s AND mf.visibility = 'org' AND mf.scope_type = 'org')
+                              OR (
+                                  %s
+                                  AND mf.visibility = 'private'
+                                  AND mf.scope_type = 'user'
+                                  AND mf.scope_id = %s
+                              )
+                              OR (
+                                  %s
+                                  AND mf.visibility = 'project'
+                                  AND mf.scope_type = 'project'
+                                  AND mf.scope_id = ANY(%s)
+                              )
+                          )
+                          AND NOT (mf.id = ANY(%s::uuid[]))
+                        ORDER BY
+                            CASE mf.verification_status
+                                WHEN 'authoritative' THEN 5
+                                WHEN 'admin_confirmed' THEN 4
+                                WHEN 'author_confirmed' THEN 3
+                                WHEN 'user_confirmed' THEN 2
+                                ELSE 1
+                            END DESC,
+                            mf.confidence DESC,
+                            mf.updated_at DESC
+                        LIMIT %s
+                        """,
+                        (
+                            organization_id,
+                            comparison_time,
+                            allow_org,
+                            allow_private,
+                            actor_id,
+                            allow_project,
+                            visible_projects,
+                            [str(row["id"]) for row in rows],
+                            remaining,
+                        ),
+                    )
+                    rows.extend(cursor.fetchall())
+
+        evidence: list[KnowledgeEvidence] = []
+        for row in rows:
+            retrieval_text = _memory_retrieval_text(row)
+            relevance = max(
+                float(row.get("relevance") or 0.0),
+                _fuzzy_relevance(question, retrieval_text),
+            )
+            item = _knowledge_evidence_from_row(row, now=comparison_time)
+            evidence.append(
+                item.model_copy(
+                    update={
+                        "retrieval_text": retrieval_text,
+                        "relevance": relevance,
+                    }
+                )
+            )
+        return evidence
 
     def remember_fact(
         self,
@@ -720,7 +922,7 @@ class PostgresKnowledgeStore:
             days=DEFAULT_MEMORY_RETENTION_DAYS
         )
         normalized_verification = _knowledge_verification(verification_status)
-        with get_postgres_connection(self.settings) as conn:
+        with self._connection() as conn:
             with conn.cursor(row_factory=dict_row) as cursor:
                 cursor.execute(
                     """
@@ -801,7 +1003,7 @@ class PostgresKnowledgeStore:
         now: datetime | None = None,
     ) -> list[MemoryFact]:
         comparison_time = now or datetime.now(timezone.utc)
-        with get_postgres_connection(self.settings) as conn:
+        with self._connection() as conn:
             with conn.cursor(row_factory=dict_row) as cursor:
                 cursor.execute(
                     """
@@ -862,7 +1064,7 @@ class PostgresKnowledgeStore:
         now: datetime | None = None,
     ) -> MemoryFact:
         comparison_time = now or datetime.now(timezone.utc)
-        with get_postgres_connection(self.settings) as conn:
+        with self._connection() as conn:
             with conn.cursor(row_factory=dict_row) as cursor:
                 cursor.execute(
                     """
@@ -1248,6 +1450,20 @@ def _memory_fact_from_row(
     )
 
 
+def _memory_retrieval_text(row: dict[str, Any]) -> str:
+    aliases = [str(alias) for alias in row.get("aliases") or []]
+    return " ".join(
+        part
+        for part in (
+            str(row.get("key") or ""),
+            str(row.get("question") or ""),
+            *aliases,
+            str(row.get("answer") or ""),
+        )
+        if part
+    )[:5000]
+
+
 def _knowledge_evidence_from_row(
     row: dict[str, Any],
     *,
@@ -1352,12 +1568,17 @@ def _knowledge_fact_visible(
     *,
     actor_id: str,
     project_ids: set[str],
+    allow_private: bool,
+    allow_project: bool,
+    allow_org: bool,
 ) -> bool:
     if fact.visibility == "org":
-        return fact.scope_type == "org"
+        return allow_org and fact.scope_type == "org"
     if fact.visibility == "private":
-        return fact.scope_type == "user" and fact.scope_id == actor_id
-    return fact.scope_type == "project" and fact.scope_id in project_ids
+        return allow_private and fact.scope_type == "user" and fact.scope_id == actor_id
+    return (
+        allow_project and fact.scope_type == "project" and fact.scope_id in project_ids
+    )
 
 
 def _verification_authority(status: str) -> float:
@@ -1455,3 +1676,44 @@ def _search_tokens(question: str) -> set[str]:
         for token in _normalize(question).split()
         if len(token) > 1 and token not in ignored
     }
+
+
+def _fuzzy_relevance(question: str, retrieval_text: str) -> float:
+    """Return conservative typo similarity without treating it as authorization."""
+    normalized_question = _normalize(question)
+    normalized_text = _normalize(retrieval_text)
+    if not normalized_question or not normalized_text:
+        return 0.0
+
+    question_tokens = _search_tokens(question)
+    text_tokens = _search_tokens(retrieval_text)
+    token_scores = [
+        max(
+            (
+                difflib.SequenceMatcher(None, token, candidate).ratio()
+                for candidate in text_tokens
+            ),
+            default=0.0,
+        )
+        for token in question_tokens
+    ]
+    fuzzy_coverage = (
+        sum(score >= 0.72 for score in token_scores) / len(token_scores)
+        if token_scores
+        else 0.0
+    )
+    sequence_ratio = difflib.SequenceMatcher(
+        None,
+        normalized_question,
+        normalized_text,
+    ).ratio()
+    trigram_ratio = _trigram_similarity(normalized_question, normalized_text)
+    score = max(sequence_ratio, trigram_ratio, fuzzy_coverage * 0.9)
+    return score if score >= 0.42 else 0.0
+
+
+def _trigram_similarity(left: str, right: str) -> float:
+    left_grams = {left[index : index + 3] for index in range(max(1, len(left) - 2))}
+    right_grams = {right[index : index + 3] for index in range(max(1, len(right) - 2))}
+    union = left_grams | right_grams
+    return len(left_grams & right_grams) / len(union) if union else 0.0
