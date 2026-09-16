@@ -823,7 +823,28 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             normalized,
         )
         if polite_prefix is not None:
-            normalized = normalized[polite_prefix.end() :]
+            command_tokens = re.findall(
+                r"[a-z]+",
+                normalized[polite_prefix.end() :].casefold(),
+            )
+            if len(command_tokens) not in {2, 3} or (
+                len(command_tokens) == 3 and command_tokens[1] not in {"this", "the"}
+            ):
+                return False
+            return bool(
+                difflib.get_close_matches(
+                    command_tokens[0],
+                    _KNOWLEDGE_CAPTURE_ACTIONS,
+                    n=1,
+                    cutoff=0.78,
+                )
+                and difflib.get_close_matches(
+                    command_tokens[-1],
+                    _KNOWLEDGE_CAPTURE_TARGETS,
+                    n=1,
+                    cutoff=0.72,
+                )
+            )
         elif re.match(
             r"(?i)^(?:do|did|what|how|why|where|when|can|could)\b", normalized
         ):

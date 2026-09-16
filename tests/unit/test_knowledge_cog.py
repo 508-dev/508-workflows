@@ -35,6 +35,19 @@ def test_knowledge_intent_routing_is_narrow() -> None:
         AgentCog._is_knowledge_capture_request("Can you remember this thread?") is True
     )
     assert AgentCog._is_knowledge_capture_request("Could you save this answer?") is True
+    assert AgentCog._is_knowledge_capture_request("Can you remeber this thred?") is True
+    assert (
+        AgentCog._is_knowledge_capture_request(
+            "Could you remember the answer from last week?"
+        )
+        is False
+    )
+    assert (
+        AgentCog._is_knowledge_capture_request(
+            "Can you remember how this thread started?"
+        )
+        is False
+    )
     assert (
         AgentCog._is_knowledge_question("I forgot, does our main website auto deploy?")
         is True
