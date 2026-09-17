@@ -86,6 +86,23 @@ from five08.knowledge.models import (
 from five08.knowledge.service import KnowledgeService
 from five08.knowledge.sources import KnowledgeSourceAdapters
 from five08.knowledge.store import PostgresKnowledgeStore
+from five08.wiki_editing.models import (
+    WikiEditActionRequest,
+    WikiEditConflictError,
+    WikiEditCreateRequest,
+    WikiEditNotFoundError,
+    WikiEditPermissionError,
+    WikiEditResponse,
+    WikiEditRevisionRequest,
+    WikiEditStateError,
+)
+from five08.wiki_editing.service import (
+    WikiEditingConfigurationError,
+    WikiEditingService,
+    WikiEditingValidationError,
+    build_outline_writer_client,
+)
+from five08.wiki_editing.store import PostgresWikiEditingStore
 from five08.queue import (
     EnqueuedJob,
     JobRecord,
@@ -323,6 +340,7 @@ sync_people_from_crm_job = JOB_FUNCTIONS["sync_people_from_crm_job"]
 sync_person_from_crm_job = JOB_FUNCTIONS["sync_person_from_crm_job"]
 sync_projects_from_erpnext_job = JOB_FUNCTIONS["sync_projects_from_erpnext_job"]
 process_docuseal_agreement_job = JOB_FUNCTIONS["process_docuseal_agreement_job"]
+author_wiki_edit_proposal_job = JOB_FUNCTIONS["author_wiki_edit_proposal_job"]
 
 TALLY_INTAKE_FIELD_LABEL_MAP = {
     "full name": "name",
@@ -356,6 +374,8 @@ _AGENT_ORCHESTRATOR: AgentOrchestrator | None = None
 _AGENT_ORCHESTRATOR_LOCK = threading.RLock()
 _KNOWLEDGE_SERVICE: KnowledgeService | None = None
 _KNOWLEDGE_SERVICE_LOCK = threading.RLock()
+_WIKI_EDITING_SERVICE: WikiEditingService | None = None
+_WIKI_EDITING_SERVICE_LOCK = threading.RLock()
 _MAX_PENDING_AGENT_PLANS = 1000
 _MAX_PENDING_AGENT_PLANS_PER_ACTOR = 25
 _AGENT_REQUEST_RATE_LIMIT_WINDOW_SECONDS = 60.0
@@ -406,6 +426,21 @@ def _get_knowledge_service() -> KnowledgeService:
                 sources=KnowledgeSourceAdapters(settings),
             )
     return _KNOWLEDGE_SERVICE
+
+
+def _get_wiki_editing_service() -> WikiEditingService:
+    """Lazily construct the API-side workflow service without an OMP runner."""
+    global _WIKI_EDITING_SERVICE
+    if _WIKI_EDITING_SERVICE is not None:
+        return _WIKI_EDITING_SERVICE
+    with _WIKI_EDITING_SERVICE_LOCK:
+        if _WIKI_EDITING_SERVICE is None:
+            _WIKI_EDITING_SERVICE = WikiEditingService(
+                settings=settings,
+                store=PostgresWikiEditingStore(settings),
+                outline_client_factory=lambda: build_outline_writer_client(settings),
+            )
+    return _WIKI_EDITING_SERVICE
 
 
 def _is_authorized_with_secret(
@@ -9703,6 +9738,364 @@ async def knowledge_query_handler(request: Request) -> JSONResponse:
         "failed": 500,
     }[response.status]
     return JSONResponse(response.model_dump(mode="json"), status_code=status_code)
+
+
+def _safe_wiki_audit_id(value: str | None) -> str | None:
+    """Keep audit identifiers bounded and free of untrusted free-form text."""
+    normalized = (value or "").strip()
+    if not normalized or len(normalized) > 128:
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", normalized):
+        return None
+    return normalized
+
+
+def _wiki_edit_audit_metadata(
+    *,
+    response: WikiEditResponse | None = None,
+    proposal_id: str | None = None,
+    source_count: int | None = None,
+) -> dict[str, Any]:
+    """Build the deliberately small audit shape for a wiki edit operation."""
+    metadata: dict[str, Any] = {
+        "status": response.status if response is not None else "failed",
+        "action": response.action if response is not None else "none",
+        "source_count": max(
+            0,
+            min(
+                100,
+                (
+                    response.source_count
+                    if source_count is None and response is not None
+                    else int(source_count or 0)
+                ),
+            ),
+        ),
+    }
+    safe_proposal_id = _safe_wiki_audit_id(
+        response.proposal_id if response is not None else proposal_id
+    )
+    if safe_proposal_id is not None:
+        metadata["proposal_id"] = safe_proposal_id
+    if response is not None:
+        safe_request_id = _safe_wiki_audit_id(response.request_id)
+        if safe_request_id is not None:
+            metadata["request_id"] = safe_request_id
+    return metadata
+
+
+def _schedule_wiki_edit_audit(
+    *,
+    context: AgentIdentityContext,
+    operation: str,
+    result: AuditResult,
+    response: WikiEditResponse | None = None,
+    proposal_id: str | None = None,
+    source_count: int | None = None,
+) -> None:
+    """Record a safe Discord-originated wiki workflow event best-effort."""
+    _schedule_agent_audit_event(
+        context=context,
+        action=f"wiki.update.{operation}",
+        result=result,
+        plan=None,
+        metadata=_wiki_edit_audit_metadata(
+            response=response,
+            proposal_id=proposal_id,
+            source_count=source_count,
+        ),
+    )
+
+
+def _wiki_edit_error_response(
+    *,
+    context: AgentIdentityContext,
+    operation: str,
+    error: Exception,
+    proposal_id: str | None = None,
+    source_count: int | None = None,
+) -> JSONResponse:
+    """Map known domain failures without returning authoring input or source text."""
+    if isinstance(error, WikiEditingConfigurationError):
+        error_name, status_code, audit_result = (
+            "wiki_editing_unavailable",
+            503,
+            AuditResult.ERROR,
+        )
+    elif isinstance(error, WikiEditPermissionError):
+        error_name, status_code, audit_result = "forbidden", 403, AuditResult.DENIED
+    elif isinstance(error, WikiEditNotFoundError):
+        error_name, status_code, audit_result = (
+            "wiki_proposal_not_found",
+            404,
+            AuditResult.DENIED,
+        )
+    elif isinstance(error, WikiEditConflictError):
+        error_name, status_code, audit_result = (
+            "wiki_edit_conflict",
+            409,
+            AuditResult.DENIED,
+        )
+    elif isinstance(error, WikiEditStateError):
+        error_name, status_code, audit_result = (
+            "wiki_edit_state_conflict",
+            409,
+            AuditResult.DENIED,
+        )
+    elif isinstance(error, WikiEditingValidationError):
+        error_name, status_code, audit_result = (
+            "invalid_wiki_update",
+            422,
+            AuditResult.DENIED,
+        )
+    else:
+        logger.exception("Wiki update operation failed operation=%s", operation)
+        error_name, status_code, audit_result = (
+            "wiki_update_failed",
+            500,
+            AuditResult.ERROR,
+        )
+    _schedule_wiki_edit_audit(
+        context=context,
+        operation=operation,
+        result=audit_result,
+        proposal_id=proposal_id,
+        source_count=source_count,
+    )
+    return JSONResponse({"error": error_name}, status_code=status_code)
+
+
+async def _wiki_payload_or_error(
+    request: Request,
+) -> tuple[dict[str, Any] | None, JSONResponse | None]:
+    try:
+        payload = await request.json()
+    except Exception:
+        return None, JSONResponse({"error": "invalid_json"}, status_code=400)
+    if not isinstance(payload, dict):
+        return None, JSONResponse({"error": "payload_must_be_object"}, status_code=400)
+    return payload, None
+
+
+async def _enqueue_wiki_authoring_job(
+    request: Request,
+    *,
+    proposal_id: str,
+    organization_id: str,
+) -> None:
+    """Queue the safe-to-retry authoring phase; it never publishes a draft."""
+    await asyncio.to_thread(
+        enqueue_job,
+        queue=request.app.state.queue,
+        fn=author_wiki_edit_proposal_job,
+        args=(proposal_id, organization_id),
+        settings=settings,
+        idempotency_key=f"wiki-author:{proposal_id}",
+    )
+
+
+async def wiki_create_handler(request: Request) -> JSONResponse:
+    """Persist a requested wiki update and enqueue only its authoring phase."""
+    if not _is_authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    payload_data, payload_error = await _wiki_payload_or_error(request)
+    if payload_error is not None:
+        return payload_error
+    assert payload_data is not None
+    try:
+        payload = WikiEditCreateRequest.model_validate(payload_data)
+    except ValidationError:
+        return JSONResponse({"error": "invalid_payload"}, status_code=422)
+
+    source_count = len(payload.selected_conversation)
+    try:
+        started = await asyncio.to_thread(_get_wiki_editing_service().create, payload)
+    except Exception as exc:
+        return _wiki_edit_error_response(
+            context=payload.context,
+            operation="create",
+            error=exc,
+            source_count=source_count,
+        )
+
+    response = started.response
+    proposal_id = response.proposal_id
+    organization_id = payload.context.organization_id
+    if started.should_enqueue:
+        if proposal_id is None or not organization_id:
+            logger.error(
+                "Wiki create returned a queueable proposal without safe identity"
+            )
+            _schedule_wiki_edit_audit(
+                context=payload.context,
+                operation="create",
+                result=AuditResult.ERROR,
+                response=response,
+                source_count=source_count,
+            )
+            return JSONResponse({"error": "wiki_update_failed"}, status_code=500)
+        try:
+            await _enqueue_wiki_authoring_job(
+                request,
+                proposal_id=proposal_id,
+                organization_id=organization_id,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to enqueue wiki authoring proposal_id=%s",
+                _safe_wiki_audit_id(proposal_id),
+            )
+            _schedule_wiki_edit_audit(
+                context=payload.context,
+                operation="create",
+                result=AuditResult.ERROR,
+                response=response,
+                source_count=source_count,
+            )
+            return JSONResponse(
+                {"error": "wiki_authoring_enqueue_failed"}, status_code=503
+            )
+
+    _schedule_wiki_edit_audit(
+        context=payload.context,
+        operation="create",
+        result=AuditResult.SUCCESS,
+        response=response,
+        source_count=source_count,
+    )
+    return JSONResponse(
+        response.model_dump(mode="json"),
+        status_code=202 if started.should_enqueue else 200,
+    )
+
+
+async def wiki_revise_handler(request: Request, proposal_id: str) -> JSONResponse:
+    """Reserve and enqueue one immutable revision of a wiki proposal."""
+    if not _is_authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    payload_data, payload_error = await _wiki_payload_or_error(request)
+    if payload_error is not None:
+        return payload_error
+    assert payload_data is not None
+    try:
+        payload = WikiEditRevisionRequest.model_validate(
+            {**payload_data, "proposal_id": proposal_id}
+        )
+    except ValidationError:
+        return JSONResponse({"error": "invalid_payload"}, status_code=422)
+
+    try:
+        started = await asyncio.to_thread(_get_wiki_editing_service().revise, payload)
+    except Exception as exc:
+        return _wiki_edit_error_response(
+            context=payload.context,
+            operation="revise",
+            error=exc,
+            proposal_id=payload.proposal_id,
+        )
+
+    response = started.response
+    queued_proposal_id = response.proposal_id
+    organization_id = payload.context.organization_id
+    if started.should_enqueue:
+        if queued_proposal_id is None or not organization_id:
+            logger.error(
+                "Wiki revision returned a queueable proposal without safe identity"
+            )
+            _schedule_wiki_edit_audit(
+                context=payload.context,
+                operation="revise",
+                result=AuditResult.ERROR,
+                response=response,
+            )
+            return JSONResponse({"error": "wiki_update_failed"}, status_code=500)
+        try:
+            await _enqueue_wiki_authoring_job(
+                request,
+                proposal_id=queued_proposal_id,
+                organization_id=organization_id,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to enqueue wiki authoring proposal_id=%s",
+                _safe_wiki_audit_id(queued_proposal_id),
+            )
+            _schedule_wiki_edit_audit(
+                context=payload.context,
+                operation="revise",
+                result=AuditResult.ERROR,
+                response=response,
+            )
+            return JSONResponse(
+                {"error": "wiki_authoring_enqueue_failed"}, status_code=503
+            )
+
+    _schedule_wiki_edit_audit(
+        context=payload.context,
+        operation="revise",
+        result=AuditResult.SUCCESS,
+        response=response,
+    )
+    return JSONResponse(
+        response.model_dump(mode="json"),
+        status_code=202 if started.should_enqueue else 200,
+    )
+
+
+async def _wiki_action_handler(
+    request: Request,
+    proposal_id: str,
+    *,
+    operation: Literal["status", "publish", "cancel"],
+) -> JSONResponse:
+    """Execute a protected proposal action after reconstructing its typed input."""
+    if not _is_authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    payload_data, payload_error = await _wiki_payload_or_error(request)
+    if payload_error is not None:
+        return payload_error
+    assert payload_data is not None
+    try:
+        payload = WikiEditActionRequest.model_validate(
+            {**payload_data, "proposal_id": proposal_id}
+        )
+    except ValidationError:
+        return JSONResponse({"error": "invalid_payload"}, status_code=422)
+
+    try:
+        service = _get_wiki_editing_service()
+        method = getattr(service, operation)
+        response = await asyncio.to_thread(method, payload)
+    except Exception as exc:
+        return _wiki_edit_error_response(
+            context=payload.context,
+            operation=operation,
+            error=exc,
+            proposal_id=payload.proposal_id,
+        )
+
+    _schedule_wiki_edit_audit(
+        context=payload.context,
+        operation=operation,
+        result=AuditResult.SUCCESS,
+        response=response,
+    )
+    return JSONResponse(response.model_dump(mode="json"), status_code=200)
+
+
+async def wiki_status_handler(request: Request, proposal_id: str) -> JSONResponse:
+    """Return the requester's current safe view of a wiki proposal."""
+    return await _wiki_action_handler(request, proposal_id, operation="status")
+
+
+async def wiki_publish_handler(request: Request, proposal_id: str) -> JSONResponse:
+    """Perform the separately confirmed, one-shot Outline publish operation."""
+    return await _wiki_action_handler(request, proposal_id, operation="publish")
+
+
+async def wiki_cancel_handler(request: Request, proposal_id: str) -> JSONResponse:
+    """Cancel a requester-owned proposal before the Outline write begins."""
+    return await _wiki_action_handler(request, proposal_id, operation="cancel")
 
 
 async def auth_login_handler(

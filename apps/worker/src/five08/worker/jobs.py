@@ -5,7 +5,7 @@ import logging
 from datetime import datetime, timezone
 from email import message_from_bytes
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 from urllib.parse import unquote
 
 from five08.redaction import (
@@ -21,8 +21,17 @@ from five08.worker.crm.resume_profile_processor import ResumeProfileProcessor
 from five08.worker.erpnext_project_sync import ERPNextProjectSyncProcessor
 from five08.worker.mailbox_resume_ingest import ResumeMailboxProcessor
 from five08.worker.masking import mask_email
+from five08.knowledge.store import PostgresKnowledgeStore
 from five08.newsletter_sync import NewsletterSyncProcessor
 from five08.job_lead_sources import scrape_job_leads
+from five08.wiki_editing.models import WikiAuthoringWorkItem, WikiSourceReference
+from five08.wiki_editing.omp import OmpWikiAuthoringRunner, WikiAuthoringMaterial
+from five08.wiki_editing.service import (
+    WikiEditingConfigurationError,
+    WikiEditingService,
+    build_outline_writer_client,
+)
+from five08.wiki_editing.store import PostgresWikiEditingStore
 
 logger = logging.getLogger(__name__)
 
@@ -230,6 +239,104 @@ def scrape_job_leads_job(
     return scrape_job_leads(settings, source=source, story_id=story_id)
 
 
+def _build_wiki_org_knowledge_search(
+    store: PostgresKnowledgeStore,
+) -> Callable[[str, WikiAuthoringWorkItem], list[WikiAuthoringMaterial]]:
+    """Return the narrowly scoped organization-memory reader available to OMP."""
+
+    def search(
+        question: str,
+        work: WikiAuthoringWorkItem,
+    ) -> list[WikiAuthoringMaterial]:
+        evidence_items = store.search_evidence(
+            question=question,
+            organization_id=work.request.organization_id,
+            actor_id=work.request.actor_id,
+            project_ids=(),
+            allow_private=False,
+            allow_project=False,
+            allow_org=True,
+            limit=4,
+            semantic_candidate_limit=0,
+        )
+        return [
+            WikiAuthoringMaterial(
+                source=WikiSourceReference(
+                    source_type="memory_fact",
+                    source_ref=evidence.source_ref,
+                    source_url=evidence.url,
+                    title=evidence.title,
+                ),
+                text=evidence.excerpt,
+                visibility="org",
+            )
+            for evidence in evidence_items
+            if evidence.visibility == "org"
+        ][:4]
+
+    return search
+
+
+def _build_wiki_editing_service() -> WikiEditingService:
+    """Construct the worker-only service that owns bounded OMP authoring."""
+    launcher_path = settings.resolved_wiki_omp_launcher_path
+    if not settings.wiki_authoring_configured or launcher_path is None:
+        raise WikiEditingConfigurationError(
+            "Wiki authoring worker is not fully configured."
+        )
+
+    def outline_client_factory():
+        return build_outline_writer_client(settings)
+
+    knowledge_store = PostgresKnowledgeStore(settings)
+    authoring_runner = OmpWikiAuthoringRunner(
+        omp_executable=str(settings.wiki_omp_command or ""),
+        omp_launcher_path=str(launcher_path),
+        openrouter_api_key=str(settings.openrouter_api_key or ""),
+        model=str(settings.wiki_omp_model or ""),
+        thinking=str(settings.wiki_omp_thinking or ""),
+        startup_timeout_seconds=cast(
+            float,
+            settings.wiki_omp_startup_timeout_seconds,
+        ),
+        authoring_timeout_seconds=cast(
+            float,
+            settings.wiki_omp_authoring_timeout_seconds,
+        ),
+        outline_client_factory=outline_client_factory,
+        allowed_collection_id=str(settings.wiki_outline_collection_id or ""),
+        knowledge_search=_build_wiki_org_knowledge_search(knowledge_store),
+    )
+    return WikiEditingService(
+        settings=settings,
+        store=PostgresWikiEditingStore(settings),
+        outline_client_factory=outline_client_factory,
+        authoring_runner=authoring_runner,
+    )
+
+
+def author_wiki_edit_proposal_job(
+    proposal_id: str,
+    organization_id: str,
+) -> dict[str, Any]:
+    """Run the retryable draft-authoring phase; publishing stays user-confirmed."""
+    normalized_proposal_id = proposal_id.strip()
+    normalized_organization_id = organization_id.strip()
+    if not normalized_proposal_id or not normalized_organization_id:
+        raise ValueError("Wiki authoring job requires proposal and organization IDs.")
+
+    logger.info(
+        "Authoring wiki proposal proposal_id=%s organization_id=%s",
+        normalized_proposal_id,
+        normalized_organization_id,
+    )
+    response = _build_wiki_editing_service().author_proposal(
+        normalized_proposal_id,
+        organization_id=normalized_organization_id,
+    )
+    return response.model_dump(mode="json")
+
+
 JOB_FUNCTIONS: dict[str, Callable[..., dict[str, Any]]] = {
     process_webhook_event.__name__: process_webhook_event,
     process_contact_skills_job.__name__: process_contact_skills_job,
@@ -243,4 +350,5 @@ JOB_FUNCTIONS: dict[str, Callable[..., dict[str, Any]]] = {
     sync_508_members_newsletters_job.__name__: sync_508_members_newsletters_job,
     process_docuseal_agreement_job.__name__: process_docuseal_agreement_job,
     scrape_job_leads_job.__name__: scrape_job_leads_job,
+    author_wiki_edit_proposal_job.__name__: author_wiki_edit_proposal_job,
 }

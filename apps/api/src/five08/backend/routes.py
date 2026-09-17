@@ -101,6 +101,11 @@ class BackendRouteSurface(Protocol):
     resume_extract_handler: RouteHandler
     sync_people_handler: RouteHandler
     tally_intake_webhook_handler: RouteHandler
+    wiki_cancel_handler: RouteHandler
+    wiki_create_handler: RouteHandler
+    wiki_publish_handler: RouteHandler
+    wiki_revise_handler: RouteHandler
+    wiki_status_handler: RouteHandler
 
 
 def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
@@ -220,6 +225,11 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
     resume_extract_handler = api.resume_extract_handler
     sync_people_handler = api.sync_people_handler
     tally_intake_webhook_handler = api.tally_intake_webhook_handler
+    wiki_cancel_handler = api.wiki_cancel_handler
+    wiki_create_handler = api.wiki_create_handler
+    wiki_publish_handler = api.wiki_publish_handler
+    wiki_revise_handler = api.wiki_revise_handler
+    wiki_status_handler = api.wiki_status_handler
 
     app.add_api_route("/", health_handler, methods=["GET"])
     app.add_api_route("/health", health_handler, methods=["GET"])
@@ -582,6 +592,27 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
     app.add_api_route(
         "/knowledge/queries",
         knowledge_query_handler,
+        methods=["POST"],
+    )
+    app.add_api_route("/wiki/updates", wiki_create_handler, methods=["POST"])
+    app.add_api_route(
+        "/wiki/updates/{proposal_id}/status",
+        wiki_status_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/wiki/updates/{proposal_id}/revise",
+        wiki_revise_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/wiki/updates/{proposal_id}/publish",
+        wiki_publish_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/wiki/updates/{proposal_id}/cancel",
+        wiki_cancel_handler,
         methods=["POST"],
     )
 
