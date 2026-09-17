@@ -2,7 +2,7 @@
 
 from unittest.mock import Mock, patch
 
-from five08.queue import JobStatus, _parse_status, enqueue_job
+from five08.queue import JobStatus, _parse_status, enqueue_job, get_postgres_connection
 from five08.settings import SharedSettings
 
 
@@ -31,4 +31,22 @@ def test_parse_status_handles_unknown_values() -> None:
     assert result == JobStatus.FAILED
     mock_warning.assert_called_once_with(
         "Unknown job status from DB: %s", "unexpected-status"
+    )
+
+
+def test_postgres_connection_applies_bounded_operation_deadlines() -> None:
+    """Optional database deadlines should be passed to libpq explicitly."""
+    settings = SharedSettings(postgres_url="postgresql://db.example/workflows")
+
+    with patch("five08.queue.connect") as mock_connect:
+        get_postgres_connection(
+            settings,
+            connect_timeout_seconds=1.9,
+            statement_timeout_seconds=2.5,
+        )
+
+    mock_connect.assert_called_once_with(
+        settings.postgres_url,
+        connect_timeout=1,
+        options="-c statement_timeout=2500",
     )

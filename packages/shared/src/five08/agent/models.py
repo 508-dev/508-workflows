@@ -24,6 +24,8 @@ MemoryScopeType = Literal["user", "project", "org"]
 MemoryVisibility = Literal["private", "project", "org"]
 MemoryVerificationStatus = Literal[
     "inferred",
+    "source_recorded",
+    "author_confirmed",
     "user_confirmed",
     "admin_confirmed",
     "authoritative",
@@ -44,6 +46,7 @@ class AgentContextSnippet(BaseModel):
     message_id: str | None = None
     author_id: str | None = None
     created_at: datetime | None = None
+    backend_loaded: bool = False
     trusted: bool = False
 
 
@@ -66,10 +69,15 @@ class MemoryFact(BaseModel):
     """Durable memory fact with provenance, visibility, and retention metadata."""
 
     id: str = Field(default_factory=lambda: str(uuid4()))
+    organization_id: str | None = None
     scope_type: MemoryScopeType
     scope_id: str
+    kind: Literal["fact", "qa", "decision"] = "fact"
     key: str = Field(min_length=1, max_length=128)
     value_json: dict[str, Any]
+    question: str | None = None
+    answer: str | None = None
+    aliases: list[str] = Field(default_factory=list)
     visibility: MemoryVisibility
     source_type: AgentContextSourceType
     source_ref: str
@@ -77,6 +85,9 @@ class MemoryFact(BaseModel):
     created_by: str
     verification_status: MemoryVerificationStatus = "inferred"
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    status: Literal["active", "superseded", "disputed", "deleted"] = "active"
+    review_after: datetime | None = None
+    supersedes_id: str | None = None
     expires_at: datetime | None = None
     deleted_at: datetime | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -175,3 +186,4 @@ class AgentResponse(BaseModel):
     results: list[AgentExecutionResult] = Field(default_factory=list)
     message: str
     clarification_question: str | None = None
+    clarification_field: Literal["task_project", "task_title"] | None = None

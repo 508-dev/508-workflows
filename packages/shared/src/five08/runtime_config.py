@@ -19,6 +19,8 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from psycopg.rows import dict_row
 
+from five08.knowledge_channels import normalize_knowledge_discord_channel_ids
+
 logger = logging.getLogger(__name__)
 
 RuntimeConfigValueType = Literal[
@@ -600,6 +602,18 @@ _DEFINITIONS: tuple[RuntimeConfigDefinition, ...] = (
         env_names=("AGENT_REASONING_MODEL",),
     ),
     RuntimeConfigDefinition(
+        key="KNOWLEDGE_DISCORD_CHANNEL_IDS",
+        attr="knowledge_discord_channel_ids",
+        label="Discord knowledge sources",
+        category="Agent",
+        description=(
+            "Discord text channels and public threads searched for cited answers. "
+            "Manage these from the Knowledge sources tab."
+        ),
+        value_type="csv",
+        env_names=("KNOWLEDGE_DISCORD_CHANNEL_IDS",),
+    ),
+    RuntimeConfigDefinition(
         key="GITHUB_API_TOKEN",
         attr="github_api_token",
         label="GitHub API token",
@@ -1055,6 +1069,12 @@ def coerce_runtime_config_value(
         text = ""
     else:
         text = str(value).strip()
+
+    if definition.key == "KNOWLEDGE_DISCORD_CHANNEL_IDS":
+        normalized_channels = normalize_knowledge_discord_channel_ids(text)
+        if not normalized_channels:
+            raise ValueError(f"{definition.key} must not be blank")
+        return normalized_channels
 
     if not definition.is_secret and definition.value_type in {"string", "url", "csv"}:
         if not text:

@@ -41,6 +41,9 @@ from five08.audit import (
     AuditSource,
     insert_audit_event,
 )
+from five08.agent.state import PostgresAgentStateStore
+from five08.agent.context import PrivateMemoryContextLoader
+
 from five08.agent import (
     AgentIdentityContext,
     AgentModelConfig,
@@ -69,6 +72,20 @@ from five08.job_channels import (
     register_job_post_channel,
     unregister_job_post_channel,
 )
+from five08.knowledge_channels import (
+    MAX_KNOWLEDGE_DISCORD_CHANNELS,
+    knowledge_discord_channel_ids,
+    normalize_knowledge_discord_channel_ids,
+)
+from five08.knowledge.model import OpenAICompatibleKnowledgeModel
+from five08.knowledge.models import (
+    KnowledgeCaptureConfirmationRequest,
+    KnowledgeCaptureRequest,
+    KnowledgeQueryRequest,
+)
+from five08.knowledge.service import KnowledgeService
+from five08.knowledge.sources import KnowledgeSourceAdapters
+from five08.knowledge.store import PostgresKnowledgeStore
 from five08.queue import (
     EnqueuedJob,
     JobRecord,
@@ -330,15 +347,15 @@ TALLY_INTAKE_FIELD_LABEL_MAP = {
     "beyond your resume / linkedin, what would you say your primary skills and interests are": "primary_skills_interests",
 }
 
-# Process-local MVP agent tools stay synchronous for Discord button UX. Both the
-# task store and pending plans are non-durable; production task workflows should
-# swap this registry for a persistent task service before multi-worker use.
+# Only the MVP task store remains process-local. Memory, pending confirmations,
+# and clarification state use Postgres across API workers and restarts.
 _AGENT_TASK_STORE = InMemoryTaskStore()
+_KNOWLEDGE_STORE = PostgresKnowledgeStore(settings)
+_AGENT_STATE_STORE = PostgresAgentStateStore(settings)
 _AGENT_ORCHESTRATOR: AgentOrchestrator | None = None
 _AGENT_ORCHESTRATOR_LOCK = threading.RLock()
-_PENDING_AGENT_PLANS: dict[str, tuple[AgentPlan, AgentIdentityContext]] = {}
-_PENDING_AGENT_PLANS_LOCK: asyncio.Lock | None = None
-_PENDING_AGENT_PLANS_LOCK_LOOP: asyncio.AbstractEventLoop | None = None
+_KNOWLEDGE_SERVICE: KnowledgeService | None = None
+_KNOWLEDGE_SERVICE_LOCK = threading.RLock()
 _MAX_PENDING_AGENT_PLANS = 1000
 _MAX_PENDING_AGENT_PLANS_PER_ACTOR = 25
 _AGENT_REQUEST_RATE_LIMIT_WINDOW_SECONDS = 60.0
@@ -358,10 +375,14 @@ def _get_agent_orchestrator() -> AgentOrchestrator:
             _AGENT_ORCHESTRATOR = AgentOrchestrator(
                 registry=ToolRegistry(
                     _AGENT_TASK_STORE,
+                    memory_store=_KNOWLEDGE_STORE,
                     runtime_config_factory=lambda: ToolRuntimeConfig.from_settings(
                         settings
                     ),
                 ),
+                state_store=_AGENT_STATE_STORE,
+                context_loader=PrivateMemoryContextLoader(_KNOWLEDGE_STORE),
+                memory_suggestions_enabled=settings.agent_memory_suggestions_enabled,
                 model_config=AgentModelConfig.from_settings(settings),
                 planner=OpenAICompatibleAgentPlanner.from_settings(settings),
                 intent_normalizer=OpenAICompatibleIntentNormalizer.from_settings(
@@ -369,6 +390,22 @@ def _get_agent_orchestrator() -> AgentOrchestrator:
                 ),
             )
     return _AGENT_ORCHESTRATOR
+
+
+def _get_knowledge_service() -> KnowledgeService:
+    """Lazily construct source adapters and the optional model client."""
+    global _KNOWLEDGE_SERVICE
+    if _KNOWLEDGE_SERVICE is not None:
+        return _KNOWLEDGE_SERVICE
+    with _KNOWLEDGE_SERVICE_LOCK:
+        if _KNOWLEDGE_SERVICE is None:
+            _KNOWLEDGE_SERVICE = KnowledgeService(
+                settings=settings,
+                store=_KNOWLEDGE_STORE,
+                model=OpenAICompatibleKnowledgeModel.from_settings(settings),
+                sources=KnowledgeSourceAdapters(settings),
+            )
+    return _KNOWLEDGE_SERVICE
 
 
 def _is_authorized_with_secret(
@@ -1015,7 +1052,7 @@ async def _sync_discord_gig_thread_status(
     if not normalized_thread_id:
         return {"status": "skipped", "reason": "missing_thread_id"}
 
-    base_url = settings.discord_bot_internal_base_url.strip()
+    base_url = settings.resolved_discord_bot_internal_base_url
     if not base_url:
         return {"status": "skipped", "reason": "bot_endpoint_not_configured"}
 
@@ -1025,7 +1062,7 @@ async def _sync_discord_gig_thread_status(
 
     try:
         response = await _http_client_from_app(request.app).post(
-            f"{base_url.rstrip('/')}/internal/jobs/thread-status",
+            f"{base_url}/internal/jobs/thread-status",
             headers={"X-API-Secret": api_secret},
             json={"thread_id": normalized_thread_id, "status": status.value},
             timeout=8.0,
@@ -1067,7 +1104,7 @@ async def _post_job_lead_to_discord(
     engagement_status: EngagementStatus = EngagementStatus.LEAD,
 ) -> tuple[dict[str, Any], int]:
     """Ask the Discord bot to promote a qualified lead into a jobs forum."""
-    base_url = settings.discord_bot_internal_base_url.strip()
+    base_url = settings.resolved_discord_bot_internal_base_url
     if not base_url:
         return {"error": "bot_endpoint_not_configured"}, 503
 
@@ -1077,7 +1114,7 @@ async def _post_job_lead_to_discord(
 
     try:
         response = await _http_client_from_app(request.app).post(
-            f"{base_url.rstrip('/')}/internal/jobs/job-leads/post",
+            f"{base_url}/internal/jobs/job-leads/post",
             headers={"X-API-Secret": api_secret},
             json={
                 "lead_id": lead_id,
@@ -1112,7 +1149,7 @@ async def _stage_job_lead_to_discord(
     reviewer_discord_user_id: str,
 ) -> tuple[dict[str, Any], int]:
     """Ask the Discord bot to create an unqualified holding thread for one lead."""
-    base_url = settings.discord_bot_internal_base_url.strip()
+    base_url = settings.resolved_discord_bot_internal_base_url
     if not base_url:
         return {"error": "bot_endpoint_not_configured"}, 503
 
@@ -1122,7 +1159,7 @@ async def _stage_job_lead_to_discord(
 
     try:
         response = await _http_client_from_app(request.app).post(
-            f"{base_url.rstrip('/')}/internal/jobs/job-leads/stage",
+            f"{base_url}/internal/jobs/job-leads/stage",
             headers={"X-API-Secret": api_secret},
             json={
                 "lead_id": lead_id,
@@ -1153,7 +1190,7 @@ async def _list_job_channels_from_bot(
     register_defaults: bool = True,
 ) -> dict[str, Any] | None:
     """Ask the Discord bot for registered job forums and live tag metadata."""
-    base_url = settings.discord_bot_internal_base_url.strip()
+    base_url = settings.resolved_discord_bot_internal_base_url
     api_secret = str(settings.api_shared_secret or "").strip()
     if not base_url or not api_secret:
         return None
@@ -1162,7 +1199,7 @@ async def _list_job_channels_from_bot(
         if not register_defaults:
             params["register_defaults"] = "false"
         response = await _http_client_from_app(request.app).get(
-            f"{base_url.rstrip('/')}/internal/jobs/channels",
+            f"{base_url}/internal/jobs/channels",
             headers={"X-API-Secret": api_secret},
             params=params,
             timeout=10.0,
@@ -1173,6 +1210,37 @@ async def _list_job_channels_from_bot(
     if response.status_code >= 400:
         logger.warning(
             "Discord job channel metadata request failed status=%s payload=%s",
+            response.status_code,
+            response.text[:500],
+        )
+        return None
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+async def _list_knowledge_channels_from_bot(
+    request: Request,
+) -> dict[str, Any] | None:
+    """Ask the Discord bot for channels it can currently read."""
+    base_url = settings.resolved_discord_bot_internal_base_url
+    api_secret = str(settings.api_shared_secret or "").strip()
+    if not base_url or not api_secret:
+        return None
+    try:
+        response = await _http_client_from_app(request.app).get(
+            f"{base_url}/internal/knowledge/channels",
+            headers={"X-API-Secret": api_secret},
+            timeout=10.0,
+        )
+    except httpx.HTTPError as exc:
+        logger.warning("Failed loading Discord knowledge channel metadata: %s", exc)
+        return None
+    if response.status_code >= 400:
+        logger.warning(
+            "Discord knowledge channel metadata request failed status=%s payload=%s",
             response.status_code,
             response.text[:500],
         )
@@ -1910,7 +1978,6 @@ def _agent_request_audit_metadata(
             }
         )
         return metadata
-    metadata["message"] = message[:256]
     return metadata
 
 
@@ -8051,6 +8118,38 @@ async def dashboard_configuration_handler(request: Request) -> JSONResponse:
     return JSONResponse({"items": items})
 
 
+async def dashboard_knowledge_channels_handler(request: Request) -> JSONResponse:
+    """Return live Discord choices and the effective knowledge-source selection."""
+    _, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_CONFIGURATION_READ,
+    )
+    if error_response is not None:
+        return error_response
+
+    payload = await _list_knowledge_channels_from_bot(request)
+    channels: list[dict[str, Any]] = []
+    available = payload is not None and isinstance(payload.get("channels"), list)
+    if available:
+        assert payload is not None
+        channels = [
+            channel
+            for channel in payload["channels"]
+            if isinstance(channel, dict)
+            and str(channel.get("channel_id", "")).isdigit()
+        ]
+    return JSONResponse(
+        {
+            "channels": channels,
+            "selected_channel_ids": knowledge_discord_channel_ids(
+                settings.knowledge_discord_channel_ids
+            ),
+            "maximum_selected": MAX_KNOWLEDGE_DISCORD_CHANNELS,
+            "available": available,
+        }
+    )
+
+
 async def dashboard_newsletter_suppressions_handler(
     request: Request,
     limit: int = Query(default=200, ge=1, le=1000),
@@ -8168,6 +8267,7 @@ async def dashboard_update_configuration_handler(
             await request.json()
         )
     except ValidationError as exc:
+        validation_errors = exc.errors(include_input=False, include_context=False)
         await _audit_dashboard_configuration_change(
             session,
             result=AuditResult.ERROR,
@@ -8176,20 +8276,20 @@ async def dashboard_update_configuration_handler(
             metadata={
                 **metadata,
                 "error": "invalid_configuration_payload",
-                "detail": exc.errors(),
+                "detail": validation_errors,
             },
         )
         return JSONResponse(
-            {"error": "invalid_configuration_payload", "detail": exc.errors()},
+            {"error": "invalid_configuration_payload", "detail": validation_errors},
             status_code=400,
         )
-    except Exception as exc:
+    except Exception:
         await _audit_dashboard_configuration_change(
             session,
             result=AuditResult.ERROR,
             key=definition.key,
             action="configuration.update",
-            metadata={**metadata, "error": "invalid_json", "detail": str(exc)},
+            metadata={**metadata, "error": "invalid_json"},
         )
         return JSONResponse({"error": "invalid_json"}, status_code=400)
 
@@ -8197,6 +8297,12 @@ async def dashboard_update_configuration_handler(
     audit_action = "configuration.clear" if payload.clear else "configuration.update"
     try:
         if payload.clear:
+            if definition.key == "KNOWLEDGE_DISCORD_CHANNEL_IDS":
+                await _validated_configuration_value(
+                    request,
+                    definition.key,
+                    "",
+                )
             await asyncio.to_thread(delete_runtime_config_value, settings, definition)
         else:
             if definition.is_secret and not str(payload.value or "").strip():
@@ -8211,37 +8317,55 @@ async def dashboard_update_configuration_handler(
                     {"error": "secret_value_required"},
                     status_code=400,
                 )
+            validated_value = await _validated_configuration_value(
+                request,
+                definition.key,
+                payload.value,
+            )
             await asyncio.to_thread(
                 set_runtime_config_value,
                 settings,
                 definition,
-                payload.value,
+                validated_value,
                 updated_by_provider=actor_provider.value,
                 updated_by_subject=actor_subject,
             )
     except ValueError as exc:
-        status_code = 409 if "environment" in str(exc) else 400
+        environment_error = f"{definition.key} is configured by environment"
+        inaccessible_channels_error = "Some selected Discord channels are no longer accessible; refresh and try again"
+        if exc.args == (environment_error,):
+            error = environment_error
+            status_code = 409
+        elif exc.args == (inaccessible_channels_error,):
+            error = inaccessible_channels_error
+            status_code = 400
+        else:
+            error = f"Invalid value for {definition.key}"
+            status_code = 400
         await _audit_dashboard_configuration_change(
             session,
             result=AuditResult.ERROR,
             key=definition.key,
             action=audit_action,
-            metadata={**metadata, "error": str(exc)},
+            metadata={**metadata, "error": error},
         )
-        return JSONResponse({"error": str(exc)}, status_code=status_code)
-    except RuntimeError as exc:
+        return JSONResponse({"error": error}, status_code=status_code)
+    except RuntimeError:
+        error = "configuration_update_unavailable"
         await _audit_dashboard_configuration_change(
             session,
             result=AuditResult.ERROR,
             key=definition.key,
             action=audit_action,
-            metadata={**metadata, "error": str(exc)},
+            metadata={**metadata, "error": error},
         )
-        return JSONResponse({"error": str(exc)}, status_code=409)
+        return JSONResponse({"error": error}, status_code=503)
 
-    global _AGENT_ORCHESTRATOR
+    global _AGENT_ORCHESTRATOR, _KNOWLEDGE_SERVICE
     with _AGENT_ORCHESTRATOR_LOCK:
         _AGENT_ORCHESTRATOR = None
+    with _KNOWLEDGE_SERVICE_LOCK:
+        _KNOWLEDGE_SERVICE = None
     await _audit_dashboard_configuration_change(
         session,
         result=AuditResult.SUCCESS,
@@ -8251,6 +8375,35 @@ async def dashboard_update_configuration_handler(
     )
     items = await asyncio.to_thread(list_runtime_config, settings)
     return JSONResponse({"items": items})
+
+
+async def _validated_configuration_value(
+    request: Request,
+    key: str,
+    value: Any,
+) -> Any:
+    """Validate configuration values that depend on live provider state."""
+    if key != "KNOWLEDGE_DISCORD_CHANNEL_IDS":
+        return value
+    normalized = normalize_knowledge_discord_channel_ids(value)
+    if not normalized:
+        return normalized
+    payload = await _list_knowledge_channels_from_bot(request)
+    if payload is None or not isinstance(payload.get("channels"), list):
+        raise RuntimeError(
+            "Discord channel validation is unavailable; no changes were saved"
+        )
+    available_ids = {
+        str(channel.get("channel_id"))
+        for channel in payload["channels"]
+        if isinstance(channel, dict)
+    }
+    missing_ids = set(knowledge_discord_channel_ids(normalized)) - available_ids
+    if missing_ids:
+        raise ValueError(
+            "Some selected Discord channels are no longer accessible; refresh and try again"
+        )
+    return normalized
 
 
 async def dashboard_rerun_job_handler(
@@ -8909,35 +9062,6 @@ def _schedule_agent_audit_event(
     task.add_done_callback(_AGENT_AUDIT_TASKS.discard)
 
 
-def _is_agent_plan_expired(plan: AgentPlan, *, now: datetime | None = None) -> bool:
-    if plan.expires_at is None:
-        return False
-    expires_at = plan.expires_at
-    if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
-    comparison_time = now or datetime.now(timezone.utc)
-    return comparison_time > expires_at.astimezone(timezone.utc)
-
-
-def _cleanup_expired_pending_agent_plans(*, now: datetime | None = None) -> None:
-    comparison_time = now or datetime.now(timezone.utc)
-    expired_plan_ids = [
-        plan_id
-        for plan_id, (plan, _context) in _PENDING_AGENT_PLANS.items()
-        if _is_agent_plan_expired(plan, now=comparison_time)
-    ]
-    for plan_id in expired_plan_ids:
-        _PENDING_AGENT_PLANS.pop(plan_id, None)
-
-
-def _pending_agent_plan_count_for_actor(discord_user_id: str) -> int:
-    return sum(
-        1
-        for _plan, context in _PENDING_AGENT_PLANS.values()
-        if context.discord_user_id == discord_user_id
-    )
-
-
 def _confirmation_execution_context(
     *,
     original_context: AgentIdentityContext,
@@ -8982,29 +9106,17 @@ def _confirmation_execution_scopes(
     return original_scopes & confirmation_scopes
 
 
-def _pending_agent_plans_lock() -> asyncio.Lock:
-    global _PENDING_AGENT_PLANS_LOCK, _PENDING_AGENT_PLANS_LOCK_LOOP
-    loop = asyncio.get_running_loop()
-    if _PENDING_AGENT_PLANS_LOCK is None or _PENDING_AGENT_PLANS_LOCK_LOOP is not loop:
-        _PENDING_AGENT_PLANS_LOCK = asyncio.Lock()
-        _PENDING_AGENT_PLANS_LOCK_LOOP = loop
-    return _PENDING_AGENT_PLANS_LOCK
-
-
 async def _store_pending_agent_plan(
     plan: AgentPlan,
     context: AgentIdentityContext,
 ) -> bool:
-    async with _pending_agent_plans_lock():
-        _cleanup_expired_pending_agent_plans()
-        if (
-            len(_PENDING_AGENT_PLANS) >= _MAX_PENDING_AGENT_PLANS
-            or _pending_agent_plan_count_for_actor(context.discord_user_id)
-            >= _MAX_PENDING_AGENT_PLANS_PER_ACTOR
-        ):
-            return False
-        _PENDING_AGENT_PLANS[plan.plan_id] = (plan, context)
-        return True
+    return await asyncio.to_thread(
+        _AGENT_STATE_STORE.save_plan,
+        plan,
+        context,
+        maximum=_MAX_PENDING_AGENT_PLANS,
+        per_actor=_MAX_PENDING_AGENT_PLANS_PER_ACTOR,
+    )
 
 
 async def _claim_pending_agent_plan(
@@ -9012,26 +9124,9 @@ async def _claim_pending_agent_plan(
     *,
     discord_user_id: str,
 ) -> tuple[str, tuple[AgentPlan, AgentIdentityContext] | None]:
-    async with _pending_agent_plans_lock():
-        now = datetime.now(timezone.utc)
-        pending = _PENDING_AGENT_PLANS.get(plan_id)
-        if pending is None:
-            _cleanup_expired_pending_agent_plans(now=now)
-            return "not_found", None
-
-        plan, original_context = pending
-        if original_context.discord_user_id != discord_user_id:
-            _cleanup_expired_pending_agent_plans(now=now)
-            return "actor_mismatch", pending
-
-        if _is_agent_plan_expired(plan, now=now):
-            _PENDING_AGENT_PLANS.pop(plan_id, None)
-            _cleanup_expired_pending_agent_plans(now=now)
-            return "expired", pending
-
-        claimed = _PENDING_AGENT_PLANS.pop(plan_id, pending)
-        _cleanup_expired_pending_agent_plans(now=now)
-        return "claimed", claimed
+    return await asyncio.to_thread(
+        _AGENT_STATE_STORE.claim_plan, plan_id, discord_user_id
+    )
 
 
 async def agent_request_handler(request: Request) -> JSONResponse:
@@ -9062,7 +9157,6 @@ async def agent_request_handler(request: Request) -> JSONResponse:
             metadata={
                 "status": "denied",
                 "reason": "rate_limited",
-                "message": payload.message[:256],
             },
         )
         return JSONResponse(
@@ -9086,13 +9180,35 @@ async def agent_request_handler(request: Request) -> JSONResponse:
             status_code=503,
         )
 
-    response = await asyncio.to_thread(
-        orchestrator.plan,
-        payload.message,
-        payload.context,
-    )
+    try:
+        response = await asyncio.to_thread(
+            orchestrator.plan,
+            payload.message,
+            payload.context,
+        )
+    except Exception:
+        logger.exception("Agent planning or conversation storage failed")
+        return JSONResponse(
+            {
+                "status": "failed",
+                "message": "Agent memory or conversation storage is temporarily unavailable. Try again.",
+                "retryable": True,
+            },
+            status_code=503,
+        )
     if response.plan is not None and response.status == "requires_confirmation":
-        stored = await _store_pending_agent_plan(response.plan, payload.context)
+        try:
+            stored = await _store_pending_agent_plan(response.plan, payload.context)
+        except Exception:
+            logger.exception("Agent confirmation storage failed")
+            return JSONResponse(
+                {
+                    "status": "failed",
+                    "message": "I couldn't save the confirmation plan. Please try again.",
+                    "retryable": True,
+                },
+                status_code=503,
+            )
         if not stored:
             _schedule_agent_audit_event(
                 context=payload.context,
@@ -9102,7 +9218,6 @@ async def agent_request_handler(request: Request) -> JSONResponse:
                 metadata={
                     "status": "failed",
                     "reason": "pending_plan_capacity_exceeded",
-                    "message": payload.message[:256],
                 },
             )
             response = AgentResponse(
@@ -9179,10 +9294,21 @@ async def agent_confirmation_handler(
                 status_code=503,
             )
 
-    claim_status, pending = await _claim_pending_agent_plan(
-        plan_id,
-        discord_user_id=payload.context.discord_user_id,
-    )
+    try:
+        claim_status, pending = await _claim_pending_agent_plan(
+            plan_id,
+            discord_user_id=payload.context.discord_user_id,
+        )
+    except Exception:
+        logger.exception("Agent confirmation claim failed")
+        return JSONResponse(
+            {
+                "status": "failed",
+                "message": "Confirmation storage is temporarily unavailable. Please retry.",
+                "retryable": True,
+            },
+            status_code=503,
+        )
     if pending is None:
         _schedule_agent_audit_event(
             context=payload.context,
@@ -9288,7 +9414,6 @@ async def agent_confirmation_handler(
             "model_tier": plan.model_tier,
             "model_source_tier": plan.model.source_tier,
             "action_names": [action.tool_name for action in plan.actions],
-            "results": [result.model_dump(mode="json") for result in results],
             "tool_outcomes": [
                 {"tool_name": result.tool_name, "status": result.status}
                 for result in results
@@ -9299,6 +9424,285 @@ async def agent_confirmation_handler(
         response.model_dump(mode="json"),
         status_code={"executed": 200, "denied": 403, "failed": 500}[status],
     )
+
+
+async def knowledge_capture_handler(request: Request) -> JSONResponse:
+    """Create a frozen, reviewable knowledge draft from Discord evidence."""
+    if not _is_authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    try:
+        payload_data = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid_json"}, status_code=400)
+    if not isinstance(payload_data, dict):
+        return JSONResponse({"error": "payload_must_be_object"}, status_code=400)
+    try:
+        payload = KnowledgeCaptureRequest.model_validate(payload_data)
+    except ValidationError:
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
+    if _agent_request_rate_limited(payload.context.discord_user_id):
+        _schedule_agent_audit_event(
+            context=payload.context,
+            action="knowledge.capture",
+            result=AuditResult.DENIED,
+            plan=None,
+            metadata={"status": "denied", "reason": "rate_limited"},
+        )
+        return JSONResponse(
+            {
+                "status": "denied",
+                "message": "Too many knowledge requests. Try again in a minute.",
+            },
+            status_code=429,
+        )
+
+    try:
+        response = await asyncio.to_thread(
+            _get_knowledge_service().create_capture,
+            payload,
+        )
+    except Exception:
+        logger.exception("Knowledge capture failed")
+        response_payload = {
+            "status": "failed",
+            "message": "I could not prepare that knowledge capture.",
+        }
+        _schedule_agent_audit_event(
+            context=payload.context,
+            action="knowledge.capture",
+            result=AuditResult.ERROR,
+            plan=None,
+            metadata={"status": "failed", "reason": "service_error"},
+        )
+        return JSONResponse(response_payload, status_code=500)
+
+    audit_result = (
+        AuditResult.DENIED
+        if response.status == "denied"
+        else AuditResult.ERROR
+        if response.status == "failed"
+        else AuditResult.SUCCESS
+    )
+    _schedule_agent_audit_event(
+        context=payload.context,
+        action="knowledge.capture",
+        result=audit_result,
+        plan=None,
+        metadata={
+            "status": response.status,
+            "draft_id": response.draft_id,
+            "source_type": payload.source.source_type,
+            "source_visibility": payload.source.source_visibility,
+            "message_count": len(payload.messages),
+            "candidate_count": len(response.candidates),
+        },
+    )
+    status_code = {
+        "requires_confirmation": 202,
+        "saved": 200,
+        "canceled": 200,
+        "needs_clarification": 422,
+        "denied": 403,
+        "failed": 500,
+    }[response.status]
+    return JSONResponse(response.model_dump(mode="json"), status_code=status_code)
+
+
+async def knowledge_capture_confirmation_handler(
+    request: Request,
+    draft_id: str,
+) -> JSONResponse:
+    """Reauthorize and atomically confirm or cancel a frozen capture."""
+    if not _is_authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        normalized_draft_id = str(UUID(draft_id))
+    except ValueError:
+        return JSONResponse({"error": "invalid_draft_id"}, status_code=400)
+    try:
+        payload_data = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid_json"}, status_code=400)
+    if not isinstance(payload_data, dict):
+        return JSONResponse({"error": "payload_must_be_object"}, status_code=400)
+    try:
+        payload = KnowledgeCaptureConfirmationRequest.model_validate(payload_data)
+    except ValidationError:
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
+
+    try:
+        response = await asyncio.to_thread(
+            _get_knowledge_service().confirm_capture,
+            normalized_draft_id,
+            context=payload.context,
+            confirm=payload.confirm,
+        )
+    except KeyError:
+        _schedule_agent_audit_event(
+            context=payload.context,
+            action="knowledge.capture.confirmation",
+            result=AuditResult.DENIED,
+            plan=None,
+            metadata={"draft_id": normalized_draft_id, "reason": "not_found"},
+        )
+        return JSONResponse({"error": "draft_not_found"}, status_code=404)
+    except PermissionError:
+        _schedule_agent_audit_event(
+            context=payload.context,
+            action="knowledge.capture.confirmation",
+            result=AuditResult.DENIED,
+            plan=None,
+            metadata={"draft_id": normalized_draft_id, "reason": "actor_mismatch"},
+        )
+        return JSONResponse({"error": "actor_mismatch"}, status_code=403)
+    except TimeoutError:
+        _schedule_agent_audit_event(
+            context=payload.context,
+            action="knowledge.capture.confirmation",
+            result=AuditResult.DENIED,
+            plan=None,
+            metadata={"draft_id": normalized_draft_id, "reason": "expired"},
+        )
+        return JSONResponse({"error": "draft_expired"}, status_code=410)
+    except ValueError:
+        _schedule_agent_audit_event(
+            context=payload.context,
+            action="knowledge.capture.confirmation",
+            result=AuditResult.DENIED,
+            plan=None,
+            metadata={"draft_id": normalized_draft_id, "reason": "consumed"},
+        )
+        return JSONResponse({"error": "draft_already_consumed"}, status_code=409)
+    except Exception:
+        logger.exception("Knowledge capture confirmation failed")
+        _schedule_agent_audit_event(
+            context=payload.context,
+            action="knowledge.capture.confirmation",
+            result=AuditResult.ERROR,
+            plan=None,
+            metadata={
+                "status": "failed",
+                "draft_id": normalized_draft_id,
+                "reason": "service_error",
+            },
+        )
+        return JSONResponse(
+            {
+                "status": "failed",
+                "message": "I could not save that knowledge capture.",
+            },
+            status_code=500,
+        )
+
+    _schedule_agent_audit_event(
+        context=payload.context,
+        action="knowledge.capture.confirmation",
+        result=(
+            AuditResult.DENIED
+            if response.status == "denied"
+            else AuditResult.ERROR
+            if response.status == "failed"
+            else AuditResult.SUCCESS
+        ),
+        plan=None,
+        metadata={
+            "status": response.status,
+            "draft_id": normalized_draft_id,
+            "fact_count": len(response.facts),
+        },
+    )
+    status_code = {
+        "requires_confirmation": 409,
+        "saved": 200,
+        "canceled": 200,
+        "needs_clarification": 422,
+        "denied": 403,
+        "failed": 500,
+    }[response.status]
+    return JSONResponse(response.model_dump(mode="json"), status_code=status_code)
+
+
+async def knowledge_query_handler(request: Request) -> JSONResponse:
+    """Answer one question from authorized, source-grounded knowledge."""
+    if not _is_authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        payload_data = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid_json"}, status_code=400)
+    if not isinstance(payload_data, dict):
+        return JSONResponse({"error": "payload_must_be_object"}, status_code=400)
+    try:
+        payload = KnowledgeQueryRequest.model_validate(payload_data)
+    except ValidationError:
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
+    if _agent_request_rate_limited(payload.context.discord_user_id):
+        _schedule_agent_audit_event(
+            context=payload.context,
+            action="knowledge.query",
+            result=AuditResult.DENIED,
+            plan=None,
+            metadata={"status": "denied", "reason": "rate_limited"},
+        )
+        return JSONResponse(
+            {
+                "status": "denied",
+                "answer": "Too many knowledge requests. Try again in a minute.",
+            },
+            status_code=429,
+        )
+
+    try:
+        response = await asyncio.to_thread(
+            _get_knowledge_service().answer,
+            payload,
+        )
+    except Exception:
+        logger.exception("Knowledge query failed")
+        _schedule_agent_audit_event(
+            context=payload.context,
+            action="knowledge.query",
+            result=AuditResult.ERROR,
+            plan=None,
+            metadata={"status": "failed", "reason": "service_error"},
+        )
+        return JSONResponse(
+            {
+                "status": "failed",
+                "answer": "I could not search organizational knowledge right now.",
+            },
+            status_code=500,
+        )
+
+    _schedule_agent_audit_event(
+        context=payload.context,
+        action="knowledge.query",
+        result=(
+            AuditResult.DENIED
+            if response.status == "denied"
+            else AuditResult.ERROR
+            if response.status == "failed"
+            else AuditResult.SUCCESS
+        ),
+        plan=None,
+        metadata={
+            "status": response.status,
+            "citation_count": len(response.citations),
+            "citation_source_types": sorted(
+                {citation.source_type for citation in response.citations}
+            ),
+            "source_error_count": len(response.source_errors),
+            "public_safe": response.public_safe,
+        },
+    )
+    status_code = {
+        "answered": 200,
+        "insufficient": 200,
+        "denied": 403,
+        "failed": 500,
+    }[response.status]
+    return JSONResponse(response.model_dump(mode="json"), status_code=status_code)
 
 
 async def auth_login_handler(
@@ -10024,6 +10428,31 @@ async def auth_discord_link_consume_handler(
     return RedirectResponse(url=f"/auth/login?{login_query}", status_code=302)
 
 
+async def _knowledge_capture_cleanup_scheduler() -> None:
+    retention_seconds = max(
+        60,
+        int(settings.knowledge_capture_draft_ttl_seconds),
+    )
+    interval_seconds = max(60, min(retention_seconds, 300))
+    while True:
+        try:
+            await asyncio.to_thread(
+                _KNOWLEDGE_STORE.purge_capture_drafts,
+                consumed_retention_seconds=retention_seconds,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("Knowledge capture draft cleanup failed", exc_info=True)
+        try:
+            await asyncio.to_thread(_AGENT_STATE_STORE.purge_expired)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("Expired agent state cleanup failed", exc_info=True)
+        await asyncio.sleep(interval_seconds)
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> Any:
     redis_conn = get_redis_connection(settings)
@@ -10049,6 +10478,9 @@ async def _lifespan(app: FastAPI) -> Any:
     app.state.discord_admin_verifier = DiscordAdminVerifier(settings)
     app.state.http_client = httpx.AsyncClient(follow_redirects=False)
 
+    app.state.knowledge_capture_cleanup_task = asyncio.create_task(
+        _knowledge_capture_cleanup_scheduler()
+    )
     crm_sync_skip_reason = _crm_sync_scheduler_skip_reason()
     if crm_sync_skip_reason is None:
         app.state.crm_sync_task = asyncio.create_task(_crm_sync_scheduler(app))
@@ -10074,6 +10506,11 @@ async def _lifespan(app: FastAPI) -> Any:
     try:
         yield
     finally:
+        cleanup_task = app.state.knowledge_capture_cleanup_task
+        cleanup_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await cleanup_task
+
         if hasattr(app.state, "crm_sync_task"):
             task = app.state.crm_sync_task
             task.cancel()

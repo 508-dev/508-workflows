@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable, Protocol
+from five08.agent.memory import MemoryStore
 
 from five08.agent.models import (
     AgentContextSnippet,
     AgentContextSource,
     AgentIdentityContext,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -52,6 +56,58 @@ class RequestContextLoader:
             context.context_snippets,
             bounds=bounds,
             now=datetime.now(timezone.utc),
+            preserve_backend_provenance=False,
+        )
+
+
+class PrivateMemoryContextLoader:
+    """Add the actor's active private preferences to bounded planner context."""
+
+    def __init__(self, store: MemoryStore) -> None:
+        self.store = store
+
+    def load(
+        self, *, context: AgentIdentityContext, bounds: ContextLoadBounds
+    ) -> list[AgentContextSnippet]:
+        from five08.agent.policy import PolicyEngine
+
+        # Client-supplied metadata cannot establish backend provenance.
+        snippets = [
+            snippet.model_copy(update={"backend_loaded": False})
+            for snippet in context.context_snippets
+        ]
+        if (
+            context.response_destination_visibility == "private"
+            and not context.impersonation
+            and "memory:read_self" in PolicyEngine().scopes_for_context(context)
+        ):
+            try:
+                facts = self.store.list_facts(
+                    scope_type="user",
+                    scope_id=context.discord_user_id,
+                    visible_to_user_id=context.discord_user_id,
+                    visible_to_project_id=None,
+                    visible_to_org_id=context.organization_id,
+                )
+            except Exception:
+                logger.warning("Private memory context unavailable", exc_info=True)
+                facts = []
+            # Current conversation snippets stay first so long-term memory cannot
+            # consume their bounded token or message budget.
+            snippets.extend(
+                AgentContextSnippet(
+                    source_type="memory_fact",
+                    source_ref=fact.id,
+                    label=f"Your saved preference: {fact.key}",
+                    text=f"{fact.key}: {fact.value_json}"[:2048],
+                    backend_loaded=True,
+                )
+                for fact in facts[:5]
+            )
+        return bound_context_snippets(
+            snippets,
+            bounds=bounds,
+            preserve_backend_provenance=True,
         )
 
 
@@ -60,6 +116,7 @@ def bound_context_snippets(
     *,
     bounds: ContextLoadBounds,
     now: datetime | None = None,
+    preserve_backend_provenance: bool = False,
 ) -> list[AgentContextSnippet]:
     """Apply deterministic count, age, and token bounds to context snippets."""
 
@@ -82,6 +139,9 @@ def bound_context_snippets(
                     "text": snippet.text[:2048],
                     "token_count": token_count,
                     "trusted": False,
+                    "backend_loaded": (
+                        snippet.backend_loaded if preserve_backend_provenance else False
+                    ),
                 }
             )
         )
@@ -98,7 +158,7 @@ def context_sources_for_snippets(
 
     sources: list[AgentContextSource] = []
     for index, snippet in enumerate(snippets):
-        if not snippet.trusted:
+        if not (snippet.trusted or snippet.backend_loaded):
             sources.append(
                 AgentContextSource(
                     source_id=f"request-context-{index}",

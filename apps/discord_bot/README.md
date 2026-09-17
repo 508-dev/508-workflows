@@ -67,6 +67,26 @@ Long-running service changes should be implemented as PR-based workflows rather
 than direct production mutations. Task reads require an explicit project filter
 to avoid guild-wide task enumeration.
 
+## Knowledge Memory
+
+Members can tag the bot with `remember this thread` (inside a thread) or reply
+to an answer with `remember this answer`. The bot sends a private, frozen Q&A
+preview with **Remember** and **Cancel** buttons. Nothing is persisted before
+confirmation. Confirmation rechecks the requester's current roles, and the
+backend atomically stores the fact together with its Discord message IDs,
+authors, timestamps, and jump link.
+
+`/ask` always returns a private answer. A natural-language question in a bot
+mention is routed to the same knowledge service unless it is a supported live
+agent workflow. Retrieval combines visible remembered answers with the
+member-safe Outline index and permission-filtered ERPNext project data; CRM
+contact evidence remains admin-only and private. Every answer carries typed
+citations. Mention answers are posted publicly only when all selected evidence
+is organization-visible and the answer passes the sensitive-output check.
+
+See [Discord Knowledge Memory](../../docs/discord-knowledge-memory.md) for the
+storage, authorization, and source contracts.
+
 Mention flow is opt-in by default: the bot runs the agent when directly
 mentioned in a server channel or thread. The only unmentioned continuation path
 is a bot-owned thread named `Agent response`, which is created for public-safe
@@ -88,12 +108,11 @@ Audit writes are best-effort and do not block command execution. If the audit
 store is unavailable, treat the agent surface as temporarily untraced until the
 audit pipeline is healthy again.
 
-Pending confirmation plans and the MVP task store are currently process-local in
-the backend API. Confirmation plans expire after 10 minutes with opportunistic
-cleanup during agent requests and confirmations. A production multi-process
-deployment should move pending plans to Redis or another shared TTL store and
-swap the task registry for a durable task service before relying on cross-process
-agent behavior.
+Pending confirmations and missing task fields use Postgres TTL storage and
+survive API restarts. Confirmations expire after 10 minutes and are atomically
+claimed before execution. Private memory is durable, owner-only, and supports
+confirmed edits and deletion. The separate MVP task registry remains
+process-local and needs a durable task service for production task workflows.
 
 Relevant configuration:
 
@@ -103,6 +122,8 @@ Relevant configuration:
 - `AGENT_FAST_*`, `AGENT_STRONG_*`, `AGENT_REASONING_*`: backend model
   tier configuration for OpenAI-compatible providers. Credentials stay in the
   backend process; the bot only receives non-secret plan metadata.
+- `KNOWLEDGE_*`: bounds, confirmation lifetime, review age, evidence limit, and
+  optional model use for source-grounded capture and Q&A.
 - `RESUME_AI_*`: optional resume-specific extraction provider for direct CRM
   resume parsing in the bot; falls back to the normal `OPENAI_*` settings.
 
@@ -130,6 +151,13 @@ and result snippets are not audit logged.
 
 ## Slash Commands
 
+- `/ask`
+  - Description: Ask remembered answers, the member-safe wiki, and authorized
+    ERP/CRM sources.
+  - Behavior: Always responds ephemerally and includes source citations.
+  - Guardrails: The backend filters every source by the caller's current roles
+    and project membership; unsupported or insufficient answers are not guessed.
+
 - `/agent`
   - Description: Send a natural-language task request through the backend agent gateway.
   - Behavior:
@@ -146,9 +174,13 @@ and result snippets are not audit logged.
   - Description: Run the same agent gateway from a normal channel or thread message.
   - Behavior:
     - Strips the bot mention and sends the remaining text as the agent request.
-    - Replies in the same channel or thread.
+    - Posts only fixed public-safe or organization-safe answers in the channel;
+      other results and confirmation controls are sent by DM.
     - Supports the same confirmation buttons for writes.
   - Example: `@508.dev Bot show tasks for project Atlas`
+  - Knowledge examples:
+    - `@508.dev Bot I forgot, does our main website auto deploy?`
+    - `@508.dev Bot remember this thread`
 
 - `/dashboard-login`
   - Description: Generate a one-time operations dashboard login link.

@@ -60,6 +60,8 @@ import {
   type JobChannelsResponse,
   type JobPostChannel,
   type JobPostChannelTag,
+  type KnowledgeChannel,
+  type KnowledgeChannelsResponse,
 } from "@/views/configuration-view"
 import {
   type NewsletterStatus,
@@ -962,6 +964,10 @@ function App() {
   const [gigLeadScrapeStatus, setGigLeadScrapeStatus] = useState<JobLeadScrapeStatus | null>(null)
   const [jobPostChannels, setJobPostChannels] = useState<JobPostChannel[]>([])
   const [availableJobPostChannels, setAvailableJobPostChannels] = useState<JobPostChannel[]>([])
+  const [knowledgeChannels, setKnowledgeChannels] = useState<KnowledgeChannel[]>([])
+  const [selectedKnowledgeChannelIds, setSelectedKnowledgeChannelIds] = useState<string[]>([])
+  const [knowledgeChannelsAvailable, setKnowledgeChannelsAvailable] = useState(false)
+  const [knowledgeChannelLimit, setKnowledgeChannelLimit] = useState(8)
   const [projects, setProjects] = useState<Project[]>([])
   const [projectsSummary, setProjectsSummary] = useState<ProjectsResponse["summary"]>({})
   const [wikiMatches, setWikiMatches] = useState<WikiMatchPreview | null>(null)
@@ -2288,6 +2294,24 @@ function App() {
     }
   }
 
+  async function loadKnowledgeChannels() {
+    setBusy("knowledgeChannels", true)
+    try {
+      const payload = await requestJson<KnowledgeChannelsResponse>(
+        "/dashboard/api/knowledge-channels",
+      )
+      setKnowledgeChannels(payload.channels || [])
+      setSelectedKnowledgeChannelIds(payload.selected_channel_ids || [])
+      setKnowledgeChannelsAvailable(payload.available)
+      setKnowledgeChannelLimit(payload.maximum_selected || 8)
+    } catch (error) {
+      setKnowledgeChannelsAvailable(false)
+      showError(error, "Unable to load Discord knowledge channels")
+    } finally {
+      setBusy("knowledgeChannels", false)
+    }
+  }
+
   async function loadConfiguration() {
     setBusy("configuration", true)
     try {
@@ -2312,6 +2336,9 @@ function App() {
         },
       )
       setConfigurationItems(payload.items)
+      if (key === "KNOWLEDGE_DISCORD_CHANNEL_IDS") {
+        await loadKnowledgeChannels()
+      }
       showToast(`Saved ${key}`, "ok")
       return true
     } catch (error) {
@@ -2334,6 +2361,10 @@ function App() {
         },
       )
       setConfigurationItems(payload.items)
+      if (key === "KNOWLEDGE_DISCORD_CHANNEL_IDS") {
+        setSelectedKnowledgeChannelIds([])
+        await loadKnowledgeChannels()
+      }
       showToast(`Cleared ${key}`, "ok")
     } catch (error) {
       showError(error, `Unable to clear ${key}`)
@@ -2676,6 +2707,7 @@ function App() {
     if (view === "configuration") {
       void loadConfiguration()
       void loadJobPostChannels({ includeAvailable: true })
+      void loadKnowledgeChannels()
     }
   }, [view])
 
@@ -2702,6 +2734,7 @@ function App() {
     if (view === "configuration") {
       void loadConfiguration()
       void loadJobPostChannels({ includeAvailable: true })
+      void loadKnowledgeChannels()
     }
   }, [permissions])
 
@@ -3228,10 +3261,15 @@ function App() {
               canWrite={can("configuration:write")}
               jobChannels={jobPostChannels}
               availableJobChannels={availableJobPostChannels}
+              knowledgeChannels={knowledgeChannels}
+              selectedKnowledgeChannelIds={selectedKnowledgeChannelIds}
+              knowledgeChannelsAvailable={knowledgeChannelsAvailable}
+              knowledgeChannelLimit={knowledgeChannelLimit}
               focusCategory={configurationFocus?.category}
               focusNonce={configurationFocus?.nonce}
               onRefresh={loadConfiguration}
               onRefreshJobChannels={() => loadJobPostChannels({ includeAvailable: true })}
+              onRefreshKnowledgeChannels={loadKnowledgeChannels}
               onSave={updateConfigurationValue}
               onClear={clearConfigurationValue}
               onSaveJobChannel={updateJobPostChannel}

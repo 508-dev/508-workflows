@@ -1,5 +1,6 @@
 """Configuration for webhook ingest and worker services."""
 
+from ipaddress import ip_address
 from urllib.parse import urlparse
 
 from pydantic import AliasChoices, Field, PrivateAttr, field_validator, model_validator
@@ -88,6 +89,38 @@ class WorkerSettings(SharedSettings):
     crm_sync_enabled: bool = True
     crm_sync_interval_seconds: int = 900
     crm_sync_page_size: int = 200
+
+    @property
+    def resolved_discord_bot_internal_base_url(self) -> str | None:
+        """Return only transport-safe internal Discord bot endpoints."""
+        candidate = self.discord_bot_internal_base_url.strip().rstrip("/")
+        if not candidate:
+            return None
+        try:
+            parsed = urlparse(candidate)
+            hostname = parsed.hostname
+        except ValueError:
+            return None
+        if (
+            not hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.params
+            or parsed.query
+            or parsed.fragment
+        ):
+            return None
+        if parsed.scheme.casefold() == "https":
+            return candidate
+        if parsed.scheme.casefold() != "http":
+            return None
+        hostname = hostname.casefold()
+        if hostname in {"localhost", "discord_bot"}:
+            return candidate
+        try:
+            return candidate if ip_address(hostname).is_loopback else None
+        except ValueError:
+            return None
 
     @property
     def worker_queue_name(self) -> str:
