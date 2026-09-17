@@ -645,6 +645,29 @@ def test_backend_post_uses_authenticated_tls_verified_json(
     )
     assert mock_post.call_args.kwargs["timeout"] == 45.0
     assert mock_post.call_args.kwargs["verify"] == default_ca_bundle_path()
+    assert mock_post.call_args.kwargs["allow_redirects"] is False
+
+
+def test_backend_post_rejects_redirects_before_parsing_response() -> None:
+    cog = WikiWriterCog.__new__(WikiWriterCog)
+
+    with patch.object(
+        wiki_writer_module,
+        "settings",
+        SimpleNamespace(
+            backend_api_base_url="https://api.test",
+            api_shared_secret="secret",
+            wiki_editing_assertion_secret="wiki-assertion-secret",
+            wiki_editing_request_timeout_seconds=45.0,
+        ),
+    ):
+        with patch("five08.discord_bot.cogs.wiki_writer.requests.post") as mock_post:
+            mock_post.return_value = _FakeResponse(307, {"detail": "redirect"})
+
+            with pytest.raises(RuntimeError, match="redirect status=307"):
+                cog._post_backend_json("/wiki/updates", {"instruction": "x"})
+
+    assert mock_post.call_args.kwargs["allow_redirects"] is False
 
 
 def test_audit_metadata_excludes_instruction_summary_and_raw_source_text() -> None:

@@ -997,7 +997,12 @@ class WikiWriterCog(DiscordAuditCogMixin, commands.Cog):
             json=payload,
             timeout=settings.wiki_editing_request_timeout_seconds,
             verify=default_ca_bundle_path(),
+            allow_redirects=False,
         )
+        if 300 <= response.status_code < 400:
+            raise RuntimeError(
+                f"Backend returned redirect status={response.status_code}"
+            )
         try:
             data = response.json()
         except ValueError as exc:

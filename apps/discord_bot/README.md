@@ -119,6 +119,8 @@ Relevant configuration:
 - `BACKEND_API_BASE_URL`: backend API used by the bot. Use HTTPS outside local
   development; plaintext is allowed only for loopback hosts or Compose's fixed
   internal `http://web:8090` endpoint.
+- `AUDIT_API_BASE_URL`: optional audit-service override. It carries the same
+  API secret and follows the identical HTTPS/internal-endpoint policy.
 - `API_SHARED_SECRET`: shared service secret for protected backend calls.
 - `AGENT_API_TIMEOUT_SECONDS`: timeout for synchronous agent gateway requests.
 - `WIKI_EDITING_REQUEST_TIMEOUT_SECONDS`: timeout for approval-gated wiki

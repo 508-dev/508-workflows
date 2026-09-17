@@ -32,6 +32,39 @@ def _is_loopback_host(host: str) -> bool:
         return False
 
 
+def _validate_privileged_backend_url(value: str, *, setting_name: str) -> str:
+    """Require a safe transport endpoint before sending an API secret."""
+    normalized = value.strip()
+    try:
+        parsed = urlparse(normalized)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError(
+            f"{setting_name} must be a valid absolute HTTP(S) URL"
+        ) from exc
+
+    scheme = parsed.scheme.casefold()
+    host = (parsed.hostname or "").casefold()
+    if (
+        scheme not in {"http", "https"}
+        or not parsed.netloc
+        or not host
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise ValueError(f"{setting_name} must be a valid absolute HTTP(S) URL")
+
+    if scheme == "https" or _is_loopback_host(host):
+        return normalized
+    if host == _COMPOSE_BACKEND_API_HOST and port == _COMPOSE_BACKEND_API_PORT:
+        return normalized
+
+    raise ValueError(
+        f"{setting_name} must use HTTPS unless it targets a loopback host or "
+        "the internal Compose endpoint http://web:8090"
+    )
+
+
 class Settings(SharedSettings):
     """
     Bot configuration settings with environment variable support.
@@ -101,30 +134,20 @@ class Settings(SharedSettings):
     @classmethod
     def _validate_backend_api_base_url(cls, value: str) -> str:
         """Require TLS for external backend requests that carry API secrets."""
-        normalized = value.strip()
-        try:
-            parsed = urlparse(normalized)
-            port = parsed.port
-        except ValueError as exc:
-            raise ValueError(
-                "BACKEND_API_BASE_URL must be a valid absolute HTTP(S) URL"
-            ) from exc
+        return _validate_privileged_backend_url(
+            value,
+            setting_name="BACKEND_API_BASE_URL",
+        )
 
-        scheme = parsed.scheme.casefold()
-        host = (parsed.hostname or "").casefold()
-        if scheme not in {"http", "https"} or not parsed.netloc or not host:
-            raise ValueError(
-                "BACKEND_API_BASE_URL must be a valid absolute HTTP(S) URL"
-            )
-
-        if scheme == "https" or _is_loopback_host(host):
-            return normalized
-        if host == _COMPOSE_BACKEND_API_HOST and port == _COMPOSE_BACKEND_API_PORT:
-            return normalized
-
-        raise ValueError(
-            "BACKEND_API_BASE_URL must use HTTPS unless it targets a loopback "
-            "host or the internal Compose endpoint http://web:8090"
+    @field_validator("audit_api_base_url")
+    @classmethod
+    def _validate_audit_api_base_url(cls, value: str | None) -> str | None:
+        """Apply the same secret-carrying transport policy to audit overrides."""
+        if value is None or not value.strip():
+            return None
+        return _validate_privileged_backend_url(
+            value,
+            setting_name="AUDIT_API_BASE_URL",
         )
 
     @model_validator(mode="after")

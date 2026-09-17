@@ -257,8 +257,9 @@ class DiscordAuditLogger:
                 headers=headers,
                 json=event_payload,
                 timeout=self.timeout_seconds,
+                allow_redirects=False,
             )
-            if response.status_code >= 400:
+            if response.status_code >= 300:
                 logger.warning(
                     "Audit write failed status=%s action=%s body=%s",
                     response.status_code,

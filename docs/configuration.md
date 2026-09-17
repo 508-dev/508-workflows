@@ -249,7 +249,8 @@ Discord bot:
 - `DISCORD_LOGS_WEBHOOK_URL`
 - `DISCORD_LOGS_WEBHOOK_WAIT`
 
-`BACKEND_API_BASE_URL` carries the bot's protected backend requests. It must
+`BACKEND_API_BASE_URL` carries the bot's protected backend requests, and an
+optional `AUDIT_API_BASE_URL` override carries the same API secret. Both must
 use HTTPS outside local development; plaintext is allowed only for loopback
 hosts or Compose's fixed internal `http://web:8090` endpoint.
 
