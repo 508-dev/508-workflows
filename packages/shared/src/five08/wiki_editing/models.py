@@ -1010,7 +1010,10 @@ class WikiEditResponse(BaseModel):
 
 PROPOSAL_TRANSITIONS: dict[WikiProposalStatus, frozenset[WikiProposalStatus]] = {
     "queued": frozenset({"authoring", "failed", "canceled"}),
-    "authoring": frozenset({"proposed", "conflict", "failed", "canceled"}),
+    # An authoring transport/capacity failure can release this lease back to
+    # queued. That repeats only the non-mutating draft phase and retains the
+    # same durable proposal revision/run metadata.
+    "authoring": frozenset({"queued", "proposed", "conflict", "failed", "canceled"}),
     "proposed": frozenset({"conflict", "canceled", "publishing"}),
     "conflict": frozenset({"canceled"}),
     "failed": frozenset(),

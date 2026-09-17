@@ -11,6 +11,7 @@ cannot publish an Outline change.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from ipaddress import ip_address
 from typing import Callable, Literal, Mapping
@@ -19,6 +20,7 @@ from urllib.parse import urlparse
 import requests
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from five08.clients.outline import OutlineAPIError, OutlineClient
 from five08.wiki_editing.models import (
     WikiAuthoringWorkItem,
     WikiEditTargetAction,
@@ -30,6 +32,7 @@ from five08.wiki_editing.omp import (
     KnowledgeSearch,
     WIKI_AUTHORING_MIN_KNOWLEDGE_AUTHORITY,
     WikiAuthoringError,
+    WikiAuthoringTransientError,
     WikiAuthoringUnavailableError,
     WikiOmpDraft,
 )
@@ -139,10 +142,14 @@ class _MaterialRegistry:
             ) from exc
 
     def payload(self) -> list[dict[str, object]]:
+        # The sandbox only needs an opaque citation ID, a human-readable title,
+        # and bounded text. Keep provider-facing material free of internal
+        # source references, URLs, collection IDs, and hashes; the worker
+        # retains that provenance locally for the reviewed proposal.
         return [
             {
                 "id": source_id,
-                "source": material.source.model_dump(mode="json"),
+                "source": {"title": material.source.title},
                 "text": material.text,
             }
             for source_id, material in self._materials.items()
@@ -168,6 +175,8 @@ class SandboxedOmpWikiAuthoringRunner:
         thinking: str = "medium",
         startup_timeout_seconds: float = 30.0,
         authoring_timeout_seconds: float = 300.0,
+        outline_client_factory: Callable[[], OutlineClient],
+        allowed_collection_id: str,
         knowledge_search: KnowledgeSearch | None = None,
         transport: SandboxTransport | None = None,
     ) -> None:
@@ -177,11 +186,13 @@ class SandboxedOmpWikiAuthoringRunner:
         self.thinking = thinking.strip().lower() or "medium"
         self.startup_timeout_seconds = max(1.0, startup_timeout_seconds)
         self.authoring_timeout_seconds = max(1.0, authoring_timeout_seconds)
+        self.outline_client_factory = outline_client_factory
+        self.allowed_collection_id = allowed_collection_id.strip()
         self.knowledge_search = knowledge_search
         self.transport = transport
-        if not self.sandbox_token or not self.model:
+        if not self.sandbox_token or not self.model or not self.allowed_collection_id:
             raise WikiAuthoringUnavailableError(
-                "Isolated OMP authoring requires a sandbox token and model."
+                "Isolated OMP authoring requires a sandbox token, model, and shared collection."
             )
 
     def author(
@@ -254,8 +265,83 @@ class SandboxedOmpWikiAuthoringRunner:
                 ),
                 prefix="base-document",
             )
+        self._add_related_outline_documents(registry, work_item)
         self._add_organization_knowledge(registry, work_item)
         return registry
+
+    def _add_related_outline_documents(
+        self,
+        registry: _MaterialRegistry,
+        work_item: WikiAuthoringWorkItem,
+    ) -> None:
+        """Add a few full documents from the configured shared collection.
+
+        Outline search excerpts are only candidate selectors and can describe
+        documents outside the authoring collection. They must stay inside the
+        trusted worker. A complete document is admitted only after a second
+        worker-side fetch proves it belongs to the configured shared
+        collection; nothing about rejected candidates crosses to OMP.
+        """
+        revision_instruction = work_item.proposal.revision_instruction or ""
+        query = " ".join(
+            f"{work_item.request.instruction} {revision_instruction}".split()
+        )[:200]
+        if not query:
+            return
+        try:
+            client = self.outline_client_factory()
+            candidates = client.search_documents(query=query, limit=4)
+        except (OutlineAPIError, ValueError):
+            return
+
+        excluded_ids = {work_item.proposal.target_document_id or ""}
+        if work_item.proposal.base_snapshot is not None:
+            excluded_ids.add(work_item.proposal.base_snapshot.document_id)
+        seen_ids: set[str] = set()
+        for candidate in candidates:
+            document_id = candidate.document.id.strip()
+            if (
+                not document_id
+                or len(document_id) > 256
+                or document_id in seen_ids
+                or document_id in excluded_ids
+            ):
+                continue
+            seen_ids.add(document_id)
+            try:
+                document = client.get_document(document_id=document_id)
+            except (OutlineAPIError, ValueError):
+                continue
+            if (
+                document.id != document_id
+                or (document.collection_id or "").strip() != self.allowed_collection_id
+                or not document.text.strip()
+                or len(document.text) > _MAX_MATERIAL_CHARACTERS
+            ):
+                continue
+            try:
+                registry.add(
+                    _SandboxMaterial(
+                        source=WikiSourceReference(
+                            source_type="outline_document",
+                            source_ref=document.id,
+                            source_url=document.url,
+                            title=document.title,
+                            content_hash=wiki_content_hash(document.text),
+                        ),
+                        text=document.text,
+                    ),
+                    prefix="related-outline",
+                )
+            except WikiAuthoringError:
+                # Related documents are supplemental. The immutable bundle
+                # budget may already be consumed by the selected conversation
+                # and target snapshot, so never fail the entire draft for one.
+                return
+            except ValueError:
+                # Invalid remote document metadata is never made visible to
+                # the sandbox or retried as a permissive fallback.
+                continue
 
     def _add_organization_knowledge(
         self,
@@ -353,6 +439,11 @@ class SandboxedOmpWikiAuthoringRunner:
                     "The isolated OMP sandbox did not complete successfully."
                 ) from exc
 
+        deadline = (
+            time.monotonic()
+            + self.startup_timeout_seconds
+            + self.authoring_timeout_seconds
+        )
         try:
             response = requests.post(
                 endpoint,
@@ -363,7 +454,7 @@ class SandboxedOmpWikiAuthoringRunner:
                 stream=True,
             )
         except requests.RequestException as exc:
-            raise WikiAuthoringUnavailableError(
+            raise WikiAuthoringTransientError(
                 "The isolated OMP sandbox could not be reached."
             ) from exc
         try:
@@ -371,11 +462,19 @@ class SandboxedOmpWikiAuthoringRunner:
                 raise WikiAuthoringUnavailableError(
                     "The isolated OMP sandbox rejected the configured contract."
                 )
+            if (
+                response.status_code == 408
+                or response.status_code == 429
+                or response.status_code >= 500
+            ):
+                raise WikiAuthoringTransientError(
+                    "The isolated OMP sandbox did not complete successfully."
+                )
             if not 200 <= response.status_code < 300:
                 raise WikiAuthoringError(
                     "The isolated OMP sandbox did not complete successfully."
                 )
-            body = self._bounded_response_body(response)
+            body = self._bounded_response_body(response, deadline=deadline)
         finally:
             response.close()
         try:
@@ -391,10 +490,44 @@ class SandboxedOmpWikiAuthoringRunner:
         return decoded
 
     @staticmethod
-    def _bounded_response_body(response: requests.Response) -> bytes:
+    def _bounded_response_body(
+        response: requests.Response,
+        *,
+        deadline: float,
+    ) -> bytes:
+        """Read a bounded response without allowing a slow drip to outlive its lease.
+
+        Requests exposes connect/read timeouts but no whole-response deadline.
+        Reset the active socket timeout before every chunk and use a monotonic
+        deadline as a second guard. A response whose underlying connection
+        cannot support that bound is treated as temporarily unavailable rather
+        than allowing an authoring lease to run indefinitely.
+        """
         chunks: list[bytes] = []
         received = 0
-        for chunk in response.iter_content(chunk_size=64 * 1024):
+        iterator = iter(response.iter_content(chunk_size=64 * 1024))
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise WikiAuthoringTransientError(
+                    "The isolated OMP sandbox exceeded its total response deadline."
+                )
+            SandboxedOmpWikiAuthoringRunner._set_response_read_timeout(
+                response,
+                timeout_seconds=remaining,
+            )
+            try:
+                chunk = next(iterator)
+            except StopIteration:
+                break
+            except requests.RequestException as exc:
+                raise WikiAuthoringTransientError(
+                    "The isolated OMP sandbox response was interrupted."
+                ) from exc
+            if deadline - time.monotonic() <= 0:
+                raise WikiAuthoringTransientError(
+                    "The isolated OMP sandbox exceeded its total response deadline."
+                )
             if not chunk:
                 continue
             received += len(chunk)
@@ -404,6 +537,30 @@ class SandboxedOmpWikiAuthoringRunner:
                 )
             chunks.append(chunk)
         return b"".join(chunks)
+
+    @staticmethod
+    def _set_response_read_timeout(
+        response: requests.Response,
+        *,
+        timeout_seconds: float,
+    ) -> None:
+        """Bound the next urllib3 read to the remaining total deadline."""
+        raw = getattr(response, "raw", None)
+        connection = getattr(raw, "_connection", None)
+        socket = getattr(connection, "sock", None)
+        if socket is None:
+            file_pointer = getattr(getattr(raw, "_fp", None), "fp", None)
+            socket = getattr(getattr(file_pointer, "raw", None), "_sock", None)
+        if socket is None:
+            raise WikiAuthoringTransientError(
+                "The isolated OMP sandbox response cannot enforce a total deadline."
+            )
+        try:
+            socket.settimeout(max(0.001, timeout_seconds))
+        except OSError as exc:
+            raise WikiAuthoringTransientError(
+                "The isolated OMP sandbox response cannot enforce a total deadline."
+            ) from exc
 
     @staticmethod
     def _validated_sandbox_url(value: str) -> str:

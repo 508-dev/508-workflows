@@ -24,6 +24,10 @@ from five08.discord_bot.utils.role_decorators import (
     require_role,
 )
 from five08.tls import default_ca_bundle_path
+from five08.wiki_editing.assertions import (
+    WIKI_ASSERTION_HEADER,
+    create_wiki_action_assertion,
+)
 from five08.wiki_editing.models import WikiEditReviewArtifact
 
 
@@ -958,14 +962,24 @@ class WikiWriterCog(DiscordAuditCogMixin, commands.Cog):
         """Send an authenticated JSON request without exposing its payload in logs."""
         base_url = settings.backend_api_base_url.rstrip("/")
         secret = str(settings.api_shared_secret or "").strip()
-        if not base_url or not secret:
+        assertion_secret = str(settings.wiki_editing_assertion_secret or "").strip()
+        if not base_url or not secret or not assertion_secret:
             raise WikiWriterConfigurationError(
-                "Backend API URL or API_SHARED_SECRET is not configured"
+                "Backend API URL, API_SHARED_SECRET, or WIKI_EDITING_ASSERTION_SECRET is not configured"
             )
+        assertion = create_wiki_action_assertion(
+            assertion_secret,
+            method="POST",
+            path=path,
+            payload=payload,
+        )
 
         response = requests.post(
             f"{base_url}{path}",
-            headers={"X-API-Secret": secret},
+            headers={
+                "X-API-Secret": secret,
+                WIKI_ASSERTION_HEADER: assertion,
+            },
             json=payload,
             timeout=settings.agent_api_timeout_seconds,
             verify=default_ca_bundle_path(),

@@ -18,6 +18,10 @@ from five08.discord_bot.cogs.wiki_writer import (
     setup,
 )
 from five08.tls import default_ca_bundle_path
+from five08.wiki_editing.assertions import (
+    WIKI_ASSERTION_HEADER,
+    verify_wiki_action_assertion,
+)
 from five08.wiki_editing.models import WikiEditReviewArtifact, WikiSourceReference
 
 
@@ -555,6 +559,7 @@ def test_backend_post_uses_authenticated_tls_verified_json(
         SimpleNamespace(
             backend_api_base_url="http://api.test",
             api_shared_secret="secret",
+            wiki_editing_assertion_secret="wiki-assertion-secret",
             agent_api_timeout_seconds=8.0,
         ),
     )
@@ -568,7 +573,15 @@ def test_backend_post_uses_authenticated_tls_verified_json(
 
     assert response["http_status"] == 202
     assert mock_post.call_args.args[0] == "http://api.test/wiki/updates"
-    assert mock_post.call_args.kwargs["headers"] == {"X-API-Secret": "secret"}
+    headers = mock_post.call_args.kwargs["headers"]
+    assert headers["X-API-Secret"] == "secret"
+    verify_wiki_action_assertion(
+        headers[WIKI_ASSERTION_HEADER],
+        "wiki-assertion-secret",
+        method="POST",
+        path="/wiki/updates",
+        payload={"instruction": "x"},
+    )
     assert mock_post.call_args.kwargs["verify"] == default_ca_bundle_path()
 
 

@@ -66,6 +66,8 @@ _ROLE_SCOPES: dict[str, frozenset[str]] = {
             "knowledge:read_org",
             "knowledge:capture_org",
             "knowledge:read_wiki",
+            "wiki:propose",
+            "wiki:publish",
         }
     ),
     "admin": frozenset(
@@ -107,6 +109,8 @@ _ROLE_SCOPES: dict[str, frozenset[str]] = {
             "knowledge:capture_project",
             "knowledge:verify_org",
             "knowledge:admin",
+            "wiki:propose",
+            "wiki:publish",
         }
     ),
 }

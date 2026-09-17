@@ -46,6 +46,7 @@ from five08.wiki_editing.models import (
 from five08.wiki_editing.omp import (
     WikiAuthoringError,
     WikiAuthoringRunner,
+    WikiAuthoringTransientError,
 )
 from five08.wiki_editing.store import WikiEditingStore
 
@@ -106,7 +107,7 @@ class WikiEditingService:
     def create(self, request: WikiEditCreateRequest) -> WikiProposalStart:
         """Persist an explicit request and reserve its first draft revision."""
         organization_id = self._authorize(request.context, scope="wiki:propose")
-        self._assert_authoring_configured()
+        self._assert_wiki_editing_configured()
         self._validate_create_request(request, organization_id=organization_id)
         base_snapshot = self._snapshot_for_target(request.target_document_id)
         stored_request, created = self.store.create_or_get_request(
@@ -136,7 +137,7 @@ class WikiEditingService:
     def revise(self, request: WikiEditRevisionRequest) -> WikiProposalStart:
         """Reserve a fresh immutable proposal revision with explicit feedback."""
         organization_id = self._authorize(request.context, scope="wiki:propose")
-        self._assert_authoring_configured()
+        self._assert_wiki_editing_configured()
         self._validate_instruction(request.instruction)
         proposal = self._owned_proposal(
             request.proposal_id,
@@ -258,7 +259,7 @@ class WikiEditingService:
     def publish(self, request: WikiEditActionRequest) -> WikiEditResponse:
         """Make at most one confirmed Outline write, never an automatic retry."""
         organization_id = self._authorize(request.context, scope="wiki:publish")
-        self._assert_authoring_configured()
+        self._assert_wiki_editing_configured()
         proposal = self._owned_proposal(
             request.proposal_id,
             organization_id=organization_id,
@@ -372,6 +373,7 @@ class WikiEditingService:
         organization_id: str,
     ) -> WikiEditResponse:
         """Run the safe-to-retry OMP authoring phase for one reserved proposal."""
+        self._assert_authoring_configured()
         if self.authoring_runner is None:
             raise WikiEditingConfigurationError(
                 "The OMP authoring worker is unavailable."
@@ -395,6 +397,13 @@ class WikiEditingService:
                         self.settings,
                         "wiki_omp_authoring_timeout_seconds",
                         300.0,
+                    )
+                )
+                + float(
+                    getattr(
+                        self.settings,
+                        "wiki_omp_startup_timeout_seconds",
+                        30.0,
                     )
                 )
                 + 60.0
@@ -432,6 +441,27 @@ class WikiEditingService:
                 organization_id=organization_id,
                 output=output,
             )
+        except WikiAuthoringTransientError:
+            # The OMP draft phase has no write capability, so a transport or
+            # capacity retry is safe. Release the durable claim before raising
+            # so the queue retry can actually acquire it; never apply this to
+            # malformed model output, which remains a reviewable failure.
+            try:
+                self.store.release_authoring(
+                    proposal.id,
+                    organization_id=organization_id,
+                )
+            except WikiEditStateError:
+                # A requester may cancel while the sidecar is unavailable. Do
+                # not revive that terminal result merely to retry authoring.
+                latest = self.store.get_proposal(
+                    proposal.id,
+                    organization_id=organization_id,
+                )
+                if latest is None:  # pragma: no cover - state-store invariant
+                    raise WikiEditNotFoundError("Wiki proposal was not found.")
+                return self._response_for(latest)
+            raise
         except WikiAuthoringError:
             return self._fail_authoring(proposal.id, organization_id)
         except WikiEditStateError:
@@ -447,14 +477,46 @@ class WikiEditingService:
             return self._fail_authoring(proposal.id, organization_id)
         return self._response_for(completed)
 
-    def _assert_authoring_configured(self) -> None:
+    def mark_authoring_retry_exhausted(
+        self,
+        proposal_id: str,
+        *,
+        organization_id: str,
+    ) -> WikiEditResponse:
+        """Expose exhausted transient retries as a revisable proposal failure.
+
+        The generic worker queue owns retry accounting. This narrow worker-only
+        hook prevents a proposal from remaining queued forever when that queue
+        has exhausted its configured retry budget.
+        """
+        proposal = self.store.get_proposal(
+            proposal_id,
+            organization_id=organization_id,
+        )
+        if proposal is None:
+            raise WikiEditNotFoundError("Wiki proposal was not found.")
+        if proposal.status != "queued":
+            return self._response_for(proposal)
+        failed = self.store.fail_proposal(
+            proposal.id,
+            organization_id=organization_id,
+            failure_code="authoring_retry_exhausted",
+        )
+        return self._response_for(
+            failed,
+            message="Wiki authoring was unavailable after its retry budget. Request a revision to try again.",
+        )
+
+    def _assert_wiki_editing_configured(self) -> None:
+        """Validate only configuration needed by API-owned workflow actions.
+
+        The API creates proposals, checks conflicts, and publishes approved
+        changes, but it must not receive the worker/sandbox RPC credential.
+        Requiring the worker-only sandbox settings here made a correctly
+        isolated API fail closed simply because it could not see that secret.
+        """
         if not bool(getattr(self.settings, "wiki_editing_enabled", False)):
             raise WikiEditingConfigurationError("Wiki editing is disabled.")
-        configured = getattr(self.settings, "wiki_authoring_configured", None)
-        if configured is False:
-            raise WikiEditingConfigurationError(
-                "Wiki authoring is not fully configured in the backend and worker."
-            )
         if not str(
             getattr(self.settings, "wiki_outline_collection_id", "") or ""
         ).strip():
@@ -464,6 +526,15 @@ class WikiEditingService:
         # Validate the admin credential now rather than allowing an authoring
         # request to progress with the member-safe read-only credential.
         build_outline_writer_client(self.settings)
+
+    def _assert_authoring_configured(self) -> None:
+        """Validate worker-only sandbox configuration before an OMP run."""
+        self._assert_wiki_editing_configured()
+        configured = getattr(self.settings, "wiki_authoring_configured", None)
+        if configured is not True:
+            raise WikiEditingConfigurationError(
+                "Wiki authoring is not fully configured in the worker."
+            )
 
     def _authorize(self, context: AgentIdentityContext, *, scope: str) -> str:
         organization_id = (context.organization_id or "").strip()

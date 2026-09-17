@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import Mock
@@ -13,6 +14,10 @@ from fastapi import Request
 from five08.backend import api
 from five08.knowledge.models import KnowledgeEvidence
 from five08.queue import EnqueuedJob
+from five08.wiki_editing.assertions import (
+    WIKI_ASSERTION_HEADER,
+    create_wiki_action_assertion,
+)
 from five08.wiki_editing.models import (
     WikiEditConflictError,
     WikiEditNotFoundError,
@@ -71,11 +76,23 @@ class _WikiEditingServiceStub:
             raise self.error
         return _response(proposal_id=_PROPOSAL_ID, status="published")
 
+    def acknowledge_review(self, payload: object) -> WikiEditResponse:
+        self.action_payload = payload
+        if self.error is not None:
+            raise self.error
+        return _response(proposal_id=_PROPOSAL_ID, status="proposed")
+
     def cancel(self, payload: object) -> WikiEditResponse:
         self.action_payload = payload
         if self.error is not None:
             raise self.error
         return _response(proposal_id=_PROPOSAL_ID, status="canceled")
+
+    def mark_authoring_enqueue_failed(self, payload: object) -> WikiEditResponse:
+        self.action_payload = payload
+        if self.error is not None:
+            raise self.error
+        return _response(proposal_id=_PROPOSAL_ID, status="failed")
 
 
 def _response(
@@ -134,6 +151,7 @@ def _create_payload() -> dict[str, object]:
 def _request(
     payload: dict[str, object],
     *,
+    path: str = "/wiki/updates",
     queue: object | None = None,
     authorized: bool = True,
 ) -> Request:
@@ -148,13 +166,24 @@ def _request(
         return {"type": "http.request", "body": body, "more_body": False}
 
     headers = [(b"x-api-secret", b"test-secret")] if authorized else []
+    headers.append(
+        (
+            WIKI_ASSERTION_HEADER.lower().encode("ascii"),
+            create_wiki_action_assertion(
+                "test-wiki-assertion-secret",
+                method="POST",
+                path=path,
+                payload=payload,
+            ).encode("ascii"),
+        )
+    )
     scope: dict[str, object] = {
         "type": "http",
         "http_version": "1.1",
         "method": "POST",
         "scheme": "http",
-        "path": "/",
-        "raw_path": b"/",
+        "path": path,
+        "raw_path": path.encode("ascii"),
         "query_string": b"",
         "headers": headers,
         "client": ("testclient", 50000),
@@ -178,6 +207,11 @@ def _configure(
         return function(*args, **kwargs)
 
     monkeypatch.setattr(api.settings, "api_shared_secret", "test-secret")
+    monkeypatch.setattr(
+        api.settings,
+        "wiki_editing_assertion_secret",
+        "test-wiki-assertion-secret",
+    )
     monkeypatch.setattr(api, "_WIKI_EDITING_SERVICE", service)
     monkeypatch.setattr(api.asyncio, "to_thread", run_inline)
     audit = Mock()
@@ -241,6 +275,7 @@ async def test_wiki_revision_uses_route_id_and_new_proposal_idempotency(
                 "proposal_id": "body-id-must-not-win",
                 "instruction": "PRIVATE REVISION DIRECTION",
             },
+            path=f"/wiki/updates/{_PROPOSAL_ID}/revise",
             queue=queue,
         ),
         _PROPOSAL_ID,
@@ -255,6 +290,46 @@ async def test_wiki_revision_uses_route_id_and_new_proposal_idempotency(
         settings=api.settings,
         idempotency_key=f"wiki-author:{_REVISION_ID}",
     )
+
+
+async def test_wiki_enqueue_failure_becomes_a_reviewable_failed_draft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _WikiEditingServiceStub()
+    _audit, enqueue = _configure(monkeypatch, service)
+    enqueue.side_effect = RuntimeError("broker unavailable")
+
+    response = await api.wiki_create_handler(
+        _request(_create_payload(), queue=object())
+    )
+
+    assert response.status_code == 202
+    assert _response_json(response)["status"] == "failed"
+    assert getattr(service.action_payload, "proposal_id") == _PROPOSAL_ID
+
+
+async def test_wiki_acknowledgement_binds_review_to_the_route_proposal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _WikiEditingServiceStub()
+    _audit, _enqueue = _configure(monkeypatch, service)
+    review_id = "a" * 16
+
+    response = await api.wiki_acknowledge_review_handler(
+        _request(
+            {
+                "context": _context(),
+                "proposal_id": "body-id-must-not-win",
+                "review_id": review_id,
+            },
+            path=f"/wiki/updates/{_PROPOSAL_ID}/acknowledge-review",
+        ),
+        _PROPOSAL_ID,
+    )
+
+    assert response.status_code == 200
+    assert getattr(service.action_payload, "proposal_id") == _PROPOSAL_ID
+    assert getattr(service.action_payload, "review_id") == review_id
 
 
 @pytest.mark.parametrize(
@@ -283,7 +358,10 @@ async def test_wiki_action_maps_domain_errors_without_exposing_details(
     audit, _enqueue = _configure(monkeypatch, service)
 
     response = await api.wiki_status_handler(
-        _request({"context": _context()}),
+        _request(
+            {"context": _context()},
+            path=f"/wiki/updates/{_PROPOSAL_ID}/status",
+        ),
         _PROPOSAL_ID,
     )
 
@@ -310,24 +388,24 @@ def test_wiki_routes_are_registered() -> None:
         "/wiki/updates",
         "/wiki/updates/{proposal_id}/status",
         "/wiki/updates/{proposal_id}/revise",
+        "/wiki/updates/{proposal_id}/acknowledge-review",
         "/wiki/updates/{proposal_id}/publish",
         "/wiki/updates/{proposal_id}/cancel",
     } <= paths
 
 
-def test_worker_builds_bounded_omp_authoring_service(
+def test_worker_builds_remote_sandboxed_omp_authoring_service(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     worker_settings = SimpleNamespace(
         wiki_authoring_configured=True,
-        resolved_wiki_omp_launcher_path="/safe/wiki-omp-launcher.sh",
-        wiki_omp_command="omp",
-        openrouter_api_key="openrouter-key",
+        resolved_wiki_omp_sandbox_url="http://wiki_omp_sandbox:8080",
+        wiki_omp_sandbox_token="sandbox-token",
         wiki_omp_model="openrouter/model",
         wiki_omp_thinking="high",
         wiki_omp_startup_timeout_seconds=12.0,
         wiki_omp_authoring_timeout_seconds=45.0,
-        wiki_outline_collection_id="shared-wiki",
+        wiki_outline_collection_id="collection-1",
     )
     captured: dict[str, Any] = {}
     store = object()
@@ -344,30 +422,31 @@ def test_worker_builds_bounded_omp_authoring_service(
         captured.update(kwargs)
         return runner
 
-    monkeypatch.setattr(jobs, "OmpWikiAuthoringRunner", build_runner)
+    monkeypatch.setattr(jobs, "SandboxedOmpWikiAuthoringRunner", build_runner)
 
     service = jobs._build_wiki_editing_service()
 
     assert service.store is store
     assert service.authoring_runner is runner
     knowledge_search = captured.pop("knowledge_search")
+    outline_client_factory = captured.pop("outline_client_factory")
     assert callable(knowledge_search)
+    assert callable(outline_client_factory)
     assert captured == {
-        "omp_executable": "omp",
-        "omp_launcher_path": "/safe/wiki-omp-launcher.sh",
-        "openrouter_api_key": "openrouter-key",
+        "sandbox_url": "http://wiki_omp_sandbox:8080",
+        "sandbox_token": "sandbox-token",
         "model": "openrouter/model",
         "thinking": "high",
         "startup_timeout_seconds": 12.0,
         "authoring_timeout_seconds": 45.0,
-        "outline_client_factory": service.outline_client_factory,
-        "allowed_collection_id": "shared-wiki",
+        "allowed_collection_id": "collection-1",
     }
     assert service.outline_client_factory() is writer
 
 
-def test_worker_org_knowledge_callback_excludes_private_and_project_evidence() -> None:
+def test_worker_org_knowledge_callback_requires_fresh_high_trust_evidence() -> None:
     store = Mock()
+    updated_at = datetime.now(timezone.utc)
     store.search_evidence.return_value = [
         KnowledgeEvidence(
             evidence_id="org-evidence",
@@ -377,6 +456,9 @@ def test_worker_org_knowledge_callback_excludes_private_and_project_evidence() -
             excerpt="Use the shared release checklist.",
             url="https://knowledge.example/org",
             visibility="org",
+            authority=0.9,
+            stale=False,
+            updated_at=updated_at,
         ),
         KnowledgeEvidence(
             evidence_id="private-evidence",
@@ -393,6 +475,64 @@ def test_worker_org_knowledge_callback_excludes_private_and_project_evidence() -
             title="Project note",
             excerpt="Do not expose this either.",
             visibility="project",
+            authority=1.0,
+            stale=False,
+            updated_at=updated_at,
+        ),
+        KnowledgeEvidence(
+            evidence_id="low-trust-evidence",
+            source_type="memory",
+            source_ref="memory:low-trust",
+            title="Unverified shared note",
+            excerpt="Do not expose this unverified note.",
+            visibility="org",
+            authority=0.8,
+            stale=False,
+            updated_at=updated_at,
+        ),
+        KnowledgeEvidence(
+            evidence_id="stale-evidence",
+            source_type="memory",
+            source_ref="memory:stale",
+            title="Stale shared note",
+            excerpt="Do not expose this stale note.",
+            visibility="org",
+            authority=1.0,
+            stale=True,
+            updated_at=updated_at,
+        ),
+        KnowledgeEvidence(
+            evidence_id="missing-metadata-evidence",
+            source_type="memory",
+            source_ref="memory:missing-metadata",
+            title="Metadata-free shared note",
+            excerpt="Do not expose this metadata-free note.",
+            visibility="org",
+            authority=1.0,
+            # Deliberately omit ``stale``. A source adapter that only gets a
+            # default value is not trusted as having supplied freshness state.
+            updated_at=updated_at,
+        ),
+        KnowledgeEvidence(
+            evidence_id="missing-timestamp-evidence",
+            source_type="memory",
+            source_ref="memory:missing-timestamp",
+            title="Timestamp-free shared note",
+            excerpt="Do not expose this timestamp-free note.",
+            visibility="org",
+            authority=1.0,
+            stale=False,
+        ),
+        KnowledgeEvidence(
+            evidence_id="non-memory-evidence",
+            source_type="outline",
+            source_ref="outline:shared",
+            title="Unexpected source type",
+            excerpt="Do not expose this unexpected source type.",
+            visibility="org",
+            authority=1.0,
+            stale=False,
+            updated_at=updated_at,
         ),
     ]
     search = jobs._build_wiki_org_knowledge_search(store)
@@ -426,6 +566,9 @@ def test_worker_org_knowledge_callback_excludes_private_and_project_evidence() -
     assert materials[0].source.title == "Shared deployment decision"
     assert materials[0].text == "Use the shared release checklist."
     assert materials[0].visibility == "org"
+    assert materials[0].knowledge_authority == 0.9
+    assert materials[0].knowledge_stale is False
+    assert materials[0].knowledge_updated_at == updated_at
 
 
 def test_worker_authoring_job_never_calls_publish(

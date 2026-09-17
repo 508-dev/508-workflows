@@ -92,9 +92,15 @@ from five08.wiki_editing.models import (
     WikiEditCreateRequest,
     WikiEditNotFoundError,
     WikiEditPermissionError,
+    WikiEditReviewAcknowledgementRequest,
     WikiEditResponse,
     WikiEditRevisionRequest,
     WikiEditStateError,
+)
+from five08.wiki_editing.assertions import (
+    WIKI_ASSERTION_HEADER,
+    WikiAssertionError,
+    verify_wiki_action_assertion,
 )
 from five08.wiki_editing.service import (
     WikiEditingConfigurationError,
@@ -156,6 +162,7 @@ from five08.backend.auth import (
     normalize_next_path,
 )
 from five08.clients.erpnext import ERPNextAPIError, ERPNextClient
+from five08.clients.outline import OutlineAPIError, OutlineClient
 from five08.backend.routes import BackendRouteSurface, register_routes
 from five08.backend.schemas import (
     AgentConfirmationRequest,
@@ -183,6 +190,7 @@ from five08.backend.schemas import (
     DashboardProjectUserRequest,
     DashboardProjectWikiMatchRequest,
     DiscordLinkCreateRequest,
+    OutlineInvitationRequest,
     ResumeApplyRequest,
     ResumeExtractRequest,
 )
@@ -9039,6 +9047,82 @@ async def audit_event_handler(request: Request) -> JSONResponse:
     )
 
 
+def _outline_invitation_client() -> OutlineClient:
+    """Build the backend-owned Outline client for fixed member invitations."""
+    api_key = str(settings.outline_admin_api_key or "").strip()
+    if not api_key:
+        raise ValueError("OUTLINE_ADMIN_API_KEY is not configured.")
+
+    base_url = str(settings.outline_base_url or "").strip()
+    return OutlineClient(
+        api_key=api_key,
+        base_url=base_url or "https://app.getoutline.com",
+        timeout_seconds=max(1.0, float(settings.outline_api_timeout_seconds)),
+    )
+
+
+async def outline_invitation_readiness_handler(request: Request) -> JSONResponse:
+    """Confirm that the backend can own the next Outline invitation.
+
+    The Discord combined account-provisioning flow calls this before creating
+    a mailbox or SSO account, so a missing backend-only credential cannot
+    leave those durable resources created without the required wiki invite.
+    It deliberately validates local backend configuration only; sending a
+    synthetic provider invitation would itself be a side effect.
+    """
+    if not _is_authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    try:
+        await asyncio.to_thread(_outline_invitation_client)
+    except ValueError:
+        logger.error("Outline invitation is unavailable: missing backend configuration")
+        return JSONResponse({"error": "outline_invite_unavailable"}, status_code=503)
+
+    return JSONResponse({"status": "ready"})
+
+
+async def outline_invitation_handler(request: Request) -> JSONResponse:
+    """Send one member-only Outline invitation for an authenticated bot request."""
+    if not _is_authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    try:
+        payload_data = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid_json"}, status_code=400)
+
+    if not isinstance(payload_data, dict):
+        return JSONResponse({"error": "payload_must_be_object"}, status_code=400)
+
+    try:
+        payload = OutlineInvitationRequest.model_validate(payload_data)
+        email = validate_plain_email(payload.email, "email")
+    except (ValidationError, ValueError):
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
+
+    name = (payload.name or "").strip() or email.partition("@")[0]
+    try:
+        await asyncio.to_thread(
+            _outline_invitation_client().invite_user,
+            email=email,
+            name=name,
+            role="member",
+        )
+    except ValueError:
+        logger.error("Outline invitation is unavailable: missing backend configuration")
+        return JSONResponse({"error": "outline_invite_unavailable"}, status_code=503)
+    except OutlineAPIError:
+        logger.warning(
+            "Outline invitation failed masked_email=%s",
+            mask_email(email),
+            exc_info=True,
+        )
+        return JSONResponse({"error": "outline_invite_failed"}, status_code=502)
+
+    return JSONResponse({"status": "invited"}, status_code=201)
+
+
 async def _write_agent_audit_event(
     *,
     context: AgentIdentityContext,
@@ -9867,6 +9951,8 @@ def _wiki_edit_error_response(
 
 async def _wiki_payload_or_error(
     request: Request,
+    *,
+    expected_path: str,
 ) -> tuple[dict[str, Any] | None, JSONResponse | None]:
     try:
         payload = await request.json()
@@ -9874,6 +9960,29 @@ async def _wiki_payload_or_error(
         return None, JSONResponse({"error": "invalid_json"}, status_code=400)
     if not isinstance(payload, dict):
         return None, JSONResponse({"error": "payload_must_be_object"}, status_code=400)
+    assertion_secret = str(
+        getattr(settings, "wiki_editing_assertion_secret", "") or ""
+    ).strip()
+    if not assertion_secret:
+        logger.error(
+            "Rejecting wiki action: WIKI_EDITING_ASSERTION_SECRET is not configured"
+        )
+        return None, JSONResponse(
+            {"error": "wiki_editing_unavailable"}, status_code=503
+        )
+    try:
+        verify_wiki_action_assertion(
+            request.headers.get(WIKI_ASSERTION_HEADER),
+            assertion_secret,
+            method=request.method,
+            path=expected_path,
+            payload=payload,
+        )
+    except WikiAssertionError:
+        # Do not accept caller-supplied roles or Discord user IDs based solely
+        # on the broadly used API secret. The separate assertion binds the
+        # exact body to a short-lived bot-issued authorization.
+        return None, JSONResponse({"error": "invalid_wiki_assertion"}, status_code=401)
     return payload, None
 
 
@@ -9894,11 +10003,51 @@ async def _enqueue_wiki_authoring_job(
     )
 
 
+async def _wiki_enqueue_failure_response(
+    *,
+    context: AgentIdentityContext,
+    operation: Literal["create", "revise"],
+    proposal_id: str,
+    source_count: int | None = None,
+) -> JSONResponse:
+    """Turn a failed broker handoff into a reviewable, non-orphaned draft."""
+    try:
+        response = await asyncio.to_thread(
+            _get_wiki_editing_service().mark_authoring_enqueue_failed,
+            WikiEditActionRequest(context=context, proposal_id=proposal_id),
+        )
+    except Exception:
+        logger.exception(
+            "Failed to record wiki authoring queue failure proposal_id=%s",
+            _safe_wiki_audit_id(proposal_id),
+        )
+        _schedule_wiki_edit_audit(
+            context=context,
+            operation=operation,
+            result=AuditResult.ERROR,
+            proposal_id=proposal_id,
+            source_count=source_count,
+        )
+        return JSONResponse({"error": "wiki_authoring_enqueue_failed"}, status_code=503)
+
+    _schedule_wiki_edit_audit(
+        context=context,
+        operation=operation,
+        result=AuditResult.ERROR,
+        response=response,
+        source_count=source_count,
+    )
+    return JSONResponse(response.model_dump(mode="json"), status_code=202)
+
+
 async def wiki_create_handler(request: Request) -> JSONResponse:
     """Persist a requested wiki update and enqueue only its authoring phase."""
     if not _is_authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
-    payload_data, payload_error = await _wiki_payload_or_error(request)
+    payload_data, payload_error = await _wiki_payload_or_error(
+        request,
+        expected_path="/wiki/updates",
+    )
     if payload_error is not None:
         return payload_error
     assert payload_data is not None
@@ -9945,15 +10094,11 @@ async def wiki_create_handler(request: Request) -> JSONResponse:
                 "Failed to enqueue wiki authoring proposal_id=%s",
                 _safe_wiki_audit_id(proposal_id),
             )
-            _schedule_wiki_edit_audit(
+            return await _wiki_enqueue_failure_response(
                 context=payload.context,
                 operation="create",
-                result=AuditResult.ERROR,
-                response=response,
+                proposal_id=proposal_id,
                 source_count=source_count,
-            )
-            return JSONResponse(
-                {"error": "wiki_authoring_enqueue_failed"}, status_code=503
             )
 
     _schedule_wiki_edit_audit(
@@ -9973,7 +10118,10 @@ async def wiki_revise_handler(request: Request, proposal_id: str) -> JSONRespons
     """Reserve and enqueue one immutable revision of a wiki proposal."""
     if not _is_authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
-    payload_data, payload_error = await _wiki_payload_or_error(request)
+    payload_data, payload_error = await _wiki_payload_or_error(
+        request,
+        expected_path=f"/wiki/updates/{proposal_id}/revise",
+    )
     if payload_error is not None:
         return payload_error
     assert payload_data is not None
@@ -10020,14 +10168,10 @@ async def wiki_revise_handler(request: Request, proposal_id: str) -> JSONRespons
                 "Failed to enqueue wiki authoring proposal_id=%s",
                 _safe_wiki_audit_id(queued_proposal_id),
             )
-            _schedule_wiki_edit_audit(
+            return await _wiki_enqueue_failure_response(
                 context=payload.context,
                 operation="revise",
-                result=AuditResult.ERROR,
-                response=response,
-            )
-            return JSONResponse(
-                {"error": "wiki_authoring_enqueue_failed"}, status_code=503
+                proposal_id=queued_proposal_id,
             )
 
     _schedule_wiki_edit_audit(
@@ -10042,6 +10186,49 @@ async def wiki_revise_handler(request: Request, proposal_id: str) -> JSONRespons
     )
 
 
+async def wiki_acknowledge_review_handler(
+    request: Request,
+    proposal_id: str,
+) -> JSONResponse:
+    """Record the requester's acknowledgement of one complete review packet."""
+    if not _is_authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    payload_data, payload_error = await _wiki_payload_or_error(
+        request,
+        expected_path=f"/wiki/updates/{proposal_id}/acknowledge-review",
+    )
+    if payload_error is not None:
+        return payload_error
+    assert payload_data is not None
+    try:
+        payload = WikiEditReviewAcknowledgementRequest.model_validate(
+            {**payload_data, "proposal_id": proposal_id}
+        )
+    except ValidationError:
+        return JSONResponse({"error": "invalid_payload"}, status_code=422)
+
+    try:
+        response = await asyncio.to_thread(
+            _get_wiki_editing_service().acknowledge_review,
+            payload,
+        )
+    except Exception as exc:
+        return _wiki_edit_error_response(
+            context=payload.context,
+            operation="acknowledge_review",
+            error=exc,
+            proposal_id=payload.proposal_id,
+        )
+
+    _schedule_wiki_edit_audit(
+        context=payload.context,
+        operation="acknowledge_review",
+        result=AuditResult.SUCCESS,
+        response=response,
+    )
+    return JSONResponse(response.model_dump(mode="json"), status_code=200)
+
+
 async def _wiki_action_handler(
     request: Request,
     proposal_id: str,
@@ -10051,7 +10238,10 @@ async def _wiki_action_handler(
     """Execute a protected proposal action after reconstructing its typed input."""
     if not _is_authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
-    payload_data, payload_error = await _wiki_payload_or_error(request)
+    payload_data, payload_error = await _wiki_payload_or_error(
+        request,
+        expected_path=f"/wiki/updates/{proposal_id}/{operation}",
+    )
     if payload_error is not None:
         return payload_error
     assert payload_data is not None

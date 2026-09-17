@@ -331,6 +331,8 @@ def _build_wiki_editing_service() -> WikiEditingService:
             float,
             settings.wiki_omp_authoring_timeout_seconds,
         ),
+        outline_client_factory=outline_client_factory,
+        allowed_collection_id=str(settings.wiki_outline_collection_id or ""),
         knowledge_search=_build_wiki_org_knowledge_search(knowledge_store),
     )
     return WikiEditingService(
@@ -361,6 +363,38 @@ def author_wiki_edit_proposal_job(
         organization_id=normalized_organization_id,
     )
     return response.model_dump(mode="json")
+
+
+def mark_wiki_authoring_retry_exhausted(
+    proposal_id: str,
+    organization_id: str,
+) -> None:
+    """Make an exhausted sandbox retry visible as a revisable draft failure.
+
+    This lifecycle bridge intentionally does not construct the authoring
+    service: a missing/invalid sandbox credential is itself a retryable job
+    failure, and rebuilding that service here would leave its queued proposal
+    orphaned after the generic job becomes dead. The Postgres store is the only
+    dependency required to move ``queued`` to a revisable ``failed`` state.
+    """
+    normalized_proposal_id = proposal_id.strip()
+    normalized_organization_id = organization_id.strip()
+    if not normalized_proposal_id or not normalized_organization_id:
+        raise ValueError("Wiki authoring job requires proposal and organization IDs.")
+    store = PostgresWikiEditingStore(settings)
+    proposal = store.get_proposal(
+        normalized_proposal_id,
+        organization_id=normalized_organization_id,
+    )
+    if proposal is None:
+        raise ValueError("Wiki proposal was not found.")
+    if proposal.status != "queued":
+        return
+    store.fail_proposal(
+        proposal.id,
+        organization_id=normalized_organization_id,
+        failure_code="authoring_retry_exhausted",
+    )
 
 
 JOB_FUNCTIONS: dict[str, Callable[..., dict[str, Any]]] = {

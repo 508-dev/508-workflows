@@ -1,10 +1,13 @@
 """Unit tests for worker actor job state transitions."""
 
 from datetime import datetime, timezone
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from five08.queue import JobRecord, JobStatus
 from five08.worker import actors
+from five08.worker import jobs
+from five08.worker.config import WorkerSettings
 from five08.worker.crm.docuseal_processor import (
     DocusealAgreementNonRetryableError,
     DocusealAgreementProcessingError,
@@ -115,3 +118,110 @@ def test_run_job_marks_dead_for_non_retryable_docuseal_error() -> None:
         call_args.kwargs["last_error"]
         == "DocusealAgreementNonRetryableError: invalid_completed_at for contact_id=c-1"
     )
+
+
+def test_exhausted_wiki_authoring_marks_the_proposal_revisable() -> None:
+    now = datetime.now(timezone.utc)
+    job = JobRecord(
+        id="job-wiki-1",
+        type="author_wiki_edit_proposal_job",
+        status=JobStatus.QUEUED,
+        payload={
+            "args": ["proposal-1", "guild-1"],
+            "kwargs": {},
+        },
+        idempotency_key=None,
+        attempts=0,
+        max_attempts=1,
+        run_after=None,
+        locked_at=None,
+        locked_by=None,
+        last_error=None,
+        created_at=now,
+        updated_at=now,
+    )
+
+    def _raise_transient(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("sandbox unavailable")
+
+    with (
+        patch("five08.worker.actors.get_job", return_value=job),
+        patch("five08.worker.actors.mark_job_running"),
+        patch("five08.worker.actors.mark_job_succeeded") as mock_mark_succeeded,
+        patch("five08.worker.actors.mark_job_dead") as mock_mark_dead,
+        patch(
+            "five08.worker.actors.mark_wiki_authoring_retry_exhausted"
+        ) as mock_mark_proposal,
+        patch.dict(
+            actors._HANDLERS,
+            {"author_wiki_edit_proposal_job": _raise_transient},
+            clear=False,
+        ),
+    ):
+        actors._run_job("job-wiki-1")
+
+    mock_mark_succeeded.assert_not_called()
+    mock_mark_proposal.assert_called_once_with("proposal-1", "guild-1")
+    mock_mark_dead.assert_called_once()
+
+
+def test_exhausted_wiki_authoring_with_missing_token_marks_proposal_revisable(
+    monkeypatch,
+) -> None:
+    """Configuration failure must not strand a queue-dead proposal as queued."""
+    now = datetime.now(timezone.utc)
+    job = JobRecord(
+        id="job-wiki-missing-token",
+        type="author_wiki_edit_proposal_job",
+        status=JobStatus.QUEUED,
+        payload={
+            "args": ["proposal-missing-token", "guild-1"],
+            "kwargs": {},
+        },
+        idempotency_key=None,
+        attempts=0,
+        max_attempts=1,
+        run_after=None,
+        locked_at=None,
+        locked_by=None,
+        last_error=None,
+        created_at=now,
+        updated_at=now,
+    )
+    worker_settings = WorkerSettings(
+        wiki_editing_enabled=True,
+        wiki_omp_sandbox_url="http://wiki_omp_sandbox:8080",
+        wiki_omp_sandbox_token=None,
+    )
+    proposal = SimpleNamespace(id="proposal-missing-token", status="queued")
+    store = Mock()
+    store.get_proposal.return_value = proposal
+    monkeypatch.setattr(jobs, "settings", worker_settings)
+    monkeypatch.setattr(jobs, "PostgresWikiEditingStore", lambda _settings: store)
+
+    with (
+        patch("five08.worker.actors.get_job", return_value=job),
+        patch("five08.worker.actors.mark_job_running"),
+        patch("five08.worker.actors.mark_job_succeeded") as mock_mark_succeeded,
+        patch("five08.worker.actors.mark_job_dead") as mock_mark_dead,
+        patch("five08.worker.actors._schedule_retry") as mock_schedule_retry,
+        patch.dict(
+            actors._HANDLERS,
+            {"author_wiki_edit_proposal_job": jobs.author_wiki_edit_proposal_job},
+            clear=False,
+        ),
+    ):
+        actors._run_job(job.id)
+
+    mock_mark_succeeded.assert_not_called()
+    mock_schedule_retry.assert_not_called()
+    store.get_proposal.assert_called_once_with(
+        "proposal-missing-token",
+        organization_id="guild-1",
+    )
+    store.fail_proposal.assert_called_once_with(
+        "proposal-missing-token",
+        organization_id="guild-1",
+        failure_code="authoring_retry_exhausted",
+    )
+    mock_mark_dead.assert_called_once()

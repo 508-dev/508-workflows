@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from five08.langfuse import get_langfuse_client
 from five08.agent.tools import ToolRuntimeConfig
+from five08.discord_bot.config import Settings as DiscordBotSettings
 from five08.settings import SharedSettings
 
 
@@ -148,6 +149,38 @@ def test_shared_settings_accepts_legacy_github_app_id_alias() -> None:
     settings = SharedSettings(**{"GITHUB_APP_ID": "123"})
 
     assert settings.github_app_client_id == "123"
+
+
+def test_discord_settings_never_exposes_privileged_outline_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bot must not regain writer credentials from runtime config."""
+    from five08 import runtime_config
+
+    resolved_attributes: list[str] = []
+
+    def unexpected_runtime_value(
+        _settings: object,
+        attribute: str,
+        default: object,
+    ) -> object:
+        resolved_attributes.append(attribute)
+        return default
+
+    monkeypatch.setattr(
+        runtime_config,
+        "resolve_runtime_setting_value",
+        unexpected_runtime_value,
+    )
+    settings = DiscordBotSettings(
+        outline_admin_api_key="environment-admin-key",
+        legacy_outline_admin_api_key="legacy-admin-key",
+    )
+
+    assert settings.outline_admin_api_key is None
+    assert settings.legacy_outline_admin_api_key is None
+    assert settings.outline_api_key is None
+    assert resolved_attributes == []
 
 
 def test_shared_settings_accept_newsletter_sync_env_aliases() -> None:

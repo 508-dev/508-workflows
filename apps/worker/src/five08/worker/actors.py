@@ -24,6 +24,7 @@ from five08.worker.config import settings
 from five08.worker.crm.docuseal_processor import DocusealAgreementNonRetryableError
 from five08.worker.jobs import (
     JOB_FUNCTIONS,
+    mark_wiki_authoring_retry_exhausted,
 )
 
 from five08.logging import configure_observability
@@ -51,6 +52,7 @@ _JOB_WEBHOOK_LOGGER = DiscordWebhookLogger(
 _QUEUE_NAME = settings.worker_queue_name
 _HANDLERS = JOB_FUNCTIONS
 _SYNC_PEOPLE_JOB_NAME: Final[str] = "sync_people_from_crm_job"
+_WIKI_AUTHORING_JOB_NAME: Final[str] = "author_wiki_edit_proposal_job"
 
 
 def _job_attempt_display(attempts: int) -> int:
@@ -209,6 +211,27 @@ def _schedule_retry(job: JobRecord, attempts: int, *, error: str) -> None:
     execute_job.send_with_options(args=(job_id,), delay=delay_seconds * 1000)
 
 
+def _mark_exhausted_wiki_authoring(job: JobRecord) -> None:
+    """Best-effort bridge from generic queue exhaustion to proposal state."""
+    if job.type != _WIKI_AUTHORING_JOB_NAME:
+        return
+    try:
+        args, kwargs = _extract_call_args(job)
+        if kwargs or len(args) != 2:
+            raise ValueError("wiki authoring job payload must have two positional IDs")
+        proposal_id, organization_id = args
+        if not isinstance(proposal_id, str) or not isinstance(organization_id, str):
+            raise ValueError("wiki authoring job IDs must be strings")
+        mark_wiki_authoring_retry_exhausted(proposal_id, organization_id)
+    except Exception:
+        # The original worker job still becomes dead. This callback must not
+        # mask its error or make generic queue recovery less reliable.
+        logger.exception(
+            "Failed to mark exhausted wiki authoring proposal job_id=%s",
+            job.id,
+        )
+
+
 def _run_job(job_id: str) -> None:
     job = get_job(settings, job_id)
     if job is None:
@@ -304,6 +327,7 @@ def _run_job(job_id: str) -> None:
         )
 
         if next_attempt >= job.max_attempts:
+            _mark_exhausted_wiki_authoring(job)
             mark_job_dead(
                 settings,
                 job_id,

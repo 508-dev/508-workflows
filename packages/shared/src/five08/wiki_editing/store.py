@@ -97,6 +97,15 @@ class WikiEditingStore(Protocol):
     ) -> WikiAuthoringWorkItem | None:
         """Claim a bounded OMP authoring lease for one proposal revision."""
 
+    def release_authoring(
+        self,
+        proposal_id: str,
+        *,
+        organization_id: str,
+        now: datetime | None = None,
+    ) -> WikiEditProposal:
+        """Release a retryable authoring lease without changing its revision."""
+
     def complete_proposal(
         self,
         proposal_id: str,
@@ -621,6 +630,28 @@ class InMemoryWikiEditingStore:
                 request=request.model_copy(deep=True),
                 proposal=proposal.model_copy(deep=True),
             )
+
+    def release_authoring(
+        self,
+        proposal_id: str,
+        *,
+        organization_id: str,
+        now: datetime | None = None,
+    ) -> WikiEditProposal:
+        comparison_time = _now(now)
+        with self._lock:
+            proposal = self._required_proposal(proposal_id, organization_id)
+            ensure_proposal_transition(proposal.status, "queued")
+            released = proposal.model_copy(
+                update={
+                    "status": "queued",
+                    "authoring_started_at": None,
+                    "updated_at": comparison_time,
+                },
+                deep=True,
+            )
+            self._proposals[proposal_id] = released
+            return _public_proposal(released).model_copy(deep=True)
 
     def complete_proposal(
         self,
@@ -1246,6 +1277,33 @@ class PostgresWikiEditingStore:
                     request=_authoring_request_from_row(request_row),
                     proposal=_authoring_proposal_from_row(row),
                 )
+
+    def release_authoring(
+        self,
+        proposal_id: str,
+        *,
+        organization_id: str,
+        now: datetime | None = None,
+    ) -> WikiEditProposal:
+        comparison_time = _now(now)
+        with self._connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cursor:
+                row = self._locked_proposal(cursor, proposal_id, organization_id)
+                proposal = _proposal_from_row(row)
+                ensure_proposal_transition(proposal.status, "queued")
+                cursor.execute(
+                    """
+                    UPDATE wiki_edit_proposals
+                    SET status = 'queued', authoring_started_at = NULL, updated_at = %s
+                    WHERE id = %s::uuid
+                    RETURNING *
+                    """,
+                    (comparison_time, proposal_id),
+                )
+                released = cursor.fetchone()
+                if released is None:  # pragma: no cover - locked row invariant
+                    raise RuntimeError("unable to release wiki proposal authoring")
+                return _proposal_from_row(released)
 
     def complete_proposal(
         self,

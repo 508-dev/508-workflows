@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from five08.agent import AgentIdentityContext
 
@@ -34,6 +34,15 @@ class DiscordLinkCreateRequest(BaseModel):
     next_path: str | None = None
     discord_display_name: str | None = None
     discord_roles: list[str] = Field(default_factory=list)
+
+
+class OutlineInvitationRequest(BaseModel):
+    """A fixed-purpose request to send one member invitation through Outline."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    email: str = Field(min_length=1, max_length=320)
+    name: str | None = Field(default=None, max_length=256)
 
 
 class AgentConfirmationRequest(BaseModel):

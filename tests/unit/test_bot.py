@@ -184,7 +184,7 @@ class TestBot508:
 
         assert config.backend_api_base_url == "http://127.0.0.1:8090"
 
-    def test_outline_admin_api_key_prefers_new_name_and_supports_legacy_alias(
+    def test_outline_admin_api_key_is_never_exposed_to_the_bot(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ):
@@ -193,20 +193,20 @@ class TestBot508:
 
         legacy_config = Settings()
 
-        assert legacy_config.outline_admin_api_key == "legacy-admin-key"
-        assert legacy_config.outline_api_key == "legacy-admin-key"
+        assert legacy_config.outline_admin_api_key is None
+        assert legacy_config.outline_api_key is None
 
         monkeypatch.setenv("OUTLINE_ADMIN_API_KEY", " ")
 
         blank_new_config = Settings()
 
-        assert blank_new_config.outline_admin_api_key == "legacy-admin-key"
+        assert blank_new_config.outline_admin_api_key is None
 
         monkeypatch.setenv("OUTLINE_ADMIN_API_KEY", "preferred-admin-key")
 
         config = Settings()
 
-        assert config.outline_admin_api_key == "preferred-admin-key"
+        assert config.outline_admin_api_key is None
 
     def test_outline_contents_api_key_is_shared_with_the_bot(
         self,

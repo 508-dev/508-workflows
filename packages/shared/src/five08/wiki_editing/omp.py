@@ -33,6 +33,15 @@ class WikiAuthoringUnavailableError(WikiAuthoringError):
     """The isolated authoring runtime is not configured or cannot be reached."""
 
 
+class WikiAuthoringTransientError(WikiAuthoringUnavailableError):
+    """A retryable sandbox transport or capacity failure.
+
+    This is deliberately distinct from a malformed draft or an invalid sandbox
+    configuration. Retrying a draft phase is safe because it has no publishing
+    capability, but callers must release the durable authoring lease first.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class WikiAuthoringMaterial:
     """One backend-approved read-only item eligible for sandbox authoring."""

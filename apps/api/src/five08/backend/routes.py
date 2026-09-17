@@ -95,12 +95,15 @@ class BackendRouteSurface(Protocol):
     knowledge_capture_confirmation_handler: RouteHandler
     knowledge_capture_handler: RouteHandler
     knowledge_query_handler: RouteHandler
+    outline_invitation_handler: RouteHandler
+    outline_invitation_readiness_handler: RouteHandler
     process_contact_handler: RouteHandler
     rerun_job_handler: RouteHandler
     resume_apply_handler: RouteHandler
     resume_extract_handler: RouteHandler
     sync_people_handler: RouteHandler
     tally_intake_webhook_handler: RouteHandler
+    wiki_acknowledge_review_handler: RouteHandler
     wiki_cancel_handler: RouteHandler
     wiki_create_handler: RouteHandler
     wiki_publish_handler: RouteHandler
@@ -219,12 +222,15 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
     knowledge_capture_confirmation_handler = api.knowledge_capture_confirmation_handler
     knowledge_capture_handler = api.knowledge_capture_handler
     knowledge_query_handler = api.knowledge_query_handler
+    outline_invitation_handler = api.outline_invitation_handler
+    outline_invitation_readiness_handler = api.outline_invitation_readiness_handler
     process_contact_handler = api.process_contact_handler
     rerun_job_handler = api.rerun_job_handler
     resume_apply_handler = api.resume_apply_handler
     resume_extract_handler = api.resume_extract_handler
     sync_people_handler = api.sync_people_handler
     tally_intake_webhook_handler = api.tally_intake_webhook_handler
+    wiki_acknowledge_review_handler = api.wiki_acknowledge_review_handler
     wiki_cancel_handler = api.wiki_cancel_handler
     wiki_create_handler = api.wiki_create_handler
     wiki_publish_handler = api.wiki_publish_handler
@@ -573,6 +579,16 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
     )
     app.add_api_route("/sync/people", sync_people_handler, methods=["POST"])
     app.add_api_route("/audit/events", audit_event_handler, methods=["POST"])
+    app.add_api_route(
+        "/outline/invitations",
+        outline_invitation_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/outline/invitations/ready",
+        outline_invitation_readiness_handler,
+        methods=["GET"],
+    )
     app.add_api_route("/agent/requests", agent_request_handler, methods=["POST"])
     app.add_api_route(
         "/agent/confirmations/{plan_id}",
@@ -603,6 +619,11 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
     app.add_api_route(
         "/wiki/updates/{proposal_id}/revise",
         wiki_revise_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/wiki/updates/{proposal_id}/acknowledge-review",
+        wiki_acknowledge_review_handler,
         methods=["POST"],
     )
     app.add_api_route(

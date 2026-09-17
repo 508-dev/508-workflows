@@ -18,7 +18,7 @@ from five08.wiki_editing.models import (
     WikiEditRevisionRequest,
     WikiOmpRunMetadata,
 )
-from five08.wiki_editing.omp import WikiOmpDraft
+from five08.wiki_editing.omp import WikiAuthoringTransientError, WikiOmpDraft
 from five08.wiki_editing.service import (
     WikiEditingService,
     WikiEditingValidationError,
@@ -96,6 +96,14 @@ class _Author:
         )
 
 
+class _TransientAuthor:
+    def author(
+        self, _work_item: object, *, metadata: WikiOmpRunMetadata
+    ) -> WikiOmpDraft:
+        del metadata
+        raise WikiAuthoringTransientError("sandbox is starting")
+
+
 def _settings(**overrides: Any) -> SimpleNamespace:
     values = {
         "discord_server_id": "guild-1",
@@ -127,7 +135,7 @@ def _context(*, user_id: str = "writer") -> AgentIdentityContext:
 
 def _service(
     outline: _Outline,
-    author: _Author | None = None,
+    author: object | None = None,
 ) -> WikiEditingService:
     return WikiEditingService(
         settings=_settings(),  # type: ignore[arg-type]
@@ -217,6 +225,35 @@ def test_failed_queue_handoff_becomes_a_revisionable_proposal() -> None:
 
     assert failed.status == "failed"
     assert failed.action == "revise"
+
+
+def test_transient_authoring_releases_the_lease_for_queue_retry() -> None:
+    outline = _Outline()
+    service = _service(outline, _TransientAuthor())
+    started = service.create(_create_request())
+    assert started.response.proposal_id is not None
+
+    with pytest.raises(WikiAuthoringTransientError, match="sandbox is starting"):
+        service.author_proposal(
+            started.response.proposal_id,
+            organization_id="guild-1",
+        )
+
+    released = service.store.get_proposal(
+        started.response.proposal_id,
+        organization_id="guild-1",
+    )
+    assert released is not None
+    assert released.status == "queued"
+    assert released.authoring_started_at is None
+    assert released.omp_metadata is not None
+
+    exhausted = service.mark_authoring_retry_exhausted(
+        started.response.proposal_id,
+        organization_id="guild-1",
+    )
+    assert exhausted.status == "failed"
+    assert exhausted.action == "revise"
 
 
 def test_revision_preserves_immutable_history_and_passes_feedback_to_author() -> None:

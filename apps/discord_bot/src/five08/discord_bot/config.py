@@ -5,9 +5,10 @@ This module uses Pydantic settings to handle environment variables
 and configuration with type validation and default values.
 """
 
+from typing import ClassVar
 from urllib.parse import urlparse
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, model_validator
 
 from five08.openai_fallback import (
     OpenAICompatibleProvider,
@@ -26,6 +27,20 @@ class Settings(SharedSettings):
     """
 
     discord_bot_token: str = ""
+
+    # The bot sends narrow backend requests for Outline invitations and wiki
+    # actions. It must never recover the privileged Outline writer credential
+    # through SharedSettings' database-backed runtime-config fallback.
+    runtime_config_overlay_excluded_attributes: ClassVar[frozenset[str]] = (
+        SharedSettings.runtime_config_overlay_excluded_attributes
+        | frozenset(
+            {
+                "legacy_outline_admin_api_key",
+                "outline_admin_api_key",
+                "outline_api_key",
+            }
+        )
+    )
 
     discord_admin_roles: str = "Admin,Owner"
     discord_default_job_forum_channels: str = "gigs:part_time,fulltime-roles:full_time"
@@ -62,6 +77,13 @@ class Settings(SharedSettings):
     resume_ai_base_url: str | None = None
     resume_ai_model: str = "gpt-4.1-mini"
     resume_extractor_max_tokens: int = 2000
+
+    @model_validator(mode="after")
+    def _remove_privileged_outline_credentials(self) -> "Settings":
+        """Make accidental bot env/dotenv inheritance non-authoritative too."""
+        object.__setattr__(self, "outline_admin_api_key", None)
+        object.__setattr__(self, "legacy_outline_admin_api_key", None)
+        return self
 
     @property
     def discord_sendmsg_character_limit(self) -> int:

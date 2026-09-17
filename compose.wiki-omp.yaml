@@ -1,13 +1,28 @@
 # Explicit opt-in overlay for the isolated OMP authoring sandbox.
 #
-# Start it only with a reviewed digest and deployment-managed secrets:
+# Start it only with deployment-managed secrets:
 #   docker compose -f compose.yaml -f compose.wiki-omp.yaml up -d
 #
 # This file is intentionally separate from compose.yaml. A normal stack must
-# not interpolate or receive the sandbox image/provider credential at all.
+# not receive the sandbox/provider credentials at all.
 services:
+  worker:
+    environment:
+      # Enabling the overlay always selects the local isolated sidecar rather
+      # than a caller-supplied HTTPS endpoint.
+      WIKI_OMP_SANDBOX_URL: http://wiki_omp_sandbox:8080
+      WIKI_OMP_SANDBOX_TOKEN: ${WIKI_OMP_SANDBOX_TOKEN:?Set WIKI_OMP_SANDBOX_TOKEN}
+    depends_on:
+      wiki_omp_sandbox:
+        condition: service_healthy
+
   wiki_omp_sandbox:
-    image: ${WIKI_OMP_SANDBOX_IMAGE:?Set WIKI_OMP_SANDBOX_IMAGE to a reviewed image digest}
+    build:
+      context: .
+      dockerfile: apps/wiki_omp_sandbox/Dockerfile
+    # The source Dockerfile pins and verifies the OMP binary. In production,
+    # promote the resulting image by digest through the deployment system.
+    image: ${WIKI_OMP_SANDBOX_IMAGE:-508-wiki-omp-sandbox:v18.0.3}
     restart: unless-stopped
     init: true
     read_only: true
@@ -19,24 +34,79 @@ services:
     pids_limit: 128
     mem_limit: 1024m
     tmpfs:
-      - /tmp:rw,noexec,nosuid,size=64m
+      - /tmp:rw,noexec,nosuid,nodev,size=128m,uid=65532,gid=65532,mode=1770
     environment:
       WIKI_OMP_SANDBOX_LISTEN_ADDR: 0.0.0.0:8080
       WIKI_OMP_SANDBOX_TOKEN: ${WIKI_OMP_SANDBOX_TOKEN:?Set WIKI_OMP_SANDBOX_TOKEN}
-      WIKI_OMP_SANDBOX_PROTOCOL_VERSION: v1
-      # The reviewed sandbox image must read its separate provider credential
-      # from this file. Do not pass the worker's OPENROUTER_API_KEY or any
-      # backend credential into this service.
+      WIKI_OMP_SANDBOX_RUN_TIMEOUT_SECONDS: ${WIKI_OMP_SANDBOX_RUN_TIMEOUT_SECONDS:-270}
+      WIKI_OMP_SANDBOX_MAX_CONCURRENCY: ${WIKI_OMP_SANDBOX_MAX_CONCURRENCY:-1}
+      # The sidecar reads its provider credential once, then starts OMP with a
+      # new empty home/cwd and a minimal child environment. Do not pass the
+      # worker's OPENROUTER_API_KEY or any backend credential into this service.
       OPENROUTER_API_KEY_FILE: /run/secrets/openrouter_api_key
+      # The sandbox has no direct external Docker route. OMP receives this
+      # fixed internal CONNECT proxy in its minimal child environment.
+      WIKI_OMP_EGRESS_PROXY_URL: http://wiki_omp_egress_proxy:3128
     secrets:
       - source: wiki_omp_sandbox_openrouter_api_key
         target: openrouter_api_key
     networks:
       - wiki_omp_control
+      - wiki_omp_proxy
+    depends_on:
+      wiki_omp_egress_proxy:
+        condition: service_healthy
+    healthcheck:
+      test:
+        ["CMD", "python3", "-c", "from urllib.request import urlopen; assert urlopen('http://127.0.0.1:8080/health', timeout=3).status == 200"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
+
+  wiki_omp_egress_proxy:
+    # This service uses the same reviewed image but has no OMP/provider
+    # credentials. It implements a fixed OpenRouter-only HTTPS CONNECT proxy.
+    build:
+      context: .
+      dockerfile: apps/wiki_omp_sandbox/Dockerfile
+    image: ${WIKI_OMP_SANDBOX_IMAGE:-508-wiki-omp-sandbox:v18.0.3}
+    entrypoint: ["python3", "/app/omp_egress_proxy.py"]
+    restart: unless-stopped
+    init: true
+    read_only: true
+    user: "65532:65532"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 256m
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m,uid=65532,gid=65532,mode=1770
+    environment:
+      WIKI_OMP_EGRESS_PROXY_LISTEN_ADDR: 0.0.0.0:3128
+      WIKI_OMP_EGRESS_PROXY_MAX_CONCURRENCY: ${WIKI_OMP_SANDBOX_MAX_CONCURRENCY:-1}
+    networks:
+      - wiki_omp_proxy
       - wiki_omp_egress
+    healthcheck:
+      test:
+        ["CMD", "python3", "-c", "import socket; s = socket.create_connection(('127.0.0.1', 3128), timeout=3); s.close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 3s
 
 networks:
-  # The sandbox alone receives outbound model-provider connectivity.
+  # The sandbox and proxy share this internal-only network. The sandbox is not
+  # attached to an external route, so its provider traffic must pass through
+  # the fixed CONNECT policy in wiki_omp_egress_proxy.
+  wiki_omp_proxy:
+    internal: true
+  # Only the destination-restricting proxy has an external Docker route.
+  # It permits OpenRouter HTTPS CONNECT traffic only and verifies that DNS
+  # answers are globally routable before opening a connection.
   wiki_omp_egress:
 
 secrets:

@@ -13,7 +13,7 @@ a request is created, revised, canceled, viewed, or published.
 ```text
 /wiki-update (explicit request)
   -> durable request + immutable queued proposal revision
-  -> worker starts bounded OMP authoring with read-only host tools
+  -> worker sends a bounded material bundle to isolated OMP authoring
   -> proposed title, summary, source references, and backend-computed diff
   -> Discord private review packet: full article + complete diff + safe links
   -> requester acknowledges that exact packet
@@ -23,29 +23,29 @@ a request is created, revised, canceled, viewed, or published.
   -> article link, conflict, or reconciliation state
 ```
 
-The authoring runtime can search and read shared Outline pages, read a selected
-organization-visible thread snapshot, search organization-visible knowledge,
-and submit one typed draft. It has no database connection, Discord token,
-Outline credential, generic HTTP tool, shell, filesystem tool, or publishing
-tool. OMP runs with no persistent session in the initial release; the durable
-Postgres workflow is the source of truth for request/proposal state.
+The credentialed worker sends OMP a fixed, backend-approved material bundle:
+the explicit request, opted-in organization-visible thread snapshot, frozen
+target article when updating, a few full related articles verified in the same
+shared Outline collection, and current high-authority organization-visible
+knowledge. Outline search excerpts are candidate selectors only and never
+leave the worker. The sandbox returns one typed draft; it has no database
+connection, Discord token, Outline credential, publishing tool, or enabled
+generic HTTP/shell/filesystem tool. The durable Postgres workflow is the source
+of truth for request/proposal state.
 
-All Outline reads are server-filtered to `WIKI_OUTLINE_COLLECTION_ID` before a
-title, excerpt, or document body reaches OMP. Search excerpts are
-discovery-only: they provide a document ID but never a citable source ID. A
-complete read is permitted only for the prevalidated update target or an ID
-from that filtered search, and private, deleted, or nonexistent IDs receive
-the same unavailable result. Sources must be opened through a read-only tool
-before the model may cite them.
+The bundle has opaque source IDs. The sandbox may cite only IDs from that
+bundle, and the worker rejects any other citation. It has no dynamic Outline or
+knowledge tool: that avoids giving untrusted OMP an oracle against privileged
+backend integrations.
 
 Organization knowledge is supplemental and fail-closed. The worker supplies
 only current organization-memory facts with a verified high-trust authority
 (`admin_confirmed` or `authoritative`); private, project-scoped, stale,
 lower-trust, or metadata-incomplete facts are omitted.
 
-The loop has a 32-call, 32-source, and 32,000-character admitted-source
-budget; a target article is capped at 16,000 characters and an opted-in public
-Discord snapshot at 12,000.
+The bundle has a 32-source and 32,000-character admitted-source budget; a
+target article is capped at 16,000 characters and an opted-in public Discord
+snapshot at 12,000.
 
 `include_current_thread` is opt-in. The bot rejects private threads from this
 path. Private memories are never selected automatically and are not shared with
@@ -96,19 +96,45 @@ operation and cannot issue a second request.
 
 ## OMP deployment boundary
 
-Install the pinned `omp-rpc` package with the worker and set
-`WIKI_OMP_COMMAND` to a single trusted OMP executable. The worker invokes it
-through `scripts/wiki-omp-launcher.sh`, which clears the process environment,
-uses a newly created empty scratch directory, and forwards only
-`OPENROUTER_API_KEY`. Run the executable in an isolated container/sidecar with
-controlled egress and no project or home-directory mount. The launcher adds
-RPC, no-session, no-native-tools, no-skills, no-rules, no-extensions, no-LSP,
-and no-PTY flags; the backend still enforces the host-tool allowlist.
+OMP never runs as a child of the API or worker. Clearing a child environment is
+not a security boundary: a same-UID child can still inspect its parent's mounts,
+network, and credentials. `WIKI_OMP_COMMAND` and `WIKI_OMP_LAUNCHER_PATH` are
+therefore rejected rather than used as a fallback.
 
-The base worker image contains the launcher but deliberately does not download
-an OMP binary at build time. Enable this feature only from a reviewed custom
-worker image (or a controlled mounted binary) that pins the OMP release, then
-set `WIKI_OMP_COMMAND` to that executable's absolute path.
+The optional `compose.wiki-omp.yaml` overlay builds the repository's separate
+sandbox image. Its Dockerfile downloads a pinned, checksum-verified OMP release
+and the sidecar starts OMP in RPC mode with tools, sessions, skills, rules,
+extensions, LSP, and PTY disabled. It then rejects the run if OMP reports any
+remaining tool through `get_state`. Each request receives a new empty
+home/config/cache/cwd and a minimal OMP child environment containing only the
+OpenRouter key, enforced internal proxy address, locale, and scratch paths;
+the sandbox bearer token and provider-key file path are not inherited by OMP.
+
+The sidecar has no `env_file`, host mounts, database/Redis/MinIO/API/Discord
+credentials, Linux capabilities, or writable root filesystem. Its OpenRouter
+credential is a Docker secret mounted only in the sidecar, not a worker
+environment variable. The worker uses a distinct narrow
+`WIKI_OMP_SANDBOX_TOKEN` to call `POST /v1/wiki-authoring/runs`; the versioned
+request contains only the bounded material bundle and the response is strict
+JSON with a single draft. Promote the resulting sandbox image by reviewed
+digest in production.
+
+The overlay places the sandbox only on Docker-internal control/proxy networks;
+it has no direct external route. A separate, uncredentialed proxy is the sole
+service attached to an external bridge. It accepts only HTTPS `CONNECT`
+requests for `openrouter.ai:443`, rejects all other HTTP traffic, and refuses
+DNS answers outside global address space before connecting. OMP receives that
+proxy URL in its otherwise minimal child environment, so a failed/misconfigured
+proxy stops authoring rather than silently granting the sandbox broad egress.
+
+The v1 request uses `Authorization: Bearer <sandbox token>` and includes the
+model/thinking selection, reserved action and target, opaque approved-material
+IDs with their bounded content, and the draft size/citation contract. The
+sandbox must return exactly `{"protocol_version":"v1","draft":{...}}`,
+where `draft` contains the reserved action/target, title, text, summary, and
+only material IDs it used. The worker disables redirects, bounds the response,
+rejects extra response fields, and validates every cited ID before persisting a
+proposal. A sandbox error cannot publish or modify Outline.
 
 Do not set `WIKI_EDITING_ENABLED=true` until all required configuration is
 present. See the [Configuration Reference](./configuration.md) for every

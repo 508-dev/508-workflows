@@ -17,6 +17,7 @@ from typing import Any, Literal
 from urllib.parse import urlsplit
 
 import discord
+import requests
 from discord import app_commands
 from discord.ext import commands
 
@@ -33,7 +34,7 @@ from five08.clients.migadu import (
     MigaduMailboxCreateRequest,
     normalize_migadu_mailbox_domain,
 )
-from five08.clients.outline import OutlineAPIError, OutlineClient
+from five08.clients.outline import OutlineAPIError
 from five08.document_text import document_file_extension, extract_document_text
 from five08.crm_normalization import (
     format_seniority_label as shared_format_seniority_label,
@@ -63,6 +64,7 @@ from five08.discord_bot.utils.role_decorators import (
     require_role,
     check_user_roles_with_hierarchy,
 )
+from five08.tls import default_ca_bundle_path
 from five08.job_match import (
     DISCORD_ROLES_NEVER_SUGGEST,
     suggest_technical_discord_roles,
@@ -145,6 +147,10 @@ class MailboxProvisioningPartialError(RuntimeError):
         self.mailbox_email = mailbox_email
         self.partial_success = partial_success
         self.newsletter_error = newsletter_error
+
+
+class OutlineInvitationPreflightError(OutlineAPIError):
+    """The backend could not guarantee the required invite before writes."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -3643,22 +3649,6 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             timeout_seconds=max(1.0, float(settings.authentik_api_timeout_seconds)),
         )
 
-    def _outline_client(self) -> OutlineClient:
-        """Build an Outline API client from shared settings."""
-        api_key = self._contact_text_value(settings.outline_admin_api_key)
-        if not api_key:
-            raise ValueError("OUTLINE_ADMIN_API_KEY is not configured.")
-
-        base_url = (
-            self._contact_text_value(settings.outline_base_url)
-            or "https://app.getoutline.com"
-        )
-        return OutlineClient(
-            api_key=api_key,
-            base_url=base_url,
-            timeout_seconds=max(1.0, float(settings.outline_api_timeout_seconds)),
-        )
-
     def _migadu_mailbox_domain(self) -> str:
         """Resolve the mailbox domain configured for new 508 addresses."""
         return normalize_migadu_mailbox_domain(settings.migadu_mailbox_domain)
@@ -3851,6 +3841,108 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             "X-API-Secret": settings.api_shared_secret,
             "Content-Type": "application/json",
         }
+
+    def _backend_url(self, path: str) -> str:
+        """Resolve one fixed internal API path from the configured base URL."""
+        base_url = str(settings.backend_api_base_url or "").strip().rstrip("/")
+        if not base_url:
+            raise ValueError(
+                "BACKEND_API_BASE_URL is required for backend API requests."
+            )
+        return f"{base_url}{path}"
+
+    def _validate_outline_invitation_backend_config(self) -> None:
+        """Fail before account provisioning when the bot cannot reach its proxy."""
+        self._backend_url("/outline/invitations")
+        self._backend_headers()
+
+    def _check_outline_invitation_backend_ready(self) -> None:
+        """Check the backend's invitation credential before durable provisioning."""
+        try:
+            response = requests.get(
+                self._backend_url("/outline/invitations/ready"),
+                headers=self._backend_headers(),
+                timeout=max(1.0, float(settings.outline_api_timeout_seconds) + 2.0),
+                verify=default_ca_bundle_path(),
+            )
+        except requests.RequestException as exc:
+            raise OutlineAPIError(
+                "Backend request for the Outline invitation failed."
+            ) from exc
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise OutlineAPIError(
+                "Backend returned an invalid response for the Outline invitation."
+            ) from exc
+
+        if (
+            response.status_code == 200
+            and isinstance(payload, dict)
+            and payload.get("status") == "ready"
+        ):
+            return
+
+        if response.status_code == 401:
+            message = "Backend rejected the Outline invitation request."
+        elif (
+            response.status_code == 503
+            and isinstance(payload, dict)
+            and payload.get("error") == "outline_invite_unavailable"
+        ):
+            message = "Outline invitation service is unavailable."
+        else:
+            message = "Outline invitation request failed."
+        raise OutlineAPIError(message)
+
+    async def _ensure_outline_invitation_backend_ready(self) -> None:
+        """Keep the synchronous backend readiness request off the event loop."""
+        try:
+            await asyncio.to_thread(self._check_outline_invitation_backend_ready)
+        except OutlineAPIError as exc:
+            raise OutlineInvitationPreflightError(str(exc)) from exc
+
+    def _post_outline_invitation(self, *, email: str, name: str) -> None:
+        """Call the backend-owned, fixed-purpose Outline invitation endpoint."""
+        try:
+            response = requests.post(
+                self._backend_url("/outline/invitations"),
+                headers=self._backend_headers(),
+                json={"email": email, "name": name},
+                timeout=max(1.0, float(settings.outline_api_timeout_seconds) + 2.0),
+                verify=default_ca_bundle_path(),
+            )
+        except requests.RequestException as exc:
+            raise OutlineAPIError(
+                "Backend request for the Outline invitation failed."
+            ) from exc
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise OutlineAPIError(
+                "Backend returned an invalid response for the Outline invitation."
+            ) from exc
+
+        if (
+            response.status_code == 201
+            and isinstance(payload, dict)
+            and payload.get("status") == "invited"
+        ):
+            return
+
+        if response.status_code == 401:
+            message = "Backend rejected the Outline invitation request."
+        elif (
+            response.status_code == 503
+            and isinstance(payload, dict)
+            and payload.get("error") == "outline_invite_unavailable"
+        ):
+            message = "Outline invitation service is unavailable."
+        else:
+            message = "Outline invitation request failed."
+        raise OutlineAPIError(message)
 
     def _create_resume_profile_processor(self) -> ResumeProfileProcessor:
         return ResumeProfileProcessor(self._resume_processor_config())
@@ -8248,13 +8340,12 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         email: str,
         name: str | None = None,
     ) -> None:
-        """Invite one email address to Outline."""
+        """Invite one email address through the backend-owned Outline client."""
         invite_name = name or email.partition("@")[0]
         await asyncio.to_thread(
-            self._outline_client().invite_user,
+            self._post_outline_invitation,
             email=email,
             name=invite_name,
-            role="member",
         )
 
     async def _invite_outline_user_for_contact_flow(
@@ -8398,6 +8489,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             contact=contact,
             mailbox_username=mailbox_username,
         )
+        await self._ensure_outline_invitation_backend_ready()
         contact_name = self._contact_text_value(contact.get("name")) or "Unknown"
         mailbox = await self._create_migadu_mailbox_for_contact(
             contact=contact,
@@ -8426,7 +8518,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
     ) -> None:
         """Validate required account clients before creating any resources."""
         self._authentik_client()
-        self._outline_client()
+        self._validate_outline_invitation_backend_config()
 
         target_email, _local_part = self._normalize_mailbox_request(mailbox_username)
         existing_email = self._normalize_508_email(contact.get("c508Email"))
@@ -8454,6 +8546,24 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             result = await self._execute_user_accounts_provisioning(
                 contact=contact,
                 mailbox_username=mailbox_username,
+            )
+        except OutlineInvitationPreflightError as exc:
+            message = self._sanitize_error_message_for_discord(exc)
+            self._audit_command_safe(
+                interaction=interaction,
+                action="crm.create_user_accounts",
+                result="error",
+                metadata={
+                    "search_term": search_term,
+                    "mailbox_username": mailbox_username,
+                    "stage": "outline_preflight",
+                    "error": message,
+                },
+            )
+            await interaction.followup.send(
+                "❌ Outline invitation readiness failed before provisioning. "
+                f"No mailbox or SSO account was created: {message}",
+                ephemeral=True,
             )
         except MailboxProvisioningPartialError as exc:
             message = self._sanitize_error_message_for_discord(exc)

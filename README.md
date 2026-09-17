@@ -92,6 +92,7 @@ avoids printing the resolved Postgres password directly.
 - [Discord Gig Dashboard](./docs/discord-gig-dashboard.md): gig tracking and dashboard behavior.
 - [Discord GitHub Todos and Projects](./docs/discord-github-todos.md): GitHub App setup and Discord access model.
 - [Discord Agent Eval Harness](./docs/discord-agent-eval-harness.md): Discord agent eval workflow.
+- [Discord Wiki Editing](./docs/discord-wiki-editing.md): approval-gated shared wiki authoring.
 
 ## Deployment
 
