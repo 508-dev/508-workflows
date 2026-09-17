@@ -8,6 +8,8 @@ from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
+from five08.tls import default_ca_bundle_path
+
 
 OUTLINE_BASE_URL = "https://app.getoutline.com"
 OUTLINE_SEARCH_RESULT_LIMIT = 10
@@ -24,6 +26,20 @@ class OutlineDocumentSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class OutlineDocument:
+    """A complete Outline document suitable for an approved write workflow."""
+
+    id: str
+    title: str
+    text: str
+    url: str
+    collection_id: str | None
+    parent_document_id: str | None
+    revision: int | None
+    updated_at: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class OutlineSearchResult:
     """One keyword-search result with a short context excerpt."""
 
@@ -34,6 +50,10 @@ class OutlineSearchResult:
 
 class OutlineAPIError(RuntimeError):
     """Raised when the Outline API request fails or returns invalid data."""
+
+
+class OutlineConflictError(OutlineAPIError):
+    """Raised when Outline rejects a write against a newer document revision."""
 
 
 def normalize_outline_api_base_url(base_url: str) -> str:
@@ -68,7 +88,7 @@ def normalize_outline_web_base_url(base_url: str) -> str:
 
 
 class OutlineClient:
-    """Small Outline RPC API wrapper for invitations and read-only wiki access."""
+    """Small Outline RPC API wrapper for invitations and wiki access."""
 
     def __init__(
         self,
@@ -97,11 +117,16 @@ class OutlineClient:
                 headers=self._headers(),
                 json=payload,
                 timeout=self.timeout_seconds,
+                verify=default_ca_bundle_path(),
             )
         except requests.RequestException as exc:
             raise OutlineAPIError(f"Outline API request failed: {exc}") from exc
 
         if not 200 <= response.status_code < 300:
+            if response.status_code == 409:
+                raise OutlineConflictError(
+                    "Outline API request conflicted with a newer document revision."
+                )
             raise OutlineAPIError(
                 f"Outline API request failed: status={response.status_code}"
             )
@@ -143,6 +168,90 @@ class OutlineClient:
                 "suppressEmail": suppress_email,
             },
         )
+
+    def get_document(self, *, document_id: str) -> OutlineDocument:
+        """Return one complete document, including its Markdown text and revision."""
+        return self._response_document(
+            self.request(
+                "documents.info",
+                {"id": self._required_identifier(document_id, "document ID")},
+            )
+        )
+
+    def create_document(
+        self,
+        *,
+        title: str,
+        text: str,
+        collection_id: str | None = None,
+        parent_document_id: str | None = None,
+        publish: bool = False,
+    ) -> OutlineDocument:
+        """Create one document in a collection or under a parent document.
+
+        New documents are drafts by default. Callers that have completed their
+        own approval and permission checks must explicitly pass ``publish=True``.
+        """
+        normalized_collection_id = self._optional_identifier(
+            collection_id,
+            "collection ID",
+        )
+        normalized_parent_document_id = self._optional_identifier(
+            parent_document_id,
+            "parent document ID",
+        )
+        if normalized_collection_id is None and normalized_parent_document_id is None:
+            raise ValueError(
+                "Outline document creation requires a collection ID or parent document ID."
+            )
+
+        payload: dict[str, Any] = {
+            "title": self._required_identifier(title, "document title"),
+            "text": self._document_text(text),
+            "publish": self._publish_value(publish),
+        }
+        if normalized_collection_id is not None:
+            payload["collectionId"] = normalized_collection_id
+        if normalized_parent_document_id is not None:
+            payload["parentDocumentId"] = normalized_parent_document_id
+
+        return self._response_document(self.request("documents.create", payload))
+
+    def update_document(
+        self,
+        *,
+        document_id: str,
+        title: str | None = None,
+        text: str | None = None,
+        publish: bool | None = None,
+        expected_revision: int | None = None,
+    ) -> OutlineDocument:
+        """Update a document, optionally guarding against a stale revision.
+
+        Supplying ``text`` replaces the document's complete Markdown body. Pass
+        the ``revision`` returned by :meth:`get_document` as
+        ``expected_revision`` to have Outline reject a concurrent update.
+        """
+        payload: dict[str, Any] = {
+            "id": self._required_identifier(document_id, "document ID"),
+        }
+        has_change = False
+        if title is not None:
+            payload["title"] = self._required_identifier(title, "document title")
+            has_change = True
+        if text is not None:
+            payload["text"] = self._document_text(text)
+            has_change = True
+        if publish is not None:
+            payload["publish"] = self._publish_value(publish)
+            has_change = True
+        if expected_revision is not None:
+            payload["lastRevision"] = self._expected_revision(expected_revision)
+
+        if not has_change:
+            raise ValueError("Outline document update requires at least one change.")
+
+        return self._response_document(self.request("documents.update", payload))
 
     def search_documents(
         self,
@@ -268,6 +377,133 @@ class OutlineClient:
             url=url,
             updated_at=updated_at or None,
         )
+
+    def _response_document(self, response: dict[str, Any]) -> OutlineDocument:
+        """Validate the document object returned by an Outline document endpoint."""
+        raw_document = response.get("data")
+        if isinstance(raw_document, dict) and isinstance(
+            raw_document.get("document"), dict
+        ):
+            raw_document = raw_document["document"]
+        if not isinstance(raw_document, dict):
+            raise OutlineAPIError("Outline document payload must include an object.")
+
+        document_id = self._response_identifier(raw_document, "id", "ID")
+        raw_url = raw_document.get("url")
+        if not isinstance(raw_url, str):
+            raise OutlineAPIError("Outline document payload must include a URL.")
+        url = self._document_url(raw_url)
+        if url is None:
+            raise OutlineAPIError(
+                "Outline document payload must include a same-instance URL."
+            )
+
+        raw_text = raw_document.get("text")
+        if not isinstance(raw_text, str):
+            raise OutlineAPIError(
+                "Outline document payload must include Markdown document text."
+            )
+
+        title = str(raw_document.get("title") or "").strip() or "Untitled document"
+        raw_revision = raw_document.get("revision")
+        if raw_revision is None:
+            revision = None
+        elif isinstance(raw_revision, int) and not isinstance(raw_revision, bool):
+            revision = raw_revision
+        else:
+            raise OutlineAPIError(
+                "Outline document payload revision must be an integer when present."
+            )
+
+        return OutlineDocument(
+            id=document_id,
+            title=title,
+            text=raw_text,
+            url=url,
+            collection_id=self._optional_response_identifier(
+                raw_document,
+                "collectionId",
+                "collection ID",
+            ),
+            parent_document_id=self._optional_response_identifier(
+                raw_document,
+                "parentDocumentId",
+                "parent document ID",
+            ),
+            revision=revision,
+            updated_at=self._optional_response_text(raw_document, "updatedAt"),
+        )
+
+    @staticmethod
+    def _required_identifier(value: str, label: str) -> str:
+        if not isinstance(value, str) or not (normalized := value.strip()):
+            raise ValueError(f"Outline {label} must not be empty.")
+        return normalized
+
+    @classmethod
+    def _optional_identifier(cls, value: str | None, label: str) -> str | None:
+        if value is None:
+            return None
+        return cls._required_identifier(value, label)
+
+    @staticmethod
+    def _document_text(value: str) -> str:
+        if not isinstance(value, str):
+            raise ValueError("Outline document text must be a string.")
+        return value
+
+    @staticmethod
+    def _publish_value(value: bool) -> bool:
+        if not isinstance(value, bool):
+            raise ValueError("Outline publish must be a boolean.")
+        return value
+
+    @staticmethod
+    def _expected_revision(value: int) -> int:
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(
+                "Outline expected document revision must be a non-negative integer."
+            )
+        return value
+
+    @staticmethod
+    def _response_identifier(
+        raw_document: dict[str, Any],
+        key: str,
+        label: str,
+    ) -> str:
+        raw_value = raw_document.get(key)
+        if not isinstance(raw_value, str) or not (value := raw_value.strip()):
+            raise OutlineAPIError(
+                f"Outline document payload must include a non-empty {label}."
+            )
+        return value
+
+    @classmethod
+    def _optional_response_identifier(
+        cls,
+        raw_document: dict[str, Any],
+        key: str,
+        label: str,
+    ) -> str | None:
+        raw_value = raw_document.get(key)
+        if raw_value is None:
+            return None
+        return cls._response_identifier(raw_document, key, label)
+
+    @staticmethod
+    def _optional_response_text(
+        raw_document: dict[str, Any],
+        key: str,
+    ) -> str | None:
+        raw_value = raw_document.get(key)
+        if raw_value is None:
+            return None
+        if not isinstance(raw_value, str):
+            raise OutlineAPIError(
+                f"Outline document payload {key} must be a string when present."
+            )
+        return raw_value.strip() or None
 
     def _document_url(self, raw_url: str) -> str | None:
         """Build an absolute same-instance URL from Outline's document path."""
