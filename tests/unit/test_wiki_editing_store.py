@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from five08.wiki_editing.models import (
@@ -149,6 +151,86 @@ def test_proposal_output_is_committed_once_and_revision_increments() -> None:
     )
     assert latest is not None
     assert latest.id == second.id
+
+
+def test_authoring_claim_blocks_duplicate_delivery_during_lease() -> None:
+    store = InMemoryWikiEditingStore()
+    request, _ = store.create_or_get_request(_request())
+    proposal = store.create_proposal(
+        WikiProposalCreate(
+            request_id=request.id,
+            organization_id="org-1",
+            target_action="create",
+        )
+    )
+    started_at = datetime(2026, 9, 17, 12, tzinfo=timezone.utc)
+
+    first = store.claim_authoring(
+        proposal.id,
+        organization_id="org-1",
+        omp_metadata=_metadata(),
+        now=started_at,
+        authoring_lease_seconds=60,
+    )
+    duplicate = store.claim_authoring(
+        proposal.id,
+        organization_id="org-1",
+        omp_metadata=_metadata(),
+        now=started_at + timedelta(seconds=59),
+        authoring_lease_seconds=60,
+    )
+
+    assert first is not None
+    assert duplicate is None
+    persisted = store.get_proposal(proposal.id, organization_id="org-1")
+    assert persisted is not None
+    assert persisted.status == "authoring"
+    assert persisted.authoring_started_at == started_at
+
+
+def test_authoring_claim_reclaims_expired_lease_for_bound_omp_run() -> None:
+    store = InMemoryWikiEditingStore()
+    request, _ = store.create_or_get_request(_request())
+    proposal = store.create_proposal(
+        WikiProposalCreate(
+            request_id=request.id,
+            organization_id="org-1",
+            target_action="create",
+        )
+    )
+    started_at = datetime(2026, 9, 17, 12, tzinfo=timezone.utc)
+    lease_seconds = 60
+    metadata = _metadata()
+    first = store.claim_authoring(
+        proposal.id,
+        organization_id="org-1",
+        omp_metadata=metadata,
+        now=started_at,
+        authoring_lease_seconds=lease_seconds,
+    )
+    assert first is not None
+
+    with pytest.raises(WikiEditConflictError, match="bound to another OMP run"):
+        store.claim_authoring(
+            proposal.id,
+            organization_id="org-1",
+            omp_metadata=metadata.model_copy(update={"run_id": "omp-run-2"}),
+            now=started_at + timedelta(seconds=lease_seconds),
+            authoring_lease_seconds=lease_seconds,
+        )
+
+    reclaimed_at = started_at + timedelta(seconds=lease_seconds)
+    reclaimed = store.claim_authoring(
+        proposal.id,
+        organization_id="org-1",
+        omp_metadata=metadata,
+        now=reclaimed_at,
+        authoring_lease_seconds=lease_seconds,
+    )
+
+    assert reclaimed is not None
+    assert reclaimed.proposal.omp_metadata == metadata
+    assert reclaimed.proposal.authoring_started_at == reclaimed_at
 
 
 def test_publish_attempt_is_recorded_before_external_write_and_never_reclaimed() -> (

@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol, cast
 from uuid import uuid4
 
@@ -44,6 +45,9 @@ from five08.wiki_editing.models import (
     WikiConversationProvenance,
     ensure_proposal_transition,
 )
+
+
+_DEFAULT_AUTHORING_LEASE_SECONDS = 900.0
 
 
 class WikiEditingStore(Protocol):
@@ -89,8 +93,9 @@ class WikiEditingStore(Protocol):
         organization_id: str,
         omp_metadata: WikiOmpRunMetadata,
         now: datetime | None = None,
+        authoring_lease_seconds: float = _DEFAULT_AUTHORING_LEASE_SECONDS,
     ) -> WikiAuthoringWorkItem | None:
-        """Atomically enter authoring and bind a single OMP run to a revision."""
+        """Claim a bounded OMP authoring lease for one proposal revision."""
 
     def complete_proposal(
         self,
@@ -176,6 +181,31 @@ def _now(value: datetime | None = None) -> datetime:
     if current.tzinfo is None:
         return current.replace(tzinfo=timezone.utc)
     return current.astimezone(timezone.utc)
+
+
+def _validated_authoring_lease_seconds(value: float) -> float:
+    """Validate the bounded time a worker may own an authoring attempt."""
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("authoring_lease_seconds must be positive") from exc
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ValueError("authoring_lease_seconds must be positive")
+    return seconds
+
+
+def _authoring_lease_expired(
+    started_at: datetime | None,
+    *,
+    now: datetime,
+    lease_seconds: float,
+) -> bool:
+    """Return whether a known authoring start is safely eligible for recovery."""
+    if started_at is None:
+        # A missing start time cannot prove the prior worker is no longer live.
+        # Preserve the safe no-second-run behavior rather than guessing.
+        return False
+    return now >= _now(started_at) + timedelta(seconds=lease_seconds)
 
 
 def _request_fingerprint(request: WikiEditRequestInput) -> str:
@@ -515,8 +545,10 @@ class InMemoryWikiEditingStore:
         organization_id: str,
         omp_metadata: WikiOmpRunMetadata,
         now: datetime | None = None,
+        authoring_lease_seconds: float = _DEFAULT_AUTHORING_LEASE_SECONDS,
     ) -> WikiAuthoringWorkItem | None:
         comparison_time = _now(now)
+        lease_seconds = _validated_authoring_lease_seconds(authoring_lease_seconds)
         with self._lock:
             proposal = self._required_proposal(proposal_id, organization_id)
             if proposal.status == "queued":
@@ -532,10 +564,24 @@ class InMemoryWikiEditingStore:
                 )
                 self._proposals[proposal_id] = proposal
             elif proposal.status == "authoring":
+                if not _authoring_lease_expired(
+                    proposal.authoring_started_at,
+                    now=comparison_time,
+                    lease_seconds=lease_seconds,
+                ):
+                    return None
                 if proposal.omp_metadata != omp_metadata:
                     raise WikiEditConflictError(
                         "wiki proposal is already bound to another OMP run"
                     )
+                proposal = proposal.model_copy(
+                    update={
+                        "authoring_started_at": comparison_time,
+                        "updated_at": comparison_time,
+                    },
+                    deep=True,
+                )
+                self._proposals[proposal_id] = proposal
             else:
                 return None
             request = self._requests.get(proposal.request_id)
@@ -1067,8 +1113,10 @@ class PostgresWikiEditingStore:
         organization_id: str,
         omp_metadata: WikiOmpRunMetadata,
         now: datetime | None = None,
+        authoring_lease_seconds: float = _DEFAULT_AUTHORING_LEASE_SECONDS,
     ) -> WikiAuthoringWorkItem | None:
         comparison_time = _now(now)
+        lease_seconds = _validated_authoring_lease_seconds(authoring_lease_seconds)
         with self._connection() as conn:
             with conn.cursor(row_factory=dict_row) as cursor:
                 row = self._locked_proposal(cursor, proposal_id, organization_id)
@@ -1094,10 +1142,28 @@ class PostgresWikiEditingStore:
                     if row is None:  # pragma: no cover - locked row invariant
                         raise RuntimeError("unable to start wiki proposal authoring")
                 elif current.status == "authoring":
+                    if not _authoring_lease_expired(
+                        current.authoring_started_at,
+                        now=comparison_time,
+                        lease_seconds=lease_seconds,
+                    ):
+                        return None
                     if current.omp_metadata != omp_metadata:
                         raise WikiEditConflictError(
                             "wiki proposal is already bound to another OMP run"
                         )
+                    cursor.execute(
+                        """
+                        UPDATE wiki_edit_proposals
+                        SET authoring_started_at = %s, updated_at = %s
+                        WHERE id = %s::uuid
+                        RETURNING *
+                        """,
+                        (comparison_time, comparison_time, proposal_id),
+                    )
+                    row = cursor.fetchone()
+                    if row is None:  # pragma: no cover - locked row invariant
+                        raise RuntimeError("unable to reclaim wiki proposal authoring")
                 else:
                     return None
                 request_row = self._locked_request(
