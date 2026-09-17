@@ -185,6 +185,17 @@ class TestBot508:
 
         assert config.backend_api_base_url == "http://127.0.0.1:8090"
 
+    def test_wiki_editing_request_timeout_covers_two_outline_calls(self) -> None:
+        config = Settings(discord_bot_token="token")
+
+        assert config.wiki_editing_request_timeout_seconds == 45.0
+
+        with pytest.raises(ValidationError):
+            Settings(
+                discord_bot_token="token",
+                wiki_editing_request_timeout_seconds=44.0,
+            )
+
     @pytest.mark.parametrize(
         "backend_api_base_url",
         [

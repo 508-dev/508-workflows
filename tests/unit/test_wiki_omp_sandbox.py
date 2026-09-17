@@ -310,6 +310,7 @@ def test_remote_sandbox_receives_the_private_predecessor_draft_for_a_revision() 
     reviewed_material = next(
         material for material in materials if material["id"] == "reviewed-draft:2"
     )
+    assert reviewed_material["source"] == {"title": "Release guide"}
     assert reviewed_material["text"] == (
         "First paragraph.\n\nA long second paragraph to shorten."
     )
@@ -456,6 +457,33 @@ def test_remote_sandbox_excludes_untrusted_knowledge_material() -> None:
     assert "memory:approved" not in serialized
     assert "memory:private" not in serialized
     assert "memory:low-trust" not in serialized
+
+
+def test_organization_knowledge_search_includes_revision_instruction() -> None:
+    queries: list[str] = []
+
+    def knowledge_search(
+        question: str,
+        _work: WikiAuthoringWorkItem,
+    ) -> list[WikiAuthoringMaterial]:
+        queries.append(question)
+        return []
+
+    runner = SandboxedOmpWikiAuthoringRunner(
+        sandbox_url="http://wiki_omp_sandbox:8080",
+        sandbox_token="sandbox-token",
+        model="openrouter/test",
+        outline_client_factory=_empty_outline_client_factory,
+        allowed_collection_id="collection-1",
+        knowledge_search=knowledge_search,
+        transport=lambda *_args: _draft_response(source_ids=["request:1"]),
+    )
+
+    runner.author(_revision_work_item(), metadata=_metadata())
+
+    assert queries == [
+        "Shorten the second paragraph of the draft. Shorten the second paragraph."
+    ]
 
 
 def test_remote_sandbox_receives_only_full_allowed_collection_documents() -> None:

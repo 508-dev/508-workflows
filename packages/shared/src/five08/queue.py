@@ -414,8 +414,14 @@ def enqueue_job(
     idempotency_key: str | None = None,
     max_attempts: int | None = None,
     run_after: datetime | None = None,
+    redispatch_existing_queued: bool = False,
 ) -> EnqueuedJob:
-    """Create a job record and hand it to the configured queue adapter."""
+    """Create a job record and hand it to the configured queue adapter.
+
+    ``redispatch_existing_queued`` is an opt-in recovery path for callers
+    whose durable work is still queued after an interrupted handoff to Redis.
+    It deliberately does not redispatch running, retrying, or terminal jobs.
+    """
     payload = {"args": list(args), "kwargs": kwargs or {}}
     job_type = fn.__name__
     job_id, created = create_job_record(
@@ -428,6 +434,12 @@ def enqueue_job(
     )
     if created:
         queue.enqueue(job_id, run_at=run_after)
+    elif redispatch_existing_queued:
+        existing = get_job(settings, job_id)
+        if existing is not None and existing.status == JobStatus.QUEUED:
+            # Preserve the durable schedule rather than trusting a retry's
+            # call-site value, which may no longer describe this job.
+            queue.enqueue(job_id, run_at=existing.run_after)
     return EnqueuedJob(id=job_id, created=created)
 
 

@@ -71,6 +71,10 @@ class Settings(SharedSettings):
     audit_api_base_url: str | None = None
     audit_api_timeout_seconds: float = 2.0
     agent_api_timeout_seconds: float = 8.0
+    # A confirmed wiki publish can synchronously fetch the current Outline
+    # document and then write it. Keep the bot's deadline above two default
+    # Outline request windows plus transport overhead.
+    wiki_editing_request_timeout_seconds: float = Field(default=45.0, ge=45.0)
     openai_api_key: str | None = None
     openai_base_url: str | None = None
     openai_model: str = "gpt-5-mini"

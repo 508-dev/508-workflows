@@ -36,6 +36,7 @@ WikiPublishOperationStatus = Literal[
     "succeeded",
     "unknown",
     "conflict",
+    "rejected",
 ]
 WikiEditResponseAction = Literal[
     "none",
@@ -1094,7 +1095,7 @@ PROPOSAL_TRANSITIONS: dict[WikiProposalStatus, frozenset[WikiProposalStatus]] = 
     # revision is retired so its stale Discord controls cannot fork history.
     "failed": frozenset({"canceled"}),
     "canceled": frozenset(),
-    "publishing": frozenset({"published", "publish_unknown", "conflict"}),
+    "publishing": frozenset({"published", "publish_unknown", "conflict", "failed"}),
     "published": frozenset(),
     "publish_unknown": frozenset({"published"}),
 }

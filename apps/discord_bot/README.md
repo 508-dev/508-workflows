@@ -121,6 +121,9 @@ Relevant configuration:
   internal `http://web:8090` endpoint.
 - `API_SHARED_SECRET`: shared service secret for protected backend calls.
 - `AGENT_API_TIMEOUT_SECONDS`: timeout for synchronous agent gateway requests.
+- `WIKI_EDITING_REQUEST_TIMEOUT_SECONDS`: timeout for approval-gated wiki
+  actions (default and minimum: 45 seconds, to cover a synchronous Outline
+  conflict read and write).
 - `AGENT_FAST_*`, `AGENT_STRONG_*`, `AGENT_REASONING_*`: backend model
   tier configuration for OpenAI-compatible providers. Credentials stay in the
   backend process; the bot only receives non-secret plan metadata.

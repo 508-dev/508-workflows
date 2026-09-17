@@ -243,13 +243,15 @@ class SandboxedOmpWikiAuthoringRunner:
         if revision_parent is not None:
             # A revision must see the exact immutable draft it replaces. Its
             # provenance remains worker-only; the sandbox receives only an
-            # opaque material ID, a generic label, and bounded text.
+            # opaque material ID, the reviewed article title, and bounded
+            # text. The body intentionally excludes the title, so both fields
+            # are needed to preserve an accepted title during revision.
             registry.add(
                 _SandboxMaterial(
                     source=WikiSourceReference(
                         source_type="other",
                         source_ref=f"wiki-proposal:{revision_parent.proposal_id}",
-                        title=f"Prior draft revision {revision_parent.revision}",
+                        title=revision_parent.title,
                         content_hash=revision_parent.content_hash,
                     ),
                     text=revision_parent.text,
@@ -370,8 +372,14 @@ class SandboxedOmpWikiAuthoringRunner:
     ) -> None:
         if self.knowledge_search is None:
             return
+        revision_instruction = work_item.proposal.revision_instruction or ""
+        query = " ".join(
+            f"{work_item.request.instruction} {revision_instruction}".split()
+        )[:200]
+        if not query:
+            return
         try:
-            materials = self.knowledge_search(work_item.request.instruction, work_item)
+            materials = self.knowledge_search(query, work_item)
         except Exception:
             # Supplemental knowledge must never turn an unavailable data source
             # into an error that exposes backend internals to the sandbox.

@@ -10,6 +10,7 @@ from five08.clients.outline import (
     OutlineClient,
     OutlineConflictError,
     OutlineDocument,
+    OutlineNoWriteError,
     normalize_outline_api_base_url,
     normalize_outline_web_base_url,
 )
@@ -72,15 +73,17 @@ def test_invite_user_posts_outline_rpc_payload() -> None:
     assert result["ok"] is True
 
 
-def test_invite_user_raises_on_http_error() -> None:
+@pytest.mark.parametrize("status_code", [401, 403])
+def test_invite_user_raises_typed_no_write_error(status_code: int) -> None:
     response = Mock()
-    response.status_code = 403
+    response.status_code = status_code
     response.text = "Forbidden"
 
     with patch("five08.clients.outline.requests.post", return_value=response):
-        with pytest.raises(OutlineAPIError, match="status=403") as error:
+        with pytest.raises(OutlineNoWriteError) as error:
             OutlineClient(api_key="outline-key").invite_user(email="jane@508.dev")
 
+    assert error.value.status_code == status_code
     assert "Forbidden" not in str(error.value)
 
 

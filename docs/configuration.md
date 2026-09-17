@@ -316,6 +316,10 @@ Agent gateway:
   for a wiki action. Keep it distinct from `API_SHARED_SECRET`.
 - `WIKI_EDITING_API_TIMEOUT_SECONDS`: Postgres connection/statement timeout for
   durable workflow state. Outline calls use `OUTLINE_API_TIMEOUT_SECONDS`.
+- `WIKI_EDITING_REQUEST_TIMEOUT_SECONDS`: Discord bot-to-backend wiki request
+  timeout (default and minimum: 45 seconds). It covers a confirmed publish's
+  synchronous Outline conflict read and write, each with the default 20-second
+  provider timeout, plus transport overhead.
 - `WIKI_EDITING_MAX_INSTRUCTION_CHARACTERS`: maximum explicit request or
   revision feedback length (fixed maximum and default: 4000).
 - `WIKI_EDITING_MAX_DOCUMENT_CHARACTERS`: maximum full target article sent to

@@ -863,35 +863,49 @@ class WikiWriterCog(DiscordAuditCogMixin, commands.Cog):
         remaining = WIKI_THREAD_CONTEXT_MAX_CHARS
         try:
             async with asyncio.timeout(3):
-                async for message in channel.history(
-                    limit=WIKI_THREAD_MESSAGE_LIMIT,
-                    oldest_first=True,
-                ):
-                    raw_content = str(getattr(message, "content", "")).strip()
-                    if not raw_content or remaining <= 0:
-                        continue
-                    author = getattr(message, "author", None)
-                    author_id = str(getattr(author, "id", "unknown"))
-                    prefix = f"{author_id}: "
-                    separator = "\n" if lines else ""
-                    available = remaining - len(separator)
-                    if available <= len(prefix):
-                        break
-                    line = f"{prefix}{raw_content}"[:available]
-                    if not line.strip():
-                        continue
-                    lines.append(line)
-                    remaining -= len(separator) + len(line)
-                    message_id = getattr(message, "id", None)
-                    if message_id is not None:
-                        message_ids.append(str(message_id))
-                    if remaining <= 0:
-                        break
+                newest_messages = [
+                    message
+                    async for message in channel.history(
+                        limit=WIKI_THREAD_MESSAGE_LIMIT,
+                        oldest_first=False,
+                    )
+                ]
         except (TimeoutError, discord.HTTPException):
             logger.warning(
                 "Could not collect requested wiki thread context", exc_info=True
             )
             return []
+
+        # Discord returns this bounded batch newest-first. Consume it in that
+        # order so a character-bound snapshot retains the current discussion,
+        # then restore chronology before it reaches the author.
+        selected_lines: list[tuple[str, str | None]] = []
+        for message in newest_messages:
+            raw_content = str(getattr(message, "content", "")).strip()
+            if not raw_content or remaining <= 0:
+                continue
+            author = getattr(message, "author", None)
+            author_id = str(getattr(author, "id", "unknown"))
+            prefix = f"{author_id}: "
+            separator = "\n" if selected_lines else ""
+            available = remaining - len(separator)
+            if available <= len(prefix):
+                break
+            line = f"{prefix}{raw_content}"[:available]
+            if not line.strip():
+                continue
+            message_id = getattr(message, "id", None)
+            selected_lines.append(
+                (line, str(message_id) if message_id is not None else None)
+            )
+            remaining -= len(separator) + len(line)
+            if remaining <= 0:
+                break
+
+        for line, message_id in reversed(selected_lines):
+            lines.append(line)
+            if message_id is not None:
+                message_ids.append(message_id)
 
         if not lines:
             return []
@@ -981,7 +995,7 @@ class WikiWriterCog(DiscordAuditCogMixin, commands.Cog):
                 WIKI_ASSERTION_HEADER: assertion,
             },
             json=payload,
-            timeout=settings.agent_api_timeout_seconds,
+            timeout=settings.wiki_editing_request_timeout_seconds,
             verify=default_ca_bundle_path(),
         )
         try:

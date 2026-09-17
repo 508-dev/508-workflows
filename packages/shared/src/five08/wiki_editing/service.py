@@ -21,6 +21,7 @@ from five08.clients.outline import (
     OutlineClient,
     OutlineConflictError,
     OutlineDocument,
+    OutlineNoWriteError,
 )
 from five08.settings import SharedSettings
 from five08.wiki_editing.models import (
@@ -303,6 +304,34 @@ class WikiEditingService:
 
         try:
             published = self._write_confirmed_proposal(proposal)
+        except OutlineNoWriteError:
+            # A 401/403 is a definitive pre-write rejection. Keep the one-shot
+            # operation as an audit record, but make the reviewed proposal
+            # revisionable instead of treating a credential error as ambiguous.
+            try:
+                operation = self.store.mark_publish_rejected(
+                    proposal.id,
+                    organization_id=organization_id,
+                    failure_code="outline_no_write_rejected",
+                )
+                latest = self._owned_proposal(
+                    proposal.id,
+                    organization_id=organization_id,
+                    actor_id=request.context.discord_user_id,
+                )
+            except Exception as persistence_error:
+                self._mark_publish_unknown_safely(proposal.id, organization_id)
+                raise WikiEditingValidationError(
+                    "Outline rejected the publish before writing, but its final state needs reconciliation."
+                ) from persistence_error
+            return self._response_for(
+                latest,
+                operation=operation,
+                message=(
+                    "Outline rejected the publish before writing. Resolve the writer "
+                    "credentials, then request a revision to retry."
+                ),
+            )
         except OutlineConflictError as exc:
             # A 409 is an explicit no-write response. It is safe to turn into a
             # reviewable conflict rather than treating it as an ambiguous retry.

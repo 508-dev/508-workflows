@@ -431,9 +431,12 @@ async def test_selected_thread_context_is_bounded_org_visible_and_never_private(
         def permissions_for(self, _actor: object) -> SimpleNamespace:
             return SimpleNamespace(view_channel=True, read_message_history=True)
 
-        async def history(self, **_kwargs: object):
+        async def history(self, *, limit: int, oldest_first: bool):
             self.history_called = True
-            for index in range(25):
+            message_indexes = (
+                range(limit) if oldest_first else range(24, 24 - limit, -1)
+            )
+            for index in message_indexes:
                 yield SimpleNamespace(
                     id=index,
                     author=SimpleNamespace(id=index + 100),
@@ -455,7 +458,9 @@ async def test_selected_thread_context_is_bounded_org_visible_and_never_private(
     source = sources[0]
     assert source["visibility"] == "org"
     assert source["provenance"]["source_type"] == "discord_thread"
-    assert 0 < len(source["provenance"]["message_ids"]) <= 6
+    assert source["provenance"]["message_ids"] == [
+        str(index) for index in range(19, 25)
+    ]
     assert len(source["organization_visible_text"]) <= 12_000
     assert public_thread.history_called is True
 
@@ -491,6 +496,62 @@ async def test_selected_thread_context_is_bounded_org_visible_and_never_private(
     )
     assert restricted_sources == []
     assert restricted_parent_thread.history_called is False
+
+
+@pytest.mark.asyncio
+async def test_selected_thread_context_uses_newest_messages_in_chronological_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeThread:
+        id = 456
+        name = "Current decision"
+        jump_url = "https://discord.com/channels/123/456"
+
+        def __init__(self) -> None:
+            default_role = SimpleNamespace(id=0)
+            self.guild = SimpleNamespace(
+                id=123,
+                me=SimpleNamespace(id=999),
+                default_role=default_role,
+            )
+            self.parent = SimpleNamespace(
+                permissions_for=lambda _actor: SimpleNamespace(
+                    view_channel=True,
+                    read_message_history=True,
+                )
+            )
+
+        def is_private(self) -> bool:
+            return False
+
+        def permissions_for(self, _actor: object) -> SimpleNamespace:
+            return SimpleNamespace(view_channel=True, read_message_history=True)
+
+        async def history(self, *, limit: int, oldest_first: bool):
+            assert limit == wiki_writer_module.WIKI_THREAD_MESSAGE_LIMIT
+            assert oldest_first is False
+            # Discord yields its requested newest batch newest-first.
+            for index in range(24, 4, -1):
+                yield SimpleNamespace(
+                    id=index,
+                    author=SimpleNamespace(id=index + 100),
+                    content=f"message {index}",
+                )
+
+    monkeypatch.setattr(wiki_writer_module.discord, "Thread", FakeThread)
+    cog, _guild = _cog_with_member(_member("Steering Committee"))
+    sources = await cog._collect_current_thread(
+        _interaction(channel=FakeThread()),
+        member=_member("Steering Committee"),
+        guild_id="123",
+    )
+
+    assert len(sources) == 1
+    source = sources[0]
+    assert source["provenance"]["message_ids"] == [str(index) for index in range(5, 25)]
+    assert source["organization_visible_text"].splitlines() == [
+        f"{index + 100}: message {index}" for index in range(5, 25)
+    ]
 
 
 @pytest.mark.asyncio
@@ -560,7 +621,7 @@ def test_backend_post_uses_authenticated_tls_verified_json(
             backend_api_base_url="https://api.test",
             api_shared_secret="secret",
             wiki_editing_assertion_secret="wiki-assertion-secret",
-            agent_api_timeout_seconds=8.0,
+            wiki_editing_request_timeout_seconds=45.0,
         ),
     )
 
@@ -582,6 +643,7 @@ def test_backend_post_uses_authenticated_tls_verified_json(
         path="/wiki/updates",
         payload={"instruction": "x"},
     )
+    assert mock_post.call_args.kwargs["timeout"] == 45.0
     assert mock_post.call_args.kwargs["verify"] == default_ca_bundle_path()
 
 

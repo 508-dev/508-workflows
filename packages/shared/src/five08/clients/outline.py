@@ -56,6 +56,16 @@ class OutlineConflictError(OutlineAPIError):
     """Raised when Outline rejects a write against a newer document revision."""
 
 
+class OutlineNoWriteError(OutlineAPIError):
+    """Raised for a known pre-write authentication or authorization rejection."""
+
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+        super().__init__(
+            f"Outline rejected the request before writing: status={status_code}"
+        )
+
+
 def normalize_outline_api_base_url(base_url: str) -> str:
     """Normalize an Outline root or API URL to the RPC API base."""
     normalized = base_url.strip().rstrip("/")
@@ -127,6 +137,11 @@ class OutlineClient:
                 raise OutlineConflictError(
                     "Outline API request conflicted with a newer document revision."
                 )
+            if response.status_code in {401, 403}:
+                # Outline has explicitly rejected the credentials before the
+                # RPC handler can apply a create or update. Callers may safely
+                # offer a fresh reviewed revision after credentials are fixed.
+                raise OutlineNoWriteError(response.status_code)
             raise OutlineAPIError(
                 f"Outline API request failed: status={response.status_code}"
             )

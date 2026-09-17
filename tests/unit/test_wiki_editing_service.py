@@ -9,7 +9,11 @@ from typing import Any
 import pytest
 
 from five08.agent.models import AgentIdentityContext
-from five08.clients.outline import OutlineConflictError, OutlineDocument
+from five08.clients.outline import (
+    OutlineConflictError,
+    OutlineDocument,
+    OutlineNoWriteError,
+)
 from five08.wiki_editing.models import (
     WikiEditActionRequest,
     WikiEditCreateRequest,
@@ -372,6 +376,45 @@ def test_ambiguous_publish_failure_is_not_retried() -> None:
     assert status.status == "publish_unknown"
     assert repeated.status == "publish_unknown"
     assert outline.update_calls == 1
+
+
+def test_definitive_outline_rejection_is_revisionable_after_credentials_are_fixed() -> (
+    None
+):
+    outline = _Outline()
+    author = _Author()
+    service = _service(outline, author)
+    proposal_id = _propose(service)
+    _acknowledge(service, proposal_id)
+    outline.raise_on_update = OutlineNoWriteError(403)
+
+    rejected = service.publish(_action(proposal_id))
+
+    assert rejected.status == "failed"
+    assert rejected.operation_status == "rejected"
+    assert rejected.action == "revise"
+    assert outline.update_calls == 1
+
+    outline.raise_on_update = None
+    revised = service.revise(
+        WikiEditRevisionRequest(
+            context=_context(),
+            proposal_id=proposal_id,
+            instruction="Retry after writer access is restored.",
+        )
+    )
+    assert revised.response.proposal_id is not None
+    drafted = service.author_proposal(
+        revised.response.proposal_id,
+        organization_id="guild-1",
+    )
+    assert drafted.status == "proposed"
+    _acknowledge(service, revised.response.proposal_id)
+
+    published = service.publish(_action(revised.response.proposal_id))
+
+    assert published.status == "published"
+    assert outline.update_calls == 2
 
 
 def test_known_outline_conflict_after_claim_stays_reviewable() -> None:

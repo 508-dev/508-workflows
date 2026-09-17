@@ -210,6 +210,16 @@ class WikiEditingStore(Protocol):
     ) -> WikiPublishOperation:
         """Resolve an attempted external write after a confirmed provider response."""
 
+    def mark_publish_rejected(
+        self,
+        proposal_id: str,
+        *,
+        organization_id: str,
+        failure_code: str,
+        now: datetime | None = None,
+    ) -> WikiPublishOperation:
+        """Record a definitive no-write rejection and restore revision eligibility."""
+
     def mark_publish_unknown(
         self,
         proposal_id: str,
@@ -1230,6 +1240,45 @@ class InMemoryWikiEditingStore:
             self._proposals[proposal_id] = unresolved
             return unknown.model_copy(deep=True)
 
+    def mark_publish_rejected(
+        self,
+        proposal_id: str,
+        *,
+        organization_id: str,
+        failure_code: str,
+        now: datetime | None = None,
+    ) -> WikiPublishOperation:
+        """Record an explicit pre-write rejection without hiding it as ambiguous."""
+        comparison_time = _now(now)
+        normalized_code = _failure_code(failure_code)
+        with self._lock:
+            proposal = self._required_proposal(proposal_id, organization_id)
+            operation = self._required_operation(proposal_id)
+            if operation.status == "rejected":
+                return operation.model_copy(deep=True)
+            if operation.status != "write_started":
+                raise WikiEditStateError("wiki publish operation was not attempted")
+            ensure_proposal_transition(proposal.status, "failed")
+            rejected = operation.model_copy(
+                update={
+                    "status": "rejected",
+                    "resolved_at": comparison_time,
+                    "updated_at": comparison_time,
+                },
+                deep=True,
+            )
+            failed = proposal.model_copy(
+                update={
+                    "status": "failed",
+                    "failure_code": normalized_code,
+                    "updated_at": comparison_time,
+                },
+                deep=True,
+            )
+            self._operations[proposal_id] = rejected
+            self._proposals[proposal_id] = failed
+            return rejected.model_copy(deep=True)
+
     def _required_proposal(
         self, proposal_id: str, organization_id: str
     ) -> WikiProposalForAuthoring:
@@ -2184,6 +2233,54 @@ class PostgresWikiEditingStore:
                     (comparison_time, proposal_id),
                 )
                 return _operation_from_row(unknown_row)
+
+    def mark_publish_rejected(
+        self,
+        proposal_id: str,
+        *,
+        organization_id: str,
+        failure_code: str,
+        now: datetime | None = None,
+    ) -> WikiPublishOperation:
+        """Persist a known no-write failure so the owner can request a revision."""
+        comparison_time = _now(now)
+        normalized_code = _failure_code(failure_code)
+        with self._connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cursor:
+                proposal_row = self._locked_proposal(
+                    cursor, proposal_id, organization_id
+                )
+                proposal = _proposal_from_row(proposal_row)
+                operation_row = self._locked_operation(cursor, proposal_id)
+                if operation_row is None:
+                    raise WikiEditNotFoundError("wiki publish operation was not found")
+                operation = _operation_from_row(operation_row)
+                if operation.status == "rejected":
+                    return operation
+                if operation.status != "write_started":
+                    raise WikiEditStateError("wiki publish operation was not attempted")
+                ensure_proposal_transition(proposal.status, "failed")
+                cursor.execute(
+                    """
+                    UPDATE wiki_edit_publish_operations
+                    SET status = 'rejected', resolved_at = %s, updated_at = %s
+                    WHERE id = %s::uuid
+                    RETURNING *
+                    """,
+                    (comparison_time, comparison_time, operation.id),
+                )
+                rejected_row = cursor.fetchone()
+                if rejected_row is None:  # pragma: no cover - locked row invariant
+                    raise RuntimeError("unable to mark wiki publish operation rejected")
+                cursor.execute(
+                    """
+                    UPDATE wiki_edit_proposals
+                    SET status = 'failed', failure_code = %s, updated_at = %s
+                    WHERE id = %s::uuid
+                    """,
+                    (normalized_code, comparison_time, proposal_id),
+                )
+                return _operation_from_row(rejected_row)
 
     def _locked_request(
         self, cursor: Any, request_id: str, organization_id: str

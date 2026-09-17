@@ -247,6 +247,7 @@ async def test_wiki_create_requires_secret_and_enqueues_idempotently(
         args=(_PROPOSAL_ID, "guild-1"),
         settings=api.settings,
         idempotency_key=f"wiki-author:{_PROPOSAL_ID}",
+        redispatch_existing_queued=True,
     )
     metadata = audit.call_args.kwargs["metadata"]
     assert metadata == {
@@ -289,6 +290,7 @@ async def test_wiki_revision_uses_route_id_and_new_proposal_idempotency(
         args=(_REVISION_ID, "guild-1"),
         settings=api.settings,
         idempotency_key=f"wiki-author:{_REVISION_ID}",
+        redispatch_existing_queued=True,
     )
 
 

@@ -10000,6 +10000,9 @@ async def _enqueue_wiki_authoring_job(
         args=(proposal_id, organization_id),
         settings=settings,
         idempotency_key=f"wiki-author:{proposal_id}",
+        # A process can die after committing this job row but before Redis
+        # accepts it. A retry may safely recover only a still-queued job.
+        redispatch_existing_queued=True,
     )
 
 
