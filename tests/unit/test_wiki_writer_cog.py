@@ -12,11 +12,13 @@ from five08.discord_bot.cogs import wiki_writer as wiki_writer_module
 from five08.discord_bot.cogs.wiki_writer import (
     NO_MENTIONS,
     WikiProposalView,
+    WikiReviewAcknowledgementButton,
     WikiUpdateDynamicButton,
     WikiWriterCog,
     setup,
 )
 from five08.tls import default_ca_bundle_path
+from five08.wiki_editing.models import WikiEditReviewArtifact, WikiSourceReference
 
 
 class _FakeResponse:
@@ -68,6 +70,42 @@ def _cog_with_member(member: SimpleNamespace) -> tuple[WikiWriterCog, SimpleName
     return cog, guild
 
 
+def _review_payload() -> dict[str, object]:
+    review = WikiEditReviewArtifact.from_output(
+        proposed_title="Member guide",
+        proposed_article="Full proposed article with @everyone preserved in the private file.",
+        complete_diff="@@ -1 +1 @@\n-Old guide\n+Full proposed article with @everyone.",
+        source_refs=[
+            WikiSourceReference(
+                source_type="outline_document",
+                source_ref="doc-1",
+                title="Existing member guide",
+                source_url="https://outline.example/doc/member-guide",
+            )
+        ],
+    )
+    return review.model_dump(mode="json")
+
+
+def test_failed_wiki_draft_shows_revision_controls() -> None:
+    assert wiki_writer_module._controls_for_response({"status": "failed"}) == (
+        "revise",
+        "cancel",
+        "refresh",
+    )
+
+
+def test_unacknowledged_proposal_only_shows_ack_after_a_complete_packet() -> None:
+    assert wiki_writer_module._controls_for_response(
+        {"status": "proposed", "review": _review_payload()}
+    ) == ("ack", "revise", "cancel", "refresh")
+    assert wiki_writer_module._controls_for_response({"status": "proposed"}) == (
+        "revise",
+        "cancel",
+        "refresh",
+    )
+
+
 @pytest.fixture(autouse=True)
 def configure_wiki_guild(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(wiki_writer_module.settings, "discord_server_id", "123")
@@ -88,11 +126,13 @@ async def test_wiki_update_posts_typed_payload_and_sanitizes_private_response() 
         return_value={
             "proposal_id": proposal_id,
             "status": "proposed",
+            "audience": "shared_coop_wiki",
             "message": "Review @everyone **carefully**",
             "title": "<b>Member guide</b>",
             "target_document_id": "doc-1",
             "summary": "Add **clearer** guidance.",
-            "diff": "+ Mention @here only when necessary.",
+            "review": _review_payload(),
+            "review_acknowledged": False,
             "source_count": 0,
             "revision": 1,
         }
@@ -123,16 +163,29 @@ async def test_wiki_update_posts_typed_payload_and_sanitizes_private_response() 
     assert "@everyone" not in sent.args[0]
     assert "@here" not in sent.args[0]
     assert "**" not in sent.args[0]
+    assert "Audience: shared co-op wiki" in sent.args[0]
+    assert "Full proposed article" not in sent.args[0]
+    assert "Proposed diff:" not in sent.args[0]
+    review_file = sent.kwargs["file"]
+    packet = review_file.fp.getvalue().decode("utf-8")
+    assert "Full proposed article with @everyone" in packet
+    assert "@@ -1 +1 @@" in packet
+    assert "https://outline.example/doc/member-guide" in packet
     view = sent.kwargs["view"]
     assert isinstance(view, WikiProposalView)
     assert {item.item.label for item in view.children} == {
-        "Publish",
+        "Acknowledge review",
         "Revise",
         "Cancel",
         "Refresh",
     }
     assert all(proposal_id in item.item.custom_id for item in view.children)
-    assert all(item.item.custom_id.endswith(":123") for item in view.children)
+    generic_ids = [
+        item.item.custom_id
+        for item in view.children
+        if isinstance(item, WikiUpdateDynamicButton)
+    ]
+    assert all(custom_id.endswith(":123") for custom_id in generic_ids)
 
 
 @pytest.mark.asyncio
@@ -229,6 +282,42 @@ async def test_dynamic_publish_rehydrates_encoded_owner_and_fresh_roles() -> Non
     assert call["context"]["roles"] == ["Admin"]
     assert call["context"]["guild_id"] == "123"
     interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+
+
+@pytest.mark.asyncio
+async def test_dynamic_review_acknowledgement_binds_the_rendered_packet() -> None:
+    cog, guild = _cog_with_member(_member("Admin"))
+    review = _review_payload()
+    review_id = str(review["review_id"])
+    cog._post_proposal_action = AsyncMock(
+        return_value={
+            "proposal_id": "11111111-1111-1111-1111-111111111111",
+            "status": "proposed",
+            "action": "publish",
+            "review_acknowledged": True,
+            "message": "Review acknowledged.",
+            "source_count": 1,
+        }
+    )
+    cog._audit_wiki_response = Mock()
+    cog._send_wiki_response = AsyncMock()
+    interaction = _interaction(role_names=(), channel=None)
+    guild.fetch_member.return_value = _member("Admin")
+    interaction.client = SimpleNamespace(get_cog=Mock(return_value=cog))
+    button = WikiReviewAcknowledgementButton(
+        proposal_id="11111111-1111-1111-1111-111111111111",
+        requester_id=123,
+        review_id=review_id,
+    )
+
+    await button.callback(interaction)
+
+    call = cog._post_proposal_action.await_args.kwargs
+    assert call["action"] == "ack"
+    assert call["review_id"] == review_id
+    assert call["context"]["roles"] == ["Admin"]
+    assert button.item.custom_id.endswith(f":{review_id}")
+    assert len(button.item.custom_id) <= 100
 
 
 @pytest.mark.asyncio
@@ -362,8 +451,8 @@ async def test_selected_thread_context_is_bounded_org_visible_and_never_private(
     source = sources[0]
     assert source["visibility"] == "org"
     assert source["provenance"]["source_type"] == "discord_thread"
-    assert len(source["provenance"]["message_ids"]) == 10
-    assert len(source["organization_visible_text"]) <= 20_000
+    assert 0 < len(source["provenance"]["message_ids"]) <= 6
+    assert len(source["organization_visible_text"]) <= 12_000
     assert public_thread.history_called is True
 
     private_thread = FakeThread(private=True)
@@ -415,6 +504,16 @@ async def test_proposal_action_posts_expected_endpoint_payloads() -> None:
     assert cog._post_backend_json.call_args.args == (
         f"/wiki/updates/{proposal_id}/publish",
         {"context": context},
+    )
+    await cog._post_proposal_action(
+        proposal_id=proposal_id,
+        action="ack",
+        context=context,
+        review_id="0123456789abcdef",
+    )
+    assert cog._post_backend_json.call_args.args == (
+        f"/wiki/updates/{proposal_id}/acknowledge-review",
+        {"context": context, "review_id": "0123456789abcdef"},
     )
     await cog._post_proposal_action(
         proposal_id=proposal_id,
@@ -491,6 +590,7 @@ def test_audit_metadata_excludes_instruction_summary_and_raw_source_text() -> No
             "revision": 3,
             "summary": "private source text",
             "diff": "+ private source text",
+            "review": _review_payload(),
             "message": "private source text",
         },
     )
@@ -505,6 +605,7 @@ def test_audit_metadata_excludes_instruction_summary_and_raw_source_text() -> No
         "revision": 3,
     }
     assert "private source text" not in str(metadata)
+    assert "Full proposed article" not in str(metadata)
 
 
 @pytest.mark.asyncio
@@ -513,6 +614,9 @@ async def test_setup_registers_restart_safe_dynamic_wiki_controls() -> None:
 
     await setup(bot)
 
-    bot.add_dynamic_items.assert_called_once_with(WikiUpdateDynamicButton)
+    bot.add_dynamic_items.assert_called_once_with(
+        WikiUpdateDynamicButton,
+        WikiReviewAcknowledgementButton,
+    )
     added_cog = bot.add_cog.await_args.args[0]
     assert isinstance(added_cog, WikiWriterCog)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import io
 import inspect
 import logging
 import re
@@ -23,6 +24,7 @@ from five08.discord_bot.utils.role_decorators import (
     require_role,
 )
 from five08.tls import default_ca_bundle_path
+from five08.wiki_editing.models import WikiEditReviewArtifact
 
 
 logger = logging.getLogger(__name__)
@@ -30,7 +32,9 @@ NO_MENTIONS = discord.AllowedMentions.none()
 WIKI_UPDATE_INSTRUCTION_MAX_LENGTH = 4_000
 WIKI_TARGET_DOCUMENT_ID_MAX_LENGTH = 256
 WIKI_THREAD_MESSAGE_LIMIT = 20
-WIKI_THREAD_CONTEXT_MAX_CHARS = 20_000
+# Keep the bot-side snapshot inside the backend/OMP aggregate source budget:
+# 4k explicit instruction + 16k target article + 12k selected thread = 32k.
+WIKI_THREAD_CONTEXT_MAX_CHARS = 12_000
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _WIKI_UPDATE_COMPONENT_RE = re.compile(
     r"^wiki:update:(?P<action>publish|revise|cancel|refresh):"
@@ -39,8 +43,15 @@ _WIKI_UPDATE_COMPONENT_RE = re.compile(
     r"(?P<requester_id>[1-9][0-9]{0,19})$",
     re.IGNORECASE,
 )
+_WIKI_REVIEW_ACK_COMPONENT_RE = re.compile(
+    r"^wiki:review:ack:(?P<proposal_id>[0-9a-f]{8}-[0-9a-f]{4}-"
+    r"[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}):"
+    r"(?P<requester_id>[1-9][0-9]{0,19}):(?P<review_id>[0-9a-f]{16})$",
+    re.IGNORECASE,
+)
 
 WikiUpdateAction = Literal["publish", "revise", "cancel", "refresh"]
+WikiProposalAction = Literal["publish", "revise", "cancel", "refresh", "ack"]
 _WIKI_UPDATE_ACTIONS: tuple[WikiUpdateAction, ...] = (
     "publish",
     "revise",
@@ -108,6 +119,19 @@ def _proposal_uuid(value: object) -> str | None:
         return None
 
 
+def _review_id_from_response(response: dict[str, Any]) -> str | None:
+    """Extract a bounded review binding only from a complete review payload."""
+    review = response.get("review")
+    if not isinstance(review, dict):
+        return None
+    candidate = str(review.get("review_id") or "").strip().lower()
+    if len(candidate) != 16 or any(
+        character not in "0123456789abcdef" for character in candidate
+    ):
+        return None
+    return candidate
+
+
 def _wiki_update_component_id(
     *,
     action: WikiUpdateAction,
@@ -131,18 +155,60 @@ def _wiki_update_component_id(
     return custom_id
 
 
-def _controls_for_response(response: dict[str, Any]) -> tuple[WikiUpdateAction, ...]:
+def _wiki_review_ack_component_id(
+    *,
+    proposal_id: str,
+    requester_id: int,
+    review_id: str,
+) -> str:
+    """Bind an acknowledgement control to an immutable review packet.
+
+    This deliberately omits the guild from the ID to leave space for the
+    review binding. The callback still checks the configured guild before it
+    reconstructs an actor context.
+    """
+    normalized_proposal_id = _proposal_uuid(proposal_id)
+    normalized_review_id = review_id.strip().lower()
+    if normalized_proposal_id is None:
+        raise ValueError("Wiki proposal ID must be a UUID")
+    if requester_id <= 0:
+        raise ValueError("Wiki requester ID must be a positive integer")
+    if len(normalized_review_id) != 16 or any(
+        character not in "0123456789abcdef" for character in normalized_review_id
+    ):
+        raise ValueError("Wiki review ID must be a 16-character hexadecimal binding")
+    custom_id = f"wiki:review:ack:{normalized_proposal_id}:{requester_id}:{normalized_review_id}"
+    if len(custom_id) > 100:
+        raise ValueError("Wiki review acknowledgement ID exceeds Discord's limit")
+    return custom_id
+
+
+def _controls_for_response(
+    response: dict[str, Any],
+) -> tuple[WikiProposalAction, ...]:
     """Show only controls that can be meaningful for the current lifecycle state."""
     status = str(response.get("status") or "").strip().lower()
-    if status in {"published", "canceled", "failed", "publish_unknown"}:
+    if status in {"published", "canceled", "publish_unknown"}:
         return ("refresh",)
+    if status == "failed":
+        return ("revise", "cancel", "refresh")
     if status in {"queued", "authoring", "publishing"}:
         return ("cancel", "refresh")
     if status == "conflict":
         return ("revise", "cancel", "refresh")
-    # A proposal awaiting review normally reports ``proposed``.  Keep the full
-    # review set as a safe fallback for a compatible backend response.
-    return _WIKI_UPDATE_ACTIONS
+    if status == "proposed":
+        if (
+            response.get("review_acknowledged") is True
+            and str(response.get("action") or "").strip().lower() == "publish"
+        ):
+            return _WIKI_UPDATE_ACTIONS
+        if _review_id_from_response(response) is not None:
+            return ("ack", "revise", "cancel", "refresh")
+        # Never offer a publish or acknowledgement button unless this response
+        # successfully carries the complete private review packet.
+        return ("revise", "cancel", "refresh")
+    # Unknown lifecycle values fail closed to reversible controls.
+    return ("refresh",)
 
 
 class WikiUpdateDynamicButton(
@@ -215,6 +281,77 @@ class WikiUpdateDynamicButton(
         await restored_view.handle_action(interaction, self.action)
 
 
+class WikiReviewAcknowledgementButton(
+    discord.ui.DynamicItem[discord.ui.Button[Any]],
+    template=_WIKI_REVIEW_ACK_COMPONENT_RE,
+):
+    """Restart-safe owner acknowledgement for one complete review attachment."""
+
+    def __init__(
+        self,
+        *,
+        proposal_id: str,
+        requester_id: int,
+        review_id: str,
+    ) -> None:
+        self.proposal_id = _proposal_uuid(proposal_id) or proposal_id
+        self.requester_id = requester_id
+        self.review_id = review_id.strip().lower()
+        super().__init__(
+            discord.ui.Button(
+                label="Acknowledge review",
+                style=discord.ButtonStyle.success,
+                custom_id=_wiki_review_ack_component_id(
+                    proposal_id=self.proposal_id,
+                    requester_id=requester_id,
+                    review_id=self.review_id,
+                ),
+            )
+        )
+
+    @classmethod
+    async def from_custom_id(
+        cls,
+        interaction: discord.Interaction,
+        item: discord.ui.Item[Any],
+        match: re.Match[str],
+        /,
+    ) -> "WikiReviewAcknowledgementButton":
+        del interaction, item
+        return cls(
+            proposal_id=match["proposal_id"],
+            requester_id=int(match["requester_id"]),
+            review_id=match["review_id"],
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        client = getattr(interaction, "client", None)
+        get_cog = getattr(client, "get_cog", None)
+        cog = get_cog("WikiWriterCog") if callable(get_cog) else None
+        if not isinstance(cog, WikiWriterCog):
+            await _send_ephemeral(
+                interaction,
+                "Wiki review controls are temporarily unavailable. Try again.",
+            )
+            return
+        guild_id = cog._configured_guild_id()
+        if guild_id is None:
+            await _send_ephemeral(
+                interaction,
+                "Wiki review controls are only available in the configured co-op server.",
+            )
+            return
+        restored_view = WikiProposalView(
+            cog=cog,
+            requester_id=self.requester_id,
+            proposal_id=self.proposal_id,
+            guild_id=guild_id,
+            review_id=self.review_id,
+            actions=("ack",),
+        )
+        await restored_view.handle_action(interaction, "ack")
+
+
 class WikiRevisionModal(discord.ui.Modal):
     """Collect a bounded revision instruction without retaining source text."""
 
@@ -245,17 +382,29 @@ class WikiProposalView(discord.ui.View):
         requester_id: int,
         proposal_id: str,
         guild_id: str,
-        actions: tuple[WikiUpdateAction, ...] | None = None,
+        review_id: str | None = None,
+        actions: tuple[WikiProposalAction, ...] | None = None,
     ) -> None:
         super().__init__(timeout=None)
         self.cog = cog
         self.requester_id = requester_id
         self.proposal_id = proposal_id
         self.guild_id = guild_id
-        for action in actions or _WIKI_UPDATE_ACTIONS:
+        self.review_id = review_id
+        for action in actions or ("revise", "cancel", "refresh"):
+            if action == "ack":
+                if review_id is not None:
+                    self.add_item(
+                        WikiReviewAcknowledgementButton(
+                            proposal_id=proposal_id,
+                            requester_id=requester_id,
+                            review_id=review_id,
+                        )
+                    )
+                continue
             self.add_item(
                 WikiUpdateDynamicButton(
-                    action=action,
+                    action=cast(WikiUpdateAction, action),
                     proposal_id=proposal_id,
                     guild_id=guild_id,
                     requester_id=requester_id,
@@ -274,7 +423,7 @@ class WikiProposalView(discord.ui.View):
     async def handle_action(
         self,
         interaction: discord.Interaction,
-        action: WikiUpdateAction,
+        action: WikiProposalAction,
     ) -> None:
         if interaction.user.id != self.requester_id:
             await _send_ephemeral(
@@ -348,7 +497,7 @@ class WikiProposalView(discord.ui.View):
         self,
         interaction: discord.Interaction,
         *,
-        action: WikiUpdateAction,
+        action: WikiProposalAction,
         context: dict[str, Any],
         instruction: str | None = None,
     ) -> None:
@@ -358,6 +507,7 @@ class WikiProposalView(discord.ui.View):
                 action=action,
                 context=context,
                 instruction=instruction,
+                review_id=self.review_id if action == "ack" else None,
             )
         except Exception:
             logger.warning("Wiki proposal action failed", exc_info=True)
@@ -404,6 +554,25 @@ async def _send_ephemeral(interaction: discord.Interaction, message: str) -> Non
         message,
         allowed_mentions=NO_MENTIONS,
         ephemeral=True,
+    )
+
+
+def _private_review_attachment(
+    response: dict[str, Any],
+) -> tuple[discord.File | None, str | None]:
+    """Build a bounded review file without ever putting raw content in a card."""
+    raw_review = response.get("review")
+    if not isinstance(raw_review, dict):
+        return None, None
+    try:
+        review = WikiEditReviewArtifact.model_validate(raw_review)
+        content = review.attachment_bytes()
+    except (TypeError, ValueError):
+        logger.warning("Wiki response contained an invalid review attachment")
+        return None, None
+    return (
+        discord.File(io.BytesIO(content), filename=review.attachment_filename),
+        review.review_id,
     )
 
 
@@ -753,9 +922,10 @@ class WikiWriterCog(DiscordAuditCogMixin, commands.Cog):
         self,
         *,
         proposal_id: str,
-        action: WikiUpdateAction,
+        action: WikiProposalAction,
         context: dict[str, Any],
         instruction: str | None = None,
+        review_id: str | None = None,
     ) -> dict[str, Any]:
         if action == "revise":
             if instruction is None:  # pragma: no cover - guarded by the modal
@@ -765,6 +935,11 @@ class WikiWriterCog(DiscordAuditCogMixin, commands.Cog):
         elif action == "publish":
             payload = {"context": context}
             path = f"/wiki/updates/{proposal_id}/publish"
+        elif action == "ack":
+            if review_id is None:  # pragma: no cover - guarded by the view
+                raise ValueError("Wiki review acknowledgement requires a review ID")
+            payload = {"context": context, "review_id": review_id}
+            path = f"/wiki/updates/{proposal_id}/acknowledge-review"
         elif action == "cancel":
             payload = {"context": context}
             path = f"/wiki/updates/{proposal_id}/cancel"
@@ -815,6 +990,10 @@ class WikiWriterCog(DiscordAuditCogMixin, commands.Cog):
         guild_id: str,
     ) -> None:
         proposal_id = _proposal_uuid(response.get("proposal_id"))
+        review_file, review_id = _private_review_attachment(response)
+        actions = _controls_for_response(response)
+        if "ack" in actions and (review_file is None or review_id is None):
+            actions = tuple(action for action in actions if action != "ack")
         view: WikiProposalView | None = None
         if proposal_id is not None:
             view = WikiProposalView(
@@ -822,26 +1001,38 @@ class WikiWriterCog(DiscordAuditCogMixin, commands.Cog):
                 requester_id=requester_id,
                 proposal_id=proposal_id,
                 guild_id=guild_id,
-                actions=_controls_for_response(response),
+                review_id=review_id,
+                actions=actions,
             )
-        content = self._format_wiki_response(response)
-        if view is None:
-            await interaction.followup.send(
-                content,
-                allowed_mentions=NO_MENTIONS,
-                ephemeral=True,
-            )
-            return
-        await interaction.followup.send(
-            content,
-            view=view,
-            allowed_mentions=NO_MENTIONS,
-            ephemeral=True,
+        content = self._format_wiki_response(
+            response,
+            review_attached=review_file is not None,
         )
+        if view is None:
+            kwargs: dict[str, Any] = {
+                "allowed_mentions": NO_MENTIONS,
+                "ephemeral": True,
+            }
+            if review_file is not None:
+                kwargs["file"] = review_file
+            await interaction.followup.send(content, **kwargs)
+            return
+        kwargs = {
+            "view": view,
+            "allowed_mentions": NO_MENTIONS,
+            "ephemeral": True,
+        }
+        if review_file is not None:
+            kwargs["file"] = review_file
+        await interaction.followup.send(content, **kwargs)
 
     @staticmethod
-    def _format_wiki_response(response: dict[str, Any]) -> str:
-        """Render only safe proposal metadata, never request or source text."""
+    def _format_wiki_response(
+        response: dict[str, Any],
+        *,
+        review_attached: bool = False,
+    ) -> str:
+        """Render only compact metadata; full content lives in a private file."""
         message = _safe_display_text(
             response.get("message") or "Wiki update status received.",
             max_length=700,
@@ -850,6 +1041,8 @@ class WikiWriterCog(DiscordAuditCogMixin, commands.Cog):
         status = _safe_display_text(response.get("status"), max_length=80)
         if status:
             lines.append(f"Status: {status}")
+        if response.get("audience") == "shared_coop_wiki":
+            lines.append("Audience: shared co-op wiki")
         title = _safe_display_text(response.get("title"), max_length=200)
         if title:
             lines.append(f"Document: {title}")
@@ -874,9 +1067,14 @@ class WikiWriterCog(DiscordAuditCogMixin, commands.Cog):
         summary = _safe_display_text(response.get("summary"), max_length=500)
         if summary:
             lines.append(f"Summary: {summary}")
-        diff = _safe_display_text(response.get("diff"), max_length=500)
-        if diff:
-            lines.append(f"Proposed diff: {diff}")
+        if review_attached:
+            lines.append(
+                "The complete proposed article, diff, and safe source links are attached privately."
+            )
+        elif str(response.get("status") or "").strip().lower() == "proposed":
+            lines.append(
+                "The complete review packet is unavailable. Refresh or revise before publishing."
+            )
         document_url = _safe_document_url(response.get("document_url"))
         if document_url:
             lines.append(f"Open document: <{document_url}>")
@@ -937,5 +1135,5 @@ class WikiWriterCog(DiscordAuditCogMixin, commands.Cog):
 
 async def setup(bot: commands.Bot) -> None:
     """Load the restart-safe wiki writer controls and cog."""
-    bot.add_dynamic_items(WikiUpdateDynamicButton)
+    bot.add_dynamic_items(WikiUpdateDynamicButton, WikiReviewAcknowledgementButton)
     await bot.add_cog(WikiWriterCog(bot))

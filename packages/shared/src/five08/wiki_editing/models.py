@@ -8,8 +8,10 @@ available through the explicitly named ``*ForAuthoring`` internal models.
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import datetime, timezone
 from typing import Literal, cast
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -51,10 +53,43 @@ WikiSourceType = Literal[
     "other",
 ]
 
+# Discord's default upload allowance is much larger, but a review packet is a
+# deliberately narrow handoff rather than a general file-transfer channel. The
+# service rejects an over-limit draft before it becomes reviewable, so the UI
+# never silently truncates the article or diff that a requester must approve.
+WIKI_REVIEW_ATTACHMENT_MAX_BYTES = 1_000_000
+WIKI_REVIEW_ID_LENGTH = 16
+
 
 def wiki_content_hash(value: str) -> str:
     """Return the stable SHA-256 hash used for snapshots and provenance."""
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _safe_review_source_url(value: str | None) -> str | None:
+    """Return a safe HTTP(S) source URL for a private Discord review packet."""
+    candidate = (value or "").strip()
+    if (
+        not candidate
+        or len(candidate) > 2_000
+        or any(character.isspace() for character in candidate)
+        or any(character in candidate for character in "<>")
+    ):
+        return None
+    try:
+        parsed = urlsplit(candidate)
+        hostname = parsed.hostname
+    except ValueError:
+        return None
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return None
+    return candidate
 
 
 def _utc_now() -> datetime:
@@ -222,6 +257,48 @@ class WikiSourceReference(BaseModel):
     @classmethod
     def _validate_content_hash(cls, value: str | None) -> str | None:
         return WikiConversationProvenance._validate_content_hash(value)
+
+
+class WikiReviewSourceLink(BaseModel):
+    """A source link safe to include in a private Discord review attachment.
+
+    The opaque ``source_ref`` and any source text intentionally stay out of
+    this representation. A model may cite an approved source with no link, but
+    it cannot cause arbitrary URI schemes or credential-bearing URLs to appear
+    in the review packet.
+    """
+
+    source_type: WikiSourceType
+    title: str = Field(min_length=1, max_length=512)
+    url: str = Field(min_length=1, max_length=2_000)
+
+    @field_validator("title")
+    @classmethod
+    def _strip_title(cls, value: str) -> str:
+        return _strip_required(value)
+
+    @field_validator("url")
+    @classmethod
+    def _validate_url(cls, value: str) -> str:
+        safe_url = _safe_review_source_url(value)
+        if safe_url is None:
+            raise ValueError("review source URLs must be safe HTTP(S) URLs")
+        return safe_url
+
+    @classmethod
+    def from_source_reference(
+        cls,
+        source: "WikiSourceReference",
+    ) -> "WikiReviewSourceLink | None":
+        """Keep only a source reference that has a safe displayable URL."""
+        safe_url = _safe_review_source_url(source.source_url)
+        if safe_url is None:
+            return None
+        return cls(
+            source_type=source.source_type,
+            title=source.title,
+            url=safe_url,
+        )
 
 
 class WikiBaseDocumentReference(BaseModel):
@@ -454,6 +531,31 @@ class WikiEditActionRequest(BaseModel):
         return _strip_required(value)
 
 
+class WikiEditReviewAcknowledgementRequest(BaseModel):
+    """Requester confirmation bound to one immutable rendered review packet."""
+
+    context: AgentIdentityContext = Field(exclude=True, repr=False)
+    proposal_id: str = Field(min_length=1, max_length=256)
+    review_id: str = Field(
+        min_length=WIKI_REVIEW_ID_LENGTH, max_length=WIKI_REVIEW_ID_LENGTH
+    )
+
+    @field_validator("proposal_id")
+    @classmethod
+    def _strip_proposal_id(cls, value: str) -> str:
+        return _strip_required(value)
+
+    @field_validator("review_id")
+    @classmethod
+    def _validate_review_id(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if len(normalized) != WIKI_REVIEW_ID_LENGTH or any(
+            character not in "0123456789abcdef" for character in normalized
+        ):
+            raise ValueError("review_id must be a short hexadecimal review binding")
+        return normalized
+
+
 class WikiEditRequestInput(BaseModel):
     """Trusted internal input persisted as one idempotent authoring request."""
 
@@ -594,11 +696,58 @@ class WikiEditProposal(BaseModel):
     document_url: str | None = None
     published_document_version: str | None = None
     published_content_hash: str | None = None
+    review_acknowledged_by: str | None = None
+    review_acknowledged_content_hash: str | None = None
+    review_acknowledged_at: datetime | None = None
     created_at: datetime
     authoring_started_at: datetime | None = None
     proposed_at: datetime | None = None
     published_at: datetime | None = None
     updated_at: datetime
+
+    @field_validator("review_acknowledged_by")
+    @classmethod
+    def _strip_review_acknowledged_by(cls, value: str | None) -> str | None:
+        return _strip_required(value) if value is not None else None
+
+    @field_validator("review_acknowledged_content_hash")
+    @classmethod
+    def _validate_review_acknowledged_content_hash(
+        cls,
+        value: str | None,
+    ) -> str | None:
+        return WikiConversationProvenance._validate_content_hash(value)
+
+    @field_validator("review_acknowledged_at")
+    @classmethod
+    def _normalize_review_acknowledged_at(
+        cls,
+        value: datetime | None,
+    ) -> datetime | None:
+        return _normalize_datetime(value) if value is not None else None
+
+    @model_validator(mode="after")
+    def _validate_review_acknowledgement(self) -> "WikiEditProposal":
+        values = (
+            self.review_acknowledged_by,
+            self.review_acknowledged_content_hash,
+            self.review_acknowledged_at,
+        )
+        if any(value is not None for value in values) and not all(
+            value is not None for value in values
+        ):
+            raise ValueError("wiki review acknowledgement fields must be set together")
+        if (
+            self.review_acknowledged_by is not None
+            and self.review_acknowledged_by != self.actor_id
+        ):
+            raise ValueError("wiki review must be acknowledged by its requester")
+        return self
+
+    @property
+    def review_acknowledged(self) -> bool:
+        """Whether the requester durably acknowledged this immutable revision."""
+        return self.review_acknowledged_at is not None
 
 
 class WikiProposalForAuthoring(WikiEditProposal):
@@ -606,6 +755,161 @@ class WikiProposalForAuthoring(WikiEditProposal):
 
     base_snapshot: WikiBaseDocumentSnapshot | None = Field(default=None, exclude=True)
     revision_instruction: str | None = Field(default=None, exclude=True, repr=False)
+
+
+class WikiEditReviewArtifact(BaseModel):
+    """Complete owner-only review packet rendered as one bounded attachment.
+
+    The article and diff are deliberately not part of ordinary workflow
+    responses. Only the actor-scoped status read creates this artifact, and the
+    Discord cog emits it as an ephemeral attachment before offering its
+    acknowledgement action.
+    """
+
+    review_id: str = Field(
+        min_length=WIKI_REVIEW_ID_LENGTH,
+        max_length=WIKI_REVIEW_ID_LENGTH,
+    )
+    proposed_title: str = Field(min_length=1, max_length=512)
+    proposed_article: str = Field(min_length=1, max_length=500_000)
+    complete_diff: str = Field(min_length=1, max_length=250_000)
+    source_links: list[WikiReviewSourceLink] = Field(
+        default_factory=list, max_length=100
+    )
+
+    @field_validator("review_id")
+    @classmethod
+    def _validate_review_id(cls, value: str) -> str:
+        return WikiEditReviewAcknowledgementRequest._validate_review_id(value)
+
+    @field_validator("proposed_title")
+    @classmethod
+    def _strip_title(cls, value: str) -> str:
+        return _strip_required(value)
+
+    @field_validator("proposed_article", "complete_diff")
+    @classmethod
+    def _require_document_content(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("review content must not be blank")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_review_binding(self) -> "WikiEditReviewArtifact":
+        if self.review_id != self.content_hash[:WIKI_REVIEW_ID_LENGTH]:
+            raise ValueError("review_id does not bind this complete review packet")
+        return self
+
+    @property
+    def content_hash(self) -> str:
+        """Full immutable review hash stored with an acknowledgement."""
+        payload = {
+            "version": 1,
+            "proposed_title": self.proposed_title,
+            "proposed_article": self.proposed_article,
+            "complete_diff": self.complete_diff,
+            "source_links": [
+                source.model_dump(mode="json") for source in self.source_links
+            ],
+        }
+        serialized = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return wiki_content_hash(serialized)
+
+    @property
+    def attachment_filename(self) -> str:
+        """Return a deterministic filename with no untrusted title component."""
+        return f"wiki-review-{self.review_id}.md"
+
+    def attachment_bytes(self) -> bytes:
+        """Render the exact review packet or reject it rather than truncating."""
+        sources = "\n".join(
+            (
+                f"{index}. {source.source_type}: "
+                f"{' '.join(source.title.split())}\n   <{source.url}>"
+            )
+            for index, source in enumerate(self.source_links, start=1)
+        )
+        if not sources:
+            sources = "No linked sources were supplied with this draft."
+        rendered = (
+            "# Wiki update review\n\n"
+            f"Review ID: {self.review_id}\n"
+            "Audience: shared co-op wiki\n\n"
+            "## Proposed article\n\n"
+            f"# {self.proposed_title}\n\n"
+            f"{self.proposed_article}\n\n"
+            "## Complete diff\n\n"
+            f"{self.complete_diff}\n\n"
+            "## Linked sources\n\n"
+            f"{sources}\n"
+        )
+        encoded = rendered.encode("utf-8")
+        if len(encoded) > WIKI_REVIEW_ATTACHMENT_MAX_BYTES:
+            raise ValueError("wiki review attachment exceeds the bounded size")
+        return encoded
+
+    @classmethod
+    def from_proposal(cls, proposal: WikiEditProposal) -> "WikiEditReviewArtifact":
+        """Build the review artifact only from one immutable completed proposal."""
+        if (
+            proposal.proposed_title is None
+            or proposal.proposed_text is None
+            or proposal.proposed_diff is None
+        ):
+            raise WikiEditStateError("wiki proposal has no complete review output")
+        return cls.from_output(
+            proposed_title=proposal.proposed_title,
+            proposed_article=proposal.proposed_text,
+            complete_diff=proposal.proposed_diff,
+            source_refs=proposal.source_refs,
+        )
+
+    @classmethod
+    def from_output(
+        cls,
+        *,
+        proposed_title: str,
+        proposed_article: str,
+        complete_diff: str,
+        source_refs: list[WikiSourceReference],
+    ) -> "WikiEditReviewArtifact":
+        """Build and size-check a packet before its proposal output is persisted."""
+        source_links = [
+            source_link
+            for source in source_refs
+            if (source_link := WikiReviewSourceLink.from_source_reference(source))
+            is not None
+        ]
+        payload = {
+            "version": 1,
+            "proposed_title": proposed_title,
+            "proposed_article": proposed_article,
+            "complete_diff": complete_diff,
+            "source_links": [source.model_dump(mode="json") for source in source_links],
+        }
+        serialized = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        content_hash = wiki_content_hash(serialized)
+        artifact = cls(
+            review_id=content_hash[:WIKI_REVIEW_ID_LENGTH],
+            proposed_title=proposed_title,
+            proposed_article=proposed_article,
+            complete_diff=complete_diff,
+            source_links=source_links,
+        )
+        # Validate the rendered representation at the same boundary that
+        # creates it. The UI will never replace omitted data with a preview.
+        artifact.attachment_bytes()
+        return artifact
 
 
 class WikiAuthoringWorkItem(BaseModel):
@@ -640,11 +944,20 @@ class WikiPublishClaim(BaseModel):
 
 
 class WikiEditResponse(BaseModel):
-    """Discord/API-safe workflow response with no raw source or request text."""
+    """Workflow response with an optional owner-scoped review artifact.
+
+    Ordinary lifecycle responses contain only metadata. The complete article and
+    diff can appear in ``review`` only after the service has authenticated the
+    proposal owner for a status read; callers must not persist or audit it.
+    """
 
     proposal_id: str | None = None
     request_id: str | None = None
     status: WikiProposalStatus | None = None
+    # Wiki editing is deliberately limited to the configured organization-wide
+    # Outline collection; expose that audience in the review card so the
+    # requester can see the sharing boundary before publishing.
+    audience: Literal["shared_coop_wiki"] = "shared_coop_wiki"
     message: str = Field(min_length=1, max_length=8_000)
     action: WikiEditResponseAction = "none"
     target_document_id: str | None = None
@@ -655,6 +968,8 @@ class WikiEditResponse(BaseModel):
     source_count: int = Field(default=0, ge=0)
     revision: int | None = Field(default=None, ge=1)
     operation_status: WikiPublishOperationStatus | None = None
+    review_acknowledged: bool = False
+    review: WikiEditReviewArtifact | None = None
 
     @classmethod
     def from_proposal(
@@ -664,6 +979,7 @@ class WikiEditResponse(BaseModel):
         message: str,
         action: WikiEditResponseAction = "none",
         operation: WikiPublishOperation | None = None,
+        review: WikiEditReviewArtifact | None = None,
     ) -> "WikiEditResponse":
         """Create a safe response without exposing authoring-only payloads."""
         return cls(
@@ -683,11 +999,12 @@ class WikiEditResponse(BaseModel):
                 if proposal.base_document is not None
                 else None
             ),
-            diff=proposal.proposed_diff,
             summary=proposal.summary,
             source_count=len(proposal.source_refs),
             revision=proposal.revision,
             operation_status=operation.status if operation is not None else None,
+            review_acknowledged=proposal.review_acknowledged,
+            review=review,
         )
 
 

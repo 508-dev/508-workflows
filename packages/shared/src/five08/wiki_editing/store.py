@@ -137,6 +137,17 @@ class WikiEditingStore(Protocol):
     ) -> WikiEditProposal:
         """Cancel a proposal before publishing; actor ownership is optional to enforce."""
 
+    def acknowledge_review(
+        self,
+        proposal_id: str,
+        *,
+        organization_id: str,
+        actor_id: str,
+        review_content_hash: str,
+        now: datetime | None = None,
+    ) -> WikiEditProposal:
+        """Durably bind the requester to one immutable review packet."""
+
     def create_or_get_publish_operation(
         self, proposal_id: str, *, organization_id: str
     ) -> tuple[WikiPublishOperation, bool]:
@@ -300,6 +311,9 @@ def _proposal_from_row(row: dict[str, Any]) -> WikiEditProposal:
         document_url=row.get("document_url"),
         published_document_version=row.get("published_document_version"),
         published_content_hash=row.get("published_content_hash"),
+        review_acknowledged_by=row.get("review_acknowledged_by"),
+        review_acknowledged_content_hash=row.get("review_acknowledged_content_hash"),
+        review_acknowledged_at=row.get("review_acknowledged_at"),
         created_at=row["created_at"],
         authoring_started_at=row.get("authoring_started_at"),
         proposed_at=row.get("proposed_at"),
@@ -400,11 +414,27 @@ def _public_proposal(proposal: WikiProposalForAuthoring) -> WikiEditProposal:
     return WikiEditProposal.model_validate(proposal.model_dump(mode="python"))
 
 
-def _validate_owned_actor(
-    proposal: WikiProposalForAuthoring, actor_id: str | None
-) -> None:
+def _validate_owned_actor(proposal: WikiEditProposal, actor_id: str | None) -> None:
     if actor_id is not None and proposal.actor_id != actor_id:
         raise WikiEditPermissionError("wiki proposal is not owned by this actor")
+
+
+def _validated_review_content_hash(value: str) -> str:
+    """Validate the immutable review digest accepted by persistence adapters."""
+    normalized = value.strip().lower()
+    if len(normalized) != 64 or any(
+        character not in "0123456789abcdef" for character in normalized
+    ):
+        raise ValueError("review_content_hash must be a SHA-256 hexadecimal digest")
+    return normalized
+
+
+def _require_review_acknowledgement(proposal: WikiEditProposal) -> None:
+    """Fail closed before allocating the one permitted external write attempt."""
+    if not proposal.review_acknowledged:
+        raise WikiEditStateError(
+            "wiki review must be acknowledged by its requester before publishing"
+        )
 
 
 def _new_operation(
@@ -703,6 +733,45 @@ class InMemoryWikiEditingStore:
             self._proposals[proposal_id] = updated
             return _public_proposal(updated).model_copy(deep=True)
 
+    def acknowledge_review(
+        self,
+        proposal_id: str,
+        *,
+        organization_id: str,
+        actor_id: str,
+        review_content_hash: str,
+        now: datetime | None = None,
+    ) -> WikiEditProposal:
+        comparison_time = _now(now)
+        normalized_hash = _validated_review_content_hash(review_content_hash)
+        with self._lock:
+            proposal = self._required_proposal(proposal_id, organization_id)
+            _validate_owned_actor(proposal, actor_id)
+            if proposal.review_acknowledged:
+                if (
+                    proposal.review_acknowledged_by != actor_id
+                    or proposal.review_acknowledged_content_hash != normalized_hash
+                ):
+                    raise WikiEditConflictError(
+                        "wiki proposal was acknowledged for a different review packet"
+                    )
+                return _public_proposal(proposal).model_copy(deep=True)
+            if proposal.status != "proposed":
+                raise WikiEditStateError(
+                    "wiki proposal must be proposed before its review can be acknowledged"
+                )
+            acknowledged = proposal.model_copy(
+                update={
+                    "review_acknowledged_by": actor_id,
+                    "review_acknowledged_content_hash": normalized_hash,
+                    "review_acknowledged_at": comparison_time,
+                    "updated_at": comparison_time,
+                },
+                deep=True,
+            )
+            self._proposals[proposal_id] = acknowledged
+            return _public_proposal(acknowledged).model_copy(deep=True)
+
     def create_or_get_publish_operation(
         self, proposal_id: str, *, organization_id: str
     ) -> tuple[WikiPublishOperation, bool]:
@@ -715,6 +784,7 @@ class InMemoryWikiEditingStore:
                 raise WikiEditStateError(
                     "wiki proposal must be proposed before publishing can begin"
                 )
+            _require_review_acknowledgement(proposal)
             operation = _new_operation(_public_proposal(proposal), now=_now())
             self._operations[proposal_id] = operation
             return operation.model_copy(deep=True), True
@@ -745,6 +815,7 @@ class InMemoryWikiEditingStore:
                     raise WikiEditStateError(
                         "wiki proposal must be proposed before publishing can begin"
                     )
+                _require_review_acknowledgement(proposal)
                 operation = _new_operation(
                     _public_proposal(proposal), now=comparison_time
                 )
@@ -1330,6 +1401,58 @@ class PostgresWikiEditingStore:
                     raise RuntimeError("unable to cancel wiki proposal")
                 return _proposal_from_row(updated)
 
+    def acknowledge_review(
+        self,
+        proposal_id: str,
+        *,
+        organization_id: str,
+        actor_id: str,
+        review_content_hash: str,
+        now: datetime | None = None,
+    ) -> WikiEditProposal:
+        comparison_time = _now(now)
+        normalized_hash = _validated_review_content_hash(review_content_hash)
+        with self._connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cursor:
+                row = self._locked_proposal(cursor, proposal_id, organization_id)
+                proposal = _proposal_from_row(row)
+                _validate_owned_actor(proposal, actor_id)
+                if proposal.review_acknowledged:
+                    if (
+                        proposal.review_acknowledged_by != actor_id
+                        or proposal.review_acknowledged_content_hash != normalized_hash
+                    ):
+                        raise WikiEditConflictError(
+                            "wiki proposal was acknowledged for a different review packet"
+                        )
+                    return proposal
+                if proposal.status != "proposed":
+                    raise WikiEditStateError(
+                        "wiki proposal must be proposed before its review can be acknowledged"
+                    )
+                cursor.execute(
+                    """
+                    UPDATE wiki_edit_proposals
+                    SET review_acknowledged_by = %s,
+                        review_acknowledged_content_hash = %s,
+                        review_acknowledged_at = %s,
+                        updated_at = %s
+                    WHERE id = %s::uuid
+                    RETURNING *
+                    """,
+                    (
+                        actor_id,
+                        normalized_hash,
+                        comparison_time,
+                        comparison_time,
+                        proposal_id,
+                    ),
+                )
+                acknowledged = cursor.fetchone()
+                if acknowledged is None:  # pragma: no cover - locked row invariant
+                    raise RuntimeError("unable to acknowledge wiki review")
+                return _proposal_from_row(acknowledged)
+
     def create_or_get_publish_operation(
         self, proposal_id: str, *, organization_id: str
     ) -> tuple[WikiPublishOperation, bool]:
@@ -1346,6 +1469,7 @@ class PostgresWikiEditingStore:
                     raise WikiEditStateError(
                         "wiki proposal must be proposed before publishing can begin"
                     )
+                _require_review_acknowledgement(proposal)
                 operation = self._insert_operation(cursor, proposal, now=_now())
                 return operation, True
 
@@ -1386,6 +1510,7 @@ class PostgresWikiEditingStore:
                         raise WikiEditStateError(
                             "wiki proposal must be proposed before publishing can begin"
                         )
+                    _require_review_acknowledgement(proposal)
                     operation = self._insert_operation(
                         cursor, proposal, now=comparison_time
                     )

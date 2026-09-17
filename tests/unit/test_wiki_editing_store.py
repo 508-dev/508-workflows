@@ -13,6 +13,7 @@ from five08.wiki_editing.models import (
     WikiEditConflictError,
     WikiEditRequestInput,
     WikiEditStateError,
+    WikiEditReviewArtifact,
     WikiOmpRunMetadata,
     WikiProposalCreate,
     WikiProposalOutput,
@@ -250,11 +251,23 @@ def test_publish_attempt_is_recorded_before_external_write_and_never_reclaimed()
         organization_id="org-1",
         omp_metadata=_metadata(),
     )
-    store.complete_proposal(
+    completed = store.complete_proposal(
         proposal.id,
         organization_id="org-1",
         output=_output(),
     )
+
+    with pytest.raises(WikiEditStateError, match="acknowledged"):
+        store.claim_publish_attempt(proposal.id, organization_id="org-1")
+
+    review = WikiEditReviewArtifact.from_proposal(completed)
+    acknowledged = store.acknowledge_review(
+        proposal.id,
+        organization_id="org-1",
+        actor_id="actor-1",
+        review_content_hash=review.content_hash,
+    )
+    assert acknowledged.review_acknowledged is True
 
     first_claim = store.claim_publish_attempt(
         proposal.id,
@@ -310,10 +323,17 @@ def test_known_provider_conflict_after_claim_does_not_become_unknown() -> None:
         organization_id="org-1",
         omp_metadata=_metadata(),
     )
-    store.complete_proposal(
+    completed = store.complete_proposal(
         proposal.id,
         organization_id="org-1",
         output=_output(),
+    )
+    review = WikiEditReviewArtifact.from_proposal(completed)
+    store.acknowledge_review(
+        proposal.id,
+        organization_id="org-1",
+        actor_id="actor-1",
+        review_content_hash=review.content_hash,
     )
     store.claim_publish_attempt(proposal.id, organization_id="org-1")
 
@@ -367,3 +387,40 @@ def test_update_snapshot_is_private_but_its_hash_is_exposed() -> None:
     assert proposal.base_document is not None
     assert proposal.base_document.content_hash == wiki_content_hash(text)
     assert "Internal wiki article body" not in str(payload)
+
+
+def test_review_packet_keeps_only_safe_source_links_and_never_truncates() -> None:
+    packet = WikiEditReviewArtifact.from_output(
+        proposed_title="Deployment guide",
+        proposed_article="The complete proposed article.",
+        complete_diff="@@ -1 +1 @@\n-Old\n+New",
+        source_refs=[
+            WikiSourceReference(
+                source_type="outline_document",
+                source_ref="shared-doc",
+                title="Shared deployment guide",
+                source_url="https://outline.example/doc/shared",
+            ),
+            WikiSourceReference(
+                source_type="other",
+                source_ref="unsafe-uri",
+                title="Unsafe URI",
+                source_url="javascript:alert(1)",
+            ),
+            WikiSourceReference(
+                source_type="other",
+                source_ref="credential-uri",
+                title="Credential URI",
+                source_url="https://user:secret@example.test/private",
+            ),
+        ],
+    )
+
+    assert [link.url for link in packet.source_links] == [
+        "https://outline.example/doc/shared"
+    ]
+    rendered = packet.attachment_bytes().decode("utf-8")
+    assert "The complete proposed article." in rendered
+    assert "@@ -1 +1 @@" in rendered
+    assert "javascript:" not in rendered
+    assert "secret@example" not in rendered
