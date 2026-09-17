@@ -7,6 +7,7 @@ from unittest.mock import Mock, AsyncMock, patch
 from pathlib import Path
 from types import SimpleNamespace
 import discord
+from pydantic import ValidationError
 
 from five08.discord_bot.bot import (
     Bot508,
@@ -183,6 +184,49 @@ class TestBot508:
         )
 
         assert config.backend_api_base_url == "http://127.0.0.1:8090"
+
+    @pytest.mark.parametrize(
+        "backend_api_base_url",
+        [
+            "http://127.0.0.1:8090",
+            "http://localhost:8090",
+            "http://[::1]:8090",
+            "http://web:8090",
+            "https://api.example.test",
+        ],
+    )
+    def test_backend_api_base_url_allows_secure_and_internal_endpoints(
+        self,
+        backend_api_base_url: str,
+    ) -> None:
+        config = Settings(
+            discord_bot_token="token",
+            backend_api_base_url=backend_api_base_url,
+        )
+
+        assert config.backend_api_base_url == backend_api_base_url
+
+    @pytest.mark.parametrize(
+        "backend_api_base_url",
+        [
+            "http://api.example.test",
+            "http://web.example.test:8090",
+            "http://web@api.example.test:8090",
+            "http://127.0.0.1.example.test:8090",
+            "http://web:8080",
+        ],
+    )
+    def test_backend_api_base_url_rejects_insecure_remote_endpoints(
+        self,
+        backend_api_base_url: str,
+    ) -> None:
+        with pytest.raises(
+            ValidationError, match="BACKEND_API_BASE_URL must use HTTPS"
+        ):
+            Settings(
+                discord_bot_token="token",
+                backend_api_base_url=backend_api_base_url,
+            )
 
     def test_outline_admin_api_key_is_never_exposed_to_the_bot(
         self,

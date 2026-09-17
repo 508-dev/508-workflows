@@ -110,28 +110,20 @@ class WikiEditingService:
         self._assert_wiki_editing_configured()
         self._validate_create_request(request, organization_id=organization_id)
         base_snapshot = self._snapshot_for_target(request.target_document_id)
-        stored_request, created = self.store.create_or_get_request(
-            request.to_request_input()
+        request_input = request.to_request_input()
+        proposal, should_enqueue = self.store.create_or_get_initial_proposal(
+            request_input,
+            WikiProposalCreate(
+                request_id=request_input.id,
+                organization_id=organization_id,
+                target_action=("update" if base_snapshot is not None else "create"),
+                target_document_id=request.target_document_id,
+                base_document=base_snapshot,
+            ),
         )
-        if created:
-            proposal = self.store.create_proposal(
-                WikiProposalCreate(
-                    request_id=stored_request.id,
-                    organization_id=organization_id,
-                    target_action=("update" if base_snapshot is not None else "create"),
-                    target_document_id=request.target_document_id,
-                    base_document=base_snapshot,
-                )
-            )
-            return WikiProposalStart(
-                response=self._response_for(proposal),
-                should_enqueue=True,
-            )
-
-        proposal = self._latest_proposal(stored_request.id, organization_id)
         return WikiProposalStart(
             response=self._response_for(proposal),
-            should_enqueue=proposal.status == "queued",
+            should_enqueue=should_enqueue,
         )
 
     def revise(self, request: WikiEditRevisionRequest) -> WikiProposalStart:
@@ -149,13 +141,14 @@ class WikiEditingService:
                 "This draft cannot be revised in its current state."
             )
         base_snapshot = self._snapshot_for_target(proposal.target_document_id)
-        revised = self.store.create_proposal(
+        revised = self.store.create_revision(
             WikiProposalCreate(
                 request_id=proposal.request_id,
                 organization_id=organization_id,
                 target_action=proposal.target_action,
                 target_document_id=proposal.target_document_id,
                 base_document=base_snapshot,
+                revision_parent_id=proposal.id,
                 revision_instruction=request.instruction,
             )
         )
@@ -244,13 +237,19 @@ class WikiEditingService:
             organization_id=organization_id,
             actor_id=request.context.discord_user_id,
         )
-        if proposal.status != "queued":
-            return self._response_for(proposal)
-        failed = self.store.fail_proposal(
+        failed = self.store.fail_proposal_if_status(
             proposal.id,
             organization_id=organization_id,
             failure_code="authoring_enqueue_failed",
+            expected_statuses=frozenset({"queued"}),
         )
+        if failed is None:
+            latest = self._owned_proposal(
+                proposal.id,
+                organization_id=organization_id,
+                actor_id=request.context.discord_user_id,
+            )
+            return self._response_for(latest)
         return self._response_for(
             failed,
             message="The draft could not be queued. Request a revision to try again.",
@@ -489,19 +488,20 @@ class WikiEditingService:
         hook prevents a proposal from remaining queued forever when that queue
         has exhausted its configured retry budget.
         """
-        proposal = self.store.get_proposal(
+        failed = self.store.fail_proposal_if_status(
             proposal_id,
             organization_id=organization_id,
-        )
-        if proposal is None:
-            raise WikiEditNotFoundError("Wiki proposal was not found.")
-        if proposal.status != "queued":
-            return self._response_for(proposal)
-        failed = self.store.fail_proposal(
-            proposal.id,
-            organization_id=organization_id,
             failure_code="authoring_retry_exhausted",
+            expected_statuses=frozenset({"queued", "authoring"}),
         )
+        if failed is None:
+            latest = self.store.get_proposal(
+                proposal_id,
+                organization_id=organization_id,
+            )
+            if latest is None:
+                raise WikiEditNotFoundError("Wiki proposal was not found.")
+            return self._response_for(latest)
         return self._response_for(
             failed,
             message="Wiki authoring was unavailable after its retry budget. Request a revision to try again.",
@@ -572,9 +572,10 @@ class WikiEditingService:
                     "Selected conversation must come from the configured co-op server."
                 )
             total_source_characters += len(source.organization_visible_text)
-        # The OMP adapter admits at most 32k source characters. At most 4k are
-        # reserved for the explicit instruction and 16k for an update target,
-        # leaving 12k for a selected public conversation.
+        # The OMP adapter admits 48k material characters. At most 4k are
+        # reserved for the explicit instruction, 16k for an update target,
+        # and another 16k for a reviewed predecessor revision, leaving 12k
+        # for a selected public conversation.
         max_source_characters = min(
             12_000,
             int(getattr(self.settings, "knowledge_capture_max_characters", 12_000)),
@@ -617,7 +618,7 @@ class WikiEditingService:
 
     def _validate_document_size(self, document: OutlineDocument) -> None:
         maximum = int(
-            getattr(self.settings, "wiki_editing_max_document_characters", 60_000)
+            getattr(self.settings, "wiki_editing_max_document_characters", 16_000)
         )
         if len(document.text) > maximum:
             raise WikiEditingValidationError(
@@ -652,19 +653,6 @@ class WikiEditingService:
             raise WikiEditNotFoundError("Wiki proposal was not found.")
         if proposal.actor_id != actor_id:
             raise WikiEditPermissionError("Wiki proposal belongs to another requester.")
-        return proposal
-
-    def _latest_proposal(
-        self,
-        request_id: str,
-        organization_id: str,
-    ) -> WikiEditProposal:
-        proposal = self.store.get_latest_proposal_for_request(
-            request_id,
-            organization_id=organization_id,
-        )
-        if proposal is None:
-            raise WikiEditNotFoundError("Wiki request has no reserved proposal.")
         return proposal
 
     def _current_conflict(
@@ -818,7 +806,7 @@ class WikiEditingService:
         if not title.strip() or not text.strip():
             raise WikiAuthoringError("OMP submitted an empty wiki draft.")
         maximum = int(
-            getattr(self.settings, "wiki_editing_max_document_characters", 60_000)
+            getattr(self.settings, "wiki_editing_max_document_characters", 16_000)
         )
         if len(text) > maximum:
             raise WikiAuthoringError(
@@ -833,12 +821,16 @@ class WikiEditingService:
     ) -> str:
         proposal = getattr(work_item, "proposal")
         snapshot = getattr(proposal, "base_snapshot", None)
-        if snapshot is None:
-            old_name = "/dev/null"
-            old = ""
-        else:
+        revision_parent = getattr(proposal, "revision_parent_draft", None)
+        if snapshot is not None:
             old_name = f"{snapshot.title}.md"
             old = _document_for_diff(snapshot.title, snapshot.content)
+        elif revision_parent is not None:
+            old_name = f"{revision_parent.title}.md"
+            old = _document_for_diff(revision_parent.title, revision_parent.text)
+        else:
+            old_name = "/dev/null"
+            old = ""
         new_name = f"{title}.md"
         new = _document_for_diff(title, text)
         diff = "\n".join(

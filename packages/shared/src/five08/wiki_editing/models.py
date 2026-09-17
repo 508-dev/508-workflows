@@ -129,6 +129,14 @@ class WikiEditStateError(WikiEditingError):
     """Raised when an operation is invalid for the current lifecycle state."""
 
 
+class WikiAuthoringLeaseHeldError(WikiEditStateError):
+    """Raised when another bounded authoring attempt still owns a lease."""
+
+    def __init__(self, retry_after_seconds: float) -> None:
+        self.retry_after_seconds = max(1.0, float(retry_after_seconds))
+        super().__init__("wiki proposal authoring lease is still held")
+
+
 class WikiConversationProvenance(BaseModel):
     """Safe metadata for an organization-visible selected conversation source."""
 
@@ -362,6 +370,48 @@ class WikiBaseDocumentSnapshot(WikiBaseDocumentReference):
         cls, payload: dict[str, object]
     ) -> "WikiBaseDocumentSnapshot":
         return cls.model_validate(payload)
+
+
+class WikiRevisionParentDraft(BaseModel):
+    """Private immutable output from the proposal being revised.
+
+    A revision is not a fresh request: the authoring run needs the reviewed
+    predecessor draft as well as new feedback.  This model is deliberately
+    excluded from ordinary proposal responses and is reconstructed from the
+    immutable predecessor row by the persistence adapter.
+    """
+
+    proposal_id: str = Field(min_length=1, max_length=256)
+    revision: int = Field(ge=1)
+    title: str = Field(min_length=1, max_length=512)
+    text: str = Field(min_length=1, max_length=500_000, exclude=True, repr=False)
+    content_hash: str = Field(min_length=64, max_length=64)
+
+    @field_validator("proposal_id", "title")
+    @classmethod
+    def _strip_text_fields(cls, value: str) -> str:
+        return _strip_required(value)
+
+    @field_validator("text")
+    @classmethod
+    def _require_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("revision parent draft text must not be blank")
+        return value
+
+    @field_validator("content_hash")
+    @classmethod
+    def _validate_content_hash(cls, value: str) -> str:
+        normalized = WikiConversationProvenance._validate_content_hash(value)
+        if normalized is None:  # pragma: no cover - Field requires a string
+            raise ValueError("content_hash must not be empty")
+        return normalized
+
+    @model_validator(mode="after")
+    def _validate_draft_hash(self) -> "WikiRevisionParentDraft":
+        if self.content_hash != wiki_content_hash(self.text):
+            raise ValueError("revision parent draft content_hash does not match text")
+        return self
 
 
 class WikiOmpRunMetadata(BaseModel):
@@ -635,6 +685,12 @@ class WikiProposalCreate(BaseModel):
     target_action: WikiEditTargetAction
     target_document_id: str | None = Field(default=None, max_length=256)
     base_document: WikiBaseDocumentSnapshot | None = Field(default=None, exclude=True)
+    revision_parent_id: str | None = Field(
+        default=None,
+        max_length=256,
+        exclude=True,
+        repr=False,
+    )
     revision_instruction: str | None = Field(
         default=None,
         max_length=12_000,
@@ -648,6 +704,7 @@ class WikiProposalCreate(BaseModel):
         "request_id",
         "organization_id",
         "target_document_id",
+        "revision_parent_id",
         "revision_instruction",
     )
     @classmethod
@@ -661,6 +718,8 @@ class WikiProposalCreate(BaseModel):
 
     @model_validator(mode="after")
     def _validate_target(self) -> "WikiProposalCreate":
+        if self.revision_parent_id is not None and self.revision_instruction is None:
+            raise ValueError("revision parent proposals require revision instructions")
         if self.target_action == "create":
             if self.target_document_id is not None or self.base_document is not None:
                 raise ValueError("create proposals must not carry a base document")
@@ -754,7 +813,22 @@ class WikiProposalForAuthoring(WikiEditProposal):
     """Trusted internal proposal view containing the base snapshot text."""
 
     base_snapshot: WikiBaseDocumentSnapshot | None = Field(default=None, exclude=True)
+    revision_parent_id: str | None = Field(default=None, exclude=True, repr=False)
+    revision_parent_draft: WikiRevisionParentDraft | None = Field(
+        default=None,
+        exclude=True,
+        repr=False,
+    )
     revision_instruction: str | None = Field(default=None, exclude=True, repr=False)
+
+    @model_validator(mode="after")
+    def _validate_revision_parent_draft(self) -> "WikiProposalForAuthoring":
+        if self.revision_parent_draft is not None:
+            if self.revision_parent_id is None:
+                raise ValueError("revision parent draft requires a revision parent")
+            if self.revision_parent_draft.revision >= self.revision:
+                raise ValueError("revision parent draft must be an earlier revision")
+        return self
 
 
 class WikiEditReviewArtifact(BaseModel):
@@ -1016,7 +1090,9 @@ PROPOSAL_TRANSITIONS: dict[WikiProposalStatus, frozenset[WikiProposalStatus]] = 
     "authoring": frozenset({"queued", "proposed", "conflict", "failed", "canceled"}),
     "proposed": frozenset({"conflict", "canceled", "publishing"}),
     "conflict": frozenset({"canceled"}),
-    "failed": frozenset(),
+    # A failed draft may be replaced by a new immutable revision. The old
+    # revision is retired so its stale Discord controls cannot fork history.
+    "failed": frozenset({"canceled"}),
     "canceled": frozenset(),
     "publishing": frozenset({"published", "publish_unknown", "conflict"}),
     "published": frozenset(),

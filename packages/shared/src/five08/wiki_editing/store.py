@@ -20,6 +20,7 @@ from psycopg.types.json import Jsonb
 from five08.queue import get_postgres_connection
 from five08.settings import SharedSettings
 from five08.wiki_editing.models import (
+    WikiAuthoringLeaseHeldError,
     WikiAuthoringWorkItem,
     WikiBaseDocumentSnapshot,
     WikiConflictDetails,
@@ -36,6 +37,7 @@ from five08.wiki_editing.models import (
     WikiProposalForAuthoring,
     WikiProposalOutput,
     WikiProposalStatus,
+    WikiRevisionParentDraft,
     WikiPublishClaim,
     WikiPublishOperation,
     WikiPublishResult,
@@ -44,6 +46,7 @@ from five08.wiki_editing.models import (
     WikiSourceReference,
     WikiConversationProvenance,
     ensure_proposal_transition,
+    wiki_content_hash,
 )
 
 
@@ -58,6 +61,13 @@ class WikiEditingStore(Protocol):
     ) -> tuple[WikiEditRequest, bool]:
         """Create one idempotent authoring request, or return its safe record."""
 
+    def create_or_get_initial_proposal(
+        self,
+        request: WikiEditRequestInput,
+        proposal: WikiProposalCreate,
+    ) -> tuple[WikiEditProposal, bool]:
+        """Atomically reserve or recover the first proposal for one request."""
+
     def get_request(
         self, request_id: str, *, organization_id: str
     ) -> WikiEditRequest | None:
@@ -70,6 +80,9 @@ class WikiEditingStore(Protocol):
 
     def create_proposal(self, proposal: WikiProposalCreate) -> WikiEditProposal:
         """Reserve the next immutable proposal revision for a request."""
+
+    def create_revision(self, proposal: WikiProposalCreate) -> WikiEditProposal:
+        """Atomically retire a predecessor and reserve its replacement revision."""
 
     def get_proposal(
         self, proposal_id: str, *, organization_id: str
@@ -135,6 +148,17 @@ class WikiEditingStore(Protocol):
         now: datetime | None = None,
     ) -> WikiEditProposal:
         """Mark a pre-publish failure using a sanitized code, never raw errors."""
+
+    def fail_proposal_if_status(
+        self,
+        proposal_id: str,
+        *,
+        organization_id: str,
+        failure_code: str,
+        expected_statuses: frozenset[WikiProposalStatus],
+        now: datetime | None = None,
+    ) -> WikiEditProposal | None:
+        """Atomically fail a proposal only if its locked state still matches."""
 
     def cancel_proposal(
         self,
@@ -226,6 +250,19 @@ def _authoring_lease_expired(
         # Preserve the safe no-second-run behavior rather than guessing.
         return False
     return now >= _now(started_at) + timedelta(seconds=lease_seconds)
+
+
+def _authoring_lease_retry_after(
+    started_at: datetime | None,
+    *,
+    now: datetime,
+    lease_seconds: float,
+) -> float:
+    """Return the bounded delay before a held lease may safely be reclaimed."""
+    if started_at is None:
+        return lease_seconds
+    expires_at = _now(started_at) + timedelta(seconds=lease_seconds)
+    return max(1.0, (expires_at - now).total_seconds())
 
 
 def _request_fingerprint(request: WikiEditRequestInput) -> str:
@@ -331,7 +368,51 @@ def _proposal_from_row(row: dict[str, Any]) -> WikiEditProposal:
     )
 
 
-def _authoring_proposal_from_row(row: dict[str, Any]) -> WikiProposalForAuthoring:
+def _revision_parent_draft_from_row(
+    row: dict[str, Any] | None,
+) -> WikiRevisionParentDraft | None:
+    """Reconstruct the private immutable draft a revision is based on."""
+    if row is None:
+        return None
+    title = row.get("proposed_title")
+    text = row.get("proposed_text")
+    if title is None and text is None:
+        return None
+    if not isinstance(title, str) or not isinstance(text, str):
+        raise WikiEditStateError("wiki revision parent has incomplete draft output")
+    return WikiRevisionParentDraft(
+        proposal_id=str(row["id"]),
+        revision=int(row["revision"]),
+        title=title,
+        text=text,
+        content_hash=wiki_content_hash(text),
+    )
+
+
+def _revision_parent_draft_from_proposal(
+    proposal: WikiProposalForAuthoring,
+) -> WikiRevisionParentDraft | None:
+    """Return the private reviewed draft retained by an in-memory parent."""
+    if proposal.proposed_title is None and proposal.proposed_text is None:
+        return None
+    if not isinstance(proposal.proposed_title, str) or not isinstance(
+        proposal.proposed_text, str
+    ):
+        raise WikiEditStateError("wiki revision parent has incomplete draft output")
+    return WikiRevisionParentDraft(
+        proposal_id=proposal.id,
+        revision=proposal.revision,
+        title=proposal.proposed_title,
+        text=proposal.proposed_text,
+        content_hash=wiki_content_hash(proposal.proposed_text),
+    )
+
+
+def _authoring_proposal_from_row(
+    row: dict[str, Any],
+    *,
+    revision_parent_draft: WikiRevisionParentDraft | None = None,
+) -> WikiProposalForAuthoring:
     public = _proposal_from_row(row)
     base_payload = row.get("base_document_payload")
     snapshot = (
@@ -342,6 +423,12 @@ def _authoring_proposal_from_row(row: dict[str, Any]) -> WikiProposalForAuthorin
     return WikiProposalForAuthoring(
         **public.model_dump(mode="python"),
         base_snapshot=snapshot,
+        revision_parent_id=(
+            str(row["revision_parent_proposal_id"])
+            if row.get("revision_parent_proposal_id") is not None
+            else None
+        ),
+        revision_parent_draft=revision_parent_draft,
         revision_instruction=row.get("revision_instruction"),
     )
 
@@ -396,6 +483,7 @@ def _make_authoring_proposal(
     *,
     request: WikiEditRequestForAuthoring,
     revision: int,
+    revision_parent_draft: WikiRevisionParentDraft | None = None,
 ) -> WikiProposalForAuthoring:
     now = proposal.created_at
     return WikiProposalForAuthoring(
@@ -413,6 +501,8 @@ def _make_authoring_proposal(
             else None
         ),
         base_snapshot=proposal.base_document,
+        revision_parent_id=proposal.revision_parent_id,
+        revision_parent_draft=revision_parent_draft,
         revision_instruction=proposal.revision_instruction,
         created_at=now,
         updated_at=now,
@@ -421,6 +511,46 @@ def _make_authoring_proposal(
 
 def _public_proposal(proposal: WikiProposalForAuthoring) -> WikiEditProposal:
     return WikiEditProposal.model_validate(proposal.model_dump(mode="python"))
+
+
+def _validate_initial_proposal_input(
+    request: WikiEditRequestForAuthoring,
+    proposal: WikiProposalCreate,
+    *,
+    require_request_id_match: bool,
+) -> None:
+    """Keep initial proposal reservation tied to its idempotent request."""
+    if require_request_id_match and proposal.request_id != request.id:
+        raise WikiEditConflictError("wiki initial proposal belongs to another request")
+    if proposal.organization_id != request.organization_id:
+        raise WikiEditPermissionError(
+            "wiki initial proposal is outside this organization"
+        )
+    if proposal.revision_parent_id is not None:
+        raise WikiEditStateError("wiki initial proposal cannot have a revision parent")
+    if proposal.revision_instruction is not None:
+        raise WikiEditStateError(
+            "wiki initial proposal cannot have revision instructions"
+        )
+
+
+def _validate_revision_input(
+    parent: WikiProposalForAuthoring,
+    proposal: WikiProposalCreate,
+) -> None:
+    """Validate lineage before atomically replacing a reviewable revision."""
+    if proposal.revision_parent_id != parent.id:
+        raise WikiEditConflictError("wiki revision parent does not match proposal")
+    if proposal.request_id != parent.request_id:
+        raise WikiEditConflictError("wiki revision belongs to another request")
+    if proposal.organization_id != parent.organization_id:
+        raise WikiEditPermissionError("wiki revision is outside this organization")
+    if proposal.target_action != parent.target_action:
+        raise WikiEditConflictError("wiki revision cannot change its target action")
+    if proposal.target_document_id != parent.target_document_id:
+        raise WikiEditConflictError("wiki revision cannot change its target document")
+    if proposal.revision_instruction is None:
+        raise WikiEditStateError("wiki revision requires explicit instructions")
 
 
 def _validate_owned_actor(proposal: WikiEditProposal, actor_id: str | None) -> None:
@@ -493,6 +623,63 @@ class InMemoryWikiEditingStore:
             self._request_idempotencies[key] = (stored.id, fingerprint)
             return _public_request(stored).model_copy(deep=True), True
 
+    def create_or_get_initial_proposal(
+        self,
+        request: WikiEditRequestInput,
+        proposal: WikiProposalCreate,
+    ) -> tuple[WikiEditProposal, bool]:
+        """Atomically create an idempotent request and its first proposal.
+
+        The all-in-one operation also repairs the only safe legacy partial
+        state: an idempotency record that predates the proposal reservation.
+        """
+        fingerprint = _request_fingerprint(request)
+        key = (request.organization_id, request.request_idempotency_key)
+        with self._lock:
+            existing = self._request_idempotencies.get(key)
+            if existing is None:
+                if proposal.id in self._proposals:
+                    raise WikiEditConflictError("wiki proposal id already exists")
+                stored_request = _make_authoring_request(request)
+                _validate_initial_proposal_input(
+                    stored_request,
+                    proposal,
+                    require_request_id_match=True,
+                )
+                self._requests[stored_request.id] = stored_request.model_copy(deep=True)
+                self._request_idempotencies[key] = (stored_request.id, fingerprint)
+            else:
+                request_id, existing_fingerprint = existing
+                if existing_fingerprint != fingerprint:
+                    raise WikiEditConflictError(
+                        "request idempotency key was already used with different input"
+                    )
+                stored_request = self._requests[request_id]
+                _validate_initial_proposal_input(
+                    stored_request,
+                    proposal,
+                    require_request_id_match=False,
+                )
+
+            existing_proposals = [
+                item
+                for item in self._proposals.values()
+                if item.request_id == stored_request.id
+            ]
+            if existing_proposals:
+                latest = max(existing_proposals, key=lambda item: item.revision)
+                return (
+                    _public_proposal(latest).model_copy(deep=True),
+                    latest.status == "queued",
+                )
+            stored_proposal = _make_authoring_proposal(
+                proposal.model_copy(update={"request_id": stored_request.id}),
+                request=stored_request,
+                revision=1,
+            )
+            self._proposals[stored_proposal.id] = stored_proposal.model_copy(deep=True)
+            return _public_proposal(stored_proposal).model_copy(deep=True), True
+
     def get_request(
         self, request_id: str, *, organization_id: str
     ) -> WikiEditRequest | None:
@@ -520,6 +707,10 @@ class InMemoryWikiEditingStore:
                 raise WikiEditPermissionError(
                     "wiki edit request is outside this organization"
                 )
+            if proposal.revision_parent_id is not None:
+                raise WikiEditStateError(
+                    "wiki revisions must use create_revision to retire their predecessor"
+                )
             if proposal.id in self._proposals:
                 raise WikiEditConflictError("wiki proposal id already exists")
             revision = 1 + sum(
@@ -533,6 +724,56 @@ class InMemoryWikiEditingStore:
             )
             self._proposals[stored.id] = stored.model_copy(deep=True)
             return _public_proposal(stored).model_copy(deep=True)
+
+    def create_revision(self, proposal: WikiProposalCreate) -> WikiEditProposal:
+        """Retire the latest revisable proposal and reserve its child together."""
+        with self._lock:
+            if proposal.revision_parent_id is None:
+                raise WikiEditStateError("wiki revision requires a predecessor")
+            parent = self._required_proposal(
+                proposal.revision_parent_id,
+                proposal.organization_id,
+            )
+            _validate_revision_input(parent, proposal)
+            if parent.status not in {"proposed", "conflict", "failed"}:
+                raise WikiEditStateError(
+                    "wiki proposal cannot be revised in its current state"
+                )
+            latest = max(
+                (
+                    item
+                    for item in self._proposals.values()
+                    if item.request_id == parent.request_id
+                ),
+                key=lambda item: item.revision,
+            )
+            if latest.id != parent.id:
+                raise WikiEditConflictError(
+                    "wiki proposal is no longer the latest revision"
+                )
+            if proposal.id in self._proposals:
+                raise WikiEditConflictError("wiki proposal id already exists")
+            ensure_proposal_transition(parent.status, "canceled")
+            retired = parent.model_copy(
+                update={"status": "canceled", "updated_at": proposal.created_at},
+                deep=True,
+            )
+            request = self._requests.get(parent.request_id)
+            if request is None:  # pragma: no cover - InMemory invariant
+                raise WikiEditNotFoundError("wiki edit request was not found")
+            parent_draft = (
+                _revision_parent_draft_from_proposal(parent)
+                or parent.revision_parent_draft
+            )
+            child = _make_authoring_proposal(
+                proposal,
+                request=request,
+                revision=parent.revision + 1,
+                revision_parent_draft=parent_draft,
+            )
+            self._proposals[parent.id] = retired
+            self._proposals[child.id] = child.model_copy(deep=True)
+            return _public_proposal(child).model_copy(deep=True)
 
     def get_proposal(
         self, proposal_id: str, *, organization_id: str
@@ -608,7 +849,13 @@ class InMemoryWikiEditingStore:
                     now=comparison_time,
                     lease_seconds=lease_seconds,
                 ):
-                    return None
+                    raise WikiAuthoringLeaseHeldError(
+                        _authoring_lease_retry_after(
+                            proposal.authoring_started_at,
+                            now=comparison_time,
+                            lease_seconds=lease_seconds,
+                        )
+                    )
                 if proposal.omp_metadata != omp_metadata:
                     raise WikiEditConflictError(
                         "wiki proposal is already bound to another OMP run"
@@ -732,6 +979,34 @@ class InMemoryWikiEditingStore:
         normalized_code = _failure_code(failure_code)
         with self._lock:
             proposal = self._required_proposal(proposal_id, organization_id)
+            ensure_proposal_transition(proposal.status, "failed")
+            updated = proposal.model_copy(
+                update={
+                    "status": "failed",
+                    "failure_code": normalized_code,
+                    "updated_at": comparison_time,
+                },
+                deep=True,
+            )
+            self._proposals[proposal_id] = updated
+            return _public_proposal(updated).model_copy(deep=True)
+
+    def fail_proposal_if_status(
+        self,
+        proposal_id: str,
+        *,
+        organization_id: str,
+        failure_code: str,
+        expected_statuses: frozenset[WikiProposalStatus],
+        now: datetime | None = None,
+    ) -> WikiEditProposal | None:
+        """Fail only the state observed under this same store lock."""
+        comparison_time = _now(now)
+        normalized_code = _failure_code(failure_code)
+        with self._lock:
+            proposal = self._required_proposal(proposal_id, organization_id)
+            if proposal.status not in expected_statuses:
+                return None
             ensure_proposal_transition(proposal.status, "failed")
             updated = proposal.model_copy(
                 update={
@@ -1044,6 +1319,126 @@ class PostgresWikiEditingStore:
                     )
                 return _request_from_row(existing), False
 
+    def create_or_get_initial_proposal(
+        self,
+        request: WikiEditRequestInput,
+        proposal: WikiProposalCreate,
+    ) -> tuple[WikiEditProposal, bool]:
+        """Atomically persist (or recover) a request and its first proposal.
+
+        A Discord interaction may be retried with a new in-process request ID.
+        Its durable idempotency key is authoritative, so after resolving that
+        key we normalize a repair proposal to the existing request record.
+        """
+        fingerprint = _request_fingerprint(request)
+        with self._connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cursor:
+                # Serialize first-time request creation before a separately
+                # delivered duplicate can observe a request without its child.
+                cursor.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (
+                        "wiki-edit-initial:"
+                        f"{request.organization_id}:{request.request_idempotency_key}",
+                    ),
+                )
+                cursor.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (f"wiki-edit-request:{request.id}",),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO wiki_edit_requests (
+                        id, organization_id, actor_id, request_text,
+                        instruction_hash, request_fingerprint, target_document_id,
+                        selected_conversation_payload, idempotency_key, created_at
+                    ) VALUES (
+                        %s::uuid, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    )
+                    ON CONFLICT (organization_id, idempotency_key) DO NOTHING
+                    RETURNING *
+                    """,
+                    (
+                        request.id,
+                        request.organization_id,
+                        request.actor_id,
+                        request.instruction,
+                        request.instruction_hash,
+                        fingerprint,
+                        request.target_document_id,
+                        Jsonb(
+                            [
+                                source.storage_payload()
+                                for source in request.selected_conversation
+                            ]
+                        ),
+                        request.request_idempotency_key,
+                        request.created_at,
+                    ),
+                )
+                inserted_request = cursor.fetchone()
+                if inserted_request is None:
+                    cursor.execute(
+                        """
+                        SELECT * FROM wiki_edit_requests
+                        WHERE organization_id = %s AND idempotency_key = %s
+                        """,
+                        (request.organization_id, request.request_idempotency_key),
+                    )
+                    request_row = cursor.fetchone()
+                    if request_row is None:  # pragma: no cover - unique invariant
+                        raise RuntimeError(
+                            "unable to load wiki edit idempotency record"
+                        )
+                else:
+                    request_row = inserted_request
+
+                request_id = str(request_row["id"])
+                cursor.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (f"wiki-edit-request:{request_id}",),
+                )
+                request_row = self._locked_request(
+                    cursor,
+                    request_id,
+                    request.organization_id,
+                )
+                if request_row["request_fingerprint"] != fingerprint:
+                    raise WikiEditConflictError(
+                        "request idempotency key was already used with different input"
+                    )
+                authoring_request = _authoring_request_from_row(request_row)
+                _validate_initial_proposal_input(
+                    authoring_request,
+                    proposal,
+                    require_request_id_match=inserted_request is not None,
+                )
+                cursor.execute(
+                    """
+                    SELECT * FROM wiki_edit_proposals
+                    WHERE request_id = %s::uuid
+                    ORDER BY revision DESC
+                    LIMIT 1
+                    FOR UPDATE
+                    """,
+                    (request_id,),
+                )
+                existing_proposal = cursor.fetchone()
+                if existing_proposal is not None:
+                    current = _proposal_from_row(existing_proposal)
+                    return current, current.status == "queued"
+
+                normalized_proposal = proposal.model_copy(
+                    update={"request_id": request_id}
+                )
+                stored = self._insert_proposal(
+                    cursor,
+                    normalized_proposal,
+                    request_row,
+                    revision=1,
+                )
+                return stored, True
+
     def get_request(
         self, request_id: str, *, organization_id: str
     ) -> WikiEditRequest | None:
@@ -1075,6 +1470,10 @@ class PostgresWikiEditingStore:
         return _authoring_request_from_row(row) if row is not None else None
 
     def create_proposal(self, proposal: WikiProposalCreate) -> WikiEditProposal:
+        if proposal.revision_parent_id is not None:
+            raise WikiEditStateError(
+                "wiki revisions must use create_revision to retire their predecessor"
+            )
         with self._connection() as conn:
             with conn.cursor(row_factory=dict_row) as cursor:
                 cursor.execute(
@@ -1097,46 +1496,70 @@ class PostgresWikiEditingStore:
                 revision_row = cursor.fetchone()
                 if revision_row is None:  # pragma: no cover - aggregate invariant
                     raise RuntimeError("unable to reserve wiki proposal revision")
-                base_payload = (
-                    proposal.base_document.storage_payload()
-                    if proposal.base_document is not None
-                    else None
+                return self._insert_proposal(
+                    cursor,
+                    proposal,
+                    request_row,
+                    revision=int(revision_row["next_revision"]),
                 )
+
+    def create_revision(self, proposal: WikiProposalCreate) -> WikiEditProposal:
+        """Atomically cancel a stale review card and reserve its child draft."""
+        if proposal.revision_parent_id is None:
+            raise WikiEditStateError("wiki revision requires a predecessor")
+        with self._connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cursor:
+                cursor.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (f"wiki-edit-request:{proposal.request_id}",),
+                )
+                request_row = self._locked_request(
+                    cursor,
+                    proposal.request_id,
+                    proposal.organization_id,
+                )
+                parent_row = self._locked_proposal(
+                    cursor,
+                    proposal.revision_parent_id,
+                    proposal.organization_id,
+                )
+                parent = _authoring_proposal_from_row(parent_row)
+                _validate_revision_input(parent, proposal)
+                if parent.status not in {"proposed", "conflict", "failed"}:
+                    raise WikiEditStateError(
+                        "wiki proposal cannot be revised in its current state"
+                    )
                 cursor.execute(
                     """
-                    INSERT INTO wiki_edit_proposals (
-                        id, request_id, organization_id, actor_id, revision, status,
-                        target_action, target_document_id, base_document_payload,
-                        base_content_hash, revision_instruction, created_at, updated_at
-                    ) VALUES (
-                        %s::uuid, %s::uuid, %s, %s, %s, 'queued',
-                        %s, %s, %s, %s, %s, %s, %s
-                    )
-                    RETURNING *
+                    SELECT id FROM wiki_edit_proposals
+                    WHERE request_id = %s::uuid
+                    ORDER BY revision DESC
+                    LIMIT 1
+                    FOR UPDATE
                     """,
-                    (
-                        proposal.id,
-                        proposal.request_id,
-                        proposal.organization_id,
-                        request_row["actor_id"],
-                        revision_row["next_revision"],
-                        proposal.target_action,
-                        proposal.target_document_id,
-                        Jsonb(base_payload) if base_payload is not None else None,
-                        (
-                            proposal.base_document.content_hash
-                            if proposal.base_document is not None
-                            else None
-                        ),
-                        proposal.revision_instruction,
-                        proposal.created_at,
-                        proposal.created_at,
-                    ),
+                    (proposal.request_id,),
                 )
-                row = cursor.fetchone()
-                if row is None:  # pragma: no cover - INSERT RETURNING invariant
-                    raise RuntimeError("unable to persist wiki proposal")
-                return _proposal_from_row(row)
+                latest_row = cursor.fetchone()
+                if latest_row is None or str(latest_row["id"]) != parent.id:
+                    raise WikiEditConflictError(
+                        "wiki proposal is no longer the latest revision"
+                    )
+                ensure_proposal_transition(parent.status, "canceled")
+                comparison_time = _now()
+                cursor.execute(
+                    """
+                    UPDATE wiki_edit_proposals
+                    SET status = 'canceled', updated_at = %s
+                    WHERE id = %s::uuid
+                    """,
+                    (comparison_time, parent.id),
+                )
+                return self._insert_proposal(
+                    cursor,
+                    proposal,
+                    request_row,
+                    revision=parent.revision + 1,
+                )
 
     def get_proposal(
         self, proposal_id: str, *, organization_id: str
@@ -1190,6 +1613,7 @@ class PostgresWikiEditingStore:
                     (proposal_id, organization_id),
                 )
                 joined = cursor.fetchone()
+                revision_parent_draft = self._revision_parent_draft(cursor, joined)
         if joined is None:
             return None
         request_row = {
@@ -1205,7 +1629,10 @@ class PostgresWikiEditingStore:
         }
         return WikiAuthoringWorkItem(
             request=_authoring_request_from_row(request_row),
-            proposal=_authoring_proposal_from_row(joined),
+            proposal=_authoring_proposal_from_row(
+                joined,
+                revision_parent_draft=revision_parent_draft,
+            ),
         )
 
     def claim_authoring(
@@ -1249,7 +1676,13 @@ class PostgresWikiEditingStore:
                         now=comparison_time,
                         lease_seconds=lease_seconds,
                     ):
-                        return None
+                        raise WikiAuthoringLeaseHeldError(
+                            _authoring_lease_retry_after(
+                                current.authoring_started_at,
+                                now=comparison_time,
+                                lease_seconds=lease_seconds,
+                            )
+                        )
                     if current.omp_metadata != omp_metadata:
                         raise WikiEditConflictError(
                             "wiki proposal is already bound to another OMP run"
@@ -1273,9 +1706,13 @@ class PostgresWikiEditingStore:
                     current.request_id,
                     organization_id,
                 )
+                revision_parent_draft = self._revision_parent_draft(cursor, row)
                 return WikiAuthoringWorkItem(
                     request=_authoring_request_from_row(request_row),
-                    proposal=_authoring_proposal_from_row(row),
+                    proposal=_authoring_proposal_from_row(
+                        row,
+                        revision_parent_draft=revision_parent_draft,
+                    ),
                 )
 
     def release_authoring(
@@ -1415,6 +1852,39 @@ class PostgresWikiEditingStore:
             with conn.cursor(row_factory=dict_row) as cursor:
                 row = self._locked_proposal(cursor, proposal_id, organization_id)
                 proposal = _proposal_from_row(row)
+                ensure_proposal_transition(proposal.status, "failed")
+                cursor.execute(
+                    """
+                    UPDATE wiki_edit_proposals
+                    SET status = 'failed', failure_code = %s, updated_at = %s
+                    WHERE id = %s::uuid
+                    RETURNING *
+                    """,
+                    (normalized_code, comparison_time, proposal_id),
+                )
+                updated = cursor.fetchone()
+                if updated is None:  # pragma: no cover - locked row invariant
+                    raise RuntimeError("unable to fail wiki proposal")
+                return _proposal_from_row(updated)
+
+    def fail_proposal_if_status(
+        self,
+        proposal_id: str,
+        *,
+        organization_id: str,
+        failure_code: str,
+        expected_statuses: frozenset[WikiProposalStatus],
+        now: datetime | None = None,
+    ) -> WikiEditProposal | None:
+        """Fail only a still-matching locked proposal state."""
+        comparison_time = _now(now)
+        normalized_code = _failure_code(failure_code)
+        with self._connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cursor:
+                row = self._locked_proposal(cursor, proposal_id, organization_id)
+                proposal = _proposal_from_row(row)
+                if proposal.status not in expected_statuses:
+                    return None
                 ensure_proposal_transition(proposal.status, "failed")
                 cursor.execute(
                     """
@@ -1744,6 +2214,100 @@ class PostgresWikiEditingStore:
         if row["organization_id"] != organization_id:
             raise WikiEditPermissionError("wiki proposal is outside this organization")
         return row
+
+    def _revision_parent_draft(
+        self,
+        cursor: Any,
+        child_row: dict[str, Any] | None,
+    ) -> WikiRevisionParentDraft | None:
+        """Load the nearest immutable reviewed draft in a revision lineage.
+
+        A failed revision has no output of its own, but it must not discard the
+        reviewed draft it was trying to amend. Follow immutable parents until
+        the most recent complete draft is found.
+        """
+        if child_row is None:
+            return None
+        lineage_child = child_row
+        parent_id = lineage_child.get("revision_parent_proposal_id")
+        visited: set[str] = set()
+        while parent_id is not None:
+            parent_key = str(parent_id)
+            if parent_key in visited:
+                raise WikiEditStateError("wiki revision parent lineage has a cycle")
+            visited.add(parent_key)
+            cursor.execute(
+                """
+                SELECT * FROM wiki_edit_proposals
+                WHERE id = %s::uuid AND organization_id = %s
+                """,
+                (parent_id, child_row["organization_id"]),
+            )
+            parent_row = cursor.fetchone()
+            if parent_row is None:
+                raise WikiEditStateError("wiki revision parent is unavailable")
+            if str(parent_row["request_id"]) != str(child_row["request_id"]) or int(
+                parent_row["revision"]
+            ) >= int(lineage_child["revision"]):
+                raise WikiEditStateError("wiki revision parent has invalid lineage")
+            draft = _revision_parent_draft_from_row(parent_row)
+            if draft is not None:
+                return draft
+            lineage_child = parent_row
+            parent_id = parent_row.get("revision_parent_proposal_id")
+        return None
+
+    def _insert_proposal(
+        self,
+        cursor: Any,
+        proposal: WikiProposalCreate,
+        request_row: dict[str, Any],
+        *,
+        revision: int,
+    ) -> WikiEditProposal:
+        """Insert one immutable proposal row inside its request transaction."""
+        base_payload = (
+            proposal.base_document.storage_payload()
+            if proposal.base_document is not None
+            else None
+        )
+        cursor.execute(
+            """
+            INSERT INTO wiki_edit_proposals (
+                id, request_id, organization_id, actor_id, revision, status,
+                target_action, target_document_id, base_document_payload,
+                base_content_hash, revision_parent_proposal_id,
+                revision_instruction, created_at, updated_at
+            ) VALUES (
+                %s::uuid, %s::uuid, %s, %s, %s, 'queued',
+                %s, %s, %s, %s, %s::uuid, %s, %s, %s
+            )
+            RETURNING *
+            """,
+            (
+                proposal.id,
+                proposal.request_id,
+                proposal.organization_id,
+                request_row["actor_id"],
+                revision,
+                proposal.target_action,
+                proposal.target_document_id,
+                Jsonb(base_payload) if base_payload is not None else None,
+                (
+                    proposal.base_document.content_hash
+                    if proposal.base_document is not None
+                    else None
+                ),
+                proposal.revision_parent_id,
+                proposal.revision_instruction,
+                proposal.created_at,
+                proposal.created_at,
+            ),
+        )
+        row = cursor.fetchone()
+        if row is None:  # pragma: no cover - INSERT RETURNING invariant
+            raise RuntimeError("unable to persist wiki proposal")
+        return _proposal_from_row(row)
 
     def _locked_operation(self, cursor: Any, proposal_id: str) -> dict[str, Any] | None:
         cursor.execute(

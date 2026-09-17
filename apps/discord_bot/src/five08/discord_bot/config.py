@@ -5,16 +5,31 @@ This module uses Pydantic settings to handle environment variables
 and configuration with type validation and default values.
 """
 
+from ipaddress import ip_address
 from typing import ClassVar
 from urllib.parse import urlparse
 
-from pydantic import AliasChoices, Field, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 
 from five08.openai_fallback import (
     OpenAICompatibleProvider,
     build_openai_compatible_provider_attempts,
 )
 from five08.settings import SharedSettings
+
+
+_COMPOSE_BACKEND_API_HOST = "web"
+_COMPOSE_BACKEND_API_PORT = 8090
+
+
+def _is_loopback_host(host: str) -> bool:
+    """Return whether a parsed URL host is an explicit loopback endpoint."""
+    if host == "localhost":
+        return True
+    try:
+        return ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 class Settings(SharedSettings):
@@ -77,6 +92,36 @@ class Settings(SharedSettings):
     resume_ai_base_url: str | None = None
     resume_ai_model: str = "gpt-4.1-mini"
     resume_extractor_max_tokens: int = 2000
+
+    @field_validator("backend_api_base_url")
+    @classmethod
+    def _validate_backend_api_base_url(cls, value: str) -> str:
+        """Require TLS for external backend requests that carry API secrets."""
+        normalized = value.strip()
+        try:
+            parsed = urlparse(normalized)
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError(
+                "BACKEND_API_BASE_URL must be a valid absolute HTTP(S) URL"
+            ) from exc
+
+        scheme = parsed.scheme.casefold()
+        host = (parsed.hostname or "").casefold()
+        if scheme not in {"http", "https"} or not parsed.netloc or not host:
+            raise ValueError(
+                "BACKEND_API_BASE_URL must be a valid absolute HTTP(S) URL"
+            )
+
+        if scheme == "https" or _is_loopback_host(host):
+            return normalized
+        if host == _COMPOSE_BACKEND_API_HOST and port == _COMPOSE_BACKEND_API_PORT:
+            return normalized
+
+        raise ValueError(
+            "BACKEND_API_BASE_URL must use HTTPS unless it targets a loopback "
+            "host or the internal Compose endpoint http://web:8090"
+        )
 
     @model_validator(mode="after")
     def _remove_privileged_outline_credentials(self) -> "Settings":

@@ -249,6 +249,10 @@ Discord bot:
 - `DISCORD_LOGS_WEBHOOK_URL`
 - `DISCORD_LOGS_WEBHOOK_WAIT`
 
+`BACKEND_API_BASE_URL` carries the bot's protected backend requests. It must
+use HTTPS outside local development; plaintext is allowed only for loopback
+hosts or Compose's fixed internal `http://web:8090` endpoint.
+
 Agent gateway:
 
 - `AGENT_API_TIMEOUT_SECONDS`
@@ -336,7 +340,7 @@ Agent gateway:
   bundle of explicitly selected organization-visible sources, full related
   documents verified in the shared collection, and current, high-authority
   organization knowledge (never private/project knowledge), capped at 32
-  sources and 32,000 characters. The sandbox can only return one typed draft;
+  sources and 48,000 characters. The sandbox can only return one typed draft;
   it receives no backend-hosted write tools and cannot publish.
 
 For Compose deployments, inject wiki-related secrets by service rather than

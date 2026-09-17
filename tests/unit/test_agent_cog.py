@@ -1526,7 +1526,7 @@ def test_post_backend_json_returns_structured_failed_response(
     monkeypatch.setattr(
         "five08.discord_bot.cogs.agent.settings",
         SimpleNamespace(
-            backend_api_base_url="http://api.test",
+            backend_api_base_url="https://api.test",
             api_shared_secret="secret",
             agent_api_timeout_seconds=8.0,
         ),
@@ -1552,7 +1552,7 @@ def test_post_backend_json_returns_detail_error_response(
     monkeypatch.setattr(
         "five08.discord_bot.cogs.agent.settings",
         SimpleNamespace(
-            backend_api_base_url="http://api.test",
+            backend_api_base_url="https://api.test",
             api_shared_secret="secret",
             agent_api_timeout_seconds=8.0,
         ),

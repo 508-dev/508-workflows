@@ -116,7 +116,9 @@ process-local and needs a durable task service for production task workflows.
 
 Relevant configuration:
 
-- `BACKEND_API_BASE_URL`: backend API used by the bot.
+- `BACKEND_API_BASE_URL`: backend API used by the bot. Use HTTPS outside local
+  development; plaintext is allowed only for loopback hosts or Compose's fixed
+  internal `http://web:8090` endpoint.
 - `API_SHARED_SECRET`: shared service secret for protected backend calls.
 - `AGENT_API_TIMEOUT_SECONDS`: timeout for synchronous agent gateway requests.
 - `AGENT_FAST_*`, `AGENT_STRONG_*`, `AGENT_REASONING_*`: backend model

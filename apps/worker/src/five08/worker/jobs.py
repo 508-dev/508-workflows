@@ -382,18 +382,11 @@ def mark_wiki_authoring_retry_exhausted(
     if not normalized_proposal_id or not normalized_organization_id:
         raise ValueError("Wiki authoring job requires proposal and organization IDs.")
     store = PostgresWikiEditingStore(settings)
-    proposal = store.get_proposal(
+    store.fail_proposal_if_status(
         normalized_proposal_id,
         organization_id=normalized_organization_id,
-    )
-    if proposal is None:
-        raise ValueError("Wiki proposal was not found.")
-    if proposal.status != "queued":
-        return
-    store.fail_proposal(
-        proposal.id,
-        organization_id=normalized_organization_id,
         failure_code="authoring_retry_exhausted",
+        expected_statuses=frozenset({"queued", "authoring"}),
     )
 
 

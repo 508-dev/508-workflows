@@ -1,7 +1,6 @@
 """Unit tests for worker actor job state transitions."""
 
 from datetime import datetime, timezone
-from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from five08.queue import JobRecord, JobStatus
@@ -12,6 +11,7 @@ from five08.worker.crm.docuseal_processor import (
     DocusealAgreementNonRetryableError,
     DocusealAgreementProcessingError,
 )
+from five08.wiki_editing.models import WikiAuthoringLeaseHeldError
 
 
 def test_run_job_schedules_retry_for_docuseal_processing_error() -> None:
@@ -165,6 +165,52 @@ def test_exhausted_wiki_authoring_marks_the_proposal_revisable() -> None:
     mock_mark_dead.assert_called_once()
 
 
+def test_live_wiki_authoring_lease_retries_without_consuming_an_attempt() -> None:
+    now = datetime.now(timezone.utc)
+    job = JobRecord(
+        id="job-wiki-lease-held",
+        type="author_wiki_edit_proposal_job",
+        status=JobStatus.QUEUED,
+        payload={"args": ["proposal-1", "guild-1"], "kwargs": {}},
+        idempotency_key=None,
+        attempts=2,
+        max_attempts=3,
+        run_after=None,
+        locked_at=None,
+        locked_by=None,
+        last_error=None,
+        created_at=now,
+        updated_at=now,
+    )
+
+    def _lease_held(*_args: object, **_kwargs: object) -> None:
+        raise WikiAuthoringLeaseHeldError(17.25)
+
+    with (
+        patch("five08.worker.actors.get_job", return_value=job),
+        patch("five08.worker.actors.mark_job_running"),
+        patch("five08.worker.actors.mark_job_succeeded") as mock_mark_succeeded,
+        patch("five08.worker.actors.mark_job_dead") as mock_mark_dead,
+        patch("five08.worker.actors._mark_exhausted_wiki_authoring") as mock_exhausted,
+        patch("five08.worker.actors._schedule_retry") as mock_schedule_retry,
+        patch.dict(
+            actors._HANDLERS,
+            {"author_wiki_edit_proposal_job": _lease_held},
+            clear=False,
+        ),
+    ):
+        actors._run_job(job.id)
+
+    mock_mark_succeeded.assert_not_called()
+    mock_mark_dead.assert_not_called()
+    mock_exhausted.assert_not_called()
+    mock_schedule_retry.assert_called_once()
+    call = mock_schedule_retry.call_args
+    assert call.args[0].id == job.id
+    assert call.args[1] == job.attempts
+    assert call.kwargs["delay_seconds"] == 17.25
+
+
 def test_exhausted_wiki_authoring_with_missing_token_marks_proposal_revisable(
     monkeypatch,
 ) -> None:
@@ -193,9 +239,7 @@ def test_exhausted_wiki_authoring_with_missing_token_marks_proposal_revisable(
         wiki_omp_sandbox_url="http://wiki_omp_sandbox:8080",
         wiki_omp_sandbox_token=None,
     )
-    proposal = SimpleNamespace(id="proposal-missing-token", status="queued")
     store = Mock()
-    store.get_proposal.return_value = proposal
     monkeypatch.setattr(jobs, "settings", worker_settings)
     monkeypatch.setattr(jobs, "PostgresWikiEditingStore", lambda _settings: store)
 
@@ -215,13 +259,10 @@ def test_exhausted_wiki_authoring_with_missing_token_marks_proposal_revisable(
 
     mock_mark_succeeded.assert_not_called()
     mock_schedule_retry.assert_not_called()
-    store.get_proposal.assert_called_once_with(
-        "proposal-missing-token",
-        organization_id="guild-1",
-    )
-    store.fail_proposal.assert_called_once_with(
+    store.fail_proposal_if_status.assert_called_once_with(
         "proposal-missing-token",
         organization_id="guild-1",
         failure_code="authoring_retry_exhausted",
+        expected_statuses=frozenset({"queued", "authoring"}),
     )
     mock_mark_dead.assert_called_once()

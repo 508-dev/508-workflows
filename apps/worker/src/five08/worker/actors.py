@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timedelta, timezone
 from typing import Any, Final
 
@@ -26,6 +27,7 @@ from five08.worker.jobs import (
     JOB_FUNCTIONS,
     mark_wiki_authoring_retry_exhausted,
 )
+from five08.wiki_editing.models import WikiAuthoringLeaseHeldError
 
 from five08.logging import configure_observability
 
@@ -187,10 +189,20 @@ def _compute_retry_delay_seconds(attempt: int) -> int:
     return min(base * (2 ** max(attempt - 1, 0)), capped)
 
 
-def _schedule_retry(job: JobRecord, attempts: int, *, error: str) -> None:
+def _schedule_retry(
+    job: JobRecord,
+    attempts: int,
+    *,
+    error: str,
+    delay_seconds: float | None = None,
+) -> None:
     job_id = job.id
-    delay_seconds = _compute_retry_delay_seconds(attempts)
-    retry_at = datetime.now(tz=timezone.utc) + timedelta(seconds=delay_seconds)
+    retry_delay_seconds = (
+        _compute_retry_delay_seconds(attempts)
+        if delay_seconds is None
+        else max(1, math.ceil(delay_seconds))
+    )
+    retry_at = datetime.now(tz=timezone.utc) + timedelta(seconds=retry_delay_seconds)
     mark_job_retry(
         settings,
         job_id,
@@ -208,7 +220,7 @@ def _schedule_retry(job: JobRecord, attempts: int, *, error: str) -> None:
             worker_name=settings.worker_name,
             error=error,
         )
-    execute_job.send_with_options(args=(job_id,), delay=delay_seconds * 1000)
+    execute_job.send_with_options(args=(job_id,), delay=retry_delay_seconds * 1000)
 
 
 def _mark_exhausted_wiki_authoring(job: JobRecord) -> None:
@@ -295,6 +307,22 @@ def _run_job(job_id: str) -> None:
                 worker_name=settings.worker_name,
                 result=result,
             )
+    except WikiAuthoringLeaseHeldError as exc:
+        # A separate worker still owns the proposal's durable authoring lease.
+        # This is coordination, not a failed authoring attempt: preserve the
+        # attempt count and do not turn a live lease into a terminal job.
+        error = f"{type(exc).__name__}: {exc}"
+        logger.info(
+            "Wiki authoring lease held id=%s; retrying after %.3fs",
+            job_id,
+            exc.retry_after_seconds,
+        )
+        _schedule_retry(
+            job,
+            job.attempts,
+            error=error,
+            delay_seconds=exc.retry_after_seconds,
+        )
     except DocusealAgreementNonRetryableError as exc:
         next_attempt = job.attempts + 1
         error = f"{type(exc).__name__}: {exc}"

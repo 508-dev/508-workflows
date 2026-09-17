@@ -24,14 +24,15 @@ a request is created, revised, canceled, viewed, or published.
 ```
 
 The credentialed worker sends OMP a fixed, backend-approved material bundle:
-the explicit request, opted-in organization-visible thread snapshot, frozen
-target article when updating, a few full related articles verified in the same
-shared Outline collection, and current high-authority organization-visible
-knowledge. Outline search excerpts are candidate selectors only and never
-leave the worker. The sandbox returns one typed draft; it has no database
-connection, Discord token, Outline credential, publishing tool, or enabled
-generic HTTP/shell/filesystem tool. The durable Postgres workflow is the source
-of truth for request/proposal state.
+the explicit request, an immutable predecessor draft when one exists for a
+revision, opted-in organization-visible thread snapshot, frozen target article
+when updating, a few full related articles verified in the same shared Outline
+collection, and current high-authority organization-visible knowledge. Outline
+search excerpts are candidate selectors only and never leave the worker. The
+sandbox returns one typed draft; it has no database connection, Discord token,
+Outline credential, publishing tool, or enabled generic HTTP/shell/filesystem
+tool. The durable Postgres workflow is the source of truth for request/proposal
+state.
 
 The bundle has opaque source IDs. The sandbox may cite only IDs from that
 bundle, and the worker rejects any other citation. It has no dynamic Outline or
@@ -43,7 +44,7 @@ only current organization-memory facts with a verified high-trust authority
 (`admin_confirmed` or `authoritative`); private, project-scoped, stale,
 lower-trust, or metadata-incomplete facts are omitted.
 
-The bundle has a 32-source and 32,000-character admitted-source budget; a
+The bundle has a 32-source and 48,000-character admitted-source budget; a
 target article is capped at 16,000 characters and an opted-in public Discord
 snapshot at 12,000.
 
@@ -66,8 +67,9 @@ before the backend will allocate an Outline write attempt. The acknowledgement
 records the requester, timestamp, and packet hash in Postgres; it cannot be
 replaced or cleared. A new revision has a fresh proposal ID and must be
 reviewed and acknowledged again. Each proposal revision is immutable: revision
-feedback starts a new queued revision with the same durable request and a fresh
-document snapshot.
+feedback starts a new queued revision with the same durable request, the prior
+draft as private authoring context when one exists, and a fresh document
+snapshot.
 
 For an update, the service records the complete target article's content hash
 and Outline revision before authoring. Immediately before publishing it fetches

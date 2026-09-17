@@ -10,6 +10,7 @@ from five08.wiki_editing.models import (
     WikiBaseDocumentSnapshot,
     WikiConflictDetails,
     WikiConversationProvenance,
+    WikiAuthoringLeaseHeldError,
     WikiEditConflictError,
     WikiEditRequestInput,
     WikiEditStateError,
@@ -67,6 +68,14 @@ def _output() -> WikiProposalOutput:
                 title="Deployment decision",
             )
         ],
+    )
+
+
+def _initial_proposal_input(request: WikiEditRequestInput) -> WikiProposalCreate:
+    return WikiProposalCreate(
+        request_id=request.id,
+        organization_id=request.organization_id,
+        target_action="create",
     )
 
 
@@ -154,6 +163,52 @@ def test_proposal_output_is_committed_once_and_revision_increments() -> None:
     assert latest.id == second.id
 
 
+def test_initial_proposal_reservation_is_idempotent_and_repairs_orphaned_request() -> (
+    None
+):
+    store = InMemoryWikiEditingStore()
+
+    # A normal Discord retry supplies a fresh request/proposal ID, but the same
+    # idempotency key. It must recover the original first revision instead of
+    # making a duplicate proposal.
+    request = _request()
+    initial, should_enqueue = store.create_or_get_initial_proposal(
+        request,
+        _initial_proposal_input(request),
+    )
+    retry_request = request.model_copy(update={"id": "discord-retry-request"})
+    repeated, should_reenqueue = store.create_or_get_initial_proposal(
+        retry_request,
+        _initial_proposal_input(retry_request),
+    )
+
+    assert should_enqueue is True
+    assert should_reenqueue is True
+    assert initial.status == "queued"
+    assert initial.revision == 1
+    assert repeated.id == initial.id
+    assert repeated.request_id == request.id
+    assert repeated.revision == 1
+
+    # This models the old two-transaction failure mode: an idempotent request
+    # exists, but a process died before reserving its first proposal. Retrying
+    # the same request repairs it rather than leaving an unserviceable record.
+    orphaned_request = _request().model_copy(
+        update={"request_idempotency_key": "orphaned-discord-interaction"}
+    )
+    stored_request, was_created = store.create_or_get_request(orphaned_request)
+    repaired, should_enqueue_repaired = store.create_or_get_initial_proposal(
+        orphaned_request,
+        _initial_proposal_input(orphaned_request),
+    )
+
+    assert was_created is True
+    assert should_enqueue_repaired is True
+    assert repaired.request_id == stored_request.id
+    assert repaired.revision == 1
+    assert repaired.status == "queued"
+
+
 def test_authoring_claim_blocks_duplicate_delivery_during_lease() -> None:
     store = InMemoryWikiEditingStore()
     request, _ = store.create_or_get_request(_request())
@@ -173,16 +228,16 @@ def test_authoring_claim_blocks_duplicate_delivery_during_lease() -> None:
         now=started_at,
         authoring_lease_seconds=60,
     )
-    duplicate = store.claim_authoring(
-        proposal.id,
-        organization_id="org-1",
-        omp_metadata=_metadata(),
-        now=started_at + timedelta(seconds=59),
-        authoring_lease_seconds=60,
-    )
-
     assert first is not None
-    assert duplicate is None
+    with pytest.raises(WikiAuthoringLeaseHeldError) as held:
+        store.claim_authoring(
+            proposal.id,
+            organization_id="org-1",
+            omp_metadata=_metadata(),
+            now=started_at + timedelta(seconds=59),
+            authoring_lease_seconds=60,
+        )
+    assert held.value.retry_after_seconds == pytest.approx(1.0)
     persisted = store.get_proposal(proposal.id, organization_id="org-1")
     assert persisted is not None
     assert persisted.status == "authoring"
@@ -232,6 +287,170 @@ def test_authoring_claim_reclaims_expired_lease_for_bound_omp_run() -> None:
     assert reclaimed is not None
     assert reclaimed.proposal.omp_metadata == metadata
     assert reclaimed.proposal.authoring_started_at == reclaimed_at
+
+
+def test_revision_retires_predecessor_and_preserves_its_immutable_draft() -> None:
+    store = InMemoryWikiEditingStore()
+    request, _ = store.create_or_get_request(_request())
+    predecessor = store.create_proposal(
+        WikiProposalCreate(
+            request_id=request.id,
+            organization_id="org-1",
+            target_action="create",
+        )
+    )
+    store.claim_authoring(
+        predecessor.id,
+        organization_id="org-1",
+        omp_metadata=_metadata(),
+    )
+    completed = store.complete_proposal(
+        predecessor.id,
+        organization_id="org-1",
+        output=_output(),
+    )
+
+    revision = store.create_revision(
+        WikiProposalCreate(
+            request_id=request.id,
+            organization_id="org-1",
+            target_action="create",
+            revision_parent_id=predecessor.id,
+            revision_instruction="Shorten the second paragraph.",
+        )
+    )
+
+    retired = store.get_proposal(predecessor.id, organization_id="org-1")
+    assert retired is not None
+    assert retired.status == "canceled"
+    assert revision.status == "queued"
+    assert revision.revision == completed.revision + 1
+
+    work_item = store.claim_authoring(
+        revision.id,
+        organization_id="org-1",
+        omp_metadata=_metadata().model_copy(update={"run_id": "omp-run-2"}),
+    )
+    assert work_item is not None
+    assert work_item.proposal.revision_parent_id == predecessor.id
+    assert work_item.proposal.revision_instruction == "Shorten the second paragraph."
+    parent_draft = work_item.proposal.revision_parent_draft
+    assert parent_draft is not None
+    assert parent_draft.proposal_id == predecessor.id
+    assert parent_draft.revision == completed.revision
+    assert parent_draft.title == _output().proposed_title
+    assert parent_draft.text == _output().proposed_text
+    assert parent_draft.content_hash == wiki_content_hash(_output().proposed_text)
+
+    # The child only receives a private copy reconstructed from its retired
+    # predecessor; mutating that copy must not alter the durable revision base.
+    parent_draft.text = "tampered local copy"
+    reread = store.get_authoring_work_item(revision.id, organization_id="org-1")
+    assert reread is not None
+    assert reread.proposal.revision_parent_draft is not None
+    assert reread.proposal.revision_parent_draft.text == _output().proposed_text
+
+
+def test_revision_of_failed_child_preserves_nearest_reviewed_ancestor() -> None:
+    store = InMemoryWikiEditingStore()
+    request, _ = store.create_or_get_request(_request())
+    original = store.create_proposal(
+        WikiProposalCreate(
+            request_id=request.id,
+            organization_id="org-1",
+            target_action="create",
+        )
+    )
+    store.claim_authoring(
+        original.id,
+        organization_id="org-1",
+        omp_metadata=_metadata(),
+    )
+    store.complete_proposal(
+        original.id,
+        organization_id="org-1",
+        output=_output(),
+    )
+    failed_child = store.create_revision(
+        WikiProposalCreate(
+            request_id=request.id,
+            organization_id="org-1",
+            target_action="create",
+            revision_parent_id=original.id,
+            revision_instruction="Make the heading shorter.",
+        )
+    )
+    store.fail_proposal(
+        failed_child.id,
+        organization_id="org-1",
+        failure_code="authoring_failed",
+    )
+
+    replacement = store.create_revision(
+        WikiProposalCreate(
+            request_id=request.id,
+            organization_id="org-1",
+            target_action="create",
+            revision_parent_id=failed_child.id,
+            revision_instruction="Try the shortened heading again.",
+        )
+    )
+    work_item = store.claim_authoring(
+        replacement.id,
+        organization_id="org-1",
+        omp_metadata=_metadata().model_copy(update={"run_id": "omp-run-3"}),
+    )
+
+    assert work_item is not None
+    assert work_item.proposal.revision_parent_id == failed_child.id
+    assert work_item.proposal.revision_parent_draft is not None
+    assert work_item.proposal.revision_parent_draft.proposal_id == original.id
+    assert work_item.proposal.revision_parent_draft.text == _output().proposed_text
+
+
+def test_conditional_failure_does_not_overwrite_an_authoring_claim() -> None:
+    store = InMemoryWikiEditingStore()
+    request, _ = store.create_or_get_request(_request())
+    claimed = store.create_proposal(
+        WikiProposalCreate(
+            request_id=request.id,
+            organization_id="org-1",
+            target_action="create",
+        )
+    )
+    store.claim_authoring(
+        claimed.id,
+        organization_id="org-1",
+        omp_metadata=_metadata(),
+    )
+
+    not_failed = store.fail_proposal_if_status(
+        claimed.id,
+        organization_id="org-1",
+        failure_code="authoring_enqueue_failed",
+        expected_statuses=frozenset({"queued"}),
+    )
+    still_authoring = store.get_proposal(claimed.id, organization_id="org-1")
+    assert not_failed is None
+    assert still_authoring is not None
+    assert still_authoring.status == "authoring"
+
+    queued = store.create_proposal(
+        WikiProposalCreate(
+            request_id=request.id,
+            organization_id="org-1",
+            target_action="create",
+        )
+    )
+    failed = store.fail_proposal_if_status(
+        queued.id,
+        organization_id="org-1",
+        failure_code="authoring_enqueue_failed",
+        expected_statuses=frozenset({"queued"}),
+    )
+    assert failed is not None
+    assert failed.status == "failed"
+    assert failed.failure_code == "authoring_enqueue_failed"
 
 
 def test_publish_attempt_is_recorded_before_external_write_and_never_reclaimed() -> (

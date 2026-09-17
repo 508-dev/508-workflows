@@ -227,6 +227,29 @@ def test_failed_queue_handoff_becomes_a_revisionable_proposal() -> None:
     assert failed.action == "revise"
 
 
+def test_queue_handoff_failure_does_not_overwrite_a_claimed_authoring_lease() -> None:
+    outline = _Outline()
+    service = _service(outline, _Author())
+    started = service.create(_create_request())
+    assert started.response.proposal_id is not None
+    service.store.claim_authoring(
+        started.response.proposal_id,
+        organization_id="guild-1",
+        omp_metadata=WikiOmpRunMetadata(
+            session_id="another-worker",
+            model="openrouter/test-model",
+            provider="openrouter",
+            run_id="another-run",
+        ),
+    )
+
+    response = service.mark_authoring_enqueue_failed(
+        _action(started.response.proposal_id)
+    )
+
+    assert response.status == "authoring"
+
+
 def test_transient_authoring_releases_the_lease_for_queue_retry() -> None:
     outline = _Outline()
     service = _service(outline, _TransientAuthor())
@@ -261,6 +284,7 @@ def test_revision_preserves_immutable_history_and_passes_feedback_to_author() ->
     author = _Author()
     service = _service(outline, author)
     proposal_id = _propose(service)
+    _acknowledge(service, proposal_id)
 
     revised = service.revise(
         WikiEditRevisionRequest(
@@ -271,6 +295,12 @@ def test_revision_preserves_immutable_history_and_passes_feedback_to_author() ->
     )
     assert revised.response.proposal_id is not None
     assert revised.response.revision == 2
+    retired = service.store.get_proposal(proposal_id, organization_id="guild-1")
+    assert retired is not None
+    assert retired.status == "canceled"
+    stale_publish = service.publish(_action(proposal_id))
+    assert stale_publish.status == "canceled"
+    assert outline.update_calls == 0
     second = service.author_proposal(
         revised.response.proposal_id,
         organization_id="guild-1",
@@ -281,9 +311,14 @@ def test_revision_preserves_immutable_history_and_passes_feedback_to_author() ->
     assert reviewed.review is not None
     assert "more explicit" in reviewed.review.complete_diff
     latest_work = author.work_items[-1]
-    assert getattr(getattr(latest_work, "proposal"), "revision_instruction") == (
+    second_proposal = getattr(latest_work, "proposal")
+    assert getattr(second_proposal, "revision_instruction") == (
         "Make the wording more explicit about approvals."
     )
+    parent_draft = getattr(second_proposal, "revision_parent_draft")
+    assert parent_draft is not None
+    assert parent_draft.proposal_id == proposal_id
+    assert "(initial)" in parent_draft.text
 
 
 def test_publish_uses_one_confirmed_write_and_never_repeats_it() -> None:

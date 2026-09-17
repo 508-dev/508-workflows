@@ -557,7 +557,7 @@ def test_backend_post_uses_authenticated_tls_verified_json(
         wiki_writer_module,
         "settings",
         SimpleNamespace(
-            backend_api_base_url="http://api.test",
+            backend_api_base_url="https://api.test",
             api_shared_secret="secret",
             wiki_editing_assertion_secret="wiki-assertion-secret",
             agent_api_timeout_seconds=8.0,
@@ -572,7 +572,7 @@ def test_backend_post_uses_authenticated_tls_verified_json(
         response = cog._post_backend_json("/wiki/updates", {"instruction": "x"})
 
     assert response["http_status"] == 202
-    assert mock_post.call_args.args[0] == "http://api.test/wiki/updates"
+    assert mock_post.call_args.args[0] == "https://api.test/wiki/updates"
     headers = mock_post.call_args.kwargs["headers"]
     assert headers["X-API-Secret"] == "secret"
     verify_wiki_action_assertion(

@@ -40,7 +40,10 @@ from five08.wiki_editing.omp import (
 
 _SANDBOX_PROTOCOL_VERSION = "v1"
 _MAX_SOURCE_MATERIALS = 32
-_MAX_SOURCE_CHARACTERS = 32_000
+# Request (4k) + reviewed predecessor (16k) + fresh update base (16k) +
+# explicitly selected conversation (12k). Supplemental materials are admitted
+# only from any remaining budget.
+_MAX_SOURCE_CHARACTERS = 48_000
 _MAX_MATERIAL_CHARACTERS = 16_000
 _MAX_SANDBOX_RESPONSE_BYTES = 600_000
 
@@ -236,6 +239,23 @@ class SandboxedOmpWikiAuthoringRunner:
             ),
             prefix="request",
         )
+        revision_parent = work_item.proposal.revision_parent_draft
+        if revision_parent is not None:
+            # A revision must see the exact immutable draft it replaces. Its
+            # provenance remains worker-only; the sandbox receives only an
+            # opaque material ID, a generic label, and bounded text.
+            registry.add(
+                _SandboxMaterial(
+                    source=WikiSourceReference(
+                        source_type="other",
+                        source_ref=f"wiki-proposal:{revision_parent.proposal_id}",
+                        title=f"Prior draft revision {revision_parent.revision}",
+                        content_hash=revision_parent.content_hash,
+                    ),
+                    text=revision_parent.text,
+                ),
+                prefix="reviewed-draft",
+            )
         for selected in request.selected_source_text:
             registry.add(
                 _SandboxMaterial(

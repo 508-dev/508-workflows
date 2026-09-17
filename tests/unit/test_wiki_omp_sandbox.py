@@ -20,10 +20,15 @@ from five08.clients.outline import (
 from five08.worker.wiki_omp_sandbox import SandboxedOmpWikiAuthoringRunner
 from five08.wiki_editing.models import (
     WikiAuthoringWorkItem,
+    WikiBaseDocumentSnapshot,
+    WikiConversationProvenance,
     WikiEditRequestInput,
     WikiOmpRunMetadata,
     WikiProposalCreate,
+    WikiProposalOutput,
+    WikiSelectedConversationSource,
     WikiSourceReference,
+    wiki_content_hash,
 )
 from five08.wiki_editing.omp import (
     WikiAuthoringError,
@@ -75,6 +80,132 @@ def _work_item() -> WikiAuthoringWorkItem:
     )
     assert work is not None
     return work
+
+
+def _revision_work_item() -> WikiAuthoringWorkItem:
+    store = InMemoryWikiEditingStore()
+    request, _created = store.create_or_get_request(
+        WikiEditRequestInput(
+            organization_id="guild-1",
+            actor_id="writer-1",
+            instruction="Shorten the second paragraph of the draft.",
+            request_idempotency_key="revision-request-1",
+        )
+    )
+    predecessor = store.create_proposal(
+        WikiProposalCreate(
+            request_id=request.id,
+            organization_id="guild-1",
+            target_action="create",
+        )
+    )
+    store.claim_authoring(
+        predecessor.id,
+        organization_id="guild-1",
+        omp_metadata=_metadata(),
+    )
+    store.complete_proposal(
+        predecessor.id,
+        organization_id="guild-1",
+        output=WikiProposalOutput(
+            proposed_title="Release guide",
+            proposed_text="First paragraph.\n\nA long second paragraph to shorten.",
+            proposed_diff="@@ -0,0 +1,3 @@\n+# Release guide",
+            summary="Initial release guide draft.",
+        ),
+    )
+    revision = store.create_revision(
+        WikiProposalCreate(
+            request_id=request.id,
+            organization_id="guild-1",
+            target_action="create",
+            revision_parent_id=predecessor.id,
+            revision_instruction="Shorten the second paragraph.",
+        )
+    )
+    work = store.claim_authoring(
+        revision.id,
+        organization_id="guild-1",
+        omp_metadata=_metadata().model_copy(update={"run_id": "run-2"}),
+    )
+    assert work is not None
+    return work
+
+
+def _maximal_revision_work_item() -> WikiAuthoringWorkItem:
+    """Build the complete primary-material budget for one update revision."""
+    store = InMemoryWikiEditingStore()
+    base_text = "b" * 16_000
+    base = WikiBaseDocumentSnapshot(
+        document_id="doc-1",
+        title="Release guide",
+        document_url="https://outline.example/doc/release",
+        document_version="1",
+        content_hash=wiki_content_hash(base_text),
+        content=base_text,
+    )
+    request, _created = store.create_or_get_request(
+        WikiEditRequestInput(
+            organization_id="guild-1",
+            actor_id="writer-1",
+            instruction="r" * 4_000,
+            request_idempotency_key="maximal-revision-request",
+            target_document_id="doc-1",
+            selected_conversation=[
+                WikiSelectedConversationSource(
+                    provenance=WikiConversationProvenance(
+                        source_type="discord_thread",
+                        source_ref="thread-1",
+                        title="Release decision",
+                        guild_id="guild-1",
+                    ),
+                    organization_visible_text="s" * 12_000,
+                )
+            ],
+        )
+    )
+    original = store.create_proposal(
+        WikiProposalCreate(
+            request_id=request.id,
+            organization_id="guild-1",
+            target_action="update",
+            target_document_id="doc-1",
+            base_document=base,
+        )
+    )
+    store.claim_authoring(
+        original.id,
+        organization_id="guild-1",
+        omp_metadata=_metadata(),
+    )
+    store.complete_proposal(
+        original.id,
+        organization_id="guild-1",
+        output=WikiProposalOutput(
+            proposed_title="Release guide",
+            proposed_text="p" * 16_000,
+            proposed_diff="@@ -1 +1 @@\n-old\n+new",
+            summary="Initial update.",
+        ),
+    )
+    revision = store.create_revision(
+        WikiProposalCreate(
+            request_id=request.id,
+            organization_id="guild-1",
+            target_action="update",
+            target_document_id="doc-1",
+            base_document=base,
+            revision_parent_id=original.id,
+            revision_instruction="Revise the phrasing.",
+        )
+    )
+    work_item = store.claim_authoring(
+        revision.id,
+        organization_id="guild-1",
+        omp_metadata=_metadata().model_copy(update={"run_id": "run-maximal"}),
+    )
+    assert work_item is not None
+    return work_item
 
 
 def _metadata() -> WikiOmpRunMetadata:
@@ -147,6 +278,67 @@ def test_remote_sandbox_receives_only_bounded_materials_not_worker_secrets() -> 
     assert "openrouter-secret" not in serialized
     assert "WIKI_OMP_COMMAND" not in serialized
     assert "outline_admin" not in serialized
+
+
+def test_remote_sandbox_receives_the_private_predecessor_draft_for_a_revision() -> None:
+    captured: dict[str, Any] = {}
+
+    def transport(
+        _endpoint: str,
+        _headers: Mapping[str, str],
+        payload: Mapping[str, object],
+        _startup_timeout: float,
+        _authoring_timeout: float,
+    ) -> dict[str, object]:
+        captured.update(payload)
+        return _draft_response(source_ids=["request:1", "reviewed-draft:2"])
+
+    runner = SandboxedOmpWikiAuthoringRunner(
+        sandbox_url="http://wiki_omp_sandbox:8080",
+        sandbox_token="sandbox-token",
+        model="openrouter/test",
+        outline_client_factory=_empty_outline_client_factory,
+        allowed_collection_id="collection-1",
+        transport=transport,
+    )
+
+    work_item = _revision_work_item()
+    draft = runner.author(work_item, metadata=_metadata())
+
+    materials = captured["materials"]
+    assert isinstance(materials, list)
+    reviewed_material = next(
+        material for material in materials if material["id"] == "reviewed-draft:2"
+    )
+    assert reviewed_material["text"] == (
+        "First paragraph.\n\nA long second paragraph to shorten."
+    )
+    serialized = json.dumps(materials)
+    assert "wiki-proposal:" not in serialized
+    assert "revision_parent" not in serialized
+    assert draft.source_refs[0].source_ref == f"wiki-request:{work_item.request.id}"
+    assert draft.source_refs[1].source_ref.startswith("wiki-proposal:")
+
+
+def test_revision_primary_materials_fit_the_full_bounded_budget() -> None:
+    runner = SandboxedOmpWikiAuthoringRunner(
+        sandbox_url="http://wiki_omp_sandbox:8080",
+        sandbox_token="sandbox-token",
+        model="openrouter/test",
+        outline_client_factory=_empty_outline_client_factory,
+        allowed_collection_id="collection-1",
+        transport=lambda *_args: _draft_response(source_ids=["request:1"]),
+    )
+
+    registry = runner._initial_registry(_maximal_revision_work_item())
+
+    assert registry._admitted_characters == 48_000
+    assert list(registry._materials) == [
+        "request:1",
+        "reviewed-draft:2",
+        "conversation:3",
+        "base-document:4",
+    ]
 
 
 def test_remote_sandbox_cannot_cite_unapproved_material() -> None:
