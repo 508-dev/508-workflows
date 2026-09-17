@@ -60,6 +60,19 @@ class WorkerSettings(SharedSettings):
     openai_direct_model: str | None = None
     fireworks_api_key: str | None = None
     openrouter_api_key: str | None = None
+    # OMP authoring is intentionally remote-only. The worker must never exec
+    # an untrusted OMP binary in its own credentialed/container namespace.
+    # These legacy values remain recognized only so an unsafe deployment fails
+    # closed with a useful configuration error rather than silently launching.
+    wiki_omp_command: str = ""
+    wiki_omp_launcher_path: str = ""
+    wiki_omp_sandbox_url: str = ""
+    wiki_omp_sandbox_token: str | None = None
+    wiki_omp_sandbox_protocol_version: str = "v1"
+    wiki_omp_model: str = "openrouter/openai/gpt-5-mini"
+    wiki_omp_thinking: str = "medium"
+    wiki_omp_authoring_timeout_seconds: float = Field(default=300.0, gt=0)
+    wiki_omp_startup_timeout_seconds: float = Field(default=30.0, gt=0)
     agent_planner_model: str = "accounts/fireworks/models/kimi-k2p6"
     agent_fallback_model: str = "gpt-4.1-mini"
     agent_structured_planner_enabled: bool = True
@@ -135,6 +148,87 @@ class WorkerSettings(SharedSettings):
         if queue_names:
             return queue_names[0]
         return self.redis_queue_name
+
+    @property
+    def wiki_authoring_configured(self) -> bool:
+        """Whether the authoring worker has an isolated sandbox boundary."""
+        return self.wiki_authoring_configuration_error is None
+
+    @property
+    def wiki_authoring_configuration_error(self) -> str | None:
+        """Return the fail-closed reason without exposing a credential value."""
+        if not self.wiki_editing_enabled:
+            return "Wiki editing is disabled."
+        if (self.wiki_omp_command or "").strip() or (
+            self.wiki_omp_launcher_path or ""
+        ).strip():
+            return (
+                "Local WIKI_OMP_COMMAND and WIKI_OMP_LAUNCHER_PATH are prohibited; "
+                "configure an isolated WIKI_OMP_SANDBOX_URL instead."
+            )
+        if self.resolved_wiki_omp_sandbox_url is None:
+            return (
+                "WIKI_OMP_SANDBOX_URL must be an HTTPS sandbox endpoint or the "
+                "internal http://wiki_omp_sandbox endpoint."
+            )
+        if not (self.wiki_omp_sandbox_token or "").strip():
+            return "WIKI_OMP_SANDBOX_TOKEN is required for isolated wiki authoring."
+        if self.wiki_omp_sandbox_protocol_version.strip() != "v1":
+            return "WIKI_OMP_SANDBOX_PROTOCOL_VERSION must be v1."
+        if not (self.outline_admin_api_key or "").strip():
+            return "OUTLINE_ADMIN_API_KEY is required for wiki editing."
+        if not str(self.wiki_outline_collection_id or "").strip():
+            return "WIKI_OUTLINE_COLLECTION_ID is required for wiki editing."
+        return None
+
+    @property
+    def resolved_wiki_omp_sandbox_url(self) -> str | None:
+        """Return only a transport-safe, separately hosted sandbox endpoint.
+
+        The sole plaintext exception is the fixed Compose service name on the
+        internal ``wiki_omp_control`` network. Arbitrary HTTP, loopback, and
+        private-address endpoints are rejected so configuration cannot quietly
+        turn the sidecar boundary back into a local process boundary.
+        """
+        candidate = (self.wiki_omp_sandbox_url or "").strip().rstrip("/")
+        if not candidate:
+            return None
+        try:
+            parsed = urlparse(candidate)
+            hostname = parsed.hostname
+            # Accessing ``port`` validates malformed values such as :abc.
+            port = parsed.port
+            del port
+        except ValueError:
+            return None
+        if (
+            not hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.params
+            or parsed.query
+            or parsed.fragment
+            or parsed.path not in {"", "/"}
+        ):
+            return None
+
+        scheme = parsed.scheme.casefold()
+        normalized_hostname = hostname.casefold()
+        if normalized_hostname in {"localhost", "localhost.localdomain"}:
+            return None
+        if scheme == "http":
+            return candidate if normalized_hostname == "wiki_omp_sandbox" else None
+        if scheme != "https":
+            return None
+        if "." not in normalized_hostname:
+            return None
+        try:
+            address = ip_address(normalized_hostname)
+        except ValueError:
+            # A DNS hostname is allowed only over TLS. Certificate validation
+            # remains enabled in the remote sandbox client.
+            return candidate
+        return candidate if address.is_global else None
 
     email_resume_intake_enabled: bool = False
     check_email_wait: int = 2

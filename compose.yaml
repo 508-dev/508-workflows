@@ -173,10 +173,15 @@ services:
       # allowing startup while /health reports degraded in non-local runtimes.
       INTAKE_RESUME_VIRUS_SCAN_COMMAND: ${INTAKE_RESUME_VIRUS_SCAN_COMMAND-clamdscan --stream --no-summary --config-file=/etc/clamav/clamdscan.conf}
       DISCORD_BOT_INTERNAL_BASE_URL: http://discord_bot:3000
+      # The OMP binary never runs in this credentialed worker container. This
+      # fixed plaintext URL is reachable only through the internal control
+      # network; deployments outside Compose must use an HTTPS sandbox URL.
+      WIKI_OMP_SANDBOX_URL: ${WIKI_OMP_SANDBOX_URL:-http://wiki_omp_sandbox:8080}
     restart: unless-stopped
     networks:
       - default
       - infra
+      - wiki_omp_control
     depends_on:
       web:
         condition: service_started
@@ -197,3 +202,7 @@ networks:
   infra:
     name: ${INFRA_DOCKER_NETWORK:-508-infra}
     external: true
+  # Only the worker and sandbox share this network. It has no route outside
+  # Docker and no connection to Postgres, Redis, MinIO, API, or Discord.
+  wiki_omp_control:
+    internal: true

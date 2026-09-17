@@ -21,11 +21,16 @@ from five08.worker.crm.resume_profile_processor import ResumeProfileProcessor
 from five08.worker.erpnext_project_sync import ERPNextProjectSyncProcessor
 from five08.worker.mailbox_resume_ingest import ResumeMailboxProcessor
 from five08.worker.masking import mask_email
+from five08.worker.wiki_omp_sandbox import SandboxedOmpWikiAuthoringRunner
+from five08.knowledge.models import KnowledgeEvidence
 from five08.knowledge.store import PostgresKnowledgeStore
 from five08.newsletter_sync import NewsletterSyncProcessor
 from five08.job_lead_sources import scrape_job_leads
 from five08.wiki_editing.models import WikiAuthoringWorkItem, WikiSourceReference
-from five08.wiki_editing.omp import OmpWikiAuthoringRunner, WikiAuthoringMaterial
+from five08.wiki_editing.omp import (
+    WIKI_AUTHORING_MIN_KNOWLEDGE_AUTHORITY,
+    WikiAuthoringMaterial,
+)
 from five08.wiki_editing.service import (
     WikiEditingConfigurationError,
     WikiEditingService,
@@ -37,6 +42,7 @@ logger = logging.getLogger(__name__)
 
 
 DOCUSEAL_COMPLETED_AT_UTC_FORMAT = "%Y-%m-%d %H:%M:%S"
+_REQUIRED_WIKI_KNOWLEDGE_METADATA = frozenset({"authority", "stale", "updated_at"})
 
 
 def process_contact_skills_job(contact_id: str) -> dict[str, Any]:
@@ -269,30 +275,52 @@ def _build_wiki_org_knowledge_search(
                 ),
                 text=evidence.excerpt,
                 visibility="org",
+                knowledge_authority=evidence.authority,
+                knowledge_stale=evidence.stale,
+                knowledge_updated_at=evidence.updated_at,
             )
             for evidence in evidence_items
-            if evidence.visibility == "org"
+            if _is_trusted_wiki_knowledge_evidence(evidence)
         ][:4]
 
     return search
 
 
+def _is_trusted_wiki_knowledge_evidence(evidence: KnowledgeEvidence) -> bool:
+    """Permit only current, verified organization facts into external authoring.
+
+    ``authority`` is derived from the durable knowledge fact's verification
+    status by the store. Requiring 0.9 limits authoring context to
+    admin-confirmed or authoritative facts. Missing trust or freshness metadata
+    fails closed rather than treating the default model values as trusted.
+    """
+    return (
+        evidence.source_type == "memory"
+        and evidence.visibility == "org"
+        and _REQUIRED_WIKI_KNOWLEDGE_METADATA <= evidence.model_fields_set
+        and evidence.authority >= WIKI_AUTHORING_MIN_KNOWLEDGE_AUTHORITY
+        and evidence.stale is False
+        and evidence.updated_at is not None
+    )
+
+
 def _build_wiki_editing_service() -> WikiEditingService:
     """Construct the worker-only service that owns bounded OMP authoring."""
-    launcher_path = settings.resolved_wiki_omp_launcher_path
-    if not settings.wiki_authoring_configured or launcher_path is None:
+    if not settings.wiki_authoring_configured:
         raise WikiEditingConfigurationError(
-            "Wiki authoring worker is not fully configured."
+            str(
+                settings.wiki_authoring_configuration_error
+                or "Wiki authoring worker is not fully configured."
+            )
         )
 
     def outline_client_factory():
         return build_outline_writer_client(settings)
 
     knowledge_store = PostgresKnowledgeStore(settings)
-    authoring_runner = OmpWikiAuthoringRunner(
-        omp_executable=str(settings.wiki_omp_command or ""),
-        omp_launcher_path=str(launcher_path),
-        openrouter_api_key=str(settings.openrouter_api_key or ""),
+    authoring_runner = SandboxedOmpWikiAuthoringRunner(
+        sandbox_url=str(settings.resolved_wiki_omp_sandbox_url or ""),
+        sandbox_token=str(settings.wiki_omp_sandbox_token or ""),
         model=str(settings.wiki_omp_model or ""),
         thinking=str(settings.wiki_omp_thinking or ""),
         startup_timeout_seconds=cast(
@@ -303,8 +331,6 @@ def _build_wiki_editing_service() -> WikiEditingService:
             float,
             settings.wiki_omp_authoring_timeout_seconds,
         ),
-        outline_client_factory=outline_client_factory,
-        allowed_collection_id=str(settings.wiki_outline_collection_id or ""),
         knowledge_search=_build_wiki_org_knowledge_search(knowledge_store),
     )
     return WikiEditingService(

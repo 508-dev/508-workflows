@@ -1,0 +1,46 @@
+# Explicit opt-in overlay for the isolated OMP authoring sandbox.
+#
+# Start it only with a reviewed digest and deployment-managed secrets:
+#   docker compose -f compose.yaml -f compose.wiki-omp.yaml up -d
+#
+# This file is intentionally separate from compose.yaml. A normal stack must
+# not interpolate or receive the sandbox image/provider credential at all.
+services:
+  wiki_omp_sandbox:
+    image: ${WIKI_OMP_SANDBOX_IMAGE:?Set WIKI_OMP_SANDBOX_IMAGE to a reviewed image digest}
+    restart: unless-stopped
+    init: true
+    read_only: true
+    user: "65532:65532"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 1024m
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    environment:
+      WIKI_OMP_SANDBOX_LISTEN_ADDR: 0.0.0.0:8080
+      WIKI_OMP_SANDBOX_TOKEN: ${WIKI_OMP_SANDBOX_TOKEN:?Set WIKI_OMP_SANDBOX_TOKEN}
+      WIKI_OMP_SANDBOX_PROTOCOL_VERSION: v1
+      # The reviewed sandbox image must read its separate provider credential
+      # from this file. Do not pass the worker's OPENROUTER_API_KEY or any
+      # backend credential into this service.
+      OPENROUTER_API_KEY_FILE: /run/secrets/openrouter_api_key
+    secrets:
+      - source: wiki_omp_sandbox_openrouter_api_key
+        target: openrouter_api_key
+    networks:
+      - wiki_omp_control
+      - wiki_omp_egress
+
+networks:
+  # The sandbox alone receives outbound model-provider connectivity.
+  wiki_omp_egress:
+
+secrets:
+  # This file must come from deployment secret storage, not `.env`: the worker
+  # uses that file as an env_file and must never receive the provider key.
+  wiki_omp_sandbox_openrouter_api_key:
+    file: ${WIKI_OMP_SANDBOX_OPENROUTER_API_KEY_FILE:?Set WIKI_OMP_SANDBOX_OPENROUTER_API_KEY_FILE to a deployment-managed secret file}
