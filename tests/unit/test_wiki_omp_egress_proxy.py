@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import socket
+import threading
 
 import pytest
 
 from five08.wiki_editing.omp_egress_proxy import (
     EgressProxyError,
     EgressProxySettings,
+    _relay_tunnel,
     parse_connect_target,
     resolve_public_addresses,
 )
@@ -67,3 +69,35 @@ def test_proxy_settings_reject_an_external_listener() -> None:
         EgressProxySettings.from_environment(
             {"WIKI_OMP_EGRESS_PROXY_LISTEN_ADDR": "proxy.example:3128"}
         )
+
+
+def test_tunnel_drains_buffered_bytes_before_propagating_half_closes() -> None:
+    client, downstream = socket.socketpair()
+    upstream, provider = socket.socketpair()
+    for tunnel_socket in (downstream, upstream):
+        tunnel_socket.setblocking(False)
+    for peer_socket in (client, provider):
+        peer_socket.settimeout(2)
+
+    relay = threading.Thread(
+        target=_relay_tunnel,
+        args=(downstream, upstream),
+    )
+    relay.start()
+    try:
+        client.sendall(b"request")
+        client.shutdown(socket.SHUT_WR)
+
+        assert provider.recv(1024) == b"request"
+        assert provider.recv(1024) == b""
+
+        provider.sendall(b"response")
+        provider.shutdown(socket.SHUT_WR)
+
+        assert client.recv(1024) == b"response"
+        assert client.recv(1024) == b""
+        relay.join(timeout=2)
+        assert not relay.is_alive()
+    finally:
+        for tunnel_socket in (client, downstream, upstream, provider):
+            tunnel_socket.close()

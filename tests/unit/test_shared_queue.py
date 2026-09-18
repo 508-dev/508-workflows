@@ -1,12 +1,13 @@
 """Unit tests for shared queue helpers."""
 
 from datetime import datetime, timezone
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from five08.queue import (
     JobRecord,
     JobStatus,
     _parse_status,
+    claim_job,
     enqueue_job,
     get_postgres_connection,
 )
@@ -133,3 +134,51 @@ def test_postgres_connection_applies_bounded_operation_deadlines() -> None:
         connect_timeout=1,
         options="-c statement_timeout=2500",
     )
+
+
+def test_claim_job_requires_an_eligible_status_and_returns_the_claimed_row() -> None:
+    """A worker can execute only the row returned by its conditional claim."""
+    now = datetime(2026, 9, 18, tzinfo=timezone.utc)
+    row = {
+        "id": "job-1",
+        "type": "author_wiki_edit_proposal_job",
+        "status": "running",
+        "payload": {"args": [], "kwargs": {}},
+        "idempotency_key": None,
+        "attempts": 0,
+        "max_attempts": 5,
+        "run_after": None,
+        "locked_at": now,
+        "locked_by": "worker-1",
+        "last_error": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value.__enter__.return_value
+    cursor.fetchone.return_value = row
+    settings = SharedSettings()
+
+    with patch("five08.queue.get_postgres_connection", return_value=connection):
+        claimed = claim_job(settings, "job-1", worker_name="worker-1")
+
+    assert claimed is not None
+    assert claimed.status == JobStatus.RUNNING
+    query, params = cursor.execute.call_args.args
+    assert "UPDATE jobs" in query
+    assert "status IN (%s, %s)" in query
+    assert "run_after IS NULL OR run_after <= NOW()" in query
+    assert params == ("running", "worker-1", "job-1", "queued", "failed")
+
+
+def test_claim_job_returns_none_when_a_concurrent_delivery_already_claimed_it() -> None:
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value.__enter__.return_value
+    cursor.fetchone.return_value = None
+
+    with patch("five08.queue.get_postgres_connection", return_value=connection):
+        claimed = claim_job(SharedSettings(), "job-1", worker_name="worker-1")
+
+    assert claimed is None

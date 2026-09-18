@@ -331,6 +331,7 @@ def _build_wiki_editing_service() -> WikiEditingService:
             float,
             settings.wiki_omp_authoring_timeout_seconds,
         ),
+        max_document_characters=settings.wiki_editing_max_document_characters,
         outline_client_factory=outline_client_factory,
         allowed_collection_id=str(settings.wiki_outline_collection_id or ""),
         knowledge_search=_build_wiki_org_knowledge_search(knowledge_store),

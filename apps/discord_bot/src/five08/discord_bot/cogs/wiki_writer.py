@@ -196,8 +196,12 @@ def _controls_for_response(
         return ("refresh",)
     if status == "failed":
         return ("revise", "cancel", "refresh")
-    if status in {"queued", "authoring", "publishing"}:
+    if status in {"queued", "authoring"}:
         return ("cancel", "refresh")
+    if status == "publishing":
+        # Publishing has crossed the durable external-write boundary. It must
+        # be reconciled rather than canceled, so never render a dead control.
+        return ("refresh",)
     if status == "conflict":
         return ("revise", "cancel", "refresh")
     if status == "proposed":

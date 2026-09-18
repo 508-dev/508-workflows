@@ -16,6 +16,17 @@ from five08.clients.authentik import AuthentikAPIError
 from five08.clients.espo import EspoAPIError
 from five08.clients.outline import OutlineAPIError
 from five08.tls import default_ca_bundle_path
+from five08.wiki_editing.assertions import (
+    WIKI_ASSERTION_HEADER,
+    verify_wiki_action_assertion,
+)
+
+
+OUTLINE_INVITATION_ACTOR = {
+    "discord_user_id": "123456789",
+    "discord_guild_id": "987654321",
+    "discord_roles": ["Admin"],
+}
 
 
 @pytest.fixture
@@ -27,6 +38,8 @@ def mock_interaction() -> AsyncMock:
     interaction.followup = AsyncMock()
     interaction.followup.send = AsyncMock()
     interaction.user = Mock()
+    interaction.user.id = 123456789
+    interaction.guild_id = 987654321
     role = Mock()
     role.name = "Admin"
     interaction.user.roles = [role]
@@ -46,6 +59,14 @@ def cog(mock_espo_api: Mock, monkeypatch: pytest.MonkeyPatch) -> CRMCog:
     monkeypatch.setattr(
         "five08.discord_bot.cogs.crm.settings.api_shared_secret",
         "test-api-secret",
+    )
+    monkeypatch.setattr(
+        "five08.discord_bot.cogs.crm.settings.wiki_editing_assertion_secret",
+        "test-outline-invitation-assertion-secret",
+    )
+    monkeypatch.setattr(
+        "five08.discord_bot.cogs.crm.settings.discord_server_id",
+        "987654321",
     )
     return CRMCog(Mock())
 
@@ -76,18 +97,32 @@ def test_post_outline_invitation_uses_authenticated_backend_proxy(
         "five08.discord_bot.cogs.crm.requests.post",
         return_value=response,
     ) as post:
-        cog._post_outline_invitation(email="jane@508.dev", name="Jane Doe")
+        cog._post_outline_invitation(
+            email="jane@508.dev",
+            name="Jane Doe",
+            actor=OUTLINE_INVITATION_ACTOR,
+        )
 
-    post.assert_called_once_with(
-        "http://127.0.0.1:8090/outline/invitations",
-        headers={
-            "X-API-Secret": "test-api-secret",
-            "Content-Type": "application/json",
-        },
-        json={"email": "jane@508.dev", "name": "Jane Doe"},
-        timeout=22.0,
-        verify=default_ca_bundle_path(),
+    post.assert_called_once()
+    assert post.call_args.args == ("http://127.0.0.1:8090/outline/invitations",)
+    kwargs = post.call_args.kwargs
+    assert kwargs["headers"]["X-API-Secret"] == "test-api-secret"
+    assert kwargs["headers"]["Content-Type"] == "application/json"
+    assert kwargs["json"] == {
+        "email": "jane@508.dev",
+        "name": "Jane Doe",
+        "actor": OUTLINE_INVITATION_ACTOR,
+    }
+    verify_wiki_action_assertion(
+        kwargs["headers"][WIKI_ASSERTION_HEADER],
+        "test-outline-invitation-assertion-secret",
+        method="POST",
+        path="/outline/invitations",
+        payload=kwargs["json"],
     )
+    assert kwargs["timeout"] == 22.0
+    assert kwargs["verify"] == default_ca_bundle_path()
+    assert kwargs["allow_redirects"] is False
 
 
 def test_post_outline_invitation_hides_backend_failure_details(cog: CRMCog) -> None:
@@ -98,35 +133,54 @@ def test_post_outline_invitation_hides_backend_failure_details(cog: CRMCog) -> N
         patch("five08.discord_bot.cogs.crm.requests.post", return_value=response),
         pytest.raises(OutlineAPIError, match="Outline invitation request failed"),
     ):
-        cog._post_outline_invitation(email="jane@508.dev", name="Jane Doe")
+        cog._post_outline_invitation(
+            email="jane@508.dev",
+            name="Jane Doe",
+            actor=OUTLINE_INVITATION_ACTOR,
+        )
 
 
-def test_outline_invitation_readiness_uses_authenticated_backend_proxy(
-    cog: CRMCog,
-) -> None:
+def test_outline_invitation_readiness_uses_signed_backend_proxy(cog: CRMCog) -> None:
     response = Mock(status_code=200)
     response.json.return_value = {"status": "ready"}
 
     with patch(
-        "five08.discord_bot.cogs.crm.requests.get",
+        "five08.discord_bot.cogs.crm.requests.post",
         return_value=response,
-    ) as get:
-        cog._check_outline_invitation_backend_ready()
+    ) as post:
+        cog._check_outline_invitation_backend_ready(actor=OUTLINE_INVITATION_ACTOR)
 
-    get.assert_called_once_with(
-        "http://127.0.0.1:8090/outline/invitations/ready",
-        headers={
-            "X-API-Secret": "test-api-secret",
-            "Content-Type": "application/json",
-        },
-        timeout=22.0,
-        verify=default_ca_bundle_path(),
+    post.assert_called_once()
+    assert post.call_args.args == ("http://127.0.0.1:8090/outline/invitations/ready",)
+    kwargs = post.call_args.kwargs
+    assert kwargs["headers"]["X-API-Secret"] == "test-api-secret"
+    assert kwargs["headers"]["Content-Type"] == "application/json"
+    assert kwargs["json"] == {"actor": OUTLINE_INVITATION_ACTOR}
+    verify_wiki_action_assertion(
+        kwargs["headers"][WIKI_ASSERTION_HEADER],
+        "test-outline-invitation-assertion-secret",
+        method="POST",
+        path="/outline/invitations/ready",
+        payload=kwargs["json"],
     )
+    assert kwargs["timeout"] == 22.0
+    assert kwargs["verify"] == default_ca_bundle_path()
+    assert kwargs["allow_redirects"] is False
+
+
+def test_outline_invitation_actor_rejects_other_guild(
+    cog: CRMCog,
+    mock_interaction: AsyncMock,
+) -> None:
+    mock_interaction.guild_id = 111222333
+
+    with pytest.raises(ValueError, match="configured server"):
+        cog._outline_invitation_actor_payload(mock_interaction)
 
 
 @pytest.mark.asyncio
 async def test_outline_invitation_readiness_is_marked_as_a_preflight_failure(
-    cog: CRMCog,
+    cog: CRMCog, mock_interaction: AsyncMock
 ) -> None:
     with patch.object(
         cog,
@@ -134,7 +188,10 @@ async def test_outline_invitation_readiness_is_marked_as_a_preflight_failure(
         side_effect=OutlineAPIError("Outline invitation service is unavailable."),
     ):
         with pytest.raises(OutlineInvitationPreflightError):
-            await CRMCog._ensure_outline_invitation_backend_ready(cog)
+            await CRMCog._ensure_outline_invitation_backend_ready(
+                cog,
+                interaction=mock_interaction,
+            )
 
 
 @pytest.mark.asyncio
@@ -653,6 +710,7 @@ async def test_create_user_accounts_creates_mailbox_sso_and_outline_invite(
     mock_invite.assert_called_once_with(
         email="jane@508.dev",
         name="Jane Doe",
+        actor=OUTLINE_INVITATION_ACTOR,
     )
     mock_newsletter.assert_awaited_once_with(
         ["jane@508.dev", "jane.personal@example.com"]
@@ -732,6 +790,7 @@ async def test_create_user_accounts_uses_configured_mailbox_domain_for_sso(
     mock_invite.assert_called_once_with(
         email="jane@example.org",
         name="Jane Doe",
+        actor=OUTLINE_INVITATION_ACTOR,
     )
     message = mock_interaction.followup.send.call_args.args[0]
     assert "Email: `jane@example.org`" in message
@@ -796,6 +855,7 @@ async def test_create_user_accounts_reuses_existing_mailbox(
     mock_invite.assert_called_once_with(
         email="jane@508.dev",
         name="Jane Doe",
+        actor=OUTLINE_INVITATION_ACTOR,
     )
     message = mock_interaction.followup.send.call_args.args[0]
     assert "Mailbox: already existed/reused." in message
@@ -1300,6 +1360,7 @@ async def test_invite_outline_user_invites_contact_508_email(
     mock_invite.assert_called_once_with(
         email="jane@508.dev",
         name="Jane Doe",
+        actor=OUTLINE_INVITATION_ACTOR,
     )
     message = mock_interaction.followup.send.call_args.args[0]
     assert "Outline invite sent" in message
@@ -1368,6 +1429,7 @@ async def test_invite_outline_user_invites_direct_email_when_no_contact_matches(
     mock_invite.assert_called_once_with(
         email="person@example.com",
         name="person",
+        actor=OUTLINE_INVITATION_ACTOR,
     )
     message = mock_interaction.followup.send.call_args.args[0]
     assert "Email: `person@example.com`" in message

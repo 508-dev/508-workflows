@@ -137,6 +137,26 @@ class WikiEditingService:
             organization_id=organization_id,
             actor_id=request.context.discord_user_id,
         )
+        if proposal.status == "canceled":
+            # A process can die after atomically reserving this child but
+            # before handing it to Redis. Retrying the original Discord card
+            # must redispatch that queued replacement rather than strand it or
+            # manufacture a second revision.
+            replacement = self.store.get_revision_child(
+                proposal.id,
+                organization_id=organization_id,
+            )
+            if replacement is not None:
+                return WikiProposalStart(
+                    response=self._response_for(
+                        replacement,
+                        message=(
+                            "The replacement draft was already reserved; "
+                            "refresh its status for the latest progress."
+                        ),
+                    ),
+                    should_enqueue=replacement.status == "queued",
+                )
         if proposal.status not in {"proposed", "conflict", "failed"}:
             raise WikiEditingValidationError(
                 "This draft cannot be revised in its current state."

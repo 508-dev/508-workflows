@@ -407,6 +407,7 @@ def test_worker_builds_remote_sandboxed_omp_authoring_service(
         wiki_omp_thinking="high",
         wiki_omp_startup_timeout_seconds=12.0,
         wiki_omp_authoring_timeout_seconds=45.0,
+        wiki_editing_max_document_characters=12_000,
         wiki_outline_collection_id="collection-1",
     )
     captured: dict[str, Any] = {}
@@ -441,6 +442,7 @@ def test_worker_builds_remote_sandboxed_omp_authoring_service(
         "thinking": "high",
         "startup_timeout_seconds": 12.0,
         "authoring_timeout_seconds": 45.0,
+        "max_document_characters": 12_000,
         "allowed_collection_id": "collection-1",
     }
     assert service.outline_client_factory() is writer

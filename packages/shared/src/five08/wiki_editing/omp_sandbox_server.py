@@ -39,7 +39,12 @@ MAX_RPC_FRAME_BYTES = 1_000_000
 MAX_MATERIALS = 32
 MAX_TOTAL_MATERIAL_CHARACTERS = 48_000
 MAX_MATERIAL_CHARACTERS = 16_000
-MAX_DRAFT_CHARACTERS = 500_000
+# Keep this ceiling aligned with ``wiki_editing_max_document_characters`` in
+# the credentialed application. The worker supplies its configured value in
+# each immutable draft contract; the sandbox independently rejects a value
+# outside the application's supported range.
+MIN_DRAFT_CHARACTERS = 1_000
+MAX_DRAFT_CHARACTERS = 16_000
 MAX_SUMMARY_CHARACTERS = 8_000
 MAX_TITLE_CHARACTERS = 512
 MAX_SOURCE_IDS = 100
@@ -82,6 +87,7 @@ class SandboxRun:
     target_document_id: str | None
     revision_instruction: str | None
     materials: tuple[SandboxMaterial, ...]
+    max_document_characters: int = MAX_DRAFT_CHARACTERS
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,7 +214,7 @@ def parse_sandbox_run(payload: object) -> SandboxRun:
             maximum=4_000,
         )
 
-    _validate_draft_contract(payload.get("draft_contract"))
+    max_document_characters = _validate_draft_contract(payload.get("draft_contract"))
     _required_text(payload.get("instructions"), name="instructions", maximum=2_000)
     materials = _parse_materials(payload.get("materials"))
     return SandboxRun(
@@ -218,11 +224,12 @@ def parse_sandbox_run(payload: object) -> SandboxRun:
         action=action,
         target_document_id=target_document_id,
         revision_instruction=revision_instruction,
+        max_document_characters=max_document_characters,
         materials=materials,
     )
 
 
-def _validate_draft_contract(value: object) -> None:
+def _validate_draft_contract(value: object) -> int:
     contract = _required_object(value, name="draft contract")
     expected = {
         "one_draft_only",
@@ -234,15 +241,19 @@ def _validate_draft_contract(value: object) -> None:
     }
     if set(contract) != expected:
         raise SandboxRequestError("invalid draft contract")
+    text_max_characters = contract.get("text_max_characters")
     if (
         contract.get("one_draft_only") is not True
         or contract.get("source_ids_must_come_from_materials") is not True
         or contract.get("no_publish") is not True
         or contract.get("title_max_characters") != MAX_TITLE_CHARACTERS
-        or contract.get("text_max_characters") != MAX_DRAFT_CHARACTERS
         or contract.get("summary_max_characters") != MAX_SUMMARY_CHARACTERS
+        or not isinstance(text_max_characters, int)
+        or isinstance(text_max_characters, bool)
+        or not MIN_DRAFT_CHARACTERS <= text_max_characters <= MAX_DRAFT_CHARACTERS
     ):
         raise SandboxRequestError("unsupported draft contract")
+    return text_max_characters
 
 
 def _parse_materials(value: object) -> tuple[SandboxMaterial, ...]:
@@ -359,18 +370,22 @@ class OmpRpcSession:
         model: str,
         thinking: str,
         process_factory: Callable[..., Any] = subprocess.Popen,
+        read_chunk: Callable[[int, int], bytes] | None = None,
     ) -> None:
         self.settings = settings
         self.model = model
         self.thinking = thinking
         self.process_factory = process_factory
+        self._read_chunk = os.read if read_chunk is None else read_chunk
         self.process: Any | None = None
         self._temporary_directory: Any | None = None
         self._deadline: float | None = None
         self._next_id = 0
+        self._stdout_buffer = bytearray()
 
     def __enter__(self) -> "OmpRpcSession":
         self._deadline = time.monotonic() + self.settings.run_timeout_seconds
+        self._stdout_buffer.clear()
         self._temporary_directory = tempfile.TemporaryDirectory(prefix="wiki-omp-")
         runtime_directory = Path(self._temporary_directory.name)
         for name in ("home", "config", "cache", "data", "agent"):
@@ -549,20 +564,44 @@ class OmpRpcSession:
         deadline = self._deadline
         if deadline is None:  # pragma: no cover - class lifecycle invariant
             raise OmpRunError("OMP deadline is unavailable")
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise OmpRunTimeout("OMP authoring timed out")
-        try:
-            ready, _unused, _errors = select.select([process.stdout], [], [], remaining)
-        except (OSError, ValueError) as exc:
-            raise OmpRunError("OMP output could not be read") from exc
-        if not ready:
-            raise OmpRunTimeout("OMP authoring timed out")
-        line = process.stdout.readline(MAX_RPC_FRAME_BYTES + 1)
-        if not line:
-            raise OmpRunError("OMP process stopped unexpectedly")
-        if len(line) > MAX_RPC_FRAME_BYTES:
-            raise OmpRunError("OMP response exceeded its safe boundary")
+        while True:
+            newline_index = self._stdout_buffer.find(b"\n")
+            if newline_index >= 0:
+                line = bytes(self._stdout_buffer[: newline_index + 1])
+                del self._stdout_buffer[: newline_index + 1]
+                if len(line) > MAX_RPC_FRAME_BYTES:
+                    raise OmpRunError("OMP response exceeded its safe boundary")
+                break
+            # A newline is part of the frame boundary. Once the unterminated
+            # buffer reaches the maximum, no valid frame can still arrive.
+            if len(self._stdout_buffer) >= MAX_RPC_FRAME_BYTES:
+                raise OmpRunError("OMP response exceeded its safe boundary")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise OmpRunTimeout("OMP authoring timed out")
+            try:
+                ready, _unused, _errors = select.select(
+                    [process.stdout], [], [], remaining
+                )
+            except (OSError, ValueError) as exc:
+                raise OmpRunError("OMP output could not be read") from exc
+            if not ready:
+                raise OmpRunTimeout("OMP authoring timed out")
+            try:
+                chunk = self._read_chunk(
+                    process.stdout.fileno(),
+                    MAX_RPC_FRAME_BYTES + 1 - len(self._stdout_buffer),
+                )
+            except BlockingIOError:
+                # Another event can consume readiness between ``select`` and
+                # ``read``. Re-enter the deadline-bound wait rather than
+                # falling back to a blocking buffered read.
+                continue
+            except (AttributeError, OSError, TypeError, ValueError) as exc:
+                raise OmpRunError("OMP output could not be read") from exc
+            if not chunk:
+                raise OmpRunError("OMP process stopped unexpectedly")
+            self._stdout_buffer.extend(chunk)
         try:
             payload = json.loads(line.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -639,7 +678,10 @@ class OmpAuthoringHarness:
             )
             session.prompt_and_wait(_draft_prompt(), maximum_text=300_000)
             session.prompt_and_wait(_critique_prompt(), maximum_text=100_000)
-            final = session.prompt_and_wait(_final_prompt(run), maximum_text=600_000)
+            final = session.prompt_and_wait(
+                _final_prompt(run),
+                maximum_text=_maximum_final_response_characters(run),
+            )
         return parse_draft_submission(final, run)
 
 
@@ -667,7 +709,9 @@ def parse_draft_submission(text: str, run: SandboxRun) -> dict[str, object]:
         payload.get("title"), name="draft title", maximum=MAX_TITLE_CHARACTERS
     )
     draft_text = _valid_draft_text(
-        payload.get("text"), name="draft text", maximum=MAX_DRAFT_CHARACTERS
+        payload.get("text"),
+        name="draft text",
+        maximum=run.max_document_characters,
     )
     summary = _valid_draft_text(
         payload.get("summary"), name="draft summary", maximum=MAX_SUMMARY_CHARACTERS
@@ -749,8 +793,24 @@ def _final_prompt(run: SandboxRun) -> str:
         "these keys: action, target_document_id, title, text, summary, source_ids. action must "
         f"be {json.dumps(run.action)} and target_document_id must be {target}. source_ids must "
         "be a nonempty JSON array of unique supplied material IDs. text is the complete proposed "
-        "article; summary is a concise review summary. Do not use Markdown fences."
+        f"article and must not exceed {run.max_document_characters} characters; summary is a "
+        "concise review summary. Do not use Markdown fences."
     )
+
+
+def _maximum_final_response_characters(run: SandboxRun) -> int:
+    """Permit every valid JSON-escaped draft, but not the former 600k output."""
+    # A JSON character can be represented with a six-character ``\\uXXXX``
+    # escape. Account for every bounded string field and a small structural
+    # allowance so a valid maximally escaped response remains accepted.
+    maximum_escaped_characters = 6 * (
+        run.max_document_characters
+        + MAX_TITLE_CHARACTERS
+        + MAX_SUMMARY_CHARACTERS
+        + (MAX_SOURCE_IDS * 256)
+        + 256  # target document ID
+    )
+    return maximum_escaped_characters + 1_024
 
 
 class _SandboxState:

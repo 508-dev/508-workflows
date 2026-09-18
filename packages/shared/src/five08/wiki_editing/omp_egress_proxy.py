@@ -209,54 +209,7 @@ class OpenRouterEgressProxyHandler(BaseHTTPRequestHandler):
 
     def _relay(self, upstream: socket.socket) -> None:
         """Bidirectionally relay bytes without buffering an unbounded stream."""
-        peers = {self.connection: upstream, upstream: self.connection}
-        pending = {self.connection: bytearray(), upstream: bytearray()}
-        deadline = time.monotonic() + _MAX_TUNNEL_SECONDS
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return
-            readable = [
-                source
-                for source, destination in peers.items()
-                if len(pending[destination]) < _MAX_BUFFER_BYTES
-            ]
-            writable = [destination for destination, data in pending.items() if data]
-            if not readable and not writable:
-                return
-            try:
-                ready_read, ready_write, _ = select.select(
-                    readable,
-                    writable,
-                    [],
-                    min(1.0, remaining),
-                )
-            except OSError:
-                return
-            for source in ready_read:
-                try:
-                    data = source.recv(64 * 1024)
-                except (BlockingIOError, InterruptedError):
-                    continue
-                except OSError:
-                    return
-                if not data:
-                    return
-                destination = peers[source]
-                if len(pending[destination]) + len(data) > _MAX_BUFFER_BYTES:
-                    return
-                pending[destination].extend(data)
-            for destination in ready_write:
-                data = pending[destination]
-                try:
-                    sent = destination.send(data)
-                except (BlockingIOError, InterruptedError):
-                    continue
-                except OSError:
-                    return
-                if sent <= 0:
-                    return
-                del data[:sent]
+        _relay_tunnel(self.connection, upstream)
 
     def do_GET(self) -> None:  # noqa: N802 - HTTP method hook
         self.send_error(HTTPStatus.METHOD_NOT_ALLOWED)
@@ -271,6 +224,82 @@ class OpenRouterEgressProxyHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         """Keep requests free of headers and credentials in application logs."""
         logger.info("OMP egress proxy: " + format, *args)
+
+
+def _relay_tunnel(downstream: socket.socket, upstream: socket.socket) -> None:
+    """Relay a tunnel while preserving buffered data across TCP half-closes."""
+    peers = {downstream: upstream, upstream: downstream}
+    pending = {downstream: bytearray(), upstream: bytearray()}
+    read_open = {downstream: True, upstream: True}
+    write_open = {downstream: True, upstream: True}
+    deadline = time.monotonic() + _MAX_TUNNEL_SECONDS
+
+    def shutdown_drained_destinations() -> bool:
+        """Propagate EOF after the matching direction's buffered data is sent."""
+        for source, destination in peers.items():
+            if read_open[source] or pending[destination] or not write_open[destination]:
+                continue
+            try:
+                destination.shutdown(socket.SHUT_WR)
+            except OSError:
+                return False
+            write_open[destination] = False
+        return True
+
+    while True:
+        if not shutdown_drained_destinations():
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        ready_for_read = [
+            source
+            for source, destination in peers.items()
+            if read_open[source]
+            and write_open[destination]
+            and len(pending[destination]) < _MAX_BUFFER_BYTES
+        ]
+        ready_for_write = [
+            destination
+            for destination, data in pending.items()
+            if data and write_open[destination]
+        ]
+        if not ready_for_read and not ready_for_write:
+            return
+        try:
+            ready_read, ready_write, _ = select.select(
+                ready_for_read,
+                ready_for_write,
+                [],
+                min(1.0, remaining),
+            )
+        except OSError:
+            return
+        for source in ready_read:
+            destination = peers[source]
+            try:
+                data = source.recv(
+                    min(64 * 1024, _MAX_BUFFER_BYTES - len(pending[destination]))
+                )
+            except (BlockingIOError, InterruptedError):
+                continue
+            except OSError:
+                return
+            if not data:
+                read_open[source] = False
+                continue
+            pending[destination].extend(data)
+        for destination in ready_write:
+            data = pending[destination]
+            try:
+                sent = destination.send(data)
+            except (BlockingIOError, InterruptedError):
+                continue
+            except OSError:
+                return
+            if sent <= 0:
+                return
+            del data[:sent]
 
 
 def serve(settings: EgressProxySettings) -> None:

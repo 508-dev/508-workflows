@@ -46,6 +46,8 @@ _MAX_SOURCE_MATERIALS = 32
 _MAX_SOURCE_CHARACTERS = 48_000
 _MAX_MATERIAL_CHARACTERS = 16_000
 _MAX_SANDBOX_RESPONSE_BYTES = 600_000
+_MIN_DOCUMENT_CHARACTERS = 1_000
+_MAX_DOCUMENT_CHARACTERS = 16_000
 
 SandboxTransport = Callable[
     [str, Mapping[str, str], Mapping[str, object], float, float], Mapping[str, object]
@@ -60,7 +62,7 @@ class _SandboxDraftSubmission(BaseModel):
     action: WikiEditTargetAction
     target_document_id: str | None = Field(default=None, max_length=256)
     title: str = Field(min_length=1, max_length=512)
-    text: str = Field(min_length=1, max_length=500_000)
+    text: str = Field(min_length=1, max_length=_MAX_DOCUMENT_CHARACTERS)
     summary: str = Field(min_length=1, max_length=8_000)
     source_ids: list[str] = Field(min_length=1, max_length=100)
 
@@ -178,6 +180,7 @@ class SandboxedOmpWikiAuthoringRunner:
         thinking: str = "medium",
         startup_timeout_seconds: float = 30.0,
         authoring_timeout_seconds: float = 300.0,
+        max_document_characters: int = _MAX_DOCUMENT_CHARACTERS,
         outline_client_factory: Callable[[], OutlineClient],
         allowed_collection_id: str,
         knowledge_search: KnowledgeSearch | None = None,
@@ -189,6 +192,17 @@ class SandboxedOmpWikiAuthoringRunner:
         self.thinking = thinking.strip().lower() or "medium"
         self.startup_timeout_seconds = max(1.0, startup_timeout_seconds)
         self.authoring_timeout_seconds = max(1.0, authoring_timeout_seconds)
+        if (
+            not isinstance(max_document_characters, int)
+            or isinstance(max_document_characters, bool)
+            or not _MIN_DOCUMENT_CHARACTERS
+            <= max_document_characters
+            <= _MAX_DOCUMENT_CHARACTERS
+        ):
+            raise WikiAuthoringUnavailableError(
+                "The isolated OMP sandbox draft limit is invalid."
+            )
+        self.max_document_characters = max_document_characters
         self.outline_client_factory = outline_client_factory
         self.allowed_collection_id = allowed_collection_id.strip()
         self.knowledge_search = knowledge_search
@@ -215,6 +229,10 @@ class SandboxedOmpWikiAuthoringRunner:
                 "The isolated OMP sandbox returned an invalid draft response."
             ) from exc
         submission = response.draft
+        if len(submission.text) > self.max_document_characters:
+            raise WikiAuthoringError(
+                "The isolated OMP sandbox draft exceeded the configured document limit."
+            )
         self._validate_submission(submission, work_item, registry)
         return WikiOmpDraft(
             title=submission.title,
@@ -429,7 +447,7 @@ class SandboxedOmpWikiAuthoringRunner:
             "draft_contract": {
                 "one_draft_only": True,
                 "title_max_characters": 512,
-                "text_max_characters": 500_000,
+                "text_max_characters": self.max_document_characters,
                 "summary_max_characters": 8_000,
                 "source_ids_must_come_from_materials": True,
                 "no_publish": True,

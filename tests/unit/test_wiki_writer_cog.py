@@ -99,6 +99,12 @@ def test_failed_wiki_draft_shows_revision_controls() -> None:
     )
 
 
+def test_publishing_wiki_draft_only_shows_refresh() -> None:
+    assert wiki_writer_module._controls_for_response({"status": "publishing"}) == (
+        "refresh",
+    )
+
+
 def test_unacknowledged_proposal_only_shows_ack_after_a_complete_packet() -> None:
     assert wiki_writer_module._controls_for_response(
         {"status": "proposed", "review": _review_payload()}

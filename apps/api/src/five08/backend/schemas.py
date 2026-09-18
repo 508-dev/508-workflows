@@ -36,13 +36,32 @@ class DiscordLinkCreateRequest(BaseModel):
     discord_roles: list[str] = Field(default_factory=list)
 
 
+class OutlineInvitationActor(BaseModel):
+    """Fresh Discord actor context signed by the bot for one invite action."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    discord_user_id: str = Field(min_length=1, max_length=32)
+    discord_guild_id: str = Field(min_length=1, max_length=32)
+    discord_roles: list[str] = Field(default_factory=list, max_length=100)
+
+
+class OutlineInvitationReadinessRequest(BaseModel):
+    """A signed preflight for one forthcoming Outline invitation workflow."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    actor: OutlineInvitationActor
+
+
 class OutlineInvitationRequest(BaseModel):
-    """A fixed-purpose request to send one member invitation through Outline."""
+    """A signed fixed-purpose request to send one member invitation through Outline."""
 
     model_config = ConfigDict(extra="forbid")
 
     email: str = Field(min_length=1, max_length=320)
     name: str | None = Field(default=None, max_length=256)
+    actor: OutlineInvitationActor
 
 
 class AgentConfirmationRequest(BaseModel):

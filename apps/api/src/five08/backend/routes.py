@@ -587,7 +587,7 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
     app.add_api_route(
         "/outline/invitations/ready",
         outline_invitation_readiness_handler,
-        methods=["GET"],
+        methods=["POST"],
     )
     app.add_api_route("/agent/requests", agent_request_handler, methods=["POST"])
     app.add_api_route(

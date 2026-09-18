@@ -314,7 +314,9 @@ Agent gateway:
 - `WIKI_EDITING_ASSERTION_SECRET`: required high-entropy secret shared only by
   the Discord bot and API. It signs a 60-second, method/path/body-bound
   assertion before the API accepts the bot-supplied Discord identity and roles
-  for a wiki action. Keep it distinct from `API_SHARED_SECRET`.
+  for a wiki action or fixed Outline membership action. Membership assertions
+  also bind the configured `DISCORD_SERVER_ID` and require the Admin/Owner
+  hierarchy. Keep it distinct from `API_SHARED_SECRET`.
 - `WIKI_EDITING_API_TIMEOUT_SECONDS`: Postgres connection/statement timeout for
   durable workflow state. Outline calls use `OUTLINE_API_TIMEOUT_SECONDS`.
 - `WIKI_EDITING_REQUEST_TIMEOUT_SECONDS`: Discord bot-to-backend wiki request

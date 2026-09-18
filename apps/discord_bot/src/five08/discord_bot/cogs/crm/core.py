@@ -65,6 +65,10 @@ from five08.discord_bot.utils.role_decorators import (
     check_user_roles_with_hierarchy,
 )
 from five08.tls import default_ca_bundle_path
+from five08.wiki_editing.assertions import (
+    WIKI_ASSERTION_HEADER,
+    create_wiki_action_assertion,
+)
 from five08.job_match import (
     DISCORD_ROLES_NEVER_SUGGEST,
     suggest_technical_discord_roles,
@@ -3851,24 +3855,115 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             )
         return f"{base_url}{path}"
 
-    def _validate_outline_invitation_backend_config(self) -> None:
+    @staticmethod
+    def _outline_invitation_actor_payload(
+        interaction: discord.Interaction,
+    ) -> dict[str, object]:
+        """Capture the current privileged Discord actor for one signed action."""
+        user = getattr(interaction, "user", None)
+        roles = getattr(user, "roles", None)
+        user_id = getattr(user, "id", None)
+        guild_id = getattr(interaction, "guild_id", None)
+        configured_guild_id = str(settings.discord_server_id or "").strip()
+        if (
+            not isinstance(user_id, int)
+            or user_id <= 0
+            or not isinstance(guild_id, int)
+            or guild_id <= 0
+            or not configured_guild_id
+            or str(guild_id) != configured_guild_id
+            or not isinstance(roles, list)
+            or not check_user_roles_with_hierarchy(roles, ["Admin"])
+        ):
+            raise ValueError(
+                "A current Discord Admin or Owner in the configured server is required "
+                "for Outline invitations."
+            )
+
+        role_names = sorted(
+            {
+                role_name
+                for role in roles
+                if (role_name := str(getattr(role, "name", "")).strip())
+            },
+            key=str.casefold,
+        )
+        if not role_names:
+            raise ValueError(
+                "A current Discord Admin or Owner in the configured server is required "
+                "for Outline invitations."
+            )
+        return {
+            "discord_user_id": str(user_id),
+            "discord_guild_id": str(guild_id),
+            "discord_roles": role_names,
+        }
+
+    @staticmethod
+    def _outline_invitation_assertion_secret() -> str:
+        """Return the bot/API-only secret for signed membership actions."""
+        secret = str(settings.wiki_editing_assertion_secret or "").strip()
+        if not secret:
+            raise ValueError(
+                "WIKI_EDITING_ASSERTION_SECRET is required for Outline invitation requests."
+            )
+        return secret
+
+    def _outline_invitation_headers(
+        self,
+        *,
+        method: str,
+        path: str,
+        payload: dict[str, object],
+    ) -> dict[str, str]:
+        """Authenticate one immutable, bot-authorized membership action."""
+        headers = self._backend_headers()
+        headers[WIKI_ASSERTION_HEADER] = create_wiki_action_assertion(
+            self._outline_invitation_assertion_secret(),
+            method=method,
+            path=path,
+            payload=payload,
+        )
+        return headers
+
+    def _validate_outline_invitation_backend_config(
+        self,
+        *,
+        interaction: discord.Interaction,
+    ) -> None:
         """Fail before account provisioning when the bot cannot reach its proxy."""
         self._backend_url("/outline/invitations")
         self._backend_headers()
+        self._outline_invitation_assertion_secret()
+        self._outline_invitation_actor_payload(interaction)
 
-    def _check_outline_invitation_backend_ready(self) -> None:
+    def _check_outline_invitation_backend_ready(
+        self,
+        *,
+        actor: dict[str, object],
+    ) -> None:
         """Check the backend's invitation credential before durable provisioning."""
+        request_payload: dict[str, object] = {"actor": actor}
         try:
-            response = requests.get(
+            response = requests.post(
                 self._backend_url("/outline/invitations/ready"),
-                headers=self._backend_headers(),
+                headers=self._outline_invitation_headers(
+                    method="POST",
+                    path="/outline/invitations/ready",
+                    payload=request_payload,
+                ),
+                json=request_payload,
                 timeout=max(1.0, float(settings.outline_api_timeout_seconds) + 2.0),
                 verify=default_ca_bundle_path(),
+                allow_redirects=False,
             )
         except requests.RequestException as exc:
             raise OutlineAPIError(
                 "Backend request for the Outline invitation failed."
             ) from exc
+
+        if 300 <= response.status_code < 400:
+            raise OutlineAPIError("Backend request for the Outline invitation failed.")
 
         try:
             payload = response.json()
@@ -3896,27 +3991,54 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             message = "Outline invitation request failed."
         raise OutlineAPIError(message)
 
-    async def _ensure_outline_invitation_backend_ready(self) -> None:
+    async def _ensure_outline_invitation_backend_ready(
+        self,
+        *,
+        interaction: discord.Interaction,
+    ) -> None:
         """Keep the synchronous backend readiness request off the event loop."""
+        actor = self._outline_invitation_actor_payload(interaction)
         try:
-            await asyncio.to_thread(self._check_outline_invitation_backend_ready)
+            await asyncio.to_thread(
+                self._check_outline_invitation_backend_ready,
+                actor=actor,
+            )
         except OutlineAPIError as exc:
             raise OutlineInvitationPreflightError(str(exc)) from exc
 
-    def _post_outline_invitation(self, *, email: str, name: str) -> None:
+    def _post_outline_invitation(
+        self,
+        *,
+        email: str,
+        name: str,
+        actor: dict[str, object],
+    ) -> None:
         """Call the backend-owned, fixed-purpose Outline invitation endpoint."""
+        request_payload: dict[str, object] = {
+            "email": email,
+            "name": name,
+            "actor": actor,
+        }
         try:
             response = requests.post(
                 self._backend_url("/outline/invitations"),
-                headers=self._backend_headers(),
-                json={"email": email, "name": name},
+                headers=self._outline_invitation_headers(
+                    method="POST",
+                    path="/outline/invitations",
+                    payload=request_payload,
+                ),
+                json=request_payload,
                 timeout=max(1.0, float(settings.outline_api_timeout_seconds) + 2.0),
                 verify=default_ca_bundle_path(),
+                allow_redirects=False,
             )
         except requests.RequestException as exc:
             raise OutlineAPIError(
                 "Backend request for the Outline invitation failed."
             ) from exc
+
+        if 300 <= response.status_code < 400:
+            raise OutlineAPIError("Backend request for the Outline invitation failed.")
 
         try:
             payload = response.json()
@@ -8319,12 +8441,17 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
     async def _invite_outline_user_for_contact(
         self,
         *,
+        interaction: discord.Interaction,
         contact: dict[str, Any],
         email: str,
     ) -> bool:
         """Invite the contact to Outline using the provided 508 email."""
         contact_name = self._contact_text_value(contact.get("name"))
-        await self._invite_outline_user(email=email, name=contact_name)
+        await self._invite_outline_user(
+            interaction=interaction,
+            email=email,
+            name=contact_name,
+        )
         return True
 
     def _outline_invite_email_for_contact(self, contact: dict[str, Any]) -> str:
@@ -8337,15 +8464,18 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
     async def _invite_outline_user(
         self,
         *,
+        interaction: discord.Interaction,
         email: str,
         name: str | None = None,
     ) -> None:
         """Invite one email address through the backend-owned Outline client."""
         invite_name = name or email.partition("@")[0]
+        actor = self._outline_invitation_actor_payload(interaction)
         await asyncio.to_thread(
             self._post_outline_invitation,
             email=email,
             name=invite_name,
+            actor=actor,
         )
 
     async def _invite_outline_user_for_contact_flow(
@@ -8363,7 +8493,11 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
 
             contact_name = self._contact_text_value(contact.get("name")) or "Unknown"
             email = self._outline_invite_email_for_contact(contact)
-            await self._invite_outline_user(email=email, name=contact_name)
+            await self._invite_outline_user(
+                interaction=interaction,
+                email=email,
+                name=contact_name,
+            )
 
             self._audit_command_safe(
                 interaction=interaction,
@@ -8424,7 +8558,10 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
                 email,
                 field_label="Outline invite email",
             )
-            await self._invite_outline_user(email=normalized_email)
+            await self._invite_outline_user(
+                interaction=interaction,
+                email=normalized_email,
+            )
 
             self._audit_command_safe(
                 interaction=interaction,
@@ -8477,6 +8614,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
     async def _execute_user_accounts_provisioning(
         self,
         *,
+        interaction: discord.Interaction,
         contact: dict[str, Any],
         mailbox_username: str,
     ) -> UserAccountsProvisioningResult:
@@ -8486,10 +8624,11 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             raise ValueError("Selected contact is missing a CRM ID.")
 
         self._validate_user_accounts_provisioning_config(
+            interaction=interaction,
             contact=contact,
             mailbox_username=mailbox_username,
         )
-        await self._ensure_outline_invitation_backend_ready()
+        await self._ensure_outline_invitation_backend_ready(interaction=interaction)
         contact_name = self._contact_text_value(contact.get("name")) or "Unknown"
         mailbox = await self._create_migadu_mailbox_for_contact(
             contact=contact,
@@ -8497,6 +8636,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         )
         sso = await self._execute_sso_user_provisioning(contact=contact)
         outline_invited = await self._invite_outline_user_for_contact(
+            interaction=interaction,
             contact=contact,
             email=mailbox.email,
         )
@@ -8513,12 +8653,13 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
     def _validate_user_accounts_provisioning_config(
         self,
         *,
+        interaction: discord.Interaction,
         contact: dict[str, Any],
         mailbox_username: str,
     ) -> None:
         """Validate required account clients before creating any resources."""
         self._authentik_client()
-        self._validate_outline_invitation_backend_config()
+        self._validate_outline_invitation_backend_config(interaction=interaction)
 
         target_email, _local_part = self._normalize_mailbox_request(mailbox_username)
         existing_email = self._normalize_508_email(contact.get("c508Email"))
@@ -8544,6 +8685,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
         """Create all user accounts for a selected CRM contact."""
         try:
             result = await self._execute_user_accounts_provisioning(
+                interaction=interaction,
                 contact=contact,
                 mailbox_username=mailbox_username,
             )

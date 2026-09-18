@@ -325,6 +325,40 @@ def test_revision_preserves_immutable_history_and_passes_feedback_to_author() ->
     assert "(initial)" in parent_draft.text
 
 
+def test_retrying_retired_revision_card_recovers_queued_replacement() -> None:
+    outline = _Outline()
+    service = _service(outline, _Author())
+    proposal_id = _propose(service)
+
+    first = service.revise(
+        WikiEditRevisionRequest(
+            context=_context(),
+            proposal_id=proposal_id,
+            instruction="Clarify the rollback step.",
+        )
+    )
+    assert first.response.proposal_id is not None
+    assert first.response.status == "queued"
+
+    recovered = service.revise(
+        WikiEditRevisionRequest(
+            context=_context(),
+            proposal_id=proposal_id,
+            instruction="This retry must not create another revision.",
+        )
+    )
+
+    assert recovered.response.proposal_id == first.response.proposal_id
+    assert recovered.response.status == "queued"
+    assert recovered.should_enqueue is True
+    latest = service.store.get_latest_proposal_for_request(
+        first.response.request_id,
+        organization_id="guild-1",
+    )
+    assert latest is not None
+    assert latest.id == first.response.proposal_id
+
+
 def test_publish_uses_one_confirmed_write_and_never_repeats_it() -> None:
     outline = _Outline()
     service = _service(outline, _Author())

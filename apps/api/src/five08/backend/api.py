@@ -156,6 +156,7 @@ from five08.backend.auth import (
     dashboard_permissions_for_roles,
     extract_groups,
     has_dashboard_discord_role,
+    has_role_with_hierarchy,
     has_workflows_engineer_role,
     is_admin_from_groups,
     make_pkce_pair,
@@ -190,6 +191,7 @@ from five08.backend.schemas import (
     DashboardProjectUserRequest,
     DashboardProjectWikiMatchRequest,
     DiscordLinkCreateRequest,
+    OutlineInvitationReadinessRequest,
     OutlineInvitationRequest,
     ResumeApplyRequest,
     ResumeExtractRequest,
@@ -9061,6 +9063,62 @@ def _outline_invitation_client() -> OutlineClient:
     )
 
 
+async def _signed_outline_invitation_payload_or_error(
+    request: Request,
+    *,
+    expected_path: str,
+) -> tuple[dict[str, Any] | None, JSONResponse | None]:
+    """Require a short-lived bot assertion for a fixed Outline invite action."""
+    try:
+        payload_data = await request.json()
+    except Exception:
+        return None, JSONResponse({"error": "invalid_json"}, status_code=400)
+    if not isinstance(payload_data, dict):
+        return None, JSONResponse({"error": "payload_must_be_object"}, status_code=400)
+
+    assertion_secret = str(
+        getattr(settings, "wiki_editing_assertion_secret", "") or ""
+    ).strip()
+    if not assertion_secret:
+        logger.error(
+            "Rejecting Outline invitation action: "
+            "WIKI_EDITING_ASSERTION_SECRET is not configured"
+        )
+        return None, JSONResponse(
+            {"error": "outline_invite_unavailable"}, status_code=503
+        )
+    try:
+        verify_wiki_action_assertion(
+            request.headers.get(WIKI_ASSERTION_HEADER),
+            assertion_secret,
+            method=request.method,
+            path=expected_path,
+            payload=payload_data,
+        )
+    except WikiAssertionError:
+        # API_SHARED_SECRET authenticates a service but cannot be used to
+        # manufacture the Discord actor context that authorizes membership.
+        return None, JSONResponse(
+            {"error": "invalid_outline_invitation_assertion"}, status_code=401
+        )
+    return payload_data, None
+
+
+def _outline_invitation_actor_is_admin(
+    *,
+    discord_guild_id: str,
+    discord_roles: list[str],
+) -> bool:
+    """Require the configured guild plus the Discord Admin/Owner hierarchy."""
+    configured_guild_id = str(settings.discord_server_id or "").strip()
+    if not configured_guild_id or discord_guild_id != configured_guild_id:
+        return False
+    # The corresponding Discord commands use the fixed Admin hierarchy, not
+    # dashboard-specific custom roles. Keep provider membership authorization
+    # exactly aligned with that bot-side command boundary.
+    return has_role_with_hierarchy(discord_roles, "Admin")
+
+
 async def outline_invitation_readiness_handler(request: Request) -> JSONResponse:
     """Confirm that the backend can own the next Outline invitation.
 
@@ -9072,6 +9130,23 @@ async def outline_invitation_readiness_handler(request: Request) -> JSONResponse
     """
     if not _is_authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    payload_data, error_response = await _signed_outline_invitation_payload_or_error(
+        request,
+        expected_path="/outline/invitations/ready",
+    )
+    if error_response is not None:
+        return error_response
+    assert payload_data is not None
+    try:
+        payload = OutlineInvitationReadinessRequest.model_validate(payload_data)
+    except ValidationError:
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
+    if not _outline_invitation_actor_is_admin(
+        discord_guild_id=payload.actor.discord_guild_id,
+        discord_roles=payload.actor.discord_roles,
+    ):
+        return JSONResponse({"error": "forbidden"}, status_code=403)
 
     try:
         await asyncio.to_thread(_outline_invitation_client)
@@ -9087,19 +9162,24 @@ async def outline_invitation_handler(request: Request) -> JSONResponse:
     if not _is_authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
-    try:
-        payload_data = await request.json()
-    except Exception:
-        return JSONResponse({"error": "invalid_json"}, status_code=400)
-
-    if not isinstance(payload_data, dict):
-        return JSONResponse({"error": "payload_must_be_object"}, status_code=400)
+    payload_data, error_response = await _signed_outline_invitation_payload_or_error(
+        request,
+        expected_path="/outline/invitations",
+    )
+    if error_response is not None:
+        return error_response
+    assert payload_data is not None
 
     try:
         payload = OutlineInvitationRequest.model_validate(payload_data)
         email = validate_plain_email(payload.email, "email")
     except (ValidationError, ValueError):
         return JSONResponse({"error": "invalid_payload"}, status_code=400)
+    if not _outline_invitation_actor_is_admin(
+        discord_guild_id=payload.actor.discord_guild_id,
+        discord_roles=payload.actor.discord_roles,
+    ):
+        return JSONResponse({"error": "forbidden"}, status_code=403)
 
     name = (payload.name or "").strip() or email.partition("@")[0]
     try:

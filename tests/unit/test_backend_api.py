@@ -26,6 +26,10 @@ from five08.knowledge.store import InMemoryKnowledgeStore
 from five08.backend import api
 from five08.job_channels import JobPostingType, RegisteredJobPostChannel
 from five08.worker.masking import mask_email
+from five08.wiki_editing.assertions import (
+    WIKI_ASSERTION_HEADER,
+    create_wiki_action_assertion,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -219,6 +223,54 @@ def auth_headers(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     monkeypatch.setattr(api.settings, "api_shared_secret", "test-secret")
     monkeypatch.setattr(api, "_AGENT_REQUEST_TIMESTAMPS", {})
     return {"X-API-Secret": "test-secret"}
+
+
+_OUTLINE_INVITATION_ASSERTION_SECRET = "test-outline-invitation-assertion-secret"
+
+
+def _outline_invitation_payload(
+    *,
+    roles: list[str] | None = None,
+    email: str = "jane@508.dev",
+    name: str | None = "Jane Doe",
+) -> dict[str, object]:
+    """Build the exact signed contract sent by the Discord CRM cog."""
+    payload: dict[str, object] = {
+        "email": email,
+        "actor": {
+            "discord_user_id": "123456789",
+            "discord_guild_id": "987654321",
+            "discord_roles": roles if roles is not None else ["Admin"],
+        },
+    }
+    if name is not None:
+        payload["name"] = name
+    return payload
+
+
+def _signed_outline_invitation_headers(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    auth_headers: dict[str, str],
+    payload: dict[str, object],
+    path: str = "/outline/invitations",
+) -> dict[str, str]:
+    """Return API + bot assertion headers for a fixed membership action."""
+    monkeypatch.setattr(
+        api.settings,
+        "wiki_editing_assertion_secret",
+        _OUTLINE_INVITATION_ASSERTION_SECRET,
+    )
+    monkeypatch.setattr(api.settings, "discord_server_id", "987654321")
+    return {
+        **auth_headers,
+        WIKI_ASSERTION_HEADER: create_wiki_action_assertion(
+            _OUTLINE_INVITATION_ASSERTION_SECRET,
+            method="POST",
+            path=path,
+            payload=payload,
+        ),
+    }
 
 
 @pytest.fixture
@@ -945,7 +997,7 @@ def test_outline_invitation_requires_internal_secret(client: TestClient) -> None
     with patch("five08.backend.api.OutlineClient") as client_class:
         response = client.post(
             "/outline/invitations",
-            json={"email": "jane@508.dev", "name": "Jane Doe"},
+            json=_outline_invitation_payload(),
         )
 
     assert response.status_code == 401
@@ -953,14 +1005,69 @@ def test_outline_invitation_requires_internal_secret(client: TestClient) -> None
     client_class.assert_not_called()
 
 
+def test_outline_invitation_rejects_generic_secret_without_bot_assertion(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Routine service credentials cannot grant Outline membership."""
+    monkeypatch.setattr(
+        api.settings,
+        "wiki_editing_assertion_secret",
+        _OUTLINE_INVITATION_ASSERTION_SECRET,
+    )
+    with patch("five08.backend.api.OutlineClient") as client_class:
+        response = client.post(
+            "/outline/invitations",
+            json=_outline_invitation_payload(),
+            headers=auth_headers,
+        )
+
+    assert response.status_code == 401
+    assert response.json() == {"error": "invalid_outline_invitation_assertion"}
+    client_class.assert_not_called()
+
+
 def test_outline_invitation_readiness_requires_internal_secret(
     client: TestClient,
 ) -> None:
     with patch("five08.backend.api.OutlineClient") as client_class:
-        response = client.get("/outline/invitations/ready")
+        response = client.post(
+            "/outline/invitations/ready",
+            json={"actor": _outline_invitation_payload()["actor"]},
+        )
 
     assert response.status_code == 401
     assert response.json() == {"error": "unauthorized"}
+    client_class.assert_not_called()
+
+
+def test_outline_invitation_readiness_rejects_legacy_get(client: TestClient) -> None:
+    """Readiness is a typed signed action, not an unsigned query endpoint."""
+    response = client.get("/outline/invitations/ready")
+
+    assert response.status_code == 405
+
+
+def test_outline_invitation_readiness_rejects_generic_secret_without_assertion(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        api.settings,
+        "wiki_editing_assertion_secret",
+        _OUTLINE_INVITATION_ASSERTION_SECRET,
+    )
+    with patch("five08.backend.api.OutlineClient") as client_class:
+        response = client.post(
+            "/outline/invitations/ready",
+            json={"actor": _outline_invitation_payload()["actor"]},
+            headers=auth_headers,
+        )
+
+    assert response.status_code == 401
+    assert response.json() == {"error": "invalid_outline_invitation_assertion"}
     client_class.assert_not_called()
 
 
@@ -970,8 +1077,18 @@ def test_outline_invitation_readiness_hides_missing_backend_configuration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(api.settings, "outline_admin_api_key", None)
+    payload = {"actor": _outline_invitation_payload()["actor"]}
 
-    response = client.get("/outline/invitations/ready", headers=auth_headers)
+    response = client.post(
+        "/outline/invitations/ready",
+        json=payload,
+        headers=_signed_outline_invitation_headers(
+            monkeypatch,
+            auth_headers=auth_headers,
+            payload=payload,
+            path="/outline/invitations/ready",
+        ),
+    )
 
     assert response.status_code == 503
     assert response.json() == {"error": "outline_invite_unavailable"}
@@ -983,9 +1100,19 @@ def test_outline_invitation_readiness_reports_configured_backend(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(api.settings, "outline_admin_api_key", "outline-admin-key")
+    payload = {"actor": _outline_invitation_payload()["actor"]}
 
     with patch("five08.backend.api.OutlineClient") as client_class:
-        response = client.get("/outline/invitations/ready", headers=auth_headers)
+        response = client.post(
+            "/outline/invitations/ready",
+            json=payload,
+            headers=_signed_outline_invitation_headers(
+                monkeypatch,
+                auth_headers=auth_headers,
+                payload=payload,
+                path="/outline/invitations/ready",
+            ),
+        )
 
     assert response.status_code == 200
     assert response.json() == {"status": "ready"}
@@ -1001,12 +1128,17 @@ def test_outline_invitation_is_fixed_to_member_role(
     monkeypatch.setattr(api.settings, "outline_admin_api_key", "outline-admin-key")
     monkeypatch.setattr(api.settings, "outline_base_url", "https://outline.example.com")
     monkeypatch.setattr(api.settings, "outline_api_timeout_seconds", 12.0)
+    payload = _outline_invitation_payload()
 
     with patch("five08.backend.api.OutlineClient") as client_class:
         response = client.post(
             "/outline/invitations",
-            json={"email": "jane@508.dev", "name": "Jane Doe"},
-            headers=auth_headers,
+            json=payload,
+            headers=_signed_outline_invitation_headers(
+                monkeypatch,
+                auth_headers=auth_headers,
+                payload=payload,
+            ),
         )
 
     assert response.status_code == 201
@@ -1023,24 +1155,78 @@ def test_outline_invitation_is_fixed_to_member_role(
     )
 
 
+def test_outline_invitation_rejects_signed_non_admin_actor(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _outline_invitation_payload(roles=["Member"])
+
+    with patch("five08.backend.api.OutlineClient") as client_class:
+        response = client.post(
+            "/outline/invitations",
+            json=payload,
+            headers=_signed_outline_invitation_headers(
+                monkeypatch,
+                auth_headers=auth_headers,
+                payload=payload,
+            ),
+        )
+
+    assert response.status_code == 403
+    assert response.json() == {"error": "forbidden"}
+    client_class.assert_not_called()
+
+
+def test_outline_invitation_rejects_signed_actor_from_other_guild(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _outline_invitation_payload()
+    actor = payload["actor"]
+    assert isinstance(actor, dict)
+    actor["discord_guild_id"] = "111222333"
+
+    with patch("five08.backend.api.OutlineClient") as client_class:
+        response = client.post(
+            "/outline/invitations",
+            json=payload,
+            headers=_signed_outline_invitation_headers(
+                monkeypatch,
+                auth_headers=auth_headers,
+                payload=payload,
+            ),
+        )
+
+    assert response.status_code == 403
+    assert response.json() == {"error": "forbidden"}
+    client_class.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "payload",
     [
-        {"email": "not-an-email"},
-        {"email": "jane@508.dev", "role": "admin"},
-        {"email": "jane@508.dev", "suppress_email": True},
+        _outline_invitation_payload(email="not-an-email"),
+        {**_outline_invitation_payload(), "role": "admin"},
+        {**_outline_invitation_payload(), "suppress_email": True},
     ],
 )
 def test_outline_invitation_rejects_payloads_outside_fixed_contract(
     client: TestClient,
     auth_headers: dict[str, str],
     payload: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     with patch("five08.backend.api.OutlineClient") as client_class:
         response = client.post(
             "/outline/invitations",
             json=payload,
-            headers=auth_headers,
+            headers=_signed_outline_invitation_headers(
+                monkeypatch,
+                auth_headers=auth_headers,
+                payload=payload,
+            ),
         )
 
     assert response.status_code == 400
@@ -1054,6 +1240,7 @@ def test_outline_invitation_hides_provider_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(api.settings, "outline_admin_api_key", "outline-admin-key")
+    payload = _outline_invitation_payload(name=None)
 
     with patch("five08.backend.api.OutlineClient") as client_class:
         client_class.return_value.invite_user.side_effect = api.OutlineAPIError(
@@ -1061,8 +1248,12 @@ def test_outline_invitation_hides_provider_failure(
         )
         response = client.post(
             "/outline/invitations",
-            json={"email": "jane@508.dev"},
-            headers=auth_headers,
+            json=payload,
+            headers=_signed_outline_invitation_headers(
+                monkeypatch,
+                auth_headers=auth_headers,
+                payload=payload,
+            ),
         )
 
     assert response.status_code == 502
@@ -1075,11 +1266,16 @@ def test_outline_invitation_hides_missing_backend_configuration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(api.settings, "outline_admin_api_key", None)
+    payload = _outline_invitation_payload(name=None)
 
     response = client.post(
         "/outline/invitations",
-        json={"email": "jane@508.dev"},
-        headers=auth_headers,
+        json=payload,
+        headers=_signed_outline_invitation_headers(
+            monkeypatch,
+            auth_headers=auth_headers,
+            payload=payload,
+        ),
     )
 
     assert response.status_code == 503

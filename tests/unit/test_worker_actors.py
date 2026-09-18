@@ -40,8 +40,7 @@ def test_run_job_schedules_retry_for_docuseal_processing_error() -> None:
         raise DocusealAgreementProcessingError("CRM unavailable")
 
     with (
-        patch("five08.worker.actors.get_job", return_value=job),
-        patch("five08.worker.actors.mark_job_running") as mock_mark_running,
+        patch("five08.worker.actors.claim_job", return_value=job),
         patch("five08.worker.actors.mark_job_succeeded") as mock_mark_succeeded,
         patch("five08.worker.actors.mark_job_dead") as mock_mark_dead,
         patch("five08.worker.actors._schedule_retry") as mock_schedule_retry,
@@ -53,7 +52,6 @@ def test_run_job_schedules_retry_for_docuseal_processing_error() -> None:
     ):
         actors._run_job("job-123")
 
-    mock_mark_running.assert_called_once()
     mock_mark_succeeded.assert_not_called()
     mock_mark_dead.assert_not_called()
     mock_schedule_retry.assert_called_once()
@@ -94,8 +92,7 @@ def test_run_job_marks_dead_for_non_retryable_docuseal_error() -> None:
         )
 
     with (
-        patch("five08.worker.actors.get_job", return_value=job),
-        patch("five08.worker.actors.mark_job_running") as mock_mark_running,
+        patch("five08.worker.actors.claim_job", return_value=job),
         patch("five08.worker.actors.mark_job_succeeded") as mock_mark_succeeded,
         patch("five08.worker.actors.mark_job_dead") as mock_mark_dead,
         patch("five08.worker.actors._schedule_retry") as mock_schedule_retry,
@@ -107,7 +104,6 @@ def test_run_job_marks_dead_for_non_retryable_docuseal_error() -> None:
     ):
         actors._run_job("job-124")
 
-    mock_mark_running.assert_called_once()
     mock_mark_succeeded.assert_not_called()
     mock_schedule_retry.assert_not_called()
     mock_mark_dead.assert_called_once()
@@ -145,8 +141,7 @@ def test_exhausted_wiki_authoring_marks_the_proposal_revisable() -> None:
         raise RuntimeError("sandbox unavailable")
 
     with (
-        patch("five08.worker.actors.get_job", return_value=job),
-        patch("five08.worker.actors.mark_job_running"),
+        patch("five08.worker.actors.claim_job", return_value=job),
         patch("five08.worker.actors.mark_job_succeeded") as mock_mark_succeeded,
         patch("five08.worker.actors.mark_job_dead") as mock_mark_dead,
         patch(
@@ -187,8 +182,7 @@ def test_live_wiki_authoring_lease_retries_without_consuming_an_attempt() -> Non
         raise WikiAuthoringLeaseHeldError(17.25)
 
     with (
-        patch("five08.worker.actors.get_job", return_value=job),
-        patch("five08.worker.actors.mark_job_running"),
+        patch("five08.worker.actors.claim_job", return_value=job),
         patch("five08.worker.actors.mark_job_succeeded") as mock_mark_succeeded,
         patch("five08.worker.actors.mark_job_dead") as mock_mark_dead,
         patch("five08.worker.actors._mark_exhausted_wiki_authoring") as mock_exhausted,
@@ -244,8 +238,7 @@ def test_exhausted_wiki_authoring_with_missing_token_marks_proposal_revisable(
     monkeypatch.setattr(jobs, "PostgresWikiEditingStore", lambda _settings: store)
 
     with (
-        patch("five08.worker.actors.get_job", return_value=job),
-        patch("five08.worker.actors.mark_job_running"),
+        patch("five08.worker.actors.claim_job", return_value=job),
         patch("five08.worker.actors.mark_job_succeeded") as mock_mark_succeeded,
         patch("five08.worker.actors.mark_job_dead") as mock_mark_dead,
         patch("five08.worker.actors._schedule_retry") as mock_schedule_retry,
@@ -266,3 +259,32 @@ def test_exhausted_wiki_authoring_with_missing_token_marks_proposal_revisable(
         expected_statuses=frozenset({"queued", "authoring"}),
     )
     mock_mark_dead.assert_called_once()
+
+
+def test_run_job_does_not_invoke_handler_when_another_delivery_claimed_it() -> None:
+    """Duplicate deliveries must not execute a handler after a lost claim."""
+    handler = Mock()
+    running = JobRecord(
+        id="job-already-running",
+        type="claimable_job",
+        status=JobStatus.RUNNING,
+        payload={"args": [], "kwargs": {}},
+        idempotency_key=None,
+        attempts=0,
+        max_attempts=3,
+        run_after=None,
+        locked_at=datetime.now(timezone.utc),
+        locked_by="other-worker",
+        last_error=None,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+
+    with (
+        patch("five08.worker.actors.claim_job", return_value=None),
+        patch("five08.worker.actors.get_job", return_value=running),
+        patch.dict(actors._HANDLERS, {"claimable_job": handler}, clear=False),
+    ):
+        actors._run_job(running.id)
+
+    handler.assert_not_called()

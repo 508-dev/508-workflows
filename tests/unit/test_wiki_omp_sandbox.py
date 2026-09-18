@@ -217,14 +217,18 @@ def _metadata() -> WikiOmpRunMetadata:
     )
 
 
-def _draft_response(*, source_ids: list[str]) -> dict[str, object]:
+def _draft_response(
+    *,
+    source_ids: list[str],
+    text: str = "Use the approved release checklist.",
+) -> dict[str, object]:
     return {
         "protocol_version": "v1",
         "draft": {
             "action": "create",
             "target_document_id": None,
             "title": "Release guide",
-            "text": "Use the approved release checklist.",
+            "text": text,
             "summary": "Captures the approved release decision.",
             "source_ids": source_ids,
         },
@@ -256,6 +260,7 @@ def test_remote_sandbox_receives_only_bounded_materials_not_worker_secrets() -> 
         model="openrouter/test",
         startup_timeout_seconds=7.0,
         authoring_timeout_seconds=21.0,
+        max_document_characters=12_000,
         outline_client_factory=_empty_outline_client_factory,
         allowed_collection_id="collection-1",
         transport=transport,
@@ -273,11 +278,31 @@ def test_remote_sandbox_receives_only_bounded_materials_not_worker_secrets() -> 
     }
     assert captured["startup_timeout"] == 7.0
     assert captured["authoring_timeout"] == 21.0
+    payload = captured["payload"]
+    assert isinstance(payload, dict)
+    assert payload["draft_contract"]["text_max_characters"] == 12_000
     serialized = json.dumps(captured["payload"])
     assert "OPENROUTER_API_KEY" not in serialized
     assert "openrouter-secret" not in serialized
     assert "WIKI_OMP_COMMAND" not in serialized
     assert "outline_admin" not in serialized
+
+
+def test_remote_sandbox_response_cannot_exceed_configured_document_limit() -> None:
+    runner = SandboxedOmpWikiAuthoringRunner(
+        sandbox_url="http://wiki_omp_sandbox:8080",
+        sandbox_token="sandbox-token",
+        model="openrouter/test",
+        max_document_characters=12_000,
+        outline_client_factory=_empty_outline_client_factory,
+        allowed_collection_id="collection-1",
+        transport=lambda *_args: _draft_response(
+            source_ids=["request:1"], text="x" * 12_001
+        ),
+    )
+
+    with pytest.raises(WikiAuthoringError, match="configured document limit"):
+        runner.author(_work_item(), metadata=_metadata())
 
 
 def test_remote_sandbox_receives_the_private_predecessor_draft_for_a_revision() -> None:

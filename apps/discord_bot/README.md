@@ -152,9 +152,10 @@ Configure `OUTLINE_CONTENTS_API_KEY` separately from
 `OUTLINE_ADMIN_API_KEY`. The contents key must belong to a regular account that
 has access only to collections safe for every Discord `Member`, and should be
 scoped to `documents.search`, `documents.info`, and `stars.list`.
-`DISCORD_SERVER_ID` is required: `/wiki` refuses DMs and other guilds. The same
-member-safe key supports project wiki matching in the dashboard. Search queries
-and result snippets are not audit logged.
+`DISCORD_SERVER_ID` is required: `/wiki` refuses DMs and other guilds, and
+Outline invitation requests are signed only for Admin/Owner actors in that
+configured guild. The same member-safe key supports project wiki matching in
+the dashboard. Search queries and result snippets are not audit logged.
 
 ## Slash Commands
 

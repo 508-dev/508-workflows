@@ -94,6 +94,11 @@ class WikiEditingStore(Protocol):
     ) -> WikiEditProposal | None:
         """Return the newest immutable revision for an idempotent request retry."""
 
+    def get_revision_child(
+        self, proposal_id: str, *, organization_id: str
+    ) -> WikiEditProposal | None:
+        """Return the direct replacement reserved for a retired proposal, if any."""
+
     def get_authoring_work_item(
         self, proposal_id: str, *, organization_id: str
     ) -> WikiAuthoringWorkItem | None:
@@ -808,6 +813,21 @@ class InMemoryWikiEditingStore:
                 return None
             latest = max(candidates, key=lambda proposal: proposal.revision)
             return _public_proposal(latest).model_copy(deep=True)
+
+    def get_revision_child(
+        self, proposal_id: str, *, organization_id: str
+    ) -> WikiEditProposal | None:
+        with self._lock:
+            candidates = [
+                proposal
+                for proposal in self._proposals.values()
+                if proposal.organization_id == organization_id
+                and proposal.revision_parent_id == proposal_id
+            ]
+            if not candidates:
+                return None
+            child = max(candidates, key=lambda proposal: proposal.revision)
+            return _public_proposal(child).model_copy(deep=True)
 
     def get_authoring_work_item(
         self, proposal_id: str, *, organization_id: str
@@ -1638,6 +1658,24 @@ class PostgresWikiEditingStore:
                     LIMIT 1
                     """,
                     (request_id, organization_id),
+                )
+                row = cursor.fetchone()
+        return _proposal_from_row(row) if row is not None else None
+
+    def get_revision_child(
+        self, proposal_id: str, *, organization_id: str
+    ) -> WikiEditProposal | None:
+        with self._connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cursor:
+                cursor.execute(
+                    """
+                    SELECT * FROM wiki_edit_proposals
+                    WHERE revision_parent_proposal_id = %s::uuid
+                      AND organization_id = %s
+                    ORDER BY revision DESC
+                    LIMIT 1
+                    """,
+                    (proposal_id, organization_id),
                 )
                 row = cursor.fetchone()
         return _proposal_from_row(row) if row is not None else None
