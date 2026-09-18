@@ -2,6 +2,24 @@
   "version": "model-profiles.v1",
   "pricing_source": "official provider pricing docs; OpenAI org usage/cost API requires api.usage.read",
   "models": {
+    "gpt-5.6-luna": {
+      "name": "gpt-5.6-luna",
+      "provider": "openai-compatible",
+      "model": "gpt-5.6-luna",
+      "api_key_env": "OPENAI_API_KEY",
+      "base_url": "https://api.openai.com/v1",
+      "request_options": {
+        "response_format": {
+          "type": "json_object"
+        }
+      },
+      "chat_completion_options": {
+        "max_tokens_parameter": "max_completion_tokens",
+        "reasoning_effort": "low",
+        "verbosity": "low",
+        "supports_temperature": false
+      }
+    },
     "gpt-5.5": {
       "name": "gpt-5.5",
       "provider": "openai-compatible",
