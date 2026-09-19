@@ -6,6 +6,8 @@ import sys
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from five08.knowledge_channels import normalize_knowledge_discord_channel_ids
+
 
 def normalize_sqlalchemy_postgres_url(url: str) -> str:
     """Normalize psycopg DSN for SQLAlchemy usage."""
@@ -49,6 +51,37 @@ class SharedSettings(BaseSettings):
     onboarding_reminder_repeat_days: int = Field(default=7, ge=1)
     onboarding_reminder_check_seconds: int = Field(default=3600, ge=60)
     discord_onboarding_volunteers_channel_id: str | None = None
+    knowledge_enabled: bool = True
+    knowledge_api_timeout_seconds: float = Field(default=15.0, gt=0)
+    knowledge_model_enabled: bool = True
+    knowledge_model_timeout_seconds: float = Field(default=6.0, gt=0)
+    knowledge_source_timeout_seconds: float = Field(default=6.0, ge=1.0)
+    knowledge_capture_max_messages: int = Field(default=50, ge=2, le=100)
+    knowledge_capture_max_characters: int = Field(
+        default=20_000,
+        ge=1_000,
+        le=100_000,
+    )
+    knowledge_capture_max_age_days: int = Field(default=7, ge=1, le=90)
+    knowledge_capture_draft_ttl_seconds: int = Field(
+        default=600,
+        ge=60,
+        le=3600,
+    )
+    knowledge_review_after_days: int = Field(default=180, ge=1)
+    knowledge_query_max_evidence: int = Field(default=8, ge=1, le=20)
+    knowledge_semantic_candidate_limit: int = Field(default=24, ge=1, le=64)
+    # Explicit channel/thread IDs; an empty allowlist disables Discord retrieval.
+    knowledge_discord_channel_ids: str = ""
+    knowledge_discord_history_limit: int = Field(default=100, ge=1, le=100)
+    knowledge_discord_history_days: int = Field(default=30, ge=1, le=90)
+    agent_memory_suggestions_enabled: bool = True
+
+    @field_validator("knowledge_discord_channel_ids")
+    @classmethod
+    def _validate_knowledge_channels(cls, value: str) -> str:
+        return normalize_knowledge_discord_channel_ids(value)
+
     minio_endpoint: str = "http://127.0.0.1:9000"
     minio_root_user: str = "internal"
     minio_root_password: str = ""

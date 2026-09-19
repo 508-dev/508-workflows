@@ -275,7 +275,43 @@ def _configuration_payload() -> dict[str, object]:
                 "secret_encryption_configured": True,
                 "masked_value": "sec...lue",
             },
+            {
+                "key": "KNOWLEDGE_DISCORD_CHANNEL_IDS",
+                "label": "Discord knowledge sources",
+                "category": "Agent",
+                "description": "Discord channels searched for cited answers.",
+                "value_type": "csv",
+                "is_secret": False,
+                "env_locked": False,
+                "source": "database",
+                "configured": True,
+                "restart_required": False,
+                "secret_encryption_configured": None,
+                "value": "111",
+            },
         ]
+    }
+
+
+def _knowledge_channels_payload() -> dict[str, object]:
+    return {
+        "channels": [
+            {
+                "channel_id": "111",
+                "channel_name": "general",
+                "channel_type": "text",
+                "parent_name": "Community",
+            },
+            {
+                "channel_id": "222",
+                "channel_name": "deployments",
+                "channel_type": "text",
+                "parent_name": "Engineering",
+            },
+        ],
+        "selected_channel_ids": ["111"],
+        "maximum_selected": 8,
+        "available": True,
     }
 
 
@@ -590,6 +626,13 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
                 body=json.dumps(_configuration_payload()),
             )
 
+        def knowledge_channels_route(route: Any) -> None:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(_knowledge_channels_payload()),
+            )
+
         def gigs_route(route: Any) -> None:
             gig_list_requests.append(route.request.url)
             query = parse_qs(urlparse(route.request.url).query)
@@ -849,6 +892,7 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
         page.route("**/dashboard/api/people?*", people_route)
         page.route("**/dashboard/api/audit-events?*", audit_route)
         page.route("**/dashboard/api/configuration", configuration_route)
+        page.route("**/dashboard/api/knowledge-channels", knowledge_channels_route)
         page.route("**/dashboard/api/notifications?*", notifications_route)
         page.route("**/dashboard/api/job-channels", job_channels_route)
         page.route(
@@ -1241,6 +1285,10 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             expect(
                 page.get_by_text("DocuSeal member agreement template", exact=True)
             ).to_be_visible()
+            page.get_by_role("button", name=re.compile("Knowledge sources")).click()
+            expect(page.get_by_text("#general", exact=True)).to_be_visible()
+            expect(page.get_by_text("#deployments", exact=True)).to_be_visible()
+            page.get_by_role("button", name="Settings", exact=True).click()
             page.get_by_role("button", name=re.compile("AI Providers")).click()
             expect(page.get_by_role("heading", name="Onboarding")).not_to_be_visible()
             page.get_by_role("heading", name="AI Providers").wait_for()

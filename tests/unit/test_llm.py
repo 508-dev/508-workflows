@@ -24,6 +24,27 @@ def test_gpt_5_mini_profile_omits_temperature() -> None:
     assert kwargs["verbosity"] == "low"
 
 
+def test_gpt_5_6_luna_uses_supported_completion_options() -> None:
+    provider_model = ProviderModel.openai_compatible(model="gpt-5.6-luna")
+
+    kwargs = provider_model.chat_completion_kwargs(
+        messages=[{"role": "user", "content": "Return JSON."}],
+        temperature=0.1,
+        response_format={"type": "json_object"},
+        max_tokens=100,
+        reasoning_effort="minimal",
+        verbosity="high",
+    )
+
+    assert kwargs["model"] == "gpt-5.6-luna"
+    assert kwargs["max_completion_tokens"] == 100
+    assert "max_tokens" not in kwargs
+    assert "temperature" not in kwargs
+    assert kwargs["response_format"] == {"type": "json_object"}
+    assert kwargs["reasoning_effort"] == "low"
+    assert kwargs["verbosity"] == "low"
+
+
 def test_gpt_4_1_mini_profile_keeps_temperature_but_omits_reasoning_options() -> None:
     provider_model = ProviderModel.openai_compatible(model="gpt-4.1-mini")
 

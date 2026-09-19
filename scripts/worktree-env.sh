@@ -109,6 +109,32 @@ worktree_env_resolve_conductor_port_base() {
   printf '%s' "$conductor_port_base"
 }
 
+worktree_env_resolve_paseo_port_base() {
+  paseo_port_base=${PASEO_PORT_BASE-}
+  paseo_port_end=${PASEO_PORT_END-}
+
+  if [ -z "$paseo_port_base" ] && [ -z "$paseo_port_end" ]; then
+    return 1
+  fi
+
+  if [ -z "$paseo_port_base" ] || [ -z "$paseo_port_end" ]; then
+    echo "PASEO_PORT_BASE and PASEO_PORT_END must be set together." >&2
+    return 2
+  fi
+
+  worktree_env_validate_port_number "$paseo_port_base" "PASEO_PORT_BASE" || return 2
+  worktree_env_validate_port_number "$paseo_port_end" "PASEO_PORT_END" || return 2
+  paseo_port_base=$(worktree_env_decimal_value "$paseo_port_base")
+  paseo_port_end=$(worktree_env_decimal_value "$paseo_port_end")
+
+  if [ "$paseo_port_end" -lt $((paseo_port_base + 6)) ]; then
+    echo "PASEO_PORT_BASE through PASEO_PORT_END must include at least seven ports, got '${PASEO_PORT_BASE}' through '${PASEO_PORT_END}'." >&2
+    return 2
+  fi
+
+  printf '%s' "$paseo_port_base"
+}
+
 worktree_env_validate_port_number() {
   port_value=$1
   port_label=$2
@@ -154,8 +180,12 @@ worktree_env_finalize_browser_safe_port() {
   resolved_value=$(worktree_env_decimal_value "$resolved_value")
 
   if [ "$source_label" = "default" ]; then
-    if [ "${WORKTREE_ENV_PORT_DEFAULT_SOURCE-}" = "conductor" ] && worktree_env_is_browser_unsafe_port "$resolved_value"; then
-      echo "$port_label defaults to browser-unsafe port '$resolved_value' from CONDUCTOR_PORT; set $port_label explicitly or use a different CONDUCTOR_PORT." \
+    if { [ "${WORKTREE_ENV_PORT_DEFAULT_SOURCE-}" = "conductor" ] || [ "${WORKTREE_ENV_PORT_DEFAULT_SOURCE-}" = "paseo" ]; } && worktree_env_is_browser_unsafe_port "$resolved_value"; then
+      source_name=CONDUCTOR_PORT
+      if [ "${WORKTREE_ENV_PORT_DEFAULT_SOURCE-}" = "paseo" ]; then
+        source_name=PASEO_PORT_BASE
+      fi
+      echo "$port_label defaults to browser-unsafe port '$resolved_value' from $source_name; set $port_label explicitly or use a different $source_name." \
         >&2
       return 1
     fi
@@ -285,29 +315,44 @@ worktree_env_load() {
   fi
 
   COMPOSE_PROJECT_NAME=$(worktree_env_resolve_value COMPOSE_PROJECT_NAME "${project_name}-$(printf '%04d' "$WORKTREE_ENV_SLOT")" "$WORKTREE_ENV_FILE")
-  if conductor_port_base=$(worktree_env_resolve_conductor_port_base); then
-    WORKTREE_ENV_PORT_DEFAULT_SOURCE=conductor
-    REDIS_HOST_PORT_DEFAULT=$conductor_port_base
-    POSTGRES_HOST_PORT_DEFAULT=$((conductor_port_base + 1))
-    WEB_HOST_PORT_DEFAULT=$((conductor_port_base + 2))
-    MINIO_API_HOST_PORT_DEFAULT=$((conductor_port_base + 3))
-    MINIO_CONSOLE_HOST_PORT_DEFAULT=$((conductor_port_base + 4))
-    WEB_PORT_DEFAULT=$((conductor_port_base + 5))
-    HEALTHCHECK_PORT_DEFAULT=$((conductor_port_base + 6))
+  if paseo_port_base=$(worktree_env_resolve_paseo_port_base); then
+    WORKTREE_ENV_PORT_DEFAULT_SOURCE=paseo
+    REDIS_HOST_PORT_DEFAULT=$paseo_port_base
+    POSTGRES_HOST_PORT_DEFAULT=$((paseo_port_base + 1))
+    WEB_HOST_PORT_DEFAULT=$((paseo_port_base + 2))
+    MINIO_API_HOST_PORT_DEFAULT=$((paseo_port_base + 3))
+    MINIO_CONSOLE_HOST_PORT_DEFAULT=$((paseo_port_base + 4))
+    WEB_PORT_DEFAULT=$((paseo_port_base + 5))
+    HEALTHCHECK_PORT_DEFAULT=$((paseo_port_base + 6))
   else
-    conductor_port_status=$?
-    if [ "$conductor_port_status" -ne 1 ]; then
-      return "$conductor_port_status"
+    paseo_port_status=$?
+    if [ "$paseo_port_status" -ne 1 ]; then
+      return "$paseo_port_status"
     fi
+    if conductor_port_base=$(worktree_env_resolve_conductor_port_base); then
+      WORKTREE_ENV_PORT_DEFAULT_SOURCE=conductor
+      REDIS_HOST_PORT_DEFAULT=$conductor_port_base
+      POSTGRES_HOST_PORT_DEFAULT=$((conductor_port_base + 1))
+      WEB_HOST_PORT_DEFAULT=$((conductor_port_base + 2))
+      MINIO_API_HOST_PORT_DEFAULT=$((conductor_port_base + 3))
+      MINIO_CONSOLE_HOST_PORT_DEFAULT=$((conductor_port_base + 4))
+      WEB_PORT_DEFAULT=$((conductor_port_base + 5))
+      HEALTHCHECK_PORT_DEFAULT=$((conductor_port_base + 6))
+    else
+      conductor_port_status=$?
+      if [ "$conductor_port_status" -ne 1 ]; then
+        return "$conductor_port_status"
+      fi
 
-    WORKTREE_ENV_PORT_DEFAULT_SOURCE=worktree
-    REDIS_HOST_PORT_DEFAULT=$((12000 + WORKTREE_ENV_SLOT))
-    POSTGRES_HOST_PORT_DEFAULT=$((15432 + WORKTREE_ENV_SLOT))
-    WEB_HOST_PORT_DEFAULT=$((20080 + WORKTREE_ENV_SLOT))
-    MINIO_API_HOST_PORT_DEFAULT=$((24000 + WORKTREE_ENV_SLOT))
-    MINIO_CONSOLE_HOST_PORT_DEFAULT=$((28000 + WORKTREE_ENV_SLOT))
-    WEB_PORT_DEFAULT=$((18080 + WORKTREE_ENV_SLOT))
-    HEALTHCHECK_PORT_DEFAULT=$((30000 + WORKTREE_ENV_SLOT))
+      WORKTREE_ENV_PORT_DEFAULT_SOURCE=worktree
+      REDIS_HOST_PORT_DEFAULT=$((12000 + WORKTREE_ENV_SLOT))
+      POSTGRES_HOST_PORT_DEFAULT=$((15432 + WORKTREE_ENV_SLOT))
+      WEB_HOST_PORT_DEFAULT=$((20080 + WORKTREE_ENV_SLOT))
+      MINIO_API_HOST_PORT_DEFAULT=$((24000 + WORKTREE_ENV_SLOT))
+      MINIO_CONSOLE_HOST_PORT_DEFAULT=$((28000 + WORKTREE_ENV_SLOT))
+      WEB_PORT_DEFAULT=$((18080 + WORKTREE_ENV_SLOT))
+      HEALTHCHECK_PORT_DEFAULT=$((30000 + WORKTREE_ENV_SLOT))
+    fi
   fi
 
   REDIS_HOST_PORT=$(worktree_env_resolve_value REDIS_HOST_PORT "$REDIS_HOST_PORT_DEFAULT" "$WORKTREE_ENV_FILE")
