@@ -332,6 +332,49 @@ def mark_job_running(
     )
 
 
+def claim_job(
+    settings: SharedSettings,
+    job_id: str,
+    *,
+    worker_name: str,
+) -> JobRecord | None:
+    """Atomically claim an eligible job for one worker.
+
+    Initial deliveries are ``queued``. Retry deliveries remain ``failed`` until
+    their durable ``run_after`` time, so both states can be claimed exactly
+    once. A missing row means another worker has already claimed the job, it is
+    terminal, or its retry delay has not elapsed yet.
+    """
+    query = """
+        UPDATE jobs
+        SET
+            status = %s,
+            locked_at = NOW(),
+            locked_by = %s,
+            run_after = NULL,
+            last_error = NULL,
+            updated_at = NOW()
+        WHERE id = %s
+          AND status IN (%s, %s)
+          AND (run_after IS NULL OR run_after <= NOW())
+        RETURNING *;
+    """
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                query,
+                (
+                    JobStatus.RUNNING.value,
+                    worker_name,
+                    job_id,
+                    JobStatus.QUEUED.value,
+                    JobStatus.FAILED.value,
+                ),
+            )
+            row = cursor.fetchone()
+    return _as_record(row) if row is not None else None
+
+
 def mark_job_succeeded(
     settings: SharedSettings,
     job_id: str,
@@ -414,8 +457,14 @@ def enqueue_job(
     idempotency_key: str | None = None,
     max_attempts: int | None = None,
     run_after: datetime | None = None,
+    redispatch_existing_queued: bool = False,
 ) -> EnqueuedJob:
-    """Create a job record and hand it to the configured queue adapter."""
+    """Create a job record and hand it to the configured queue adapter.
+
+    ``redispatch_existing_queued`` is an opt-in recovery path for callers
+    whose durable work is still queued after an interrupted handoff to Redis.
+    It deliberately does not redispatch running, retrying, or terminal jobs.
+    """
     payload = {"args": list(args), "kwargs": kwargs or {}}
     job_type = fn.__name__
     job_id, created = create_job_record(
@@ -428,6 +477,12 @@ def enqueue_job(
     )
     if created:
         queue.enqueue(job_id, run_at=run_after)
+    elif redispatch_existing_queued:
+        existing = get_job(settings, job_id)
+        if existing is not None and existing.status == JobStatus.QUEUED:
+            # Preserve the durable schedule rather than trusting a retry's
+            # call-site value, which may no longer describe this job.
+            queue.enqueue(job_id, run_at=existing.run_after)
     return EnqueuedJob(id=job_id, created=created)
 
 

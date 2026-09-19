@@ -249,6 +249,11 @@ Discord bot:
 - `DISCORD_LOGS_WEBHOOK_URL`
 - `DISCORD_LOGS_WEBHOOK_WAIT`
 
+`BACKEND_API_BASE_URL` carries the bot's protected backend requests, and an
+optional `AUDIT_API_BASE_URL` override carries the same API secret. Both must
+use HTTPS outside local development; plaintext is allowed only for loopback
+hosts or Compose's fixed internal `http://web:8090` endpoint.
+
 Agent gateway:
 
 - `AGENT_API_TIMEOUT_SECONDS`
@@ -298,6 +303,73 @@ Agent gateway:
 - `KNOWLEDGE_SEMANTIC_CANDIDATE_LIMIT`: maximum authorization-filtered remembered
   facts offered to the model for paraphrase and synonym matching (default: 24,
   maximum: 64).
+- `WIKI_EDITING_ENABLED`: opt-in switch for the approval-gated `/wiki-update`
+  Discord workflow (default: false). It requires `DISCORD_SERVER_ID`, an
+  `OUTLINE_ADMIN_API_KEY` scoped to document read/create/update operations, and
+  an isolated OMP sandbox. The Discord bot never receives the admin Outline
+  credential; its existing Outline invitation command is proxied through the
+  backend instead.
+- `WIKI_OUTLINE_COLLECTION_ID`: required collection for approved new articles.
+  Updates must already belong to this same shared collection.
+- `WIKI_EDITING_ASSERTION_SECRET`: required high-entropy secret shared only by
+  the Discord bot and API. It signs a 60-second, method/path/body-bound
+  assertion before the API accepts the bot-supplied Discord identity and roles
+  for a wiki action or fixed Outline membership action. Membership assertions
+  also bind the configured `DISCORD_SERVER_ID` and require the Admin/Owner
+  hierarchy. Keep it distinct from `API_SHARED_SECRET`.
+- `WIKI_EDITING_API_TIMEOUT_SECONDS`: Postgres connection/statement timeout for
+  durable workflow state. Outline calls use `OUTLINE_API_TIMEOUT_SECONDS`.
+- `WIKI_EDITING_REQUEST_TIMEOUT_SECONDS`: Discord bot-to-backend wiki request
+  timeout (default and minimum: 45 seconds). It covers a confirmed publish's
+  synchronous Outline conflict read and write, each with the default 20-second
+  provider timeout, plus transport overhead.
+- `WIKI_EDITING_MAX_INSTRUCTION_CHARACTERS`: maximum explicit request or
+  revision feedback length (fixed maximum and default: 4000).
+- `WIKI_EDITING_MAX_DOCUMENT_CHARACTERS`: maximum full target article sent to
+  the authoring harness (default and maximum: 16000). Larger articles are
+  rejected instead of being silently truncated or partially authored.
+- `WIKI_OMP_SANDBOX_URL`: required isolated authoring endpoint. It must be an
+  HTTPS endpoint, or Compose's fixed `http://wiki_omp_sandbox` name on the
+  internal control network. Loopback, arbitrary HTTP, credentialed URLs, and
+  paths/query strings are rejected.
+- `WIKI_OMP_SANDBOX_TOKEN`: required narrow RPC credential shared only by the
+  worker and the sandbox. It is not an Outline, database, Redis, API, or
+  provider credential.
+- `WIKI_OMP_SANDBOX_PROTOCOL_VERSION`: fixed sandbox protocol version (`v1`).
+  A mismatch fails closed.
+- `WIKI_OMP_COMMAND` and `WIKI_OMP_LAUNCHER_PATH`: retired and prohibited. The
+  worker will reject configuration that sets either value; clearing a child
+  environment does not isolate a same-UID process from worker mounts, network,
+  or credentials.
+- `WIKI_OMP_MODEL`, `WIKI_OMP_THINKING`,
+  `WIKI_OMP_STARTUP_TIMEOUT_SECONDS`, `WIKI_OMP_AUTHORING_TIMEOUT_SECONDS`:
+  bounded remote authoring runtime configuration. The worker sends a fixed
+  bundle of explicitly selected organization-visible sources, full related
+  documents verified in the shared collection, and current, high-authority
+  organization knowledge (never private/project knowledge), capped at 32
+  sources and 48,000 characters. The sandbox can only return one typed draft;
+  it receives no backend-hosted write tools and cannot publish.
+
+For Compose deployments, inject wiki-related secrets by service rather than
+placing them in a globally inherited production `.env` file:
+
+| Secret | Services allowed |
+| --- | --- |
+| `WIKI_EDITING_ASSERTION_SECRET` | `discord_bot`, `web` |
+| `OUTLINE_ADMIN_API_KEY` | `web`, `worker` |
+| `WIKI_OMP_SANDBOX_TOKEN` | `worker`, `wiki_omp_sandbox` |
+| OpenRouter provider key file | `wiki_omp_sandbox` only |
+
+`compose.yaml` clears these feature secrets from services that do not need
+them; `compose.wiki-omp.yaml` supplies the worker/sandbox token and mounts the
+provider key only in the sidecar. The overlay also gives the sandbox no direct
+external Docker route: an uncredentialed internal proxy is the only egress
+path and permits only `openrouter.ai:443`. For host-run development, use
+separate service environments or a disposable development credential;
+`SharedSettings` otherwise reads `.env` by default. The Discord settings class
+also hard-denies both direct and database-runtime `OUTLINE_ADMIN_API_KEY`
+values, so its invitation path remains backend-owned even if an inherited
+environment is misconfigured.
 - `GITHUB_DEFAULT_REPO`: defaults to `508-dev/todos`.
 - `GITHUB_ORGANIZATION`: defaults to `508-dev` and scopes GitHub Projects.
 - `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_INSTALLATION_ID`,
@@ -319,6 +391,8 @@ See [Discord GitHub Todos and Projects](./discord-github-todos.md) for the
 role model, required App permissions, and installation procedure.
 See [Discord Knowledge Memory](./discord-knowledge-memory.md) for capture,
 retrieval, visibility, and provenance behavior.
+See [Discord Wiki Editing](./discord-wiki-editing.md) for the separate,
+approval-gated shared-wiki workflow.
 
 Agent model base URLs must be HTTPS endpoints on allowed provider hosts, except
 the internal Docker-network Bifrost URL `http://bifrost:8080/openai` is allowed

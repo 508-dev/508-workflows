@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timedelta, timezone
 from typing import Any, Final
 
@@ -13,18 +14,20 @@ from five08.discord_webhook import DiscordWebhookLogger
 from five08.queue import (
     JobRecord,
     JobStatus,
+    claim_job,
     get_job,
     job_is_terminal,
     mark_job_dead,
     mark_job_retry,
-    mark_job_running,
     mark_job_succeeded,
 )
 from five08.worker.config import settings
 from five08.worker.crm.docuseal_processor import DocusealAgreementNonRetryableError
 from five08.worker.jobs import (
     JOB_FUNCTIONS,
+    mark_wiki_authoring_retry_exhausted,
 )
+from five08.wiki_editing.models import WikiAuthoringLeaseHeldError
 
 from five08.logging import configure_observability
 
@@ -51,6 +54,7 @@ _JOB_WEBHOOK_LOGGER = DiscordWebhookLogger(
 _QUEUE_NAME = settings.worker_queue_name
 _HANDLERS = JOB_FUNCTIONS
 _SYNC_PEOPLE_JOB_NAME: Final[str] = "sync_people_from_crm_job"
+_WIKI_AUTHORING_JOB_NAME: Final[str] = "author_wiki_edit_proposal_job"
 
 
 def _job_attempt_display(attempts: int) -> int:
@@ -185,10 +189,20 @@ def _compute_retry_delay_seconds(attempt: int) -> int:
     return min(base * (2 ** max(attempt - 1, 0)), capped)
 
 
-def _schedule_retry(job: JobRecord, attempts: int, *, error: str) -> None:
+def _schedule_retry(
+    job: JobRecord,
+    attempts: int,
+    *,
+    error: str,
+    delay_seconds: float | None = None,
+) -> None:
     job_id = job.id
-    delay_seconds = _compute_retry_delay_seconds(attempts)
-    retry_at = datetime.now(tz=timezone.utc) + timedelta(seconds=delay_seconds)
+    retry_delay_seconds = (
+        _compute_retry_delay_seconds(attempts)
+        if delay_seconds is None
+        else max(1, math.ceil(delay_seconds))
+    )
+    retry_at = datetime.now(tz=timezone.utc) + timedelta(seconds=retry_delay_seconds)
     mark_job_retry(
         settings,
         job_id,
@@ -206,23 +220,54 @@ def _schedule_retry(job: JobRecord, attempts: int, *, error: str) -> None:
             worker_name=settings.worker_name,
             error=error,
         )
-    execute_job.send_with_options(args=(job_id,), delay=delay_seconds * 1000)
+    execute_job.send_with_options(args=(job_id,), delay=retry_delay_seconds * 1000)
+
+
+def _mark_exhausted_wiki_authoring(job: JobRecord) -> None:
+    """Best-effort bridge from generic queue exhaustion to proposal state."""
+    if job.type != _WIKI_AUTHORING_JOB_NAME:
+        return
+    try:
+        args, kwargs = _extract_call_args(job)
+        if kwargs or len(args) != 2:
+            raise ValueError("wiki authoring job payload must have two positional IDs")
+        proposal_id, organization_id = args
+        if not isinstance(proposal_id, str) or not isinstance(organization_id, str):
+            raise ValueError("wiki authoring job IDs must be strings")
+        mark_wiki_authoring_retry_exhausted(proposal_id, organization_id)
+    except Exception:
+        # The original worker job still becomes dead. This callback must not
+        # mask its error or make generic queue recovery less reliable.
+        logger.exception(
+            "Failed to mark exhausted wiki authoring proposal job_id=%s",
+            job.id,
+        )
 
 
 def _run_job(job_id: str) -> None:
-    job = get_job(settings, job_id)
+    job = claim_job(settings, job_id, worker_name=settings.worker_name)
     if job is None:
-        logger.warning("Skipping job_id=%s (not found)", job_id)
-        return
-    if job_is_terminal(job.status):
-        logger.info("Skipping job_id=%s already terminal (%s)", job_id, job.status)
-        return
-    if job.status == JobStatus.RUNNING and job.locked_by != settings.worker_name:
-        logger.warning(
-            "Skipping job_id=%s locked by worker=%s",
-            job_id,
-            job.locked_by,
-        )
+        existing_job = get_job(settings, job_id)
+        if existing_job is None:
+            logger.warning("Skipping job_id=%s (not found)", job_id)
+        elif job_is_terminal(existing_job.status):
+            logger.info(
+                "Skipping job_id=%s already terminal (%s)",
+                job_id,
+                existing_job.status,
+            )
+        elif existing_job.status == JobStatus.RUNNING:
+            logger.warning(
+                "Skipping job_id=%s locked by worker=%s",
+                job_id,
+                existing_job.locked_by,
+            )
+        else:
+            logger.info(
+                "Skipping job_id=%s because it is not eligible to run (%s)",
+                job_id,
+                existing_job.status,
+            )
         return
 
     handler = _HANDLERS.get(job.type)
@@ -241,7 +286,6 @@ def _run_job(job_id: str) -> None:
         )
         return
 
-    mark_job_running(settings, job_id, worker_name=settings.worker_name)
     if _should_log_job_event(event_type="started", job_type=job.type):
         _log_job_event(
             event_type="started",
@@ -272,6 +316,22 @@ def _run_job(job_id: str) -> None:
                 worker_name=settings.worker_name,
                 result=result,
             )
+    except WikiAuthoringLeaseHeldError as exc:
+        # A separate worker still owns the proposal's durable authoring lease.
+        # This is coordination, not a failed authoring attempt: preserve the
+        # attempt count and do not turn a live lease into a terminal job.
+        error = f"{type(exc).__name__}: {exc}"
+        logger.info(
+            "Wiki authoring lease held id=%s; retrying after %.3fs",
+            job_id,
+            exc.retry_after_seconds,
+        )
+        _schedule_retry(
+            job,
+            job.attempts,
+            error=error,
+            delay_seconds=exc.retry_after_seconds,
+        )
     except DocusealAgreementNonRetryableError as exc:
         next_attempt = job.attempts + 1
         error = f"{type(exc).__name__}: {exc}"
@@ -304,6 +364,7 @@ def _run_job(job_id: str) -> None:
         )
 
         if next_attempt >= job.max_attempts:
+            _mark_exhausted_wiki_authoring(job)
             mark_job_dead(
                 settings,
                 job_id,

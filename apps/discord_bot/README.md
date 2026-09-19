@@ -116,9 +116,16 @@ process-local and needs a durable task service for production task workflows.
 
 Relevant configuration:
 
-- `BACKEND_API_BASE_URL`: backend API used by the bot.
+- `BACKEND_API_BASE_URL`: backend API used by the bot. Use HTTPS outside local
+  development; plaintext is allowed only for loopback hosts or Compose's fixed
+  internal `http://web:8090` endpoint.
+- `AUDIT_API_BASE_URL`: optional audit-service override. It carries the same
+  API secret and follows the identical HTTPS/internal-endpoint policy.
 - `API_SHARED_SECRET`: shared service secret for protected backend calls.
 - `AGENT_API_TIMEOUT_SECONDS`: timeout for synchronous agent gateway requests.
+- `WIKI_EDITING_REQUEST_TIMEOUT_SECONDS`: timeout for approval-gated wiki
+  actions (default and minimum: 45 seconds, to cover a synchronous Outline
+  conflict read and write).
 - `AGENT_FAST_*`, `AGENT_STRONG_*`, `AGENT_REASONING_*`: backend model
   tier configuration for OpenAI-compatible providers. Credentials stay in the
   backend process; the bot only receives non-secret plan metadata.
@@ -145,9 +152,10 @@ Configure `OUTLINE_CONTENTS_API_KEY` separately from
 `OUTLINE_ADMIN_API_KEY`. The contents key must belong to a regular account that
 has access only to collections safe for every Discord `Member`, and should be
 scoped to `documents.search`, `documents.info`, and `stars.list`.
-`DISCORD_SERVER_ID` is required: `/wiki` refuses DMs and other guilds. The same
-member-safe key supports project wiki matching in the dashboard. Search queries
-and result snippets are not audit logged.
+`DISCORD_SERVER_ID` is required: `/wiki` refuses DMs and other guilds, and
+Outline invitation requests are signed only for Admin/Owner actors in that
+configured guild. The same member-safe key supports project wiki matching in
+the dashboard. Search queries and result snippets are not audit logged.
 
 ## Slash Commands
 
