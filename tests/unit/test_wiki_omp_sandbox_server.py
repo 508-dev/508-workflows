@@ -71,6 +71,38 @@ def _draft_submission(
     )
 
 
+def test_http_body_limit_accepts_worst_case_valid_json_encoding() -> None:
+    """Valid non-BMP input must fit even when requests emits surrogate escapes."""
+    non_bmp = "\U0001f680"
+    payload = _request_payload()
+    payload["run"] = {
+        "run_id": non_bmp * 512,
+        "attempt": 100,
+        "model": "openrouter/" + ("m" * 240),
+        "thinking": "xhigh",
+    }
+    payload["proposal"] = {
+        "action": "update",
+        "target_document_id": non_bmp * 256,
+        "revision_instruction": non_bmp * 4_000,
+    }
+    payload["materials"] = [
+        {
+            "id": f"{index:02d}" + (non_bmp * 254),
+            "source": {"title": non_bmp * 512},
+            "text": non_bmp * 1_500,
+        }
+        for index in range(32)
+    ]
+    payload["instructions"] = non_bmp * 2_000
+
+    parse_sandbox_run(payload)
+    encoded = json.dumps(payload, allow_nan=False).encode("utf-8")
+
+    assert len(encoded) > 600_000
+    assert len(encoded) <= omp_sandbox_server.MAX_HTTP_BODY_BYTES
+
+
 @pytest.mark.parametrize(
     "mutation",
     [

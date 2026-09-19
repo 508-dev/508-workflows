@@ -337,15 +337,46 @@ def claim_job(
     job_id: str,
     *,
     worker_name: str,
+    reclaim_running_job_type: str | None = None,
+    reclaim_running_after_seconds: float | None = None,
 ) -> JobRecord | None:
     """Atomically claim an eligible job for one worker.
 
     Initial deliveries are ``queued``. Retry deliveries remain ``failed`` until
     their durable ``run_after`` time, so both states can be claimed exactly
-    once. A missing row means another worker has already claimed the job, it is
-    terminal, or its retry delay has not elapsed yet.
+    once. A caller may additionally reclaim one job type after its bounded
+    running lease expires. A missing row means another worker has already
+    claimed the job, it is terminal, or its retry delay or lease has not
+    elapsed yet.
     """
-    query = """
+    if (reclaim_running_job_type is None) != (reclaim_running_after_seconds is None):
+        raise ValueError("Running-job reclaim requires both a job type and timeout.")
+    if reclaim_running_after_seconds is not None and reclaim_running_after_seconds <= 0:
+        raise ValueError("Running-job reclaim timeout must be positive.")
+
+    eligible_clause = """
+          status IN (%s, %s)
+          AND (run_after IS NULL OR run_after <= NOW())
+    """
+    eligibility_params: tuple[Any, ...] = (
+        JobStatus.QUEUED.value,
+        JobStatus.FAILED.value,
+    )
+    if reclaim_running_job_type is not None:
+        eligible_clause = f"""
+          (({eligible_clause})
+           OR (status = %s
+               AND type = %s
+               AND locked_at IS NOT NULL
+               AND locked_at <= NOW() - (%s * INTERVAL '1 second')))
+        """
+        eligibility_params += (
+            JobStatus.RUNNING.value,
+            reclaim_running_job_type,
+            reclaim_running_after_seconds,
+        )
+
+    query = f"""
         UPDATE jobs
         SET
             status = %s,
@@ -355,8 +386,7 @@ def claim_job(
             last_error = NULL,
             updated_at = NOW()
         WHERE id = %s
-          AND status IN (%s, %s)
-          AND (run_after IS NULL OR run_after <= NOW())
+          AND ({eligible_clause})
         RETURNING *;
     """
     with get_postgres_connection(settings) as conn:
@@ -367,8 +397,7 @@ def claim_job(
                     JobStatus.RUNNING.value,
                     worker_name,
                     job_id,
-                    JobStatus.QUEUED.value,
-                    JobStatus.FAILED.value,
+                    *eligibility_params,
                 ),
             )
             row = cursor.fetchone()

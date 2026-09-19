@@ -34,7 +34,10 @@ from urllib.parse import urlparse
 logger = logging.getLogger(__name__)
 
 PROTOCOL_VERSION = "v1"
-MAX_HTTP_BODY_BYTES = 600_000
+# ``requests`` escapes non-BMP JSON characters as two six-byte surrogate
+# sequences. The maximum valid v1 request is below 1 MB even with that encoding;
+# retain a bounded margin for JSON structure and future compatible fields.
+MAX_HTTP_BODY_BYTES = 1_200_000
 MAX_RPC_FRAME_BYTES = 1_000_000
 MAX_MATERIALS = 32
 MAX_TOTAL_MATERIAL_CHARACTERS = 48_000

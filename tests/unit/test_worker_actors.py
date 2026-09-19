@@ -14,6 +14,32 @@ from five08.worker.crm.docuseal_processor import (
 from five08.wiki_editing.models import WikiAuthoringLeaseHeldError
 
 
+def test_run_job_reclaims_wiki_jobs_after_the_authoring_lease() -> None:
+    with (
+        patch("five08.worker.actors.claim_job", return_value=None) as mock_claim,
+        patch("five08.worker.actors.get_job", return_value=None),
+        patch.object(
+            actors.settings,
+            "wiki_omp_authoring_timeout_seconds",
+            120.0,
+        ),
+        patch.object(
+            actors.settings,
+            "wiki_omp_startup_timeout_seconds",
+            15.0,
+        ),
+    ):
+        actors._run_job("job-wiki-stale")
+
+    mock_claim.assert_called_once_with(
+        actors.settings,
+        "job-wiki-stale",
+        worker_name=actors.settings.worker_name,
+        reclaim_running_job_type="author_wiki_edit_proposal_job",
+        reclaim_running_after_seconds=195.0,
+    )
+
+
 def test_run_job_schedules_retry_for_docuseal_processing_error() -> None:
     """Retryable Docuseal failures should be recorded as failed + retried."""
     now = datetime.now(timezone.utc)

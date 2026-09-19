@@ -182,3 +182,51 @@ def test_claim_job_returns_none_when_a_concurrent_delivery_already_claimed_it() 
         claimed = claim_job(SharedSettings(), "job-1", worker_name="worker-1")
 
     assert claimed is None
+
+
+def test_claim_job_can_reclaim_only_an_expired_running_job_type() -> None:
+    """A bounded worker flow can atomically recover its own stale lock."""
+    now = datetime(2026, 9, 18, tzinfo=timezone.utc)
+    row = {
+        "id": "job-1",
+        "type": "author_wiki_edit_proposal_job",
+        "status": "running",
+        "payload": {"args": [], "kwargs": {}},
+        "idempotency_key": None,
+        "attempts": 0,
+        "max_attempts": 5,
+        "run_after": None,
+        "locked_at": now,
+        "locked_by": "worker-2",
+        "last_error": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value.__enter__.return_value
+    cursor.fetchone.return_value = row
+
+    with patch("five08.queue.get_postgres_connection", return_value=connection):
+        claimed = claim_job(
+            SharedSettings(),
+            "job-1",
+            worker_name="worker-2",
+            reclaim_running_job_type="author_wiki_edit_proposal_job",
+            reclaim_running_after_seconds=390.0,
+        )
+
+    assert claimed is not None
+    query, params = cursor.execute.call_args.args
+    assert "type = %s" in query
+    assert "locked_at <= NOW() - (%s * INTERVAL '1 second')" in query
+    assert params == (
+        "running",
+        "worker-2",
+        "job-1",
+        "queued",
+        "failed",
+        "running",
+        "author_wiki_edit_proposal_job",
+        390.0,
+    )

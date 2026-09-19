@@ -57,6 +57,15 @@ _SYNC_PEOPLE_JOB_NAME: Final[str] = "sync_people_from_crm_job"
 _WIKI_AUTHORING_JOB_NAME: Final[str] = "author_wiki_edit_proposal_job"
 
 
+def _wiki_authoring_job_lease_seconds() -> float:
+    """Match the durable job lease to the proposal authoring lease."""
+    return (
+        float(settings.wiki_omp_authoring_timeout_seconds)
+        + float(settings.wiki_omp_startup_timeout_seconds)
+        + 60.0
+    )
+
+
 def _job_attempt_display(attempts: int) -> int:
     return max(1, attempts + 1)
 
@@ -245,7 +254,13 @@ def _mark_exhausted_wiki_authoring(job: JobRecord) -> None:
 
 
 def _run_job(job_id: str) -> None:
-    job = claim_job(settings, job_id, worker_name=settings.worker_name)
+    job = claim_job(
+        settings,
+        job_id,
+        worker_name=settings.worker_name,
+        reclaim_running_job_type=_WIKI_AUTHORING_JOB_NAME,
+        reclaim_running_after_seconds=_wiki_authoring_job_lease_seconds(),
+    )
     if job is None:
         existing_job = get_job(settings, job_id)
         if existing_job is None:
