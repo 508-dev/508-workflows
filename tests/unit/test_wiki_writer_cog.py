@@ -505,6 +505,64 @@ async def test_selected_thread_context_is_bounded_org_visible_and_never_private(
 
 
 @pytest.mark.asyncio
+async def test_selected_thread_context_respects_configured_source_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeThread:
+        id = 456
+        name = "Current decision"
+        jump_url = "https://discord.com/channels/123/456"
+
+        def __init__(self) -> None:
+            default_role = SimpleNamespace(id=0)
+            self.guild = SimpleNamespace(
+                id=123,
+                me=SimpleNamespace(id=999),
+                default_role=default_role,
+            )
+            self.parent = SimpleNamespace(
+                permissions_for=lambda _actor: SimpleNamespace(
+                    view_channel=True,
+                    read_message_history=True,
+                )
+            )
+
+        def is_private(self) -> bool:
+            return False
+
+        def permissions_for(self, _actor: object) -> SimpleNamespace:
+            return SimpleNamespace(view_channel=True, read_message_history=True)
+
+        async def history(self, *, limit: int, oldest_first: bool):
+            assert limit == wiki_writer_module.WIKI_THREAD_MESSAGE_LIMIT
+            assert oldest_first is False
+            yield SimpleNamespace(
+                id=24,
+                author=SimpleNamespace(id=124),
+                content="x" * 2_000,
+            )
+
+    monkeypatch.setattr(wiki_writer_module.discord, "Thread", FakeThread)
+    monkeypatch.setattr(
+        wiki_writer_module.settings,
+        "knowledge_capture_max_characters",
+        1_000,
+    )
+    cog, _guild = _cog_with_member(_member("Steering Committee"))
+
+    sources = await cog._collect_current_thread(
+        _interaction(channel=FakeThread()),
+        member=_member("Steering Committee"),
+        guild_id="123",
+    )
+
+    assert len(sources) == 1
+    source = sources[0]
+    assert source["provenance"]["message_ids"] == ["24"]
+    assert len(source["organization_visible_text"]) == 1_000
+
+
+@pytest.mark.asyncio
 async def test_selected_thread_context_uses_newest_messages_in_chronological_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

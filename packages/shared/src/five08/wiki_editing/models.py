@@ -61,6 +61,13 @@ WikiSourceType = Literal[
 WIKI_REVIEW_ATTACHMENT_MAX_BYTES = 1_000_000
 WIKI_REVIEW_ID_LENGTH = 16
 
+# CommonMark permits a backslash before every ASCII punctuation character.  We
+# escape the complete set rather than only link delimiters because review
+# attachments can be opened in Markdown renderers with different extensions
+# (for example automatic bare-URL links).  Source titles remain visible text,
+# while the separately validated source URL is the only link in a review packet.
+_MARKDOWN_PUNCTUATION = frozenset(r'!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~')
+
 
 def wiki_content_hash(value: str) -> str:
     """Return the stable SHA-256 hash used for snapshots and provenance."""
@@ -91,6 +98,15 @@ def _safe_review_source_url(value: str | None) -> str | None:
     ):
         return None
     return candidate
+
+
+def _escape_review_markdown_text(value: str) -> str:
+    """Render an untrusted source title as one Markdown-safe inline label."""
+    normalized = " ".join(value.split())
+    return "".join(
+        f"\\{character}" if character in _MARKDOWN_PUNCTUATION else character
+        for character in normalized
+    )
 
 
 def _utc_now() -> datetime:
@@ -905,7 +921,7 @@ class WikiEditReviewArtifact(BaseModel):
         sources = "\n".join(
             (
                 f"{index}. {source.source_type}: "
-                f"{' '.join(source.title.split())}\n   <{source.url}>"
+                f"{_escape_review_markdown_text(source.title)}\n   <{source.url}>"
             )
             for index, source in enumerate(self.source_links, start=1)
         )

@@ -38,6 +38,8 @@ WIKI_TARGET_DOCUMENT_ID_MAX_LENGTH = 256
 WIKI_THREAD_MESSAGE_LIMIT = 20
 # Keep the bot-side snapshot inside the backend/OMP aggregate source budget:
 # 4k explicit instruction + 16k target article + 12k selected thread = 32k.
+# A deployment can lower the shared knowledge-source budget, so collection
+# takes the lower configured limit too.
 WIKI_THREAD_CONTEXT_MAX_CHARS = 12_000
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _WIKI_UPDATE_COMPONENT_RE = re.compile(
@@ -864,7 +866,16 @@ class WikiWriterCog(DiscordAuditCogMixin, commands.Cog):
 
         lines: list[str] = []
         message_ids: list[str] = []
-        remaining = WIKI_THREAD_CONTEXT_MAX_CHARS
+        remaining = min(
+            WIKI_THREAD_CONTEXT_MAX_CHARS,
+            int(
+                getattr(
+                    settings,
+                    "knowledge_capture_max_characters",
+                    WIKI_THREAD_CONTEXT_MAX_CHARS,
+                )
+            ),
+        )
         try:
             async with asyncio.timeout(3):
                 newest_messages = [

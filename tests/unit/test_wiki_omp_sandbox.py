@@ -82,13 +82,17 @@ def _work_item() -> WikiAuthoringWorkItem:
     return work
 
 
-def _revision_work_item() -> WikiAuthoringWorkItem:
+def _revision_work_item(
+    *,
+    instruction: str = "Shorten the second paragraph of the draft.",
+    revision_instruction: str = "Shorten the second paragraph.",
+) -> WikiAuthoringWorkItem:
     store = InMemoryWikiEditingStore()
     request, _created = store.create_or_get_request(
         WikiEditRequestInput(
             organization_id="guild-1",
             actor_id="writer-1",
-            instruction="Shorten the second paragraph of the draft.",
+            instruction=instruction,
             request_idempotency_key="revision-request-1",
         )
     )
@@ -120,7 +124,7 @@ def _revision_work_item() -> WikiAuthoringWorkItem:
             organization_id="guild-1",
             target_action="create",
             revision_parent_id=predecessor.id,
-            revision_instruction="Shorten the second paragraph.",
+            revision_instruction=revision_instruction,
         )
     )
     work = store.claim_authoring(
@@ -507,8 +511,62 @@ def test_organization_knowledge_search_includes_revision_instruction() -> None:
     runner.author(_revision_work_item(), metadata=_metadata())
 
     assert queries == [
-        "Shorten the second paragraph of the draft. Shorten the second paragraph."
+        "Shorten the second paragraph. Shorten the second paragraph of the draft."
     ]
+
+
+def test_retrieval_queries_prioritize_revision_feedback_before_the_bound() -> None:
+    outline_queries: list[str] = []
+    knowledge_queries: list[str] = []
+    instruction = "Original request context that does not mention the new topic. " * 8
+    revision_instruction = "Use the current launch date from verified facts."
+
+    class RecordingOutlineClient:
+        def search_documents(
+            self,
+            *,
+            query: str,
+            limit: int,
+        ) -> list[OutlineSearchResult]:
+            assert limit == 4
+            outline_queries.append(query)
+            return []
+
+        def get_document(self, *, document_id: str) -> OutlineDocument:
+            raise AssertionError(f"unexpected Outline document fetch: {document_id}")
+
+    outline_client = RecordingOutlineClient()
+
+    def knowledge_search(
+        question: str,
+        _work: WikiAuthoringWorkItem,
+    ) -> list[WikiAuthoringMaterial]:
+        knowledge_queries.append(question)
+        return []
+
+    runner = SandboxedOmpWikiAuthoringRunner(
+        sandbox_url="http://wiki_omp_sandbox:8080",
+        sandbox_token="sandbox-token",
+        model="openrouter/test",
+        outline_client_factory=lambda: cast(OutlineClient, outline_client),
+        allowed_collection_id="collection-1",
+        knowledge_search=knowledge_search,
+        transport=lambda *_args: _draft_response(source_ids=["request:1"]),
+    )
+
+    runner.author(
+        _revision_work_item(
+            instruction=instruction,
+            revision_instruction=revision_instruction,
+        ),
+        metadata=_metadata(),
+    )
+
+    expected_query = " ".join(f"{revision_instruction} {instruction}".split())[:200]
+    assert len(expected_query) == 200
+    assert expected_query.startswith(revision_instruction)
+    assert outline_queries == [expected_query]
+    assert knowledge_queries == [expected_query]
 
 
 def test_remote_sandbox_receives_only_full_allowed_collection_documents() -> None:

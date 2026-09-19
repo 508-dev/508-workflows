@@ -391,8 +391,11 @@ class WikiEditingService:
                 "The Outline publish result is unknown and will not be retried automatically."
             ) from exc
 
-        result = self._publish_result(published)
         try:
+            # Result validation occurs after the provider write. An invalid
+            # success payload is therefore ambiguous just like a disconnect:
+            # preserve the one-shot barrier and require reconciliation.
+            result = self._publish_result(proposal, published)
             operation = self.store.mark_publish_succeeded(
                 proposal.id,
                 organization_id=organization_id,
@@ -812,7 +815,17 @@ class WikiEditingService:
             )
 
     @staticmethod
-    def _publish_result(document: OutlineDocument) -> WikiPublishResult:
+    def _publish_result(
+        proposal: WikiEditProposal,
+        document: OutlineDocument,
+    ) -> WikiPublishResult:
+        if (
+            proposal.target_action == "update"
+            and document.id != proposal.target_document_id
+        ):
+            raise WikiEditingValidationError(
+                "Outline update response does not match the requested document."
+            )
         return WikiPublishResult(
             document_id=document.id,
             document_url=document.url,

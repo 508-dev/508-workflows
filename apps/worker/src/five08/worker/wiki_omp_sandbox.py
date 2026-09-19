@@ -48,6 +48,7 @@ _MAX_MATERIAL_CHARACTERS = 16_000
 _MAX_SANDBOX_RESPONSE_BYTES = 600_000
 _MIN_DOCUMENT_CHARACTERS = 1_000
 _MAX_DOCUMENT_CHARACTERS = 16_000
+_MAX_RETRIEVAL_QUERY_CHARACTERS = 200
 
 SandboxTransport = Callable[
     [str, Mapping[str, str], Mapping[str, object], float, float], Mapping[str, object]
@@ -322,10 +323,7 @@ class SandboxedOmpWikiAuthoringRunner:
         worker-side fetch proves it belongs to the configured shared
         collection; nothing about rejected candidates crosses to OMP.
         """
-        revision_instruction = work_item.proposal.revision_instruction or ""
-        query = " ".join(
-            f"{work_item.request.instruction} {revision_instruction}".split()
-        )[:200]
+        query = self._retrieval_query(work_item)
         if not query:
             return
         try:
@@ -390,10 +388,7 @@ class SandboxedOmpWikiAuthoringRunner:
     ) -> None:
         if self.knowledge_search is None:
             return
-        revision_instruction = work_item.proposal.revision_instruction or ""
-        query = " ".join(
-            f"{work_item.request.instruction} {revision_instruction}".split()
-        )[:200]
+        query = self._retrieval_query(work_item)
         if not query:
             return
         try:
@@ -421,6 +416,19 @@ class SandboxedOmpWikiAuthoringRunner:
                 # The source bundle is fixed. Unlike a local tool loop, no
                 # caller can ask for more materials after this point.
                 return
+
+    @staticmethod
+    def _retrieval_query(work_item: WikiAuthoringWorkItem) -> str:
+        """Build one bounded retrieval query with revision intent first.
+
+        A revision instruction is the user's latest request and can introduce
+        a topic absent from the original proposal. It must therefore survive
+        the fixed provider query boundary before the older request context.
+        """
+        revision_instruction = work_item.proposal.revision_instruction or ""
+        return " ".join(
+            f"{revision_instruction} {work_item.request.instruction}".split()
+        )[:_MAX_RETRIEVAL_QUERY_CHARACTERS]
 
     def _request_payload(
         self,

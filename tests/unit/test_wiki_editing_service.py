@@ -46,6 +46,7 @@ class _Outline:
         self.create_calls = 0
         self.raise_on_update: Exception | None = None
         self.raise_on_create: Exception | None = None
+        self.returned_update_document_id: str | None = None
 
     def get_document(self, *, document_id: str) -> OutlineDocument:
         assert document_id == self.document.id
@@ -59,6 +60,7 @@ class _Outline:
         assert kwargs["expected_revision"] == 1
         self.document = replace(
             self.document,
+            id=self.returned_update_document_id or self.document.id,
             title=kwargs["title"],
             text=kwargs["text"],
             revision=(self.document.revision or 0) + 1,
@@ -403,6 +405,44 @@ def test_ambiguous_publish_failure_is_not_retried() -> None:
     _acknowledge(service, proposal_id)
 
     with pytest.raises(WikiEditingValidationError, match="result is unknown"):
+        service.publish(_action(proposal_id))
+
+    status = service.status(_action(proposal_id))
+    repeated = service.publish(_action(proposal_id))
+    assert status.status == "publish_unknown"
+    assert repeated.status == "publish_unknown"
+    assert outline.update_calls == 1
+
+
+def test_invalid_post_write_result_is_marked_unknown_and_not_retried() -> None:
+    """A provider write with an unusable success payload stays one-shot."""
+    outline = _Outline()
+    outline.returned_update_document_id = "d" * 257
+    service = _service(outline, _Author())
+    proposal_id = _propose(service)
+    _acknowledge(service, proposal_id)
+
+    with pytest.raises(WikiEditingValidationError, match="requires reconciliation"):
+        service.publish(_action(proposal_id))
+
+    status = service.status(_action(proposal_id))
+    repeated = service.publish(_action(proposal_id))
+    assert status.status == "publish_unknown"
+    assert repeated.status == "publish_unknown"
+    assert outline.update_calls == 1
+
+
+def test_update_response_for_another_document_is_marked_unknown_and_not_retried() -> (
+    None
+):
+    """A successful-looking update response must bind to the requested document."""
+    outline = _Outline()
+    outline.returned_update_document_id = "other-doc"
+    service = _service(outline, _Author())
+    proposal_id = _propose(service)
+    _acknowledge(service, proposal_id)
+
+    with pytest.raises(WikiEditingValidationError, match="requires reconciliation"):
         service.publish(_action(proposal_id))
 
     status = service.status(_action(proposal_id))

@@ -643,3 +643,39 @@ def test_review_packet_keeps_only_safe_source_links_and_never_truncates() -> Non
     assert "@@ -1 +1 @@" in rendered
     assert "javascript:" not in rendered
     assert "secret@example" not in rendered
+
+
+def test_review_packet_escapes_markdown_source_titles_but_keeps_safe_url() -> None:
+    """A source title cannot add clickable links to an approval attachment."""
+    title = (
+        "[Release checklist](https://attacker.example) <https://also-attacker.example>"
+    )
+    packet = WikiEditReviewArtifact.from_output(
+        proposed_title="Deployment guide",
+        proposed_article="The complete proposed article.",
+        complete_diff="@@ -1 +1 @@\n-Old\n+New",
+        source_refs=[
+            WikiSourceReference(
+                source_type="discord_thread",
+                source_ref="thread-1",
+                title=title,
+                source_url="https://outline.example/doc/shared",
+            )
+        ],
+    )
+
+    rendered = packet.attachment_bytes().decode("utf-8")
+
+    # Keep the original provenance text for the immutable review binding, but
+    # render every Markdown delimiter literally. The allowlisted source URL is
+    # consequently the attachment's only clickable source link.
+    assert packet.source_links[0].title == title
+    assert (
+        r"1. discord_thread: \[Release checklist\]\(https\:\/\/attacker\.example\) "
+        r"\<https\:\/\/also\-attacker\.example\>"
+    ) in rendered
+    assert (
+        "1. discord_thread: [Release checklist](https://attacker.example)"
+        not in rendered
+    )
+    assert "\n   <https://outline.example/doc/shared>" in rendered
