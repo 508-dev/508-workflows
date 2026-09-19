@@ -47,6 +47,7 @@ class BackendRouteSurface(Protocol):
     dashboard_control_agent_schedule_handler: RouteHandler
     dashboard_resolve_agent_schedule_delivery_handler: RouteHandler
     dashboard_discord_diagnostics_handler: RouteHandler
+    dashboard_knowledge_channels_handler: RouteHandler
     dashboard_erpnext_account_managers_handler: RouteHandler
     dashboard_erpnext_contacts_handler: RouteHandler
     dashboard_erpnext_cost_centers_handler: RouteHandler
@@ -102,6 +103,9 @@ class BackendRouteSurface(Protocol):
     internal_agent_schedule_run_handler: RouteHandler
     job_status_handler: RouteHandler
     jobs_handler: RouteHandler
+    knowledge_capture_confirmation_handler: RouteHandler
+    knowledge_capture_handler: RouteHandler
+    knowledge_query_handler: RouteHandler
     process_contact_handler: RouteHandler
     rerun_job_handler: RouteHandler
     resume_apply_handler: RouteHandler
@@ -153,6 +157,7 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
         api.dashboard_resolve_agent_schedule_delivery_handler
     )
     dashboard_discord_diagnostics_handler = api.dashboard_discord_diagnostics_handler
+    dashboard_knowledge_channels_handler = api.dashboard_knowledge_channels_handler
     dashboard_erpnext_account_managers_handler = (
         api.dashboard_erpnext_account_managers_handler
     )
@@ -234,6 +239,9 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
     internal_agent_schedule_run_handler = api.internal_agent_schedule_run_handler
     job_status_handler = api.job_status_handler
     jobs_handler = api.jobs_handler
+    knowledge_capture_confirmation_handler = api.knowledge_capture_confirmation_handler
+    knowledge_capture_handler = api.knowledge_capture_handler
+    knowledge_query_handler = api.knowledge_query_handler
     process_contact_handler = api.process_contact_handler
     rerun_job_handler = api.rerun_job_handler
     resume_apply_handler = api.resume_apply_handler
@@ -530,6 +538,11 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
         methods=["GET"],
     )
     app.add_api_route(
+        "/dashboard/api/knowledge-channels",
+        dashboard_knowledge_channels_handler,
+        methods=["GET"],
+    )
+    app.add_api_route(
         "/dashboard/api/configuration/{key}",
         dashboard_update_configuration_handler,
         methods=["PUT"],
@@ -635,6 +648,21 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
     app.add_api_route(
         "/internal/agent-schedules/runs/{run_id}",
         internal_agent_schedule_run_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/knowledge/captures",
+        knowledge_capture_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/knowledge/captures/{draft_id}/confirmation",
+        knowledge_capture_confirmation_handler,
+        methods=["POST"],
+    )
+    app.add_api_route(
+        "/knowledge/queries",
+        knowledge_query_handler,
         methods=["POST"],
     )
 

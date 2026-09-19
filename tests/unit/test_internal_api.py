@@ -601,6 +601,82 @@ class TestInternalAPIRoutes:
         }
 
     @pytest.mark.asyncio
+    async def test_list_knowledge_channels_returns_only_bot_readable_public_sources(
+        self,
+        internal_api_routes,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """The admin picker only exposes readable public Discord sources."""
+
+        class FakeTextChannel:
+            def __init__(self, channel_id: int, name: str, *, readable: bool = True):
+                self.id = channel_id
+                self.name = name
+                self.category = SimpleNamespace(name="Engineering")
+                self._readable = readable
+
+            def permissions_for(self, _member: object) -> SimpleNamespace:
+                return SimpleNamespace(
+                    view_channel=self._readable,
+                    read_message_history=self._readable,
+                )
+
+        class FakeThread:
+            def __init__(
+                self,
+                channel_id: int,
+                name: str,
+                *,
+                private: bool = False,
+            ) -> None:
+                self.id = channel_id
+                self.name = name
+                self.parent = SimpleNamespace(name="deployments")
+                self._private = private
+
+            def is_private(self) -> bool:
+                return self._private
+
+            def permissions_for(self, _member: object) -> SimpleNamespace:
+                return SimpleNamespace(view_channel=True, read_message_history=True)
+
+        monkeypatch.setattr(
+            "five08.discord_bot.utils.internal_api.settings.discord_server_id", "123"
+        )
+        monkeypatch.setattr(
+            "five08.discord_bot.utils.internal_api.settings.knowledge_discord_channel_ids",
+            "14",
+        )
+        monkeypatch.setattr(
+            "five08.discord_bot.utils.internal_api.discord.Thread", FakeThread
+        )
+        guild = SimpleNamespace(
+            id=123,
+            me=object(),
+            fetch_channel=AsyncMock(return_value=FakeThread(14, "archived-release")),
+            text_channels=[
+                FakeTextChannel(10, "general"),
+                FakeTextChannel(11, "private-team", readable=False),
+            ],
+            threads=[
+                FakeThread(12, "release-checklist"),
+                FakeThread(13, "leadership", private=True),
+            ],
+        )
+        internal_api_routes.bot.get_guild.return_value = guild
+
+        result, status_code = await internal_api_routes._list_knowledge_channels()
+
+        assert status_code == 200
+        channels_by_id = {
+            channel["channel_id"]: channel for channel in result["channels"]
+        }
+        assert set(channels_by_id) == {"10", "12", "14"}
+        assert channels_by_id["12"]["channel_type"] == "thread"
+        assert channels_by_id["12"]["parent_name"] == "deployments"
+        guild.fetch_channel.assert_awaited_once_with(14)
+
+    @pytest.mark.asyncio
     async def test_update_gig_thread_status_rewrites_title_marker(
         self, internal_api_routes, monkeypatch: pytest.MonkeyPatch
     ):

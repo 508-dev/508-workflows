@@ -41,6 +41,8 @@ _PROJECT_MANAGER_SCOPES = frozenset(
         "memory:read_project",
         "memory:write_self",
         "memory:write_project",
+        "knowledge:read_project",
+        "knowledge:capture_project",
     }
 )
 _ENGINEER_SCOPES = frozenset(
@@ -55,6 +57,9 @@ _ENGINEER_SCOPES = frozenset(
         "context:read_current_thread",
         "memory:read_self",
         "memory:write_self",
+        "knowledge:read_org",
+        "knowledge:capture_org",
+        "knowledge:read_wiki",
     }
 )
 _STEERING_COMMITTEE_SCOPES = frozenset(
@@ -83,6 +88,11 @@ _STEERING_COMMITTEE_SCOPES = frozenset(
         "memory:write_project",
         "agent:chat",
         "web:research",
+        "knowledge:read_org",
+        "knowledge:capture_org",
+        "knowledge:read_wiki",
+        "knowledge:read_project",
+        "knowledge:capture_project",
     }
 )
 _BILLING_SCOPES = frozenset(
@@ -118,6 +128,8 @@ _ADMIN_SCOPES = frozenset(
         "context:read_user_recent_self",
         "context:read_user_recent_any",
         "memory:admin",
+        "knowledge:verify_org",
+        "knowledge:admin",
     }
 )
 

@@ -59,3 +59,12 @@ def test_model_catalog_chat_options_are_data_driven() -> None:
         model_chat_completion_options("gpt-5.5", purpose="baseline")["reasoning_effort"]
         == "medium"
     )
+
+
+def test_model_catalog_supports_gpt_5_6_luna() -> None:
+    options = model_chat_completion_options("openai/gpt-5.6-luna")
+
+    assert options["max_tokens_parameter"] == "max_completion_tokens"
+    assert options["reasoning_effort"] == "low"
+    assert options["verbosity"] == "low"
+    assert options["supports_temperature"] is False

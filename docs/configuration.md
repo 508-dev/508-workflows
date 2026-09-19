@@ -131,8 +131,13 @@ For local dev, `./scripts/dev.sh` and `./scripts/docker-compose.sh` compute
 deterministic per-worktree ports unless values are pinned in `.env` or the
 invoking shell.
 
-Inside Conductor, `CONDUCTOR_PORT` is treated as the first port in the
-workspace's 10-port range for unset worktree defaults: Redis uses `+0`,
+Inside PASEO, `PASEO_PORT_BASE` and `PASEO_PORT_END` reserve the inclusive
+range used for unset worktree defaults. The range must contain at least seven
+ports: Redis uses `+0`, Postgres `+1`, the Compose web port `+2`, MinIO API
+`+3`, MinIO Console `+4`, host-run web/API `+5`, and the bot health check `+6`.
+PASEO takes precedence over Conductor. Inside Conductor, `CONDUCTOR_PORT` is
+treated as the first port in the workspace's 10-port range for unset worktree
+defaults: Redis uses `+0`,
 Postgres `+1`, Compose web `+2`, MinIO API `+3`, MinIO console `+4`,
 host-run web/API `+5`, and bot health `+6`. Explicit service port overrides keep
 their current precedence rules.
@@ -287,6 +292,44 @@ Agent gateway:
   DNS
   and third-party HTTP behavior cannot be force-canceled by the sync adapters,
   but the API will return once the response budget expires.
+- `KNOWLEDGE_ENABLED`: enables `/ask`, knowledge questions in mentions, and
+  confirmed Discord captures.
+- `KNOWLEDGE_DISCORD_CHANNEL_IDS`: selected from **Configuration → Knowledge
+  sources** in the admin dashboard, which lists bot-readable text channels and
+  active public threads by name. The shared runtime value updates the bot and
+  API without a restart. Up to eight sources may be selected; empty disables
+  Discord history search. A nonempty environment value remains supported but
+  locks the picker. The bot
+  refreshes the caller's membership and checks both caller and bot history
+  permissions before reading each source. Private threads are excluded.
+- `KNOWLEDGE_DISCORD_HISTORY_LIMIT`: recent messages per enabled location
+  (default and maximum: 100).
+- `KNOWLEDGE_DISCORD_HISTORY_DAYS`: maximum source age (default: 30).
+  Query snapshots are capped at 20,000 characters and are not indexed or saved.
+- `AGENT_MEMORY_SUGGESTIONS_ENABLED`: suggest saving a timezone or response
+  style stated directly to the agent (default: true). This does not enable
+  automatic saving; each suggestion uses the existing confirmation flow.
+- `KNOWLEDGE_API_TIMEOUT_SECONDS`: bot-to-backend request timeout (default: 15).
+- `KNOWLEDGE_MODEL_ENABLED`: uses the configured strong agent tier for bounded
+  extraction, semantic evidence selection, and grounded synthesis. Deterministic
+  extraction plus keyword and typo-tolerant recall remain available when the
+  model is disabled or unavailable.
+- `KNOWLEDGE_MODEL_TIMEOUT_SECONDS`
+- `KNOWLEDGE_SOURCE_TIMEOUT_SECONDS`: total concurrent retrieval window per
+  question (default: 6).
+- `KNOWLEDGE_CAPTURE_MAX_MESSAGES`: maximum messages read from one Discord
+  thread capture (default: 50).
+- `KNOWLEDGE_CAPTURE_MAX_CHARACTERS`: total capture text bound (default: 20000).
+- `KNOWLEDGE_CAPTURE_MAX_AGE_DAYS`: rejects older thread messages (default: 7).
+- `KNOWLEDGE_CAPTURE_DRAFT_TTL_SECONDS`: confirmation preview lifetime
+  (default: 600).
+- `KNOWLEDGE_REVIEW_AFTER_DAYS`: age at which a remembered answer is marked as
+  review due in citations (default: 180).
+- `KNOWLEDGE_QUERY_MAX_EVIDENCE`: maximum evidence items considered per answer
+  or deterministic fallback (default: 8).
+- `KNOWLEDGE_SEMANTIC_CANDIDATE_LIMIT`: maximum authorization-filtered remembered
+  facts offered to the model for paraphrase and synonym matching (default: 24,
+  maximum: 64).
 - `GITHUB_DEFAULT_REPO`: defaults to `508-dev/todos`.
 - `GITHUB_ORGANIZATION`: defaults to `508-dev` and scopes GitHub Projects.
 - `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_INSTALLATION_ID`,
@@ -372,6 +415,8 @@ fallback behavior.
 
 See [Discord GitHub Todos and Projects](./discord-github-todos.md) for the
 role model, required App permissions, and installation procedure.
+See [Discord Knowledge Memory](./discord-knowledge-memory.md) for capture,
+retrieval, visibility, and provenance behavior.
 
 Agent model base URLs must be HTTPS endpoints on allowed provider hosts, except
 the internal Docker-network Bifrost URL `http://bifrost:8080/openai` is allowed

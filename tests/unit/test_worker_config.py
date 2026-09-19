@@ -81,6 +81,29 @@ def test_disabled_agent_schedules_skip_unused_timeout_relationships() -> None:
     assert settings.job_timeout_seconds == 300
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("https://bot.example/", "https://bot.example"),
+        ("http://127.0.0.1:3000", "http://127.0.0.1:3000"),
+        ("http://[::1]:3000", "http://[::1]:3000"),
+        ("http://localhost:3000", "http://localhost:3000"),
+        ("http://discord_bot:3000", "http://discord_bot:3000"),
+        ("http://bot.example", None),
+        ("http://[broken", None),
+        ("ftp://discord_bot:3000", None),
+        ("https://user@bot.example", None),
+    ],
+)
+def test_discord_bot_internal_url_requires_safe_transport(
+    value: str,
+    expected: str | None,
+) -> None:
+    settings = WorkerSettings(discord_bot_internal_base_url=value)
+
+    assert settings.resolved_discord_bot_internal_base_url == expected
+
+
 def test_email_intake_requires_mailbox_credentials() -> None:
     with pytest.raises(ValidationError, match="EMAIL_PASSWORD must be set"):
         WorkerSettings(

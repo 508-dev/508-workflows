@@ -86,13 +86,12 @@ def test_expired_agent_memory_cleanup_uses_only_the_worker_postgres_store(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class FakeMemoryStore:
-        def __init__(self, postgres_url: str) -> None:
-            assert postgres_url == "postgresql://worker-db"
+        def __init__(self, worker_settings: object) -> None:
+            assert worker_settings is jobs.settings
 
         def purge_expired_all_organizations(self) -> int:
             return 4
 
-    monkeypatch.setattr(jobs.settings, "postgres_url", "postgresql://worker-db")
-    monkeypatch.setattr(jobs, "PostgresMemoryStore", FakeMemoryStore)
+    monkeypatch.setattr(jobs, "PostgresKnowledgeStore", FakeMemoryStore)
 
     assert jobs.purge_expired_agent_memory_facts_job() == {"purged_count": 4}

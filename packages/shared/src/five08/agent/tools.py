@@ -108,13 +108,13 @@ _PLANNER_TOOL_ARGUMENTS: dict[str, frozenset[str]] = {
     ),
     "memory_read.get_user_facts": frozenset({"user_id"}),
     "memory_read.get_project_facts": frozenset(),
-    "memory_read.search_context": frozenset(),
     "memory_write.remember_fact": frozenset(
         {
             "scope_type",
             "key",
             "value_json",
             "visibility",
+            "replaces_id",
         }
     ),
     "memory_write.forget_fact": frozenset({"fact_id", "admin"}),
@@ -1313,6 +1313,7 @@ class ToolRegistry:
                 actor_id=actor_id,
                 organization_id=organization_id,
                 actor_scopes=actor_scopes or set(),
+                project_id=project_id,
             )
         raise KeyError(f"Unknown tool {tool_name}")
 
@@ -1738,7 +1739,7 @@ class ToolRegistry:
         user_id = _optional_str(arguments.get("user_id")) or actor_id
         if user_id is None:
             raise ValueError("user_id is required")
-        if user_id != actor_id and "memory:admin" not in actor_scopes:
+        if user_id != actor_id:
             raise PermissionError("Cannot read another user's private memory")
         tenant_id = _required_organization_id(organization_id)
         facts = self.memory_store.list_facts(
@@ -1810,10 +1811,29 @@ class ToolRegistry:
         if not isinstance(value, dict) or not value:
             raise ValueError("Memory value_json object is required")
         validate_memory_value_for_persistence(value)
+        replaces_id = _optional_str(arguments.get("replaces_id"))
+        if replaces_id:
+            owned = self.memory_store.list_facts(
+                organization_id=tenant_id,
+                scope_type="user",
+                scope_id=actor_id,
+                visible_to_user_id=actor_id,
+                visible_to_project_id=None,
+                visible_to_org_id=tenant_id,
+            )
+            previous = next((fact for fact in owned if fact.id == replaces_id), None)
+            if previous is None or scope_type != "user":
+                raise PermissionError(
+                    "Memory to edit is unavailable or not owned by you"
+                )
+            key = previous.key
         visibility = _memory_visibility_for_scope(
             arguments.get("visibility"),
             scope_type=scope_type,
         )
+        expected_visibility = "private" if scope_type == "user" else scope_type
+        if visibility != expected_visibility:
+            raise ValueError("Memory visibility must match its owner scope")
         fact = self.memory_store.remember_fact(
             organization_id=tenant_id,
             scope_type=scope_type,
@@ -1829,6 +1849,7 @@ class ToolRegistry:
                 arguments.get("verification_status") or "user_confirmed"
             ),
             confidence=float(arguments.get("confidence") or 1.0),
+            replaces_id=replaces_id,
         )
         return {"fact": _memory_fact_payload(fact)}
 
@@ -1839,6 +1860,7 @@ class ToolRegistry:
         actor_id: str | None,
         organization_id: str | None,
         actor_scopes: set[str],
+        project_id: str | None,
     ) -> dict[str, Any]:
         if actor_id is None:
             raise ValueError("actor_id is required")
@@ -1851,6 +1873,8 @@ class ToolRegistry:
             fact_id=fact_id,
             actor_id=actor_id,
             actor_is_admin="memory:admin" in actor_scopes,
+            project_id=project_id,
+            actor_can_write_project="memory:write_project" in actor_scopes,
         )
         return {"fact": _memory_fact_payload(fact)}
 
@@ -3456,9 +3480,7 @@ def _memory_scope_id(
     scope_id = _optional_str(value)
     if scope_type == "user":
         if scope_id is not None and scope_id != actor_id:
-            if "memory:admin" not in actor_scopes:
-                raise PermissionError("User memory writes are limited to the actor")
-            return scope_id
+            raise PermissionError("User memory writes are limited to the actor")
         return actor_id
     if scope_type == "project":
         return _trusted_project_scope_id(scope_id, project_id=project_id)

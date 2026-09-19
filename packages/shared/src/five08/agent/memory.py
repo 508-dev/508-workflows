@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import threading
 from datetime import datetime, timedelta, timezone
@@ -188,6 +189,7 @@ class MemoryStore(Protocol):
         verification_status: str,
         confidence: float = 1.0,
         expires_at: datetime | None = None,
+        replaces_id: str | None = None,
     ) -> MemoryFact:
         """Persist one memory fact."""
 
@@ -212,6 +214,8 @@ class MemoryStore(Protocol):
         fact_id: str,
         actor_id: str,
         actor_is_admin: bool = False,
+        project_id: str | None = None,
+        actor_can_write_project: bool = False,
         now: datetime | None = None,
     ) -> MemoryFact:
         """Immediately remove one fact the actor may manage."""
@@ -250,6 +254,7 @@ class InMemoryMemoryStore:
         verification_status: str,
         confidence: float = 1.0,
         expires_at: datetime | None = None,
+        replaces_id: str | None = None,
     ) -> MemoryFact:
         normalized_organization_id = normalize_organization_id(organization_id)
         validate_memory_value_for_persistence(value_json)
@@ -277,6 +282,40 @@ class InMemoryMemoryStore:
                 organization_id=normalized_organization_id,
                 now=now,
             )
+            existing = (
+                self._facts.get(replaces_id)
+                if replaces_id
+                else next(
+                    (
+                        old
+                        for old in reversed(list(self._facts.values()))
+                        if old.organization_id == normalized_organization_id
+                        and old.scope_type == scope_type
+                        and old.scope_id == scope_id
+                        and old.status == "active"
+                        and old.deleted_at is None
+                        and memory_slot(old.key, old.value_json)
+                        == memory_slot(key, value_json)
+                    ),
+                    None,
+                )
+            )
+            if replaces_id and (
+                existing is None
+                or existing.scope_type != scope_type
+                or existing.scope_id != scope_id
+                or existing.organization_id != normalized_organization_id
+                or existing.created_by != created_by
+                or existing.status != "active"
+            ):
+                raise PermissionError(
+                    "Memory to edit is unavailable or not owned by you"
+                )
+            if existing is not None:
+                fact = fact.model_copy(update={"supersedes_id": existing.id})
+                self._facts[existing.id] = existing.model_copy(
+                    update={"status": "superseded", "updated_at": now}
+                )
             self._facts[fact.id] = fact
         return fact
 
@@ -311,7 +350,10 @@ class InMemoryMemoryStore:
                     project_id=visible_to_project_id,
                     org_id=visible_to_org_id,
                 )
-                and (include_deleted or fact.deleted_at is None)
+                and (
+                    include_deleted
+                    or (fact.deleted_at is None and fact.status == "active")
+                )
                 and not _fact_is_expired(fact, now=comparison_time)
             ]
             newest_facts = sorted(
@@ -328,6 +370,8 @@ class InMemoryMemoryStore:
         fact_id: str,
         actor_id: str,
         actor_is_admin: bool = False,
+        project_id: str | None = None,
+        actor_can_write_project: bool = False,
         now: datetime | None = None,
     ) -> MemoryFact:
         normalized_organization_id = normalize_organization_id(organization_id)
@@ -340,12 +384,22 @@ class InMemoryMemoryStore:
             fact = self._facts.get(fact_id)
             if fact is None or fact.organization_id != normalized_organization_id:
                 raise KeyError(f"Memory fact {fact_id} was not found")
-            if not actor_is_admin and fact.created_by != actor_id:
-                raise PermissionError("Memory fact can only be deleted by its creator")
+            authorize_memory_fact_deletion(
+                scope_type=fact.scope_type,
+                scope_id=fact.scope_id,
+                visibility=fact.visibility,
+                fact_organization_id=fact.organization_id,
+                actor_id=actor_id,
+                actor_is_admin=actor_is_admin,
+                organization_id=organization_id,
+                project_id=project_id,
+                actor_can_write_project=actor_can_write_project,
+            )
             deleted = fact.model_copy(
                 update={
                     "deleted_at": comparison_time,
                     "updated_at": comparison_time,
+                    "status": "deleted",
                 }
             )
             # Forget means forget. Return deletion metadata to the caller for
@@ -379,6 +433,54 @@ class InMemoryMemoryStore:
         for fact_id in expired_ids:
             del self._facts[fact_id]
         return len(expired_ids)
+
+
+def authorize_memory_fact_deletion(
+    *,
+    scope_type: MemoryScopeType,
+    scope_id: str,
+    visibility: MemoryVisibility,
+    fact_organization_id: str | None,
+    actor_id: str,
+    actor_is_admin: bool,
+    organization_id: str | None,
+    project_id: str | None,
+    actor_can_write_project: bool,
+) -> None:
+    """Require current authority over the fact's scope before deleting it."""
+    if visibility == "private":
+        if (
+            scope_type != "user"
+            or scope_id != actor_id
+            or organization_id is None
+            or fact_organization_id != organization_id
+        ):
+            raise PermissionError("Private memory belongs only to its owner")
+        return
+    if visibility == "project":
+        if (
+            scope_type != "project"
+            or not actor_can_write_project
+            or project_id != scope_id
+            or organization_id is None
+            or fact_organization_id != organization_id
+        ):
+            raise PermissionError(
+                "Project memory deletion requires current project access"
+            )
+        return
+    if visibility == "org":
+        if (
+            scope_type != "org"
+            or not actor_is_admin
+            or organization_id != scope_id
+            or fact_organization_id != organization_id
+        ):
+            raise PermissionError(
+                "Org memory deletion requires current memory admin access"
+            )
+        return
+    raise PermissionError("Memory fact has an unsupported visibility")
 
 
 def _fact_is_visible(
@@ -548,3 +650,16 @@ def _is_luhn_valid(value: str) -> bool:
                 digit -= 9
         total += digit
     return total % 10 == 0
+
+
+def memory_slot(key: str, value: dict[str, Any]) -> str:
+    """Named facts replace their prior value; independent notes retain separate slots."""
+    normalized = key.strip().casefold()
+    if normalized == "note":
+        normalized += (
+            ":"
+            + hashlib.sha256(
+                json.dumps(value, sort_keys=True).encode("utf-8")
+            ).hexdigest()
+        )
+    return "fact:" + normalized

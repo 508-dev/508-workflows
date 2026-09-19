@@ -1,0 +1,8 @@
+{
+  "scripts": {
+    "dev": {
+      "type": "service",
+      "command": "./scripts/dev.sh all"
+    }
+  }
+}

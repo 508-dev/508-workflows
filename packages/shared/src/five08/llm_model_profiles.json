@@ -1,5 +1,16 @@
 {
   "models": {
+    "gpt-5.6-luna": {
+      "name": "gpt-5.6-luna",
+      "provider": "openai-compatible",
+      "model": "gpt-5.6-luna",
+      "request_options": {
+        "temperature": false,
+        "response_format": true,
+        "reasoning_effort": true,
+        "verbosity": true
+      }
+    },
     "gpt-5.5": {
       "name": "gpt-5.5",
       "provider": "openai-compatible",

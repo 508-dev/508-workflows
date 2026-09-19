@@ -10,7 +10,7 @@ from urllib.parse import unquote
 
 import requests
 
-from five08.agent.postgres_memory import PostgresMemoryStore
+from five08.knowledge.store import PostgresKnowledgeStore
 from five08.redaction import (
     EMAIL_ADDRESS_PATTERN,
     PERCENT_ENCODED_EMAIL_ADDRESS_PATTERN,
@@ -229,7 +229,7 @@ def purge_expired_agent_memory_facts_job() -> dict[str, Any]:
     """Remove expired durable agent-memory facts while the system is idle."""
 
     logger.info("Processing expired agent memory cleanup job")
-    memory_store = PostgresMemoryStore(settings.postgres_url)
+    memory_store = PostgresKnowledgeStore(settings)
     purged_count = memory_store.purge_expired_all_organizations()
     return {"purged_count": purged_count}
 

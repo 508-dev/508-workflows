@@ -11,6 +11,7 @@ from discord.ext import commands
 from pydantic import BaseModel, ValidationError
 
 from five08.discord_bot.config import settings
+from five08.knowledge_channels import knowledge_discord_channel_ids
 from five08.engagements import (
     EngagementStatus,
     normalize_engagement_status,
@@ -126,6 +127,10 @@ class InternalAPIRoutes:
         app.router.add_post(
             "/internal/agent-schedules/report",
             self.agent_schedule_report_handler,
+        )
+        app.router.add_get(
+            "/internal/knowledge/channels",
+            self.knowledge_channels_handler,
         )
 
     @staticmethod
@@ -905,6 +910,73 @@ class InternalAPIRoutes:
                 status=400,
             )
         result, status_code = await self._post_agent_schedule_report(payload)
+        return web.json_response(result, status=status_code)
+
+    async def _list_knowledge_channels(self) -> tuple[dict[str, Any], int]:
+        """Return channels the bot can currently read as knowledge sources."""
+        guild = self._resolve_target_guild()
+        if guild is None:
+            return {"error": "guild_not_found"}, 404
+        bot_member = guild.me
+        if bot_member is None:
+            return {"error": "bot_member_unresolved"}, 503
+
+        channels: list[dict[str, str]] = []
+        available_channels: dict[str, Any] = {
+            str(channel.id): channel
+            for channel in [*guild.text_channels, *guild.threads]
+        }
+        for channel_id in knowledge_discord_channel_ids(
+            settings.knowledge_discord_channel_ids
+        ):
+            if channel_id in available_channels:
+                continue
+            try:
+                channel = await guild.fetch_channel(int(channel_id))
+            except discord.HTTPException:
+                continue
+            if isinstance(channel, (discord.TextChannel, discord.Thread)):
+                available_channels[channel_id] = channel
+        for channel in available_channels.values():
+            if isinstance(channel, discord.Thread) and channel.is_private():
+                continue
+            permissions = channel.permissions_for(bot_member)
+            if not (permissions.view_channel and permissions.read_message_history):
+                continue
+            if isinstance(channel, discord.Thread):
+                parent = channel.parent
+                channels.append(
+                    {
+                        "channel_id": str(channel.id),
+                        "channel_name": channel.name,
+                        "channel_type": "thread",
+                        "parent_name": parent.name if parent is not None else "",
+                    }
+                )
+            else:
+                category = channel.category
+                channels.append(
+                    {
+                        "channel_id": str(channel.id),
+                        "channel_name": channel.name,
+                        "channel_type": "text",
+                        "parent_name": category.name if category is not None else "",
+                    }
+                )
+        channels.sort(
+            key=lambda item: (
+                item["parent_name"].casefold(),
+                item["channel_type"],
+                item["channel_name"].casefold(),
+            )
+        )
+        return {"channels": channels, "guild_id": str(guild.id)}, 200
+
+    async def knowledge_channels_handler(self, request: web.Request) -> web.Response:
+        """Return bot-readable Discord channels for the admin source picker."""
+        if not self._is_authorized(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        result, status_code = await self._list_knowledge_channels()
         return web.json_response(result, status=status_code)
 
     async def post_job_lead_handler(self, request: web.Request) -> web.Response:
