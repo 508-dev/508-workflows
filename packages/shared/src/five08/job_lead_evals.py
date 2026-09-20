@@ -465,11 +465,6 @@ def _run_luna(
     if not isinstance(response, JobLeadLLMClassificationResponse):
         raise ValueError("OpenAI structured response did not contain a parsed model")
     classification = _classification_from_llm_response(response, case.text)
-    probability = (
-        classification.confidence
-        if classification.is_contractor_friendly
-        else 1.0 - classification.confidence
-    )
     usage_payload = (
         completion.usage.model_dump() if completion.usage is not None else {}
     )
@@ -489,7 +484,6 @@ def _run_luna(
         provider="OpenAI",
         predicted_posting_type=classification.posting_type.value,
         predicted_contractor_friendly=classification.is_contractor_friendly,
-        contractor_probability=max(0.0, min(1.0, probability)),
         classification_confidence=classification.confidence,
         latency_ms=_elapsed_ms(started),
         request_attempts=attempts,
@@ -752,7 +746,7 @@ def render_job_lead_eval_report(report: JobLeadEvalReport) -> str:
     lines = [
         "# Jev job-lead classification evaluation",
         "",
-        f"- Evaluated: {report.evaluated_at.date().isoformat()}",
+        f"- Evaluated (UTC): `{report.evaluated_at.isoformat()}`",
         f"- Runtime revision: `{report.runtime_revision or 'unknown'}`",
         f"- Corpus: `{report.corpus_path}` ({report.case_count} cases)",
         f"- Network repeats per case: {report.network_repeats}",
@@ -874,6 +868,7 @@ def render_job_lead_eval_report(report: JobLeadEvalReport) -> str:
             "- Golden labels are exact and scoring is deterministic. No model judges another model.",
             "- Jev uses OpenRouter's Decisions endpoint and the pinned `typesafe/jev-1.13` request ID. The resolved dated snapshot is retained in the JSON observation report.",
             "- The Luna baseline uses the production job-lead prompt and schema through direct OpenAI. A preflight through OpenRouter returned HTTP 403 under provider terms, so the report does not present an unsupported route as a benchmark failure.",
+            "- Luna's self-reported classification confidence is retained as diagnostic metadata, but it is not treated as a calibrated contractor probability or used in the Jev confidence-gate analysis.",
             "- Jev cost is provider-reported. Luna cost is estimated from successful retained token usage at the official [$0.20/M input, $0.02/M cached input, and $1.20/M output rates](https://developers.openai.com/api/docs/models/gpt-5.6-luna). Retried failed requests may not expose usage and may be absent.",
             "- Raw observations are generated under the gitignored reports directory; this Markdown summary intentionally excludes provider payloads and secrets.",
             "",
