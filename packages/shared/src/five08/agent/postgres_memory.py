@@ -20,6 +20,7 @@ from five08.agent.memory import (
     DEFAULT_MEMORY_RETENTION_DAYS,
     MAX_MEMORY_FACTS_PER_LIST,
     assert_visible_org_matches_tenant,
+    authorize_memory_fact_deletion,
     normalize_memory_time,
     normalize_organization_id,
     validate_memory_value_for_persistence,
@@ -89,6 +90,7 @@ class PostgresMemoryStore:
         verification_status: str,
         confidence: float = 1.0,
         expires_at: datetime | None = None,
+        replaces_id: str | None = None,
     ) -> MemoryFact:
         """Insert one immutable memory fact and return its persisted row."""
         normalized_organization_id = normalize_organization_id(organization_id)
@@ -154,6 +156,7 @@ class PostgresMemoryStore:
                 created_at,
                 updated_at
         """
+        superseded_id: str | None = None
         with self._connection_factory() as conn:
             with conn.cursor(row_factory=dict_row) as cursor:
                 self._purge_expired_with_cursor(
@@ -161,6 +164,48 @@ class PostgresMemoryStore:
                     organization_id=normalized_organization_id,
                     now=now,
                 )
+                if replaces_id:
+                    cursor.execute(
+                        """
+                        SELECT id, organization_id, scope_type, scope_id,
+                               created_by, deleted_at
+                        FROM agent_memory_facts
+                        WHERE id = %s
+                          AND organization_id = %s
+                        FOR UPDATE
+                        """,
+                        (replaces_id, normalized_organization_id),
+                    )
+                    existing = cursor.fetchone()
+                    if (
+                        existing is None
+                        or str(existing["organization_id"])
+                        != normalized_organization_id
+                        or str(existing["scope_type"]) != scope_type
+                        or str(existing["scope_id"]) != scope_id
+                        or str(existing["created_by"]) != created_by
+                        or existing.get("deleted_at") is not None
+                    ):
+                        raise PermissionError(
+                            "Memory to edit is unavailable or not owned by you"
+                        )
+                    superseded_id = str(existing["id"])
+                    cursor.execute(
+                        """
+                        UPDATE agent_memory_facts
+                        SET deleted_at = %s,
+                            updated_at = %s
+                        WHERE id = %s
+                          AND organization_id = %s
+                          AND deleted_at IS NULL
+                        """,
+                        (
+                            now,
+                            now,
+                            superseded_id,
+                            normalized_organization_id,
+                        ),
+                    )
                 cursor.execute(
                     query,
                     (
@@ -183,10 +228,13 @@ class PostgresMemoryStore:
                 row = cursor.fetchone()
         if row is None:
             raise RuntimeError("Memory fact insert did not return a row")
-        return _memory_fact_from_row(
+        persisted = _memory_fact_from_row(
             row,
             expected_organization_id=normalized_organization_id,
         )
+        if superseded_id is not None:
+            persisted = persisted.model_copy(update={"supersedes_id": superseded_id})
+        return persisted
 
     def list_facts(
         self,
@@ -283,13 +331,15 @@ class PostgresMemoryStore:
         fact_id: str,
         actor_id: str,
         actor_is_admin: bool = False,
+        project_id: str | None = None,
+        actor_can_write_project: bool = False,
         now: datetime | None = None,
     ) -> MemoryFact:
         """Immediately remove one fact after atomically checking its manager."""
         normalized_organization_id = normalize_organization_id(organization_id)
         deleted_at = normalize_memory_time(now)
         select_query = """
-            SELECT created_by, organization_id
+            SELECT created_by, organization_id, scope_type, scope_id, visibility
             FROM agent_memory_facts
             WHERE id = %s
               AND organization_id = %s
@@ -332,10 +382,20 @@ class PostgresMemoryStore:
                     or str(existing["organization_id"]) != normalized_organization_id
                 ):
                     raise KeyError(f"Memory fact {fact_id} was not found")
-                if not actor_is_admin and str(existing["created_by"]) != actor_id:
-                    raise PermissionError(
-                        "Memory fact can only be deleted by its creator"
-                    )
+                authorize_memory_fact_deletion(
+                    scope_type=cast(MemoryScopeType, str(existing["scope_type"])),
+                    scope_id=str(existing["scope_id"]),
+                    visibility=cast(
+                        MemoryVisibility,
+                        str(existing["visibility"]),
+                    ),
+                    fact_organization_id=str(existing["organization_id"]),
+                    actor_id=actor_id,
+                    actor_is_admin=actor_is_admin,
+                    organization_id=normalized_organization_id,
+                    project_id=project_id,
+                    actor_can_write_project=actor_can_write_project,
+                )
                 cursor.execute(
                     delete_query,
                     (

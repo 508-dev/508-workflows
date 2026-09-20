@@ -139,6 +139,50 @@ def test_remember_fact_inserts_tenant_hashed_provenance_and_default_retention() 
     assert before + timedelta(days=364) < params[13] < after + timedelta(days=366)
 
 
+def test_remember_fact_atomically_supersedes_an_owned_fact() -> None:
+    old_id = "0e5e5302-8d36-4bc8-954d-68332b36949a"
+    cursor = FakeCursor(
+        one_rows=[
+            {
+                "id": UUID(old_id),
+                "organization_id": "org-1",
+                "scope_type": "user",
+                "scope_id": "123",
+                "created_by": "123",
+                "deleted_at": None,
+            },
+            _row(),
+        ]
+    )
+    store = PostgresMemoryStore(connection_factory=lambda: FakeConnection(cursor))
+
+    fact = store.remember_fact(
+        organization_id="org-1",
+        scope_type="user",
+        scope_id="123",
+        key="timezone",
+        value_json={"text": "Asia/Taipei"},
+        visibility="private",
+        source_type="request",
+        source_ref="agent_request",
+        source_excerpt=None,
+        created_by="123",
+        verification_status="user_confirmed",
+        replaces_id=old_id,
+    )
+
+    assert fact.supersedes_id == old_id
+    select_query, select_params = cursor.calls[1]
+    update_query, update_params = cursor.calls[2]
+    insert_query, _ = cursor.calls[3]
+    assert "FOR UPDATE" in select_query
+    assert select_params == (old_id, "org-1")
+    assert "SET deleted_at = %s" in update_query
+    assert update_params is not None
+    assert update_params[2:] == (old_id, "org-1")
+    assert "INSERT INTO agent_memory_facts" in insert_query
+
+
 def test_list_facts_filters_by_tenant_visibility_soft_delete_and_expiry() -> None:
     now = datetime(2026, 7, 28, 9, 30, tzinfo=timezone.utc)
     cursor = FakeCursor(
@@ -297,7 +341,13 @@ def test_forget_fact_locks_then_physically_deletes_creator_fact_within_tenant() 
     now = datetime(2026, 7, 28, 10, 0, tzinfo=timezone.utc)
     cursor = FakeCursor(
         one_rows=[
-            {"created_by": "123", "organization_id": "org-1"},
+            {
+                "created_by": "123",
+                "organization_id": "org-1",
+                "scope_type": "user",
+                "scope_id": "123",
+                "visibility": "private",
+            },
             _row(),
         ]
     )
@@ -324,10 +374,20 @@ def test_forget_fact_locks_then_physically_deletes_creator_fact_within_tenant() 
 
 
 def test_forget_fact_does_not_update_another_users_fact() -> None:
-    cursor = FakeCursor(one_rows=[{"created_by": "456", "organization_id": "org-1"}])
+    cursor = FakeCursor(
+        one_rows=[
+            {
+                "created_by": "456",
+                "organization_id": "org-1",
+                "scope_type": "user",
+                "scope_id": "456",
+                "visibility": "private",
+            }
+        ]
+    )
     store = PostgresMemoryStore(connection_factory=lambda: FakeConnection(cursor))
 
-    with pytest.raises(PermissionError, match="deleted by its creator"):
+    with pytest.raises(PermissionError, match="belongs only to its owner"):
         store.forget_fact(
             organization_id="org-1",
             fact_id="0e5e5302-8d36-4bc8-954d-68332b36949b",
@@ -338,7 +398,17 @@ def test_forget_fact_does_not_update_another_users_fact() -> None:
 
 
 def test_forget_fact_hides_another_organizations_fact_from_admin() -> None:
-    cursor = FakeCursor(one_rows=[{"created_by": "123", "organization_id": "org-a"}])
+    cursor = FakeCursor(
+        one_rows=[
+            {
+                "created_by": "123",
+                "organization_id": "org-a",
+                "scope_type": "user",
+                "scope_id": "123",
+                "visibility": "private",
+            }
+        ]
+    )
     store = PostgresMemoryStore(connection_factory=lambda: FakeConnection(cursor))
 
     with pytest.raises(KeyError, match="was not found"):
@@ -353,6 +423,49 @@ def test_forget_fact_hides_another_organizations_fact_from_admin() -> None:
     assert "organization_id = %s" in select_query
     assert select_params == ("0e5e5302-8d36-4bc8-954d-68332b36949b", "org-b")
     assert len(cursor.calls) == 2
+
+
+def test_forget_fact_requires_current_project_write_access() -> None:
+    project_row = {
+        "created_by": "456",
+        "organization_id": "org-1",
+        "scope_type": "project",
+        "scope_id": "project-1",
+        "visibility": "project",
+    }
+    denied_cursor = FakeCursor(one_rows=[project_row])
+    denied_store = PostgresMemoryStore(
+        connection_factory=lambda: FakeConnection(denied_cursor)
+    )
+
+    with pytest.raises(PermissionError, match="current project access"):
+        denied_store.forget_fact(
+            organization_id="org-1",
+            fact_id="0e5e5302-8d36-4bc8-954d-68332b36949b",
+            actor_id="123",
+            project_id="project-1",
+            actor_can_write_project=False,
+        )
+
+    allowed_cursor = FakeCursor(
+        one_rows=[
+            project_row,
+            _row(scope_type="project", scope_id="project-1", visibility="project"),
+        ]
+    )
+    allowed_store = PostgresMemoryStore(
+        connection_factory=lambda: FakeConnection(allowed_cursor)
+    )
+    deleted = allowed_store.forget_fact(
+        organization_id="org-1",
+        fact_id="0e5e5302-8d36-4bc8-954d-68332b36949b",
+        actor_id="123",
+        project_id="project-1",
+        actor_can_write_project=True,
+    )
+
+    assert deleted.scope_type == "project"
+    assert "DELETE FROM agent_memory_facts" in allowed_cursor.calls[2][0]
 
 
 def test_list_facts_never_returns_another_organizations_row() -> None:
