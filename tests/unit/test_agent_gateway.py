@@ -2381,7 +2381,7 @@ def test_admin_can_propose_a_confirmed_recurring_agent_report() -> None:
     assert action.requires_confirmation is True
     assert action.required_scopes == ["agent:schedule:manage"]
     assert action.arguments["prompt"] == objective
-    assert "0 9 * * 1" in response.plan.human_summary
+    assert "0 9 \\* \\* 1" in response.plan.human_summary
     assert objective in response.plan.human_summary
     assert "Ignore this untrusted summary" not in response.plan.human_summary
 
@@ -3016,6 +3016,9 @@ def test_model_only_answer_is_limited_to_safe_chat_and_never_impersonation() -> 
         "What were our sales last month?",
         "How much profit did we make?",
         "How much did our costs increase?",
+        "What purchase orders are overdue?",
+        "Which sales orders are still open?",
+        "What expense claims are pending?",
     ],
 )
 def test_model_only_answer_cannot_claim_operational_status(message: str) -> None:
@@ -3074,6 +3077,47 @@ def test_live_planner_write_confirmation_renders_validated_arguments() -> None:
     assert '"title": "Rotate production keys"' in response.plan.human_summary
     assert '"assignee": "Mallory"' in response.plan.human_summary
     assert '"project": "Security"' in response.plan.human_summary
+
+
+def test_live_planner_confirmation_escapes_untrusted_discord_markdown() -> None:
+    class FakePlanner:
+        def plan(self, **_kwargs: object) -> AgentPlannerResult:
+            return AgentPlannerResult(
+                draft=PlannerDraft(
+                    status="planned",
+                    actions=[
+                        {
+                            "tool_name": "task_write.create_task",
+                            "arguments": {
+                                "title": (
+                                    "||hidden|| [masked](https://evil.example) "
+                                    "**urgent**\u202e\x00"
+                                )
+                            },
+                            "summary": "Untrusted planner summary",
+                        }
+                    ],
+                ),
+                model=AgentModelConfig().resolve("fast"),
+                latency_ms=1,
+            )
+
+    response = AgentOrchestrator(planner=FakePlanner()).plan(
+        "Please create the requested task.",
+        _context(),
+    )
+
+    assert response.status == "requires_confirmation"
+    assert response.plan is not None
+    summary = response.plan.human_summary
+    assert "||hidden||" not in summary
+    assert "[masked](https://evil.example)" not in summary
+    assert "**urgent**" not in summary
+    assert "\\|\\|hidden\\|\\|" in summary
+    assert "\\[masked\\]\\(https://evil.example\\)" in summary
+    assert "\\*\\*urgent\\*\\*" in summary
+    assert "\u202e" not in summary
+    assert "\x00" not in summary
 
 
 def test_agent_chat_strips_context_for_role_without_context_read_scope() -> None:

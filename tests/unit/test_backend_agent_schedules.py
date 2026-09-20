@@ -894,6 +894,27 @@ def test_scheduled_reports_escape_external_markdown_and_display_controls() -> No
     assert "javascript:" not in web_report
 
 
+def test_model_schedule_report_escapes_markdown_and_display_controls() -> None:
+    """A public observation cannot prompt-inject Discord report formatting."""
+
+    unsafe_summary = (
+        "# [Official](https://evil.example) **Update**\u202e\x00\n"
+        "Second ||concealed|| line"
+    )
+    report = api._agent_schedule_report_content(
+        schedule=replace(_schedule(), name="**Injected name**"),
+        results=[],
+        model_summary=unsafe_summary,
+    )
+
+    assert unsafe_summary not in report
+    assert "**Scheduled report: \\*\\*Injected name\\*\\***" in report
+    assert "\\# \\[Official\\]\\(https://evil.example\\) \\*\\*Update\\*\\*" in report
+    assert "Second \\|\\|concealed\\|\\| line" in report
+    assert "\u202e" not in report
+    assert "\x00" not in report
+
+
 def test_agent_loop_rejects_an_answer_before_any_scheduled_observation() -> None:
     """A scheduled report cannot publish a model-only answer."""
 

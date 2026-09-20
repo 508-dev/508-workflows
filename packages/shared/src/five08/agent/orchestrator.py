@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -99,11 +100,32 @@ _WEB_READ_TOOL_PREFIX = "web_read."
 _MAX_PLANNER_OBSERVATION_CHARS = 12_000
 _OPERATIONAL_DATA_SUBJECT_RE = re.compile(
     r"\b(?:invoices?|billing|erp(?:next)?|suppliers?|customers?|payments?|"
+    r"purchase\s+orders?|sales\s+orders?|quotations?|expense\s+claims?|"
+    r"journal\s+entr(?:y|ies)|delivery\s+notes?|(?:credit|debit)\s+notes?|"
+    r"payment\s+entr(?:y|ies)|material\s+requests?|stock\s+entr(?:y|ies)|"
     r"balances?|owing|owed|owes?|receivables?|revenue|sales|profit|costs?|"
     r"onboarding|crm|contacts?|members?|"
     r"tasks?|github|issues?|projects?|database|records?)\b",
     re.IGNORECASE,
 )
+_DISCORD_UNTRUSTED_MARKDOWN_CHARS = frozenset("\\*_~|`[]()#>")
+
+
+def _discord_safe_confirmation_text(value: str) -> str:
+    """Escape untrusted planner values before Discord confirmation display."""
+
+    without_controls = "".join(
+        character
+        for character in value
+        if unicodedata.category(character) not in {"Cc", "Cf", "Cs"}
+    )
+    without_angle_syntax = without_controls.replace("<", "‹")
+    return "".join(
+        f"\\{character}"
+        if character in _DISCORD_UNTRUSTED_MARKDOWN_CHARS
+        else character
+        for character in without_angle_syntax
+    )
 
 
 @dataclass
@@ -3150,7 +3172,8 @@ class AgentOrchestrator:
     def _validated_action_summary(action: AgentToolAction) -> str:
         """Render the exact post-validation payload shown for confirmation."""
 
-        return f"{action.tool_name}: {json.dumps(action.arguments, ensure_ascii=False, sort_keys=True)}"
+        arguments = json.dumps(action.arguments, ensure_ascii=False, sort_keys=True)
+        return f"{action.tool_name}: {_discord_safe_confirmation_text(arguments)}"
 
     @staticmethod
     def _agent_schedule_creation_summary(arguments: dict[str, object]) -> str:

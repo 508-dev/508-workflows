@@ -10914,6 +10914,27 @@ def _discord_safe_external_text(value: object, *, limit: int) -> str:
     )
 
 
+def _discord_safe_external_report_text(value: object, *, limit: int) -> str:
+    """Preserve report line breaks while neutralizing model-produced Markdown."""
+
+    raw = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    without_controls = "".join(
+        character
+        for character in raw
+        if character == "\n"
+        or unicodedata.category(character) not in {"Cc", "Cf", "Cs"}
+    )
+    normalized = "\n".join(
+        " ".join(line.split()) for line in without_controls.split("\n")
+    )
+    without_angle_syntax = normalized.replace("<", "‹")
+    escaped = "".join(
+        f"\\{character}" if character in _DISCORD_EXTERNAL_MARKDOWN_CHARS else character
+        for character in without_angle_syntax
+    )
+    return escaped[: max(0, limit)].rstrip()
+
+
 def _discord_safe_external_url(value: object, *, limit: int = 500) -> str:
     """Return one non-Markdown HTTP(S) autolink or omit an unsafe external URL."""
 
@@ -10946,7 +10967,10 @@ def _deterministic_agent_schedule_report(
     if schedule.definition.execution_mode is AgentScheduleExecutionMode.AGENT_LOOP:
         return _deterministic_agent_loop_report(schedule=schedule, results=results)
 
-    lines = [f"**Scheduled report: {_single_line(schedule.name, limit=120)}**"]
+    schedule_name = (
+        _discord_safe_external_text(schedule.name, limit=120) or "Recurring report"
+    )
+    lines = [f"**Scheduled report: {schedule_name}**"]
     for result in results:
         if getattr(result, "tool_name", "") != "github_issue.search_issues":
             continue
@@ -10991,7 +11015,10 @@ def _deterministic_agent_loop_report(
 ) -> str:
     """Render aggregate-only internal results to a Discord channel."""
 
-    lines = [f"**Scheduled report: {_single_line(schedule.name, limit=120)}**"]
+    schedule_name = (
+        _discord_safe_external_text(schedule.name, limit=120) or "Recurring report"
+    )
+    lines = [f"**Scheduled report: {schedule_name}**"]
     for result in results:
         if getattr(result, "status", "") != "succeeded":
             continue
@@ -11116,13 +11143,19 @@ def _agent_schedule_report_content(
     results: list[Any],
     model_summary: str | None,
 ) -> str:
-    body = model_summary or _deterministic_agent_schedule_report(
-        schedule=schedule,
-        results=results,
-    )
     if model_summary:
-        body = (
-            f"**Scheduled report: {_single_line(schedule.name, limit=120)}**\n\n{body}"
+        schedule_name = (
+            _discord_safe_external_text(schedule.name, limit=120) or "Recurring report"
+        )
+        safe_summary = _discord_safe_external_report_text(
+            model_summary,
+            limit=_AGENT_SCHEDULE_REPORT_MAX_CHARS,
+        )
+        body = f"**Scheduled report: {schedule_name}**\n\n{safe_summary}"
+    else:
+        body = _deterministic_agent_schedule_report(
+            schedule=schedule,
+            results=results,
         )
     return body[:_AGENT_SCHEDULE_REPORT_MAX_CHARS].rstrip()
 
