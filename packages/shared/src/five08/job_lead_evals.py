@@ -1,0 +1,1267 @@
+"""Golden-corpus evals for contractor-friendly job-lead classification."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import statistics
+import subprocess
+import sys
+import time
+from collections import defaultdict
+from collections.abc import Callable, Mapping, Sequence
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Literal
+
+import requests
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from five08.job_lead_sources import (
+    JobLeadClassifier,
+    JobLeadLLMClassificationResponse,
+    _classification_from_llm_response,
+    classify_contractor_lead_heuristic,
+)
+from five08.model_catalog import model_chat_completion_options
+from five08.tls import default_ca_bundle_path
+
+PostingType = Literal[
+    "part_time",
+    "full_time",
+    "part_time_or_full_time",
+    "unknown",
+]
+EvalProfile = Literal["heuristic", "jev", "luna"]
+
+DEFAULT_CORPUS_PATH = Path(
+    "tests/evals/job-lead-classification/fixtures/v1/corpus.json"
+)
+DEFAULT_OUTPUT_DIR = Path("tests/evals/job-lead-classification/reports")
+DEFAULT_JEV_MODEL = "typesafe/jev-1.13"
+DEFAULT_LLM_MODEL = "openai/gpt-5.6-luna"
+OPENROUTER_DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions"
+OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
+_RETRYABLE_STATUS_CODES = frozenset({408, 409, 429, 500, 502, 503, 504, 529})
+_POSTING_TYPES: tuple[PostingType, ...] = (
+    "part_time",
+    "full_time",
+    "part_time_or_full_time",
+    "unknown",
+)
+
+
+class JobLeadEvalCase(BaseModel):
+    """One manually labeled classification example."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(pattern=r"^[a-z0-9_]+$")
+    group: Literal["core", "challenge"]
+    text: str = Field(min_length=1)
+    expected_posting_type: PostingType
+    expected_contractor_friendly: bool
+    tags: list[str] = Field(default_factory=list)
+    rationale: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_derived_label(self) -> JobLeadEvalCase:
+        expected = self.expected_posting_type in {
+            "part_time",
+            "part_time_or_full_time",
+        }
+        if self.expected_contractor_friendly != expected:
+            raise ValueError(
+                "expected_contractor_friendly must be derived from expected_posting_type"
+            )
+        return self
+
+
+class JobLeadEvalCorpus(BaseModel):
+    """Versioned, reviewable job-lead classification corpus."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: Literal["job-lead-classification.v1"]
+    description: str
+    cases: list[JobLeadEvalCase] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_unique_ids(self) -> JobLeadEvalCorpus:
+        ids = [case.id for case in self.cases]
+        if len(ids) != len(set(ids)):
+            raise ValueError("case ids must be unique")
+        return self
+
+
+class JobLeadEvalObservation(BaseModel):
+    """Normalized result from one classifier invocation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    profile: EvalProfile
+    case_id: str
+    group: Literal["core", "challenge"]
+    repeat: int = Field(ge=1)
+    requested_model: str | None = None
+    resolved_model: str | None = None
+    provider: str | None = None
+    expected_posting_type: PostingType
+    expected_contractor_friendly: bool
+    predicted_posting_type: PostingType | None = None
+    predicted_contractor_friendly: bool | None = None
+    contractor_probability: float | None = Field(default=None, ge=0.0, le=1.0)
+    classification_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    posting_probabilities: dict[str, float] = Field(default_factory=dict)
+    latency_ms: int = Field(ge=0)
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+    total_tokens: int = Field(default=0, ge=0)
+    cost_usd: float | None = Field(default=None, ge=0.0)
+    request_attempts: int = Field(default=1, ge=1)
+    error: str | None = None
+
+    @property
+    def succeeded(self) -> bool:
+        return (
+            self.error is None
+            and self.predicted_posting_type is not None
+            and self.predicted_contractor_friendly is not None
+        )
+
+
+class JobLeadEvalReport(BaseModel):
+    """Serializable eval report."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: Literal["job-lead-eval-report.v1"] = "job-lead-eval-report.v1"
+    evaluated_at: datetime
+    runtime_revision: str | None
+    corpus_version: str
+    corpus_path: str
+    case_count: int
+    network_repeats: int
+    requested_models: dict[str, str]
+    summary: dict[str, dict[str, Any]]
+    observations: list[JobLeadEvalObservation]
+
+
+def load_job_lead_eval_corpus(path: Path = DEFAULT_CORPUS_PATH) -> JobLeadEvalCorpus:
+    """Load and validate the checked-in golden corpus."""
+
+    return JobLeadEvalCorpus.model_validate_json(path.read_text())
+
+
+def jev_questions() -> dict[str, dict[str, Any]]:
+    """Return the stable Jev decision contract for this eval."""
+
+    return {
+        "contractor_friendly": {
+            "type": "noul",
+            "instructions": (
+                "Is this a direct employer or recruiter job posting that explicitly "
+                "offers contract, contractor, freelance, consulting, fractional, "
+                "1099, B2B contracting, or part-time work? Answer false for "
+                "full-time employee-only roles, people seeking work, replies, closed "
+                "roles, and company products or customer contracts."
+            ),
+        },
+        "posting_type": {
+            "type": "choice",
+            "instructions": (
+                "What employment arrangement does this direct job posting explicitly offer?"
+            ),
+            "criteria": {
+                "part_time": (
+                    "Contract, contractor, freelance, consulting, fractional, 1099, "
+                    "B2B contracting, or part-time work, without a full-time option."
+                ),
+                "full_time": (
+                    "Full-time or permanent employee work only, with no contract or "
+                    "part-time option."
+                ),
+                "part_time_or_full_time": (
+                    "Explicitly offers both full-time employment and contract, "
+                    "freelance, consulting, or part-time work."
+                ),
+                "unknown": (
+                    "Not a direct current job posting, or the employment arrangement "
+                    "is not stated clearly."
+                ),
+            },
+        },
+    }
+
+
+def run_job_lead_eval_suite(
+    *,
+    corpus: JobLeadEvalCorpus,
+    corpus_path: Path = DEFAULT_CORPUS_PATH,
+    profiles: Sequence[EvalProfile],
+    openrouter_api_key: str | None,
+    jev_model: str = DEFAULT_JEV_MODEL,
+    llm_model: str = DEFAULT_LLM_MODEL,
+    network_repeats: int = 1,
+    timeout_seconds: float = 30.0,
+    max_attempts: int = 3,
+    progress: Callable[[str], None] | None = None,
+) -> JobLeadEvalReport:
+    """Run the requested classifiers against the same labeled corpus."""
+
+    if network_repeats < 1:
+        raise ValueError("network_repeats must be at least 1")
+    network_profiles = {"jev", "luna"}.intersection(profiles)
+    if network_profiles and not openrouter_api_key:
+        raise ValueError("OPENROUTER_API_KEY is required for Jev or Luna evals")
+
+    observations: list[JobLeadEvalObservation] = []
+    for profile in profiles:
+        repeats = 1 if profile == "heuristic" else network_repeats
+        total = len(corpus.cases) * repeats
+        completed = 0
+        session = requests.Session() if profile != "heuristic" else None
+        try:
+            for repeat in range(1, repeats + 1):
+                for case in corpus.cases:
+                    completed += 1
+                    if progress and (
+                        completed == 1 or completed % 10 == 0 or completed == total
+                    ):
+                        progress(f"{profile}: {completed}/{total}")
+                    observations.append(
+                        _run_case(
+                            profile=profile,
+                            case=case,
+                            repeat=repeat,
+                            session=session,
+                            api_key=openrouter_api_key,
+                            jev_model=jev_model,
+                            llm_model=llm_model,
+                            timeout_seconds=timeout_seconds,
+                            max_attempts=max_attempts,
+                        )
+                    )
+        finally:
+            if session is not None:
+                session.close()
+
+    summary: dict[str, dict[str, Any]] = {
+        profile: summarize_profile(
+            [item for item in observations if item.profile == profile],
+            case_count=len(corpus.cases),
+        )
+        for profile in profiles
+    }
+    return JobLeadEvalReport(
+        evaluated_at=datetime.now(timezone.utc),
+        runtime_revision=_git_revision(),
+        corpus_version=corpus.version,
+        corpus_path=str(corpus_path),
+        case_count=len(corpus.cases),
+        network_repeats=network_repeats,
+        requested_models={"jev": jev_model, "luna": llm_model},
+        summary=summary,
+        observations=observations,
+    )
+
+
+def _run_case(
+    *,
+    profile: EvalProfile,
+    case: JobLeadEvalCase,
+    repeat: int,
+    session: requests.Session | None,
+    api_key: str | None,
+    jev_model: str,
+    llm_model: str,
+    timeout_seconds: float,
+    max_attempts: int,
+) -> JobLeadEvalObservation:
+    started = time.perf_counter()
+    try:
+        if profile == "heuristic":
+            return _run_heuristic(case=case, repeat=repeat, started=started)
+        if session is None or api_key is None:
+            raise RuntimeError("OpenRouter session or API key is unavailable")
+        if profile == "jev":
+            return _run_jev(
+                case=case,
+                repeat=repeat,
+                session=session,
+                api_key=api_key,
+                model=jev_model,
+                timeout_seconds=timeout_seconds,
+                max_attempts=max_attempts,
+                started=started,
+            )
+        return _run_luna(
+            case=case,
+            repeat=repeat,
+            session=session,
+            api_key=api_key,
+            model=llm_model,
+            timeout_seconds=timeout_seconds,
+            max_attempts=max_attempts,
+            started=started,
+        )
+    except Exception as exc:
+        return _base_observation(
+            profile=profile,
+            case=case,
+            repeat=repeat,
+            latency_ms=_elapsed_ms(started),
+            requested_model={"jev": jev_model, "luna": llm_model}.get(profile),
+            error=_safe_error(exc),
+        )
+
+
+def _run_heuristic(
+    *,
+    case: JobLeadEvalCase,
+    repeat: int,
+    started: float,
+) -> JobLeadEvalObservation:
+    classification = classify_contractor_lead_heuristic(case.text)
+    return _base_observation(
+        profile="heuristic",
+        case=case,
+        repeat=repeat,
+        latency_ms=_elapsed_ms(started),
+        predicted_posting_type=classification.posting_type.value,
+        predicted_contractor_friendly=classification.is_contractor_friendly,
+        classification_confidence=classification.confidence,
+    )
+
+
+def _run_jev(
+    *,
+    case: JobLeadEvalCase,
+    repeat: int,
+    session: requests.Session,
+    api_key: str,
+    model: str,
+    timeout_seconds: float,
+    max_attempts: int,
+    started: float,
+) -> JobLeadEvalObservation:
+    body, attempts = _post_json_with_retries(
+        session=session,
+        url=OPENROUTER_DECISIONS_URL,
+        api_key=api_key,
+        payload={
+            "model": model,
+            "state": case.text,
+            "questions": jev_questions(),
+        },
+        timeout_seconds=timeout_seconds,
+        max_attempts=max_attempts,
+    )
+    answers = _mapping(body.get("answers"), name="answers")
+    contractor_answer = _mapping(
+        answers.get("contractor_friendly"), name="answers.contractor_friendly"
+    )
+    posting_answer = _mapping(answers.get("posting_type"), name="answers.posting_type")
+    contractor_probability = _probability(
+        contractor_answer.get("noul"), name="answers.contractor_friendly.noul"
+    )
+    posting_type = _posting_type(
+        posting_answer.get("choice"), name="answers.posting_type.choice"
+    )
+    posting_probabilities = _probabilities(
+        posting_answer.get("probabilities"), name="answers.posting_type.probabilities"
+    )
+    confidence = _optional_probability(posting_answer.get("confidence"))
+    usage = _usage(body.get("usage"))
+    return _base_observation(
+        profile="jev",
+        case=case,
+        repeat=repeat,
+        requested_model=model,
+        resolved_model=_optional_text(body.get("model")),
+        provider=_optional_text(body.get("provider")),
+        predicted_posting_type=posting_type,
+        predicted_contractor_friendly=contractor_probability >= 0.5,
+        contractor_probability=contractor_probability,
+        classification_confidence=confidence,
+        posting_probabilities=posting_probabilities,
+        latency_ms=_elapsed_ms(started),
+        request_attempts=attempts,
+        **usage,
+    )
+
+
+def _run_luna(
+    *,
+    case: JobLeadEvalCase,
+    repeat: int,
+    session: requests.Session,
+    api_key: str,
+    model: str,
+    timeout_seconds: float,
+    max_attempts: int,
+    started: float,
+) -> JobLeadEvalObservation:
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": JobLeadClassifier._messages(case.text),
+        "response_format": {"type": "json_object"},
+    }
+    options = model_chat_completion_options(model)
+    max_tokens_parameter = options.get("max_tokens_parameter")
+    if isinstance(max_tokens_parameter, str) and max_tokens_parameter:
+        payload[max_tokens_parameter] = 700
+    else:
+        payload["max_tokens"] = 700
+    reasoning_effort = options.get("reasoning_effort")
+    if isinstance(reasoning_effort, str) and reasoning_effort:
+        payload["reasoning_effort"] = reasoning_effort
+    verbosity = options.get("verbosity")
+    if isinstance(verbosity, str) and verbosity:
+        payload["verbosity"] = verbosity
+    if options.get("supports_temperature", True):
+        payload["temperature"] = 0
+
+    body, attempts = _post_json_with_retries(
+        session=session,
+        url=OPENROUTER_CHAT_URL,
+        api_key=api_key,
+        payload=payload,
+        timeout_seconds=timeout_seconds,
+        max_attempts=max_attempts,
+    )
+    raw_content = _chat_content(body)
+    response = JobLeadLLMClassificationResponse.model_validate(
+        _parse_json_object(raw_content)
+    )
+    classification = _classification_from_llm_response(response, case.text)
+    probability = (
+        classification.confidence
+        if classification.is_contractor_friendly
+        else 1.0 - classification.confidence
+    )
+    usage = _usage(body.get("usage"))
+    return _base_observation(
+        profile="luna",
+        case=case,
+        repeat=repeat,
+        requested_model=model,
+        resolved_model=_optional_text(body.get("model")),
+        provider=_optional_text(body.get("provider")),
+        predicted_posting_type=classification.posting_type.value,
+        predicted_contractor_friendly=classification.is_contractor_friendly,
+        contractor_probability=max(0.0, min(1.0, probability)),
+        classification_confidence=classification.confidence,
+        latency_ms=_elapsed_ms(started),
+        request_attempts=attempts,
+        **usage,
+    )
+
+
+def _base_observation(
+    *,
+    profile: EvalProfile,
+    case: JobLeadEvalCase,
+    repeat: int,
+    latency_ms: int,
+    requested_model: str | None = None,
+    resolved_model: str | None = None,
+    provider: str | None = None,
+    predicted_posting_type: str | None = None,
+    predicted_contractor_friendly: bool | None = None,
+    contractor_probability: float | None = None,
+    classification_confidence: float | None = None,
+    posting_probabilities: dict[str, float] | None = None,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    total_tokens: int = 0,
+    cost_usd: float | None = None,
+    request_attempts: int = 1,
+    error: str | None = None,
+) -> JobLeadEvalObservation:
+    normalized_posting_type = (
+        _posting_type(predicted_posting_type, name="predicted_posting_type")
+        if predicted_posting_type is not None
+        else None
+    )
+    return JobLeadEvalObservation(
+        profile=profile,
+        case_id=case.id,
+        group=case.group,
+        repeat=repeat,
+        requested_model=requested_model,
+        resolved_model=resolved_model,
+        provider=provider,
+        expected_posting_type=case.expected_posting_type,
+        expected_contractor_friendly=case.expected_contractor_friendly,
+        predicted_posting_type=normalized_posting_type,
+        predicted_contractor_friendly=predicted_contractor_friendly,
+        contractor_probability=contractor_probability,
+        classification_confidence=classification_confidence,
+        posting_probabilities=posting_probabilities or {},
+        latency_ms=latency_ms,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+        cost_usd=cost_usd,
+        request_attempts=request_attempts,
+        error=error,
+    )
+
+
+def summarize_profile(
+    observations: Sequence[JobLeadEvalObservation],
+    *,
+    case_count: int,
+) -> dict[str, Any]:
+    """Calculate exact-label, binary, stability, latency, and cost metrics."""
+
+    successful = [item for item in observations if item.succeeded]
+    contractor_correct = sum(
+        item.predicted_contractor_friendly == item.expected_contractor_friendly
+        for item in successful
+    )
+    posting_correct = sum(
+        item.predicted_posting_type == item.expected_posting_type for item in successful
+    )
+    joint_correct = sum(
+        item.predicted_contractor_friendly == item.expected_contractor_friendly
+        and item.predicted_posting_type == item.expected_posting_type
+        for item in successful
+    )
+    true_positive = sum(
+        item.expected_contractor_friendly and item.predicted_contractor_friendly is True
+        for item in successful
+    )
+    false_positive = sum(
+        not item.expected_contractor_friendly
+        and item.predicted_contractor_friendly is True
+        for item in successful
+    )
+    false_negative = sum(
+        item.expected_contractor_friendly
+        and item.predicted_contractor_friendly is False
+        for item in successful
+    )
+    precision = _ratio(true_positive, true_positive + false_positive)
+    recall = _ratio(true_positive, true_positive + false_negative)
+    f1 = _f1(precision, recall)
+    posting_labels = {
+        label: _label_metrics(successful, label) for label in _POSTING_TYPES
+    }
+    posting_macro_f1 = round(
+        statistics.fmean(metrics["f1"] for metrics in posting_labels.values()), 4
+    )
+    latencies = [item.latency_ms for item in successful]
+    cost_values = [item.cost_usd for item in successful if item.cost_usd is not None]
+    profile = observations[0].profile if observations else None
+    expected_api_results = len(successful) if profile in {"jev", "luna"} else 0
+    total_cost: float | None
+    if profile == "heuristic":
+        total_cost = 0.0
+    elif len(cost_values) == expected_api_results:
+        total_cost = round(sum(cost_values), 8)
+    else:
+        total_cost = None
+
+    by_group: dict[str, dict[str, Any]] = {}
+    for group in ("core", "challenge"):
+        items = [item for item in successful if item.group == group]
+        by_group[group] = {
+            "calls": len(items),
+            "contractor_accuracy": _ratio(
+                sum(
+                    item.predicted_contractor_friendly
+                    == item.expected_contractor_friendly
+                    for item in items
+                ),
+                len(items),
+            ),
+            "posting_accuracy": _ratio(
+                sum(
+                    item.predicted_posting_type == item.expected_posting_type
+                    for item in items
+                ),
+                len(items),
+            ),
+            "joint_accuracy": _ratio(
+                sum(
+                    item.predicted_contractor_friendly
+                    == item.expected_contractor_friendly
+                    and item.predicted_posting_type == item.expected_posting_type
+                    for item in items
+                ),
+                len(items),
+            ),
+        }
+
+    grouped: dict[str, list[JobLeadEvalObservation]] = defaultdict(list)
+    for item in successful:
+        grouped[item.case_id].append(item)
+    repeated_groups = [items for items in grouped.values() if len(items) > 1]
+    stable_cases = sum(
+        len(
+            {
+                (
+                    item.predicted_contractor_friendly,
+                    item.predicted_posting_type,
+                )
+                for item in items
+            }
+        )
+        == 1
+        for items in repeated_groups
+    )
+    probability_spans = [
+        max(probabilities) - min(probabilities)
+        for items in repeated_groups
+        if len(
+            probabilities := [
+                item.contractor_probability
+                for item in items
+                if item.contractor_probability is not None
+            ]
+        )
+        > 1
+    ]
+    probability_items: list[JobLeadEvalObservation] = []
+    brier_inputs: list[tuple[float, bool]] = []
+    for item in successful:
+        probability = item.contractor_probability
+        if probability is None:
+            continue
+        probability_items.append(item)
+        brier_inputs.append((probability, item.expected_contractor_friendly))
+    brier_score = (
+        round(
+            statistics.fmean(
+                (probability - float(expected)) ** 2
+                for probability, expected in brier_inputs
+            ),
+            6,
+        )
+        if brier_inputs
+        else None
+    )
+
+    failures = _failure_examples(successful)
+    return {
+        "case_count": case_count,
+        "calls": len(observations),
+        "successful_calls": len(successful),
+        "hard_failures": len(observations) - len(successful),
+        "contractor_accuracy": _ratio(contractor_correct, len(successful)),
+        "contractor_precision": precision,
+        "contractor_recall": recall,
+        "contractor_f1": f1,
+        "contractor_false_positives": false_positive,
+        "contractor_false_negatives": false_negative,
+        "posting_accuracy": _ratio(posting_correct, len(successful)),
+        "posting_macro_f1": posting_macro_f1,
+        "posting_labels": posting_labels,
+        "joint_accuracy": _ratio(joint_correct, len(successful)),
+        "by_group": by_group,
+        "repeatability": {
+            "repeated_cases": len(repeated_groups),
+            "stable_cases": stable_cases,
+            "stable_rate": (
+                _ratio(stable_cases, len(repeated_groups)) if repeated_groups else None
+            ),
+            "mean_probability_span": (
+                round(statistics.fmean(probability_spans), 6)
+                if probability_spans
+                else None
+            ),
+            "max_probability_span": (
+                round(max(probability_spans), 6) if probability_spans else None
+            ),
+        },
+        "brier_score": brier_score,
+        "confidence_thresholds": _confidence_thresholds(probability_items),
+        "latency_ms": {
+            "mean": round(statistics.fmean(latencies), 1) if latencies else None,
+            "p50": _percentile(latencies, 0.50),
+            "p95": _percentile(latencies, 0.95),
+            "max": max(latencies) if latencies else None,
+        },
+        "usage": {
+            "input_tokens": sum(item.input_tokens for item in successful),
+            "output_tokens": sum(item.output_tokens for item in successful),
+            "total_tokens": sum(item.total_tokens for item in successful),
+            "cost_usd": total_cost,
+            "request_attempts": sum(item.request_attempts for item in observations),
+        },
+        "resolved_models": sorted(
+            {item.resolved_model for item in successful if item.resolved_model}
+        ),
+        "providers": sorted({item.provider for item in successful if item.provider}),
+        "failure_examples": failures,
+        "error_examples": [
+            {"case_id": item.case_id, "repeat": item.repeat, "error": item.error}
+            for item in observations
+            if not item.succeeded
+        ][:12],
+    }
+
+
+def render_job_lead_eval_report(report: JobLeadEvalReport) -> str:
+    """Render a compact, reviewable Markdown report."""
+
+    lines = [
+        "# Jev job-lead classification evaluation",
+        "",
+        f"- Evaluated: {report.evaluated_at.date().isoformat()}",
+        f"- Runtime revision: `{report.runtime_revision or 'unknown'}`",
+        f"- Corpus: `{report.corpus_path}` ({report.case_count} cases)",
+        f"- Network repeats per case: {report.network_repeats}",
+        f"- Jev request model: `{report.requested_models['jev']}`",
+        f"- LLM baseline: `{report.requested_models['luna']}`",
+        "",
+        "## Results",
+        "",
+        "| Profile | Successful calls | Contractor F1 | Posting accuracy | Joint accuracy | Stable cases | Latency p50 / p95 / max | Input tokens | Reported cost |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for profile, summary in report.summary.items():
+        stability = summary["repeatability"]
+        stable = (
+            f"{stability['stable_cases']}/{stability['repeated_cases']}"
+            if stability["repeated_cases"]
+            else "deterministic"
+        )
+        latency = summary["latency_ms"]
+        cost = summary["usage"]["cost_usd"]
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    profile,
+                    f"{summary['successful_calls']}/{summary['calls']}",
+                    _percent(summary["contractor_f1"]),
+                    _percent(summary["posting_accuracy"]),
+                    _percent(summary["joint_accuracy"]),
+                    stable,
+                    f"{latency['p50']} / {latency['p95']} / {latency['max']} ms",
+                    str(summary["usage"]["input_tokens"]),
+                    _money(cost),
+                ]
+            )
+            + " |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "The heuristic is local code, so its latency and zero cost are not an API-to-API comparison. Joint accuracy requires both the contractor-friendly boolean and the four-way posting type to match the golden label.",
+            "",
+            "## Core versus challenge cases",
+            "",
+            "| Profile | Core joint accuracy | Challenge joint accuracy | False positives | False negatives |",
+            "| --- | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for profile, summary in report.summary.items():
+        lines.append(
+            f"| {profile} | {_percent(summary['by_group']['core']['joint_accuracy'])} "
+            f"| {_percent(summary['by_group']['challenge']['joint_accuracy'])} "
+            f"| {summary['contractor_false_positives']} "
+            f"| {summary['contractor_false_negatives']} |"
+        )
+
+    jev_summary = report.summary.get("jev")
+    if jev_summary and jev_summary.get("confidence_thresholds"):
+        lines.extend(
+            [
+                "",
+                "## Jev confidence gate",
+                "",
+                "A symmetric gate accepts positive decisions at or above the threshold, negative decisions at or below `1 - threshold`, and falls back for the middle band.",
+                "",
+                "| Threshold | Coverage | Accuracy when accepted | False positives | False negatives |",
+                "| ---: | ---: | ---: | ---: | ---: |",
+            ]
+        )
+        for item in jev_summary["confidence_thresholds"]:
+            lines.append(
+                f"| {item['threshold']:.2f} | {_percent(item['coverage'])} "
+                f"| {_percent(item['accuracy'])} | {item['false_positives']} "
+                f"| {item['false_negatives']} |"
+            )
+        lines.extend(
+            [
+                "",
+                f"Jev contractor-probability Brier score: `{jev_summary['brier_score']}`. Lower is better.",
+            ]
+        )
+
+    lines.extend(["", "## Classification mismatches", ""])
+    any_failures = False
+    for profile, summary in report.summary.items():
+        failures = summary["failure_examples"]
+        if not failures:
+            continue
+        any_failures = True
+        lines.extend(
+            [
+                f"### {profile}",
+                "",
+                "| Case | Runs | Expected | Observed | Contractor probability |",
+                "| --- | ---: | --- | --- | ---: |",
+            ]
+        )
+        for item in failures[:16]:
+            lines.append(
+                f"| `{item['case_id']}` | {item['count']} "
+                f"| {item['expected']} | {item['observed']} "
+                f"| {item['contractor_probability']} |"
+            )
+        lines.append("")
+    if not any_failures:
+        lines.append("No classification mismatches were observed.")
+
+    lines.extend(
+        [
+            "",
+            "## Method and limitations",
+            "",
+            "- The corpus is a balanced, synthetic challenge set derived from the production label contract. It deliberately over-represents negation, commercial uses of the word `contract`, non-posts, and prompt-injection-like text; it does not estimate live HN prevalence.",
+            "- Golden labels are exact and scoring is deterministic. No model judges another model.",
+            "- Jev uses OpenRouter's Decisions endpoint and the pinned `typesafe/jev-1.13` request ID. The resolved dated snapshot is retained in the JSON observation report.",
+            "- The Luna baseline uses the production job-lead prompt and schema through OpenRouter, but this run does not change production routing.",
+            "- Provider-reported costs cover successful retained calls. Retried failed requests may not expose usage and therefore may be absent from cost totals.",
+            "- Raw observations are generated under the gitignored reports directory; this Markdown summary intentionally excludes provider payloads and secrets.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def write_job_lead_eval_report(
+    report: JobLeadEvalReport,
+    *,
+    output_dir: Path,
+    summary_path: Path | None = None,
+) -> None:
+    """Write ignored detailed observations and an optional durable summary."""
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "observed.json").write_text(report.model_dump_json(indent=2) + "\n")
+    markdown = render_job_lead_eval_report(report)
+    (output_dir / "score.md").write_text(markdown)
+    if summary_path is not None:
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        summary_path.write_text(markdown)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """CLI entry point for the job-lead classification eval."""
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS_PATH)
+    parser.add_argument("--profiles", default="heuristic,jev,luna")
+    parser.add_argument("--jev-model", default=DEFAULT_JEV_MODEL)
+    parser.add_argument("--llm-model", default=DEFAULT_LLM_MODEL)
+    parser.add_argument("--repeats", type=int, default=1)
+    parser.add_argument("--timeout-seconds", type=float, default=30.0)
+    parser.add_argument("--max-attempts", type=int, default=3)
+    parser.add_argument("--env-file", type=Path, default=Path(".env"))
+    parser.add_argument("--no-env-file", action="store_true")
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument("--summary-path", type=Path)
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--no-write", action="store_true")
+    args = parser.parse_args(argv)
+
+    if not args.no_env_file:
+        load_env_file(args.env_file)
+    profiles = _parse_profiles(args.profiles)
+    corpus = load_job_lead_eval_corpus(args.corpus)
+    report = run_job_lead_eval_suite(
+        corpus=corpus,
+        corpus_path=args.corpus,
+        profiles=profiles,
+        openrouter_api_key=_env("OPENROUTER_API_KEY"),
+        jev_model=args.jev_model,
+        llm_model=args.llm_model,
+        network_repeats=args.repeats,
+        timeout_seconds=args.timeout_seconds,
+        max_attempts=args.max_attempts,
+        progress=lambda message: print(message, file=sys.stderr, flush=True),
+    )
+    if not args.no_write:
+        write_job_lead_eval_report(
+            report,
+            output_dir=args.output_dir,
+            summary_path=args.summary_path,
+        )
+    if args.json:
+        print(report.model_dump_json(indent=2))
+    else:
+        print(render_job_lead_eval_report(report))
+    return 1 if any(item["hard_failures"] for item in report.summary.values()) else 0
+
+
+def load_env_file(path: Path) -> None:
+    """Load simple KEY=VALUE entries without overriding exported values."""
+
+    if not path.exists():
+        return
+    for line in path.read_text().splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, raw_value = stripped.split("=", 1)
+        key = key.strip()
+        if not key or key in os.environ:
+            continue
+        value = raw_value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        os.environ[key] = value
+
+
+def _post_json_with_retries(
+    *,
+    session: requests.Session,
+    url: str,
+    api_key: str,
+    payload: dict[str, Any],
+    timeout_seconds: float,
+    max_attempts: int,
+) -> tuple[dict[str, Any], int]:
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be at least 1")
+    response: requests.Response | None = None
+    for attempt in range(1, max_attempts + 1):
+        response = session.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "X-OpenRouter-Title": "508.dev Job Lead Eval",
+            },
+            json=payload,
+            timeout=timeout_seconds,
+            verify=default_ca_bundle_path(),
+        )
+        if (
+            response.status_code not in _RETRYABLE_STATUS_CODES
+            or attempt == max_attempts
+        ):
+            break
+        time.sleep(_retry_delay(response, attempt))
+    if response is None:
+        raise RuntimeError("OpenRouter request did not produce a response")
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise ValueError(
+            f"OpenRouter returned non-JSON HTTP {response.status_code}"
+        ) from exc
+    if not response.ok:
+        error = body.get("error") if isinstance(body, dict) else None
+        if isinstance(error, dict):
+            message = _optional_text(error.get("message")) or "unknown error"
+        else:
+            message = _optional_text(error) or "unknown error"
+        raise RuntimeError(f"OpenRouter HTTP {response.status_code}: {message[:300]}")
+    if not isinstance(body, dict):
+        raise ValueError("OpenRouter response must be a JSON object")
+    return body, attempt
+
+
+def _retry_delay(response: requests.Response, attempt: int) -> float:
+    retry_after = response.headers.get("retry-after")
+    if retry_after:
+        try:
+            return max(0.0, min(float(retry_after), 15.0))
+        except ValueError:
+            pass
+    return min(float(2 ** (attempt - 1)), 8.0)
+
+
+def _mapping(value: Any, *, name: str) -> Mapping[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{name} must be an object")
+    return value
+
+
+def _posting_type(value: Any, *, name: str) -> PostingType:
+    if value not in _POSTING_TYPES:
+        raise ValueError(f"{name} has unsupported value: {value!r}")
+    return value
+
+
+def _probability(value: Any, *, name: str) -> float:
+    probability = _optional_probability(value)
+    if probability is None:
+        raise ValueError(f"{name} must be a probability")
+    return probability
+
+
+def _optional_probability(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    probability = float(value)
+    return probability if 0.0 <= probability <= 1.0 else None
+
+
+def _probabilities(value: Any, *, name: str) -> dict[str, float]:
+    source = _mapping(value, name=name)
+    probabilities = {
+        str(key): probability
+        for key, raw in source.items()
+        if (probability := _optional_probability(raw)) is not None
+    }
+    if not set(_POSTING_TYPES).issubset(probabilities):
+        raise ValueError(f"{name} must include all posting types")
+    return probabilities
+
+
+def _chat_content(body: dict[str, Any]) -> str:
+    choices = body.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise ValueError("OpenRouter chat response has no choices")
+    first = choices[0]
+    if not isinstance(first, dict):
+        raise ValueError("OpenRouter first choice must be an object")
+    message = first.get("message")
+    if not isinstance(message, dict):
+        raise ValueError("OpenRouter first choice has no message")
+    content = message.get("content")
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("OpenRouter first choice has no text content")
+    return content.strip()
+
+
+def _parse_json_object(raw: str) -> dict[str, Any]:
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start < 0 or end <= start:
+            raise
+        value = json.loads(raw[start : end + 1])
+    if not isinstance(value, dict):
+        raise ValueError("Expected a JSON object from the LLM baseline")
+    return value
+
+
+def _usage(value: Any) -> dict[str, Any]:
+    source = value if isinstance(value, dict) else {}
+    input_tokens = _integer(source.get("input_tokens", source.get("prompt_tokens")))
+    output_tokens = _integer(
+        source.get("output_tokens", source.get("completion_tokens"))
+    )
+    total_tokens = _integer(source.get("total_tokens")) or input_tokens + output_tokens
+    cost = source.get("cost")
+    cost_usd = (
+        float(cost) if isinstance(cost, int | float | str) and _is_float(cost) else None
+    )
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+        "cost_usd": cost_usd,
+    }
+
+
+def _integer(value: Any) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int | float):
+        return max(0, int(value))
+    return 0
+
+
+def _is_float(value: Any) -> bool:
+    try:
+        float(value)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _safe_error(exc: Exception) -> str:
+    return f"{type(exc).__name__}: {str(exc)[:500]}"
+
+
+def _ratio(numerator: int, denominator: int) -> float:
+    return round(numerator / denominator, 4) if denominator else 0.0
+
+
+def _f1(precision: float, recall: float) -> float:
+    if precision + recall == 0:
+        return 0.0
+    return round(2 * precision * recall / (precision + recall), 4)
+
+
+def _label_metrics(
+    observations: Sequence[JobLeadEvalObservation], label: PostingType
+) -> dict[str, Any]:
+    true_positive = sum(
+        item.expected_posting_type == label and item.predicted_posting_type == label
+        for item in observations
+    )
+    false_positive = sum(
+        item.expected_posting_type != label and item.predicted_posting_type == label
+        for item in observations
+    )
+    false_negative = sum(
+        item.expected_posting_type == label and item.predicted_posting_type != label
+        for item in observations
+    )
+    support = sum(item.expected_posting_type == label for item in observations)
+    precision = _ratio(true_positive, true_positive + false_positive)
+    recall = _ratio(true_positive, true_positive + false_negative)
+    return {
+        "support": support,
+        "precision": precision,
+        "recall": recall,
+        "f1": _f1(precision, recall),
+    }
+
+
+def _confidence_thresholds(
+    observations: Sequence[JobLeadEvalObservation],
+) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    for threshold in (0.5, 0.7, 0.8, 0.9, 0.95):
+        decisions: list[tuple[JobLeadEvalObservation, bool]] = []
+        for item in observations:
+            probability = item.contractor_probability
+            if probability is None:
+                continue
+            if probability >= threshold:
+                decisions.append((item, True))
+            elif probability <= 1.0 - threshold:
+                decisions.append((item, False))
+        correct = sum(
+            prediction == item.expected_contractor_friendly
+            for item, prediction in decisions
+        )
+        false_positives = sum(
+            prediction and not item.expected_contractor_friendly
+            for item, prediction in decisions
+        )
+        false_negatives = sum(
+            not prediction and item.expected_contractor_friendly
+            for item, prediction in decisions
+        )
+        output.append(
+            {
+                "threshold": threshold,
+                "accepted": len(decisions),
+                "coverage": _ratio(len(decisions), len(observations)),
+                "accuracy": _ratio(correct, len(decisions)),
+                "false_positives": false_positives,
+                "false_negatives": false_negatives,
+            }
+        )
+    return output
+
+
+def _failure_examples(
+    observations: Sequence[JobLeadEvalObservation],
+) -> list[dict[str, Any]]:
+    grouped: dict[tuple[Any, ...], list[JobLeadEvalObservation]] = defaultdict(list)
+    for item in observations:
+        if (
+            item.predicted_contractor_friendly == item.expected_contractor_friendly
+            and item.predicted_posting_type == item.expected_posting_type
+        ):
+            continue
+        grouped[
+            (
+                item.case_id,
+                item.predicted_contractor_friendly,
+                item.predicted_posting_type,
+            )
+        ].append(item)
+    failures: list[dict[str, Any]] = []
+    for (case_id, predicted_friendly, predicted_type), items in grouped.items():
+        probabilities = [
+            item.contractor_probability
+            for item in items
+            if item.contractor_probability is not None
+        ]
+        failures.append(
+            {
+                "case_id": case_id,
+                "count": len(items),
+                "expected": (
+                    f"{items[0].expected_posting_type}/"
+                    f"{str(items[0].expected_contractor_friendly).lower()}"
+                ),
+                "observed": f"{predicted_type}/{str(predicted_friendly).lower()}",
+                "contractor_probability": (
+                    round(statistics.fmean(probabilities), 4) if probabilities else "-"
+                ),
+            }
+        )
+    return sorted(failures, key=lambda item: (item["case_id"], item["observed"]))
+
+
+def _percentile(values: Sequence[int], percentile: float) -> int | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = round((len(ordered) - 1) * percentile)
+    return ordered[index]
+
+
+def _percent(value: Any) -> str:
+    return f"{float(value) * 100:.1f}%" if isinstance(value, int | float) else "-"
+
+
+def _money(value: Any) -> str:
+    return f"${float(value):.6f}" if isinstance(value, int | float) else "unavailable"
+
+
+def _elapsed_ms(started: float) -> int:
+    return round((time.perf_counter() - started) * 1000)
+
+
+def _git_revision() -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return result.stdout.strip() or None
+
+
+def _parse_profiles(value: str) -> list[EvalProfile]:
+    raw_profiles = [item.strip() for item in value.split(",") if item.strip()]
+    allowed = {"heuristic", "jev", "luna"}
+    invalid = [item for item in raw_profiles if item not in allowed]
+    if invalid:
+        raise ValueError(f"Unsupported eval profiles: {', '.join(invalid)}")
+    if not raw_profiles:
+        raise ValueError("At least one eval profile is required")
+    return list(dict.fromkeys(raw_profiles))  # type: ignore[return-value]
+
+
+def _env(name: str) -> str | None:
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

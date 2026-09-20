@@ -1,0 +1,217 @@
+"""Tests for the job-lead classification eval harness."""
+
+from __future__ import annotations
+
+from collections import Counter
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+from pydantic import ValidationError
+
+from five08.job_lead_evals import (
+    DEFAULT_CORPUS_PATH,
+    JobLeadEvalCase,
+    JobLeadEvalObservation,
+    _run_jev,
+    jev_questions,
+    load_env_file,
+    load_job_lead_eval_corpus,
+    run_job_lead_eval_suite,
+    summarize_profile,
+)
+
+
+class _FakeResponse:
+    status_code = 200
+    ok = True
+    headers: dict[str, str] = {}
+
+    def json(self) -> dict:
+        return {
+            "model": "typesafe/jev-1.13-20260917",
+            "provider": "TypeSafe",
+            "answers": {
+                "contractor_friendly": {"type": "noul", "noul": 0.91},
+                "posting_type": {
+                    "type": "choice",
+                    "choice": "part_time",
+                    "confidence": 0.98,
+                    "probabilities": {
+                        "part_time": 0.98,
+                        "full_time": 0.01,
+                        "part_time_or_full_time": 0.01,
+                        "unknown": 0.0,
+                    },
+                },
+            },
+            "usage": {
+                "input_tokens": 450,
+                "output_tokens": 73,
+                "cost": 0.000019,
+            },
+        }
+
+
+class _FakeSession:
+    def __init__(self) -> None:
+        self.payload: dict | None = None
+
+    def post(self, _url: str, **kwargs: object) -> _FakeResponse:
+        self.payload = kwargs["json"]  # type: ignore[assignment]
+        return _FakeResponse()
+
+
+def _case() -> JobLeadEvalCase:
+    return JobLeadEvalCase(
+        id="contract_001",
+        group="core",
+        text="Acme | Contract backend engineer | Remote",
+        expected_posting_type="part_time",
+        expected_contractor_friendly=True,
+        tags=["contract"],
+        rationale="Explicit contract role.",
+    )
+
+
+def test_checked_in_corpus_is_balanced_and_versioned() -> None:
+    corpus = load_job_lead_eval_corpus(DEFAULT_CORPUS_PATH)
+
+    assert corpus.version == "job-lead-classification.v1"
+    assert len(corpus.cases) == 48
+    assert Counter(case.expected_posting_type for case in corpus.cases) == {
+        "part_time": 12,
+        "part_time_or_full_time": 12,
+        "full_time": 12,
+        "unknown": 12,
+    }
+    assert Counter(case.group for case in corpus.cases) == {
+        "core": 32,
+        "challenge": 16,
+    }
+
+
+def test_corpus_rejects_inconsistent_derived_contractor_label() -> None:
+    with pytest.raises(ValidationError, match="must be derived"):
+        JobLeadEvalCase(
+            id="bad_001",
+            group="core",
+            text="Full-time role",
+            expected_posting_type="full_time",
+            expected_contractor_friendly=True,
+            rationale="Intentionally inconsistent.",
+        )
+
+
+def test_jev_contract_uses_atomic_typed_questions() -> None:
+    questions = jev_questions()
+
+    assert questions["contractor_friendly"]["type"] == "noul"
+    assert questions["posting_type"]["type"] == "choice"
+    assert set(questions["posting_type"]["criteria"]) == {
+        "part_time",
+        "full_time",
+        "part_time_or_full_time",
+        "unknown",
+    }
+
+
+def test_jev_response_is_normalized_without_raw_provider_output() -> None:
+    session = _FakeSession()
+
+    observation = _run_jev(
+        case=_case(),
+        repeat=1,
+        session=session,  # type: ignore[arg-type]
+        api_key="test-key",
+        model="typesafe/jev-1.13",
+        timeout_seconds=5.0,
+        max_attempts=1,
+        started=0.0,
+    )
+
+    assert session.payload is not None
+    assert session.payload["state"] == _case().text
+    assert "expected_posting_type" not in session.payload
+    assert observation.predicted_contractor_friendly is True
+    assert observation.predicted_posting_type == "part_time"
+    assert observation.contractor_probability == 0.91
+    assert observation.resolved_model == "typesafe/jev-1.13-20260917"
+    assert observation.input_tokens == 450
+    assert observation.output_tokens == 73
+    assert observation.total_tokens == 523
+    assert observation.cost_usd == 0.000019
+
+
+def test_heuristic_suite_requires_no_provider_key() -> None:
+    corpus = SimpleNamespace(
+        version="job-lead-classification.v1",
+        cases=[_case()],
+    )
+
+    report = run_job_lead_eval_suite(
+        corpus=corpus,  # type: ignore[arg-type]
+        profiles=["heuristic"],
+        openrouter_api_key=None,
+    )
+
+    assert report.case_count == 1
+    assert report.summary["heuristic"]["successful_calls"] == 1
+    assert report.summary["heuristic"]["joint_accuracy"] == 1.0
+    assert report.summary["heuristic"]["usage"]["cost_usd"] == 0.0
+
+
+def test_summary_tracks_repeatability_and_confidence_gate() -> None:
+    observations = [
+        JobLeadEvalObservation(
+            profile="jev",
+            case_id="positive",
+            group="core",
+            repeat=repeat,
+            expected_posting_type="part_time",
+            expected_contractor_friendly=True,
+            predicted_posting_type="part_time",
+            predicted_contractor_friendly=True,
+            contractor_probability=probability,
+            latency_ms=200,
+            cost_usd=0.00001,
+        )
+        for repeat, probability in [(1, 0.92), (2, 0.88), (3, 0.91)]
+    ]
+    observations.extend(
+        JobLeadEvalObservation(
+            profile="jev",
+            case_id="negative",
+            group="challenge",
+            repeat=repeat,
+            expected_posting_type="full_time",
+            expected_contractor_friendly=False,
+            predicted_posting_type="full_time",
+            predicted_contractor_friendly=False,
+            contractor_probability=probability,
+            latency_ms=220,
+            cost_usd=0.00001,
+        )
+        for repeat, probability in [(1, 0.08), (2, 0.11), (3, 0.09)]
+    )
+
+    summary = summarize_profile(observations, case_count=2)
+
+    assert summary["contractor_f1"] == 1.0
+    assert summary["posting_accuracy"] == 1.0
+    assert summary["repeatability"]["stable_rate"] == 1.0
+    assert summary["repeatability"]["max_probability_span"] == 0.04
+    assert summary["confidence_thresholds"][-1]["coverage"] == 0.0
+    assert summary["usage"]["cost_usd"] == 0.00006
+
+
+def test_env_file_loader_does_not_override_exported_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("OPENROUTER_API_KEY=from-file\n")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "exported")
+
+    load_env_file(env_file)
+
+    assert __import__("os").environ["OPENROUTER_API_KEY"] == "exported"

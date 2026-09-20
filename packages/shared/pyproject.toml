@@ -36,6 +36,7 @@ ignore-missing-imports = [".*"]
 crmctl = "five08.crm_cli:run"
 agent-eval = "five08.agent.evals:main"
 resume-eval = "five08.resume_evals:main"
+job-lead-eval = "five08.job_lead_evals:main"
 
 [build-system]
 requires = ["hatchling"]
