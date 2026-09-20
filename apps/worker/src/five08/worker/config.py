@@ -106,7 +106,27 @@ class WorkerSettings(SharedSettings):
     @property
     def resolved_discord_bot_internal_base_url(self) -> str | None:
         """Return only transport-safe internal Discord bot endpoints."""
-        candidate = self.discord_bot_internal_base_url.strip().rstrip("/")
+        return self._resolved_internal_base_url(
+            self.discord_bot_internal_base_url,
+            cleartext_service_names={"discord_bot"},
+        )
+
+    @property
+    def resolved_agent_schedule_api_base_url(self) -> str | None:
+        """Return only transport-safe API endpoints for schedule delegation."""
+        return self._resolved_internal_base_url(
+            self.agent_schedule_api_base_url,
+            cleartext_service_names={"web"},
+        )
+
+    @staticmethod
+    def _resolved_internal_base_url(
+        value: str,
+        *,
+        cleartext_service_names: set[str],
+    ) -> str | None:
+        """Allow HTTPS, loopback HTTP, or an explicit compose service name."""
+        candidate = value.strip().rstrip("/")
         if not candidate:
             return None
         try:
@@ -128,7 +148,7 @@ class WorkerSettings(SharedSettings):
         if parsed.scheme.casefold() != "http":
             return None
         hostname = hostname.casefold()
-        if hostname in {"localhost", "discord_bot"}:
+        if hostname == "localhost" or hostname in cleartext_service_names:
             return candidate
         try:
             return candidate if ip_address(hostname).is_loopback else None

@@ -104,6 +104,28 @@ def test_discord_bot_internal_url_requires_safe_transport(
     assert settings.resolved_discord_bot_internal_base_url == expected
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("https://api.example/", "https://api.example"),
+        ("http://127.0.0.1:8090", "http://127.0.0.1:8090"),
+        ("http://[::1]:8090", "http://[::1]:8090"),
+        ("http://localhost:8090", "http://localhost:8090"),
+        ("http://web:8090", "http://web:8090"),
+        ("http://api.example", None),
+        ("http://discord_bot:8090", None),
+        ("https://user@api.example", None),
+    ],
+)
+def test_agent_schedule_api_url_requires_safe_transport(
+    value: str,
+    expected: str | None,
+) -> None:
+    settings = WorkerSettings(agent_schedule_api_base_url=value)
+
+    assert settings.resolved_agent_schedule_api_base_url == expected
+
+
 def test_email_intake_requires_mailbox_credentials() -> None:
     with pytest.raises(ValidationError, match="EMAIL_PASSWORD must be set"):
         WorkerSettings(

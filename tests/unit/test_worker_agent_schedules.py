@@ -15,7 +15,7 @@ def test_run_agent_schedule_job_delegates_with_the_existing_api_secret(
 ) -> None:
     """The worker never holds agent credentials or bypasses the API policy loop."""
 
-    monkeypatch.setattr(jobs.settings, "agent_schedule_api_base_url", "http://api")
+    monkeypatch.setattr(jobs.settings, "agent_schedule_api_base_url", "http://web")
     monkeypatch.setattr(jobs.settings, "api_shared_secret", "shared-secret")
     response = SimpleNamespace(
         status_code=200,
@@ -37,7 +37,7 @@ def test_run_agent_schedule_job_delegates_with_the_existing_api_secret(
         "schedule_id": "schedule-1",
         "delivery_status": "posted",
     }
-    assert post.call_args.args[0] == "http://api/internal/agent-schedules/runs/run-1"
+    assert post.call_args.args[0] == "http://web/internal/agent-schedules/runs/run-1"
     assert post.call_args.kwargs["headers"] == {"X-API-Secret": "shared-secret"}
 
 
@@ -46,7 +46,7 @@ def test_run_agent_schedule_job_marks_policy_rejections_non_retryable(
 ) -> None:
     """A revoked owner or invalid stored run should not consume retry attempts."""
 
-    monkeypatch.setattr(jobs.settings, "agent_schedule_api_base_url", "http://api")
+    monkeypatch.setattr(jobs.settings, "agent_schedule_api_base_url", "http://web")
     monkeypatch.setattr(jobs.settings, "api_shared_secret", "shared-secret")
     response = SimpleNamespace(
         status_code=403, json=Mock(return_value={"error": "denied"})
@@ -64,7 +64,7 @@ def test_run_agent_schedule_job_retries_internal_unauthorized_response(
 ) -> None:
     """A rolling shared-secret mismatch can recover after both services update."""
 
-    monkeypatch.setattr(jobs.settings, "agent_schedule_api_base_url", "http://api")
+    monkeypatch.setattr(jobs.settings, "agent_schedule_api_base_url", "http://web")
     monkeypatch.setattr(jobs.settings, "api_shared_secret", "rotating-secret")
     response = SimpleNamespace(
         status_code=401,
@@ -80,6 +80,28 @@ def test_run_agent_schedule_job_retries_internal_unauthorized_response(
         jobs.run_agent_schedule_job("run-1")
 
     assert not isinstance(raised.value, jobs.AgentScheduleRunNonRetryableError)
+
+
+def test_run_agent_schedule_job_rejects_unsafe_endpoint_before_sending_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        jobs.settings,
+        "agent_schedule_api_base_url",
+        "http://api.example",
+    )
+    monkeypatch.setattr(jobs.settings, "api_shared_secret", "shared-secret")
+
+    with (
+        patch("five08.worker.jobs.requests.post") as post,
+        pytest.raises(
+            jobs.AgentScheduleRunNonRetryableError,
+            match="agent_schedule_api_url_invalid",
+        ),
+    ):
+        jobs.run_agent_schedule_job("run-1")
+
+    post.assert_not_called()
 
 
 def test_expired_agent_memory_cleanup_uses_only_the_worker_postgres_store(

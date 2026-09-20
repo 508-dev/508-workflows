@@ -259,10 +259,13 @@ def run_agent_schedule_job(run_id: str) -> dict[str, Any]:
     if not normalized_run_id:
         raise AgentScheduleRunNonRetryableError("schedule_run_id_required")
 
-    base_url = settings.agent_schedule_api_base_url.strip().rstrip("/")
+    configured_base_url = settings.agent_schedule_api_base_url.strip()
+    base_url = settings.resolved_agent_schedule_api_base_url
     api_secret = str(settings.api_shared_secret or "").strip()
-    if not base_url:
+    if not configured_base_url:
         raise AgentScheduleRunNonRetryableError("agent_schedule_api_url_missing")
+    if not base_url:
+        raise AgentScheduleRunNonRetryableError("agent_schedule_api_url_invalid")
     if not api_secret:
         raise AgentScheduleRunNonRetryableError("api_shared_secret_missing")
 

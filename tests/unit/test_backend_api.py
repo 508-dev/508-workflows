@@ -29,6 +29,7 @@ from five08.agent import (
     ToolRuntimeConfig,
 )
 from five08.agent.state import InMemoryAgentStateStore
+from five08.agent.context import ContextLoadBounds
 from five08.knowledge.store import InMemoryKnowledgeStore
 from five08.backend import api
 from five08.job_channels import JobPostingType, RegisteredJobPostChannel
@@ -159,6 +160,30 @@ def test_cached_api_orchestrator_refreshes_policy_from_live_runtime_config(
             role_ids=["1001"],
         )
     )
+    api._KNOWLEDGE_STORE.remember_fact(
+        scope_type="user",
+        scope_id="user-1",
+        key="timezone",
+        value_json={"text": "Asia/Tokyo"},
+        visibility="private",
+        source_type="request",
+        source_ref="agent_request",
+        source_excerpt=None,
+        created_by="user-1",
+        verification_status="user_confirmed",
+        organization_id="1000",
+    )
+    memory_context = orchestrator.context_loader.load(
+        context=AgentIdentityContext(
+            discord_user_id="user-1",
+            organization_id="1000",
+            guild_id="1000",
+            roles=["Backend"],
+            role_ids=["1001"],
+        ),
+        bounds=ContextLoadBounds(),
+    )
+    assert "Asia/Tokyo" in memory_context[0].text
 
     runtime_configs[0] = ToolRuntimeConfig(
         github_default_repo="508-dev/new-repository",
@@ -181,6 +206,36 @@ def test_cached_api_orchestrator_refreshes_policy_from_live_runtime_config(
         )
         == set()
     )
+
+
+def test_api_knowledge_service_uses_configured_role_id_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        api,
+        "settings",
+        SharedSettings(
+            environment="production",
+            discord_server_id="1000",
+            agent_discord_engineer_role_ids="1001",
+        ),
+    )
+    monkeypatch.setattr(api, "_KNOWLEDGE_SERVICE", None)
+
+    service = api._get_knowledge_service()
+    configured_actor = AgentIdentityContext(
+        discord_user_id="user-1",
+        organization_id="1000",
+        guild_id="1000",
+        roles=["Backend"],
+        role_ids=["1001"],
+    )
+    name_only_actor = configured_actor.model_copy(
+        update={"roles": ["Engineer"], "role_ids": []}
+    )
+
+    assert "knowledge:read_org" in service.policy.scopes_for_context(configured_actor)
+    assert service.policy.scopes_for_context(name_only_actor) == set()
 
 
 def test_crm_sync_scheduler_skips_start_without_espo_config(
@@ -5518,7 +5573,11 @@ async def test_get_discord_diagnostics_from_bot_uses_internal_api_secret(
     monkeypatch: pytest.MonkeyPatch,
     app: api.FastAPI,
 ) -> None:
-    monkeypatch.setattr(api.settings, "discord_bot_internal_base_url", "http://bot")
+    monkeypatch.setattr(
+        api.settings,
+        "discord_bot_internal_base_url",
+        "http://discord_bot",
+    )
     monkeypatch.setattr(api.settings, "api_shared_secret", "secret")
     response = Mock(status_code=200, text="")
     response.json.return_value = {
@@ -5538,11 +5597,56 @@ async def test_get_discord_diagnostics_from_bot_uses_internal_api_secret(
     assert error is None
     assert payload == response.json.return_value
     http_client.get.assert_awaited_once_with(
-        "http://bot/internal/diagnostics/discord",
+        "http://discord_bot/internal/diagnostics/discord",
         headers={"X-API-Secret": "secret"},
         params={"refresh": "true"},
         timeout=10.0,
     )
+
+
+async def test_discord_diagnostics_rejects_unsafe_endpoint_before_sending_secret(
+    monkeypatch: pytest.MonkeyPatch,
+    app: api.FastAPI,
+) -> None:
+    monkeypatch.setattr(
+        api.settings,
+        "discord_bot_internal_base_url",
+        "http://bot.example",
+    )
+    monkeypatch.setattr(api.settings, "api_shared_secret", "secret")
+    request = Mock(app=app)
+
+    with patch("five08.backend.api._http_client_from_app") as http_client:
+        payload, error = await api._get_discord_diagnostics_from_bot(request)
+
+    assert payload is None
+    assert error == "bot_endpoint_not_configured"
+    http_client.assert_not_called()
+
+
+async def test_agent_schedule_bot_request_rejects_unsafe_endpoint_before_secret(
+    monkeypatch: pytest.MonkeyPatch,
+    app: api.FastAPI,
+) -> None:
+    monkeypatch.setattr(
+        api.settings,
+        "discord_bot_internal_base_url",
+        "http://bot.example",
+    )
+    monkeypatch.setattr(api.settings, "api_shared_secret", "secret")
+    request = Mock(app=app)
+
+    with (
+        patch("five08.backend.api._http_client_from_app") as http_client,
+        pytest.raises(RuntimeError, match="bot_endpoint_not_configured"),
+    ):
+        await api._request_agent_schedule_bot_json(
+            request,
+            path="/internal/agent-schedules/member-snapshot",
+            payload={"guild_id": "1000", "discord_user_id": "1001"},
+        )
+
+    http_client.assert_not_called()
 
 
 def test_dashboard_job_channels_returns_registered_channels(

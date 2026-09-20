@@ -514,7 +514,13 @@ def _get_agent_orchestrator() -> AgentOrchestrator:
                     ),
                 ),
                 state_store=_AGENT_STATE_STORE,
-                context_loader=PrivateMemoryContextLoader(_KNOWLEDGE_STORE),
+                context_loader=PrivateMemoryContextLoader(
+                    _KNOWLEDGE_STORE,
+                    policy_factory=lambda: PolicyEngine.from_settings(
+                        settings,
+                        runtime_config=ToolRuntimeConfig.from_settings(settings),
+                    ),
+                ),
                 memory_suggestions_enabled=settings.agent_memory_suggestions_enabled,
                 model_config=AgentModelConfig.from_settings(settings),
                 planner=OpenAICompatibleAgentPlanner.from_settings(settings),
@@ -632,6 +638,7 @@ def _get_knowledge_service() -> KnowledgeService:
                 store=_KNOWLEDGE_STORE,
                 model=OpenAICompatibleKnowledgeModel.from_settings(settings),
                 sources=KnowledgeSourceAdapters(settings),
+                policy=PolicyEngine.from_settings(settings),
             )
     return _KNOWLEDGE_SERVICE
 
@@ -1521,7 +1528,7 @@ async def _get_discord_diagnostics_from_bot(
     refresh: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Get a read-only configured-guild role snapshot from the Discord bot."""
-    base_url = settings.discord_bot_internal_base_url.strip()
+    base_url = settings.resolved_discord_bot_internal_base_url
     api_secret = str(settings.api_shared_secret or "").strip()
     if not base_url:
         return None, "bot_endpoint_not_configured"
@@ -1530,7 +1537,7 @@ async def _get_discord_diagnostics_from_bot(
 
     try:
         response = await _http_client_from_app(request.app).get(
-            f"{base_url.rstrip('/')}/internal/diagnostics/discord",
+            f"{base_url}/internal/diagnostics/discord",
             headers={"X-API-Secret": api_secret},
             params={"refresh": "true"} if refresh else None,
             timeout=10.0,
@@ -1564,7 +1571,7 @@ async def _request_agent_schedule_bot_json(
 ) -> tuple[dict[str, Any], int]:
     """Call one authenticated bot-internal schedule endpoint safely."""
 
-    base_url = settings.discord_bot_internal_base_url.strip()
+    base_url = settings.resolved_discord_bot_internal_base_url
     api_secret = str(settings.api_shared_secret or "").strip()
     if not base_url:
         raise RuntimeError("bot_endpoint_not_configured")
@@ -1572,7 +1579,7 @@ async def _request_agent_schedule_bot_json(
         raise RuntimeError("api_secret_not_configured")
     try:
         response = await _http_client_from_app(request.app).post(
-            f"{base_url.rstrip('/')}{path}",
+            f"{base_url}{path}",
             headers={"X-API-Secret": api_secret},
             json=payload,
             timeout=timeout_seconds,

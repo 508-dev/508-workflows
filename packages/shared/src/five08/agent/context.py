@@ -6,7 +6,8 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Iterable, Protocol
+from collections.abc import Callable, Iterable
+from typing import TYPE_CHECKING, Protocol
 
 from five08.agent.memory import MemoryStore, contains_sensitive_memory_text
 from five08.agent.models import (
@@ -15,6 +16,9 @@ from five08.agent.models import (
     AgentIdentityContext,
 )
 from five08.agent.privacy import contains_private_agent_identifier
+
+if TYPE_CHECKING:
+    from five08.agent.policy import PolicyEngine
 
 logger = logging.getLogger(__name__)
 
@@ -74,13 +78,29 @@ class RequestContextLoader:
 class PrivateMemoryContextLoader:
     """Add the actor's active private preferences to bounded planner context."""
 
-    def __init__(self, store: MemoryStore) -> None:
+    def __init__(
+        self,
+        store: MemoryStore,
+        *,
+        policy: PolicyEngine | None = None,
+        policy_factory: Callable[[], PolicyEngine] | None = None,
+    ) -> None:
+        if policy is not None and policy_factory is not None:
+            raise ValueError("Provide either policy or policy_factory, not both")
         self.store = store
+        self._policy = policy
+        self._policy_factory = policy_factory
 
     def load(
         self, *, context: AgentIdentityContext, bounds: ContextLoadBounds
     ) -> list[AgentContextSnippet]:
         from five08.agent.policy import PolicyEngine
+
+        policy = self._policy or (
+            self._policy_factory()
+            if self._policy_factory is not None
+            else PolicyEngine()
+        )
 
         # Client-supplied metadata cannot establish backend provenance.
         snippets = [
@@ -91,7 +111,7 @@ class PrivateMemoryContextLoader:
             context.response_destination_visibility == "private"
             and not context.impersonation
             and bool(context.organization_id)
-            and "memory:read_self" in PolicyEngine().scopes_for_context(context)
+            and "memory:read_self" in policy.scopes_for_context(context)
         ):
             try:
                 facts = self.store.list_facts(

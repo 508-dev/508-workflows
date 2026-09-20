@@ -17,6 +17,7 @@ from five08.agent.context import (
     PrivateMemoryContextLoader,
     context_sources_for_snippets,
 )
+from five08.agent.policy import PolicyEngine
 from five08.agent.state import InMemoryAgentStateStore
 from five08.knowledge.store import InMemoryKnowledgeStore
 
@@ -283,6 +284,49 @@ def test_saved_preferences_are_context_only_for_owner_and_private_destination():
         )
         == []
     )
+
+
+def test_saved_preferences_use_configured_role_ids_instead_of_role_names():
+    store = InMemoryKnowledgeStore()
+    store.remember_fact(
+        scope_type="user",
+        scope_id="alice",
+        key="timezone",
+        value_json={"text": "Asia/Tokyo"},
+        visibility="private",
+        source_type="request",
+        source_ref="agent_request",
+        source_excerpt=None,
+        created_by="alice",
+        verification_status="user_confirmed",
+        organization_id="guild",
+    )
+    policy = PolicyEngine(
+        role_id_bindings={"engineer": {"engineer-role-id"}},
+        allowed_guild_ids={"guild"},
+        require_guild_binding=True,
+        allow_role_name_fallback=False,
+    )
+    actor = context().model_copy(
+        update={"roles": ["Backend"], "role_ids": ["engineer-role-id"]}
+    )
+
+    snippets = PrivateMemoryContextLoader(store, policy=policy).load(
+        context=actor,
+        bounds=ContextLoadBounds(),
+    )
+
+    assert [snippet.source_ref for snippet in snippets] == [
+        store.list_facts(
+            organization_id="guild",
+            scope_type="user",
+            scope_id="alice",
+            visible_to_user_id="alice",
+            visible_to_project_id=None,
+            visible_to_org_id="guild",
+        )[0].id
+    ]
+    assert "Asia/Tokyo" in snippets[0].text
 
 
 def test_memory_lookup_outage_does_not_block_unrelated_agent_workflows() -> None:
