@@ -839,7 +839,7 @@ def create_manual_agent_schedule_run(
                 WHERE schedule_id = %s
                   AND trigger = %s
                   AND occurrence_at >= %s
-                  AND status IN ('queued', 'running')
+                  AND status IN ('queued', 'running', 'succeeded')
                 ORDER BY occurrence_at DESC
                 LIMIT 1
                 """,
@@ -1623,17 +1623,34 @@ def prune_terminal_agent_schedule_runs(
             cursor.execute(
                 """
                 WITH prunable AS (
-                    SELECT old_run.id
+                    SELECT old_run.id, old_run.job_id
                     FROM agent_schedules AS schedules
                     CROSS JOIN LATERAL (
-                        SELECT runs.id
+                        SELECT runs.id, runs.job_id
                         FROM agent_schedule_runs AS runs
+                        LEFT JOIN jobs ON jobs.id = runs.job_id
                         WHERE runs.schedule_id = schedules.id
                           AND runs.status IN ('succeeded', 'failed', 'skipped')
+                          AND (
+                              runs.job_id IS NULL
+                              OR jobs.id IS NULL
+                              OR (
+                                  jobs.type = 'run_agent_schedule_job'
+                                  AND jobs.status IN ('succeeded', 'dead', 'canceled')
+                              )
+                          )
                         ORDER BY runs.occurrence_at DESC, runs.id DESC
                         OFFSET %s
                     ) AS old_run
                     LIMIT %s
+                ),
+                deleted_jobs AS (
+                    DELETE FROM jobs
+                    USING prunable
+                    WHERE jobs.id = prunable.job_id
+                      AND jobs.type = 'run_agent_schedule_job'
+                      AND jobs.status IN ('succeeded', 'dead', 'canceled')
+                    RETURNING jobs.id
                 )
                 DELETE FROM agent_schedule_runs AS runs
                 USING prunable

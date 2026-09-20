@@ -439,11 +439,12 @@ class _ManualRunCursor:
             and self._recent_manual_run is not None
         ):
             if (
-                "status IN ('queued', 'running')" in self._current_query
+                "status IN ('queued', 'running', 'succeeded')" in self._current_query
                 and self._recent_manual_run["status"]
                 not in {
                     AgentScheduleRunStatus.QUEUED.value,
                     AgentScheduleRunStatus.RUNNING.value,
+                    AgentScheduleRunStatus.SUCCEEDED.value,
                 }
             ):
                 return None
@@ -580,12 +581,64 @@ def test_terminal_schedule_run_retention_bounds_rows_and_full_output(
     delete_query, delete_params = cursor.calls[0]
     output_query, output_params = cursor.calls[1]
     assert "DELETE FROM agent_schedule_runs" in delete_query
+    assert "DELETE FROM jobs" in delete_query
+    assert "jobs.type = 'run_agent_schedule_job'" in delete_query
+    assert "jobs.status IN ('succeeded', 'dead', 'canceled')" in delete_query
     assert "runs.status IN ('succeeded', 'failed', 'skipped')" in delete_query
     assert "OFFSET %s" in delete_query
     assert delete_params == (100, 1_000)
     assert "UPDATE agent_schedule_runs" in output_query
     assert "SET output = NULL" in output_query
     assert output_params == (20, 1_000)
+
+
+def test_recent_successful_manual_run_is_coalesced_during_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fast successful report still consumes the manual-run cooldown."""
+
+    now = datetime(2026, 7, 28, 9, 0, tzinfo=timezone.utc)
+    schedule_id = "00000000-0000-0000-0000-000000000010"
+    successful_run = {
+        "id": "00000000-0000-0000-0000-000000000011",
+        "schedule_id": schedule_id,
+        "occurrence_at": now,
+        "trigger": "manual",
+        "status": AgentScheduleRunStatus.SUCCEEDED.value,
+        "job_id": "00000000-0000-0000-0000-000000000012",
+        "started_at": now,
+        "finished_at": now,
+        "output": "Report",
+        "error": None,
+        "delivery_status": AgentScheduleRunDeliveryStatus.POSTED.value,
+        "delivery_message_id": "3000",
+        "delivery_claimed_at": now,
+        "created_at": now,
+        "updated_at": now,
+    }
+    cursor = _ManualRunCursor(
+        [{"id": schedule_id}],
+        recent_manual_run=successful_run,
+    )
+    monkeypatch.setattr(
+        schedules,
+        "get_postgres_connection",
+        lambda _settings: _ManualRunConnection(cursor),
+    )
+
+    result = create_manual_agent_schedule_run(
+        SharedSettings(),
+        schedule_id=schedule_id,
+        guild_id="1000",
+        now=now,
+    )
+
+    assert result is not None
+    assert result.created is False
+    assert result.run.status is AgentScheduleRunStatus.SUCCEEDED
+    assert not any(
+        "INSERT INTO agent_schedule_runs" in query for query, _ in cursor.calls
+    )
 
 
 def test_manual_run_creates_a_replacement_after_a_terminal_run(
@@ -645,7 +698,7 @@ def test_manual_run_creates_a_replacement_after_a_terminal_run(
     recent_query = next(
         query for query, _ in cursor.calls if "FROM agent_schedule_runs" in query
     )
-    assert "status IN ('queued', 'running')" in recent_query
+    assert "status IN ('queued', 'running', 'succeeded')" in recent_query
 
 
 def test_due_schedule_creates_one_catch_up_then_advances_past_now(
