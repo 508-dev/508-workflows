@@ -12,8 +12,10 @@ from pydantic import ValidationError
 from five08.job_lead_evals import (
     DEFAULT_CORPUS_PATH,
     JobLeadEvalCase,
+    JobLeadLLMClassificationResponse,
     JobLeadEvalObservation,
     _run_jev,
+    _run_luna,
     jev_questions,
     load_env_file,
     load_job_lead_eval_corpus,
@@ -60,6 +62,39 @@ class _FakeSession:
     def post(self, _url: str, **kwargs: object) -> _FakeResponse:
         self.payload = kwargs["json"]  # type: ignore[assignment]
         return _FakeResponse()
+
+
+class _FakeOpenAIClient:
+    def __init__(self) -> None:
+        self.payload: dict | None = None
+        self.beta = SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(parse=self._parse),
+            )
+        )
+
+    def _parse(self, **kwargs: object) -> SimpleNamespace:
+        self.payload = kwargs
+        parsed = JobLeadLLMClassificationResponse(
+            is_contractor_friendly=True,
+            posting_type="part_time",
+            tags=["contract"],
+            confidence=0.94,
+            confidence_label="high",
+            rationale="Explicit contract role.",
+        )
+        return SimpleNamespace(
+            model="gpt-5.6-luna",
+            choices=[SimpleNamespace(message=SimpleNamespace(parsed=parsed))],
+            usage=SimpleNamespace(
+                model_dump=lambda: {
+                    "prompt_tokens": 400,
+                    "prompt_tokens_details": {"cached_tokens": 100},
+                    "completion_tokens": 50,
+                    "total_tokens": 450,
+                }
+            ),
+        )
 
 
 def _case() -> JobLeadEvalCase:
@@ -141,6 +176,26 @@ def test_jev_response_is_normalized_without_raw_provider_output() -> None:
     assert observation.output_tokens == 73
     assert observation.total_tokens == 523
     assert observation.cost_usd == 0.000019
+
+
+def test_luna_uses_schema_parse_and_official_rate_estimate() -> None:
+    client = _FakeOpenAIClient()
+
+    observation = _run_luna(
+        case=_case(),
+        repeat=1,
+        client=client,  # type: ignore[arg-type]
+        model="gpt-5.6-luna",
+        max_attempts=1,
+        started=0.0,
+    )
+
+    assert client.payload is not None
+    assert client.payload["response_format"] is JobLeadLLMClassificationResponse
+    assert observation.predicted_contractor_friendly is True
+    assert observation.predicted_posting_type == "part_time"
+    assert observation.cached_input_tokens == 100
+    assert observation.cost_usd == 0.000122
 
 
 def test_heuristic_suite_requires_no_provider_key() -> None:

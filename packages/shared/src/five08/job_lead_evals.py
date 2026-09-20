@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import statistics
 import subprocess
@@ -16,6 +15,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import requests
+from openai import OpenAI
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from five08.job_lead_sources import (
@@ -40,9 +40,12 @@ DEFAULT_CORPUS_PATH = Path(
 )
 DEFAULT_OUTPUT_DIR = Path("tests/evals/job-lead-classification/reports")
 DEFAULT_JEV_MODEL = "typesafe/jev-1.13"
-DEFAULT_LLM_MODEL = "openai/gpt-5.6-luna"
+DEFAULT_LLM_MODEL = "gpt-5.6-luna"
 OPENROUTER_DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions"
-OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
+OPENAI_BASE_URL = "https://api.openai.com/v1"
+LUNA_INPUT_COST_PER_1M = 0.20
+LUNA_CACHED_INPUT_COST_PER_1M = 0.02
+LUNA_OUTPUT_COST_PER_1M = 1.20
 _RETRYABLE_STATUS_CODES = frozenset({408, 409, 429, 500, 502, 503, 504, 529})
 _POSTING_TYPES: tuple[PostingType, ...] = (
     "part_time",
@@ -116,6 +119,7 @@ class JobLeadEvalObservation(BaseModel):
     posting_probabilities: dict[str, float] = Field(default_factory=dict)
     latency_ms: int = Field(ge=0)
     input_tokens: int = Field(default=0, ge=0)
+    cached_input_tokens: int = Field(default=0, ge=0)
     output_tokens: int = Field(default=0, ge=0)
     total_tokens: int = Field(default=0, ge=0)
     cost_usd: float | None = Field(default=None, ge=0.0)
@@ -144,6 +148,7 @@ class JobLeadEvalReport(BaseModel):
     case_count: int
     network_repeats: int
     requested_models: dict[str, str]
+    endpoints: dict[str, str]
     summary: dict[str, dict[str, Any]]
     observations: list[JobLeadEvalObservation]
 
@@ -201,8 +206,10 @@ def run_job_lead_eval_suite(
     corpus_path: Path = DEFAULT_CORPUS_PATH,
     profiles: Sequence[EvalProfile],
     openrouter_api_key: str | None,
+    openai_api_key: str | None = None,
     jev_model: str = DEFAULT_JEV_MODEL,
     llm_model: str = DEFAULT_LLM_MODEL,
+    llm_base_url: str = OPENAI_BASE_URL,
     network_repeats: int = 1,
     timeout_seconds: float = 30.0,
     max_attempts: int = 3,
@@ -212,16 +219,28 @@ def run_job_lead_eval_suite(
 
     if network_repeats < 1:
         raise ValueError("network_repeats must be at least 1")
-    network_profiles = {"jev", "luna"}.intersection(profiles)
-    if network_profiles and not openrouter_api_key:
-        raise ValueError("OPENROUTER_API_KEY is required for Jev or Luna evals")
+    if "jev" in profiles and not openrouter_api_key:
+        raise ValueError("OPENROUTER_API_KEY is required for Jev evals")
+    if "luna" in profiles and not openai_api_key:
+        raise ValueError("OPENAI_API_KEY is required for Luna evals")
 
     observations: list[JobLeadEvalObservation] = []
     for profile in profiles:
         repeats = 1 if profile == "heuristic" else network_repeats
         total = len(corpus.cases) * repeats
         completed = 0
-        session = requests.Session() if profile != "heuristic" else None
+        client: requests.Session | OpenAI | None
+        if profile == "jev":
+            client = requests.Session()
+        elif profile == "luna":
+            client = OpenAI(
+                api_key=openai_api_key,
+                base_url=llm_base_url,
+                timeout=timeout_seconds,
+                max_retries=0,
+            )
+        else:
+            client = None
         try:
             for repeat in range(1, repeats + 1):
                 for case in corpus.cases:
@@ -235,8 +254,9 @@ def run_job_lead_eval_suite(
                             profile=profile,
                             case=case,
                             repeat=repeat,
-                            session=session,
-                            api_key=openrouter_api_key,
+                            client=client,
+                            openrouter_api_key=openrouter_api_key,
+                            openai_api_key=openai_api_key,
                             jev_model=jev_model,
                             llm_model=llm_model,
                             timeout_seconds=timeout_seconds,
@@ -244,8 +264,8 @@ def run_job_lead_eval_suite(
                         )
                     )
         finally:
-            if session is not None:
-                session.close()
+            if client is not None:
+                client.close()
 
     summary: dict[str, dict[str, Any]] = {
         profile: summarize_profile(
@@ -262,6 +282,10 @@ def run_job_lead_eval_suite(
         case_count=len(corpus.cases),
         network_repeats=network_repeats,
         requested_models={"jev": jev_model, "luna": llm_model},
+        endpoints={
+            "jev": OPENROUTER_DECISIONS_URL,
+            "luna": f"{llm_base_url.rstrip('/')}/chat/completions",
+        },
         summary=summary,
         observations=observations,
     )
@@ -272,8 +296,9 @@ def _run_case(
     profile: EvalProfile,
     case: JobLeadEvalCase,
     repeat: int,
-    session: requests.Session | None,
-    api_key: str | None,
+    client: requests.Session | OpenAI | None,
+    openrouter_api_key: str | None,
+    openai_api_key: str | None,
     jev_model: str,
     llm_model: str,
     timeout_seconds: float,
@@ -283,26 +308,32 @@ def _run_case(
     try:
         if profile == "heuristic":
             return _run_heuristic(case=case, repeat=repeat, started=started)
-        if session is None or api_key is None:
-            raise RuntimeError("OpenRouter session or API key is unavailable")
+        if client is None:
+            raise RuntimeError("Provider session is unavailable")
         if profile == "jev":
+            if openrouter_api_key is None:
+                raise RuntimeError("OpenRouter API key is unavailable")
+            if not isinstance(client, requests.Session):
+                raise RuntimeError("Jev requires a Requests session")
             return _run_jev(
                 case=case,
                 repeat=repeat,
-                session=session,
-                api_key=api_key,
+                session=client,
+                api_key=openrouter_api_key,
                 model=jev_model,
                 timeout_seconds=timeout_seconds,
                 max_attempts=max_attempts,
                 started=started,
             )
+        if openai_api_key is None:
+            raise RuntimeError("OpenAI API key is unavailable")
+        if not isinstance(client, OpenAI):
+            raise RuntimeError("Luna requires an OpenAI client")
         return _run_luna(
             case=case,
             repeat=repeat,
-            session=session,
-            api_key=api_key,
+            client=client,
             model=llm_model,
-            timeout_seconds=timeout_seconds,
             max_attempts=max_attempts,
             started=started,
         )
@@ -357,6 +388,8 @@ def _run_jev(
         },
         timeout_seconds=timeout_seconds,
         max_attempts=max_attempts,
+        service_name="OpenRouter",
+        extra_headers={"X-OpenRouter-Title": "508.dev Job Lead Eval"},
     )
     answers = _mapping(body.get("answers"), name="answers")
     contractor_answer = _mapping(
@@ -396,17 +429,15 @@ def _run_luna(
     *,
     case: JobLeadEvalCase,
     repeat: int,
-    session: requests.Session,
-    api_key: str,
+    client: OpenAI,
     model: str,
-    timeout_seconds: float,
     max_attempts: int,
     started: float,
 ) -> JobLeadEvalObservation:
     payload: dict[str, Any] = {
         "model": model,
         "messages": JobLeadClassifier._messages(case.text),
-        "response_format": {"type": "json_object"},
+        "response_format": JobLeadLLMClassificationResponse,
     }
     options = model_chat_completion_options(model)
     max_tokens_parameter = options.get("max_tokens_parameter")
@@ -423,32 +454,39 @@ def _run_luna(
     if options.get("supports_temperature", True):
         payload["temperature"] = 0
 
-    body, attempts = _post_json_with_retries(
-        session=session,
-        url=OPENROUTER_CHAT_URL,
-        api_key=api_key,
+    completion, attempts = _openai_parse_with_retries(
+        client=client,
         payload=payload,
-        timeout_seconds=timeout_seconds,
         max_attempts=max_attempts,
     )
-    raw_content = _chat_content(body)
-    response = JobLeadLLMClassificationResponse.model_validate(
-        _parse_json_object(raw_content)
-    )
+    if not completion.choices:
+        raise ValueError("OpenAI chat response has no choices")
+    response = completion.choices[0].message.parsed
+    if not isinstance(response, JobLeadLLMClassificationResponse):
+        raise ValueError("OpenAI structured response did not contain a parsed model")
     classification = _classification_from_llm_response(response, case.text)
     probability = (
         classification.confidence
         if classification.is_contractor_friendly
         else 1.0 - classification.confidence
     )
-    usage = _usage(body.get("usage"))
+    usage_payload = (
+        completion.usage.model_dump() if completion.usage is not None else {}
+    )
+    usage = _usage(usage_payload)
+    if usage["cost_usd"] is None:
+        usage["cost_usd"] = _luna_cost_usd(
+            input_tokens=usage["input_tokens"],
+            cached_input_tokens=usage["cached_input_tokens"],
+            output_tokens=usage["output_tokens"],
+        )
     return _base_observation(
         profile="luna",
         case=case,
         repeat=repeat,
         requested_model=model,
-        resolved_model=_optional_text(body.get("model")),
-        provider=_optional_text(body.get("provider")),
+        resolved_model=_optional_text(completion.model),
+        provider="OpenAI",
         predicted_posting_type=classification.posting_type.value,
         predicted_contractor_friendly=classification.is_contractor_friendly,
         contractor_probability=max(0.0, min(1.0, probability)),
@@ -474,6 +512,7 @@ def _base_observation(
     classification_confidence: float | None = None,
     posting_probabilities: dict[str, float] | None = None,
     input_tokens: int = 0,
+    cached_input_tokens: int = 0,
     output_tokens: int = 0,
     total_tokens: int = 0,
     cost_usd: float | None = None,
@@ -502,6 +541,7 @@ def _base_observation(
         posting_probabilities=posting_probabilities or {},
         latency_ms=latency_ms,
         input_tokens=input_tokens,
+        cached_input_tokens=cached_input_tokens,
         output_tokens=output_tokens,
         total_tokens=total_tokens,
         cost_usd=cost_usd,
@@ -687,6 +727,7 @@ def summarize_profile(
         },
         "usage": {
             "input_tokens": sum(item.input_tokens for item in successful),
+            "cached_input_tokens": sum(item.cached_input_tokens for item in successful),
             "output_tokens": sum(item.output_tokens for item in successful),
             "total_tokens": sum(item.total_tokens for item in successful),
             "cost_usd": total_cost,
@@ -715,12 +756,12 @@ def render_job_lead_eval_report(report: JobLeadEvalReport) -> str:
         f"- Runtime revision: `{report.runtime_revision or 'unknown'}`",
         f"- Corpus: `{report.corpus_path}` ({report.case_count} cases)",
         f"- Network repeats per case: {report.network_repeats}",
-        f"- Jev request model: `{report.requested_models['jev']}`",
-        f"- LLM baseline: `{report.requested_models['luna']}`",
+        f"- Jev: `{report.requested_models['jev']}` through OpenRouter Decisions",
+        f"- LLM baseline: `{report.requested_models['luna']}` through direct OpenAI",
         "",
         "## Results",
         "",
-        "| Profile | Successful calls | Contractor F1 | Posting accuracy | Joint accuracy | Stable cases | Latency p50 / p95 / max | Input tokens | Reported cost |",
+        "| Profile | Successful calls | Contractor F1 | Posting accuracy | Joint accuracy | Stable cases | Latency p50 / p95 / max | Input / cached / output tokens | Cost |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for profile, summary in report.summary.items():
@@ -743,7 +784,11 @@ def render_job_lead_eval_report(report: JobLeadEvalReport) -> str:
                     _percent(summary["joint_accuracy"]),
                     stable,
                     f"{latency['p50']} / {latency['p95']} / {latency['max']} ms",
-                    str(summary["usage"]["input_tokens"]),
+                    (
+                        f"{summary['usage']['input_tokens']} / "
+                        f"{summary['usage']['cached_input_tokens']} / "
+                        f"{summary['usage']['output_tokens']}"
+                    ),
                     _money(cost),
                 ]
             )
@@ -828,8 +873,8 @@ def render_job_lead_eval_report(report: JobLeadEvalReport) -> str:
             "- The corpus is a balanced, synthetic challenge set derived from the production label contract. It deliberately over-represents negation, commercial uses of the word `contract`, non-posts, and prompt-injection-like text; it does not estimate live HN prevalence.",
             "- Golden labels are exact and scoring is deterministic. No model judges another model.",
             "- Jev uses OpenRouter's Decisions endpoint and the pinned `typesafe/jev-1.13` request ID. The resolved dated snapshot is retained in the JSON observation report.",
-            "- The Luna baseline uses the production job-lead prompt and schema through OpenRouter, but this run does not change production routing.",
-            "- Provider-reported costs cover successful retained calls. Retried failed requests may not expose usage and therefore may be absent from cost totals.",
+            "- The Luna baseline uses the production job-lead prompt and schema through direct OpenAI. A preflight through OpenRouter returned HTTP 403 under provider terms, so the report does not present an unsupported route as a benchmark failure.",
+            "- Jev cost is provider-reported. Luna cost is estimated from successful retained token usage at the official [$0.20/M input, $0.02/M cached input, and $1.20/M output rates](https://developers.openai.com/api/docs/models/gpt-5.6-luna). Retried failed requests may not expose usage and may be absent.",
             "- Raw observations are generated under the gitignored reports directory; this Markdown summary intentionally excludes provider payloads and secrets.",
             "",
         ]
@@ -862,6 +907,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--profiles", default="heuristic,jev,luna")
     parser.add_argument("--jev-model", default=DEFAULT_JEV_MODEL)
     parser.add_argument("--llm-model", default=DEFAULT_LLM_MODEL)
+    parser.add_argument("--llm-base-url", default=OPENAI_BASE_URL)
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--timeout-seconds", type=float, default=30.0)
     parser.add_argument("--max-attempts", type=int, default=3)
@@ -882,8 +928,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         corpus_path=args.corpus,
         profiles=profiles,
         openrouter_api_key=_env("OPENROUTER_API_KEY"),
+        openai_api_key=_env("OPENAI_API_KEY"),
         jev_model=args.jev_model,
         llm_model=args.llm_model,
+        llm_base_url=args.llm_base_url,
         network_repeats=args.repeats,
         timeout_seconds=args.timeout_seconds,
         max_attempts=args.max_attempts,
@@ -921,6 +969,33 @@ def load_env_file(path: Path) -> None:
         os.environ[key] = value
 
 
+def _openai_parse_with_retries(
+    *,
+    client: OpenAI,
+    payload: dict[str, Any],
+    max_attempts: int,
+) -> tuple[Any, int]:
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be at least 1")
+    for attempt in range(1, max_attempts + 1):
+        try:
+            completion = client.beta.chat.completions.parse(**payload)
+        except Exception as exc:
+            status_code = getattr(exc, "status_code", None)
+            retryable = status_code in _RETRYABLE_STATUS_CODES or type(
+                exc
+            ).__name__ in {
+                "APIConnectionError",
+                "APITimeoutError",
+            }
+            if not retryable or attempt == max_attempts:
+                raise
+            time.sleep(min(float(2 ** (attempt - 1)), 8.0))
+            continue
+        return completion, attempt
+    raise RuntimeError("OpenAI request did not produce a response")
+
+
 def _post_json_with_retries(
     *,
     session: requests.Session,
@@ -929,18 +1004,22 @@ def _post_json_with_retries(
     payload: dict[str, Any],
     timeout_seconds: float,
     max_attempts: int,
+    service_name: str,
+    extra_headers: Mapping[str, str] | None = None,
 ) -> tuple[dict[str, Any], int]:
     if max_attempts < 1:
         raise ValueError("max_attempts must be at least 1")
     response: requests.Response | None = None
     for attempt in range(1, max_attempts + 1):
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        if extra_headers:
+            headers.update(extra_headers)
         response = session.post(
             url,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "X-OpenRouter-Title": "508.dev Job Lead Eval",
-            },
+            headers=headers,
             json=payload,
             timeout=timeout_seconds,
             verify=default_ca_bundle_path(),
@@ -952,12 +1031,12 @@ def _post_json_with_retries(
             break
         time.sleep(_retry_delay(response, attempt))
     if response is None:
-        raise RuntimeError("OpenRouter request did not produce a response")
+        raise RuntimeError(f"{service_name} request did not produce a response")
     try:
         body = response.json()
     except ValueError as exc:
         raise ValueError(
-            f"OpenRouter returned non-JSON HTTP {response.status_code}"
+            f"{service_name} returned non-JSON HTTP {response.status_code}"
         ) from exc
     if not response.ok:
         error = body.get("error") if isinstance(body, dict) else None
@@ -965,9 +1044,11 @@ def _post_json_with_retries(
             message = _optional_text(error.get("message")) or "unknown error"
         else:
             message = _optional_text(error) or "unknown error"
-        raise RuntimeError(f"OpenRouter HTTP {response.status_code}: {message[:300]}")
+        raise RuntimeError(
+            f"{service_name} HTTP {response.status_code}: {message[:300]}"
+        )
     if not isinstance(body, dict):
-        raise ValueError("OpenRouter response must be a JSON object")
+        raise ValueError(f"{service_name} response must be a JSON object")
     return body, attempt
 
 
@@ -1019,39 +1100,14 @@ def _probabilities(value: Any, *, name: str) -> dict[str, float]:
     return probabilities
 
 
-def _chat_content(body: dict[str, Any]) -> str:
-    choices = body.get("choices")
-    if not isinstance(choices, list) or not choices:
-        raise ValueError("OpenRouter chat response has no choices")
-    first = choices[0]
-    if not isinstance(first, dict):
-        raise ValueError("OpenRouter first choice must be an object")
-    message = first.get("message")
-    if not isinstance(message, dict):
-        raise ValueError("OpenRouter first choice has no message")
-    content = message.get("content")
-    if not isinstance(content, str) or not content.strip():
-        raise ValueError("OpenRouter first choice has no text content")
-    return content.strip()
-
-
-def _parse_json_object(raw: str) -> dict[str, Any]:
-    try:
-        value = json.loads(raw)
-    except json.JSONDecodeError:
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start < 0 or end <= start:
-            raise
-        value = json.loads(raw[start : end + 1])
-    if not isinstance(value, dict):
-        raise ValueError("Expected a JSON object from the LLM baseline")
-    return value
-
-
 def _usage(value: Any) -> dict[str, Any]:
     source = value if isinstance(value, dict) else {}
     input_tokens = _integer(source.get("input_tokens", source.get("prompt_tokens")))
+    raw_details = source.get("input_tokens_details") or source.get(
+        "prompt_tokens_details"
+    )
+    details = raw_details if isinstance(raw_details, dict) else {}
+    cached_input_tokens = _integer(details.get("cached_tokens"))
     output_tokens = _integer(
         source.get("output_tokens", source.get("completion_tokens"))
     )
@@ -1062,10 +1118,26 @@ def _usage(value: Any) -> dict[str, Any]:
     )
     return {
         "input_tokens": input_tokens,
+        "cached_input_tokens": cached_input_tokens,
         "output_tokens": output_tokens,
         "total_tokens": total_tokens,
         "cost_usd": cost_usd,
     }
+
+
+def _luna_cost_usd(
+    *, input_tokens: int, cached_input_tokens: int, output_tokens: int
+) -> float:
+    uncached_input_tokens = max(0, input_tokens - cached_input_tokens)
+    return round(
+        (
+            uncached_input_tokens * LUNA_INPUT_COST_PER_1M
+            + cached_input_tokens * LUNA_CACHED_INPUT_COST_PER_1M
+            + output_tokens * LUNA_OUTPUT_COST_PER_1M
+        )
+        / 1_000_000,
+        10,
+    )
 
 
 def _integer(value: Any) -> int:

@@ -5,7 +5,7 @@ post is contractor-friendly and assigns one of four posting types. It compares:
 
 - the production deterministic heuristic
 - TypeSafe Jev through OpenRouter's Decisions API
-- the production job-lead prompt with GPT-5.6 Luna through OpenRouter
+- the production job-lead prompt with GPT-5.6 Luna through direct OpenAI
 
 The checked-in `fixtures/v1/corpus.json` corpus contains synthetic, manually
 labeled examples. It is balanced across the four posting types and deliberately
@@ -21,9 +21,10 @@ uv run job-lead-eval \
   --repeats 3
 ```
 
-`OPENROUTER_API_KEY` is required for Jev and Luna. Jev uses the pinned
-`typesafe/jev-1.13` request model and the OpenRouter Decisions endpoint. The
-runner records the dated resolved model returned by the provider.
+`OPENROUTER_API_KEY` is required for Jev and `OPENAI_API_KEY` is required for
+Luna. Jev uses the pinned `typesafe/jev-1.13` request model and the OpenRouter
+Decisions endpoint. The runner records dated resolved models returned by the
+providers.
 
 Reports are written to `tests/evals/job-lead-classification/reports/` and are
 gitignored. The JSON report contains normalized observations but not raw model
