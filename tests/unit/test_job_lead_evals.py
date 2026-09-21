@@ -55,6 +55,7 @@ class _FakeResponse:
             },
             "usage": {
                 "input_tokens": 450,
+                "input_tokens_details": {"cached_tokens": 50},
                 "output_tokens": 73,
                 "cost": 0.000019,
             },
@@ -191,6 +192,7 @@ def test_jev_response_is_normalized_without_raw_provider_output() -> None:
     assert observation.contractor_probability == 0.91
     assert observation.resolved_model == "typesafe/jev-1.13-20260917"
     assert observation.input_tokens == 450
+    assert observation.cached_input_tokens == 50
     assert observation.output_tokens == 73
     assert observation.total_tokens == 523
     assert observation.cost_usd == 0.000019

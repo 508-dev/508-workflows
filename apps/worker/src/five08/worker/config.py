@@ -87,6 +87,12 @@ class WorkerSettings(SharedSettings):
         le=1.0,
     )
     job_lead_jev_shadow_timeout_seconds: float = Field(default=4.0, gt=0, le=30.0)
+    job_lead_jev_shadow_max_calls: int = Field(default=25, ge=1, le=100)
+    job_lead_jev_shadow_run_budget_seconds: float = Field(
+        default=20.0,
+        gt=0,
+        le=60.0,
+    )
     resume_ai_api_key: str | None = None
     resume_ai_base_url: str | None = None
     resume_ai_model: str = "gpt-4.1-mini"

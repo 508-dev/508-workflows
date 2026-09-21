@@ -183,6 +183,10 @@ def test_job_lead_jev_shadow_runtime_config_has_safe_bounds() -> None:
     threshold = runtime_config_definition_for_key(
         "JOB_LEAD_JEV_SHADOW_CONFIDENCE_THRESHOLD"
     )
+    max_calls = runtime_config_definition_for_key("JOB_LEAD_JEV_SHADOW_MAX_CALLS")
+    run_budget = runtime_config_definition_for_key(
+        "JOB_LEAD_JEV_SHADOW_RUN_BUDGET_SECONDS"
+    )
     enabled = runtime_config_definition_for_key("JOB_LEAD_JEV_SHADOW_ENABLED")
 
     assert enabled is not None
@@ -193,9 +197,19 @@ def test_job_lead_jev_shadow_runtime_config_has_safe_bounds() -> None:
     assert threshold is not None
     assert threshold.min_value == 0.5
     assert threshold.max_value == 1.0
+    assert max_calls is not None
+    assert max_calls.value_type == "int"
+    assert max_calls.min_value == 1
+    assert max_calls.max_value == 100
+    assert run_budget is not None
+    assert run_budget.value_type == "float"
+    assert run_budget.min_value == 0.1
+    assert run_budget.max_value == 60.0
     assert coerce_runtime_config_value(threshold, "0.8") == "0.8"
     with pytest.raises(ValueError, match="greater than or equal to 0.5"):
         coerce_runtime_config_value(threshold, "0.4")
+    with pytest.raises(ValueError, match="less than or equal to 60"):
+        coerce_runtime_config_value(run_budget, "61")
 
 
 def test_outline_admin_runtime_config_supports_legacy_dashboard_values(

@@ -385,6 +385,7 @@ def _run_jev(
         latency_ms=_elapsed_ms(started),
         request_attempts=decision.request_attempts,
         input_tokens=decision.input_tokens,
+        cached_input_tokens=decision.cached_input_tokens,
         output_tokens=decision.output_tokens,
         total_tokens=decision.total_tokens,
         cost_usd=decision.cost_usd,

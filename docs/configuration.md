@@ -238,6 +238,8 @@ intake-completed field unset, and matches resume filenames with
 - `JOB_LEAD_JEV_SHADOW_SAMPLE_RATE`
 - `JOB_LEAD_JEV_SHADOW_CONFIDENCE_THRESHOLD`
 - `JOB_LEAD_JEV_SHADOW_TIMEOUT_SECONDS`
+- `JOB_LEAD_JEV_SHADOW_MAX_CALLS`
+- `JOB_LEAD_JEV_SHADOW_RUN_BUDGET_SECONDS`
 
 The Jev job-lead shadow is disabled by default and requires
 `OPENROUTER_API_KEY`. When enabled, it deterministically samples eligible HN
@@ -247,9 +249,10 @@ classification. View the latest data in **Dashboard → Background tasks**, open
 the `scrape_job_leads_job` run, and inspect `Result → classifier_shadow`.
 Disagreements, confidence fallbacks, and provider failures include only the HN
 item ID and URL plus normalized decisions; raw post text and provider responses
-are not retained in the shadow report. A provider failure disables further Jev
-calls for that scrape run so an unavailable shadow service cannot repeatedly
-delay the production job.
+are not retained in the shadow report. At most 25 calls within a 20-second
+wall-clock window are allowed by default per scrape run, even if a larger sample
+is selected. A provider failure disables further Jev calls for that run so an
+unavailable shadow service cannot repeatedly delay the production job.
 
 Resume/profile LLM calls retry matching direct providers after Bifrost request
 failures when direct provider credentials are configured.

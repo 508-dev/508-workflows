@@ -41,6 +41,7 @@ class JobLeadJevDecision:
     latency_ms: int
     request_attempts: int
     input_tokens: int
+    cached_input_tokens: int
     output_tokens: int
     total_tokens: int
     cost_usd: float | None
@@ -146,6 +147,7 @@ def classify_job_lead_with_jev(
         latency_ms=max(0, round((time.perf_counter() - started) * 1000)),
         request_attempts=attempts,
         input_tokens=usage["input_tokens"],
+        cached_input_tokens=usage["cached_input_tokens"],
         output_tokens=usage["output_tokens"],
         total_tokens=usage["total_tokens"],
         cost_usd=usage["cost_usd"],
@@ -274,6 +276,11 @@ def _probabilities(value: Any, *, name: str) -> dict[str, float]:
 def _usage(value: Any) -> dict[str, Any]:
     source = value if isinstance(value, dict) else {}
     input_tokens = _integer(source.get("input_tokens", source.get("prompt_tokens")))
+    raw_details = source.get("input_tokens_details") or source.get(
+        "prompt_tokens_details"
+    )
+    details = raw_details if isinstance(raw_details, dict) else {}
+    cached_input_tokens = _integer(details.get("cached_tokens"))
     output_tokens = _integer(
         source.get("output_tokens", source.get("completion_tokens"))
     )
@@ -281,6 +288,7 @@ def _usage(value: Any) -> dict[str, Any]:
     cost = source.get("cost")
     return {
         "input_tokens": input_tokens,
+        "cached_input_tokens": cached_input_tokens,
         "output_tokens": output_tokens,
         "total_tokens": total_tokens,
         "cost_usd": _optional_float(cost),

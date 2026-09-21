@@ -8,6 +8,7 @@ import json
 import logging
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -182,6 +183,7 @@ class JobLeadJevShadowObservation:
     agrees_with_primary: bool | None = None
     request_attempts: int = 0
     input_tokens: int = 0
+    cached_input_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
     cost_usd: float | None = None
@@ -212,6 +214,7 @@ class JobLeadJevShadowObservation:
             "latency_ms": self.latency_ms,
             "request_attempts": self.request_attempts,
             "input_tokens": self.input_tokens,
+            "cached_input_tokens": self.cached_input_tokens,
             "output_tokens": self.output_tokens,
             "total_tokens": self.total_tokens,
             "cost_usd": self.cost_usd,
@@ -651,6 +654,7 @@ class JobLeadClassifier:
         settings: SharedSettings,
         client: Any | None = None,
         jev_shadow_session: requests.Session | None = None,
+        jev_shadow_clock: Callable[[], float] | None = None,
     ) -> None:
         self.settings = settings
         self.client = client if client is not None else _build_llm_client(settings)
@@ -680,6 +684,24 @@ class JobLeadClassifier:
             maximum=30.0,
             default=4.0,
         )
+        self._jev_shadow_max_calls = _bounded_int(
+            getattr(settings, "job_lead_jev_shadow_max_calls", 25),
+            minimum=1,
+            maximum=100,
+            default=25,
+        )
+        self._jev_shadow_run_budget_seconds = _bounded_float(
+            getattr(settings, "job_lead_jev_shadow_run_budget_seconds", 20.0),
+            minimum=0.1,
+            maximum=60.0,
+            default=20.0,
+        )
+        self._jev_shadow_clock = jev_shadow_clock or time.perf_counter
+        self._jev_shadow_calls_started = 0
+        self._jev_shadow_run_started_at: float | None = None
+        self._jev_shadow_budget_exhaustion_reason: (
+            Literal["max_calls", "run_budget"] | None
+        ) = None
         self._owns_jev_shadow_session = False
         self._jev_shadow_available = True
         self._jev_shadow_session = jev_shadow_session
@@ -711,6 +733,42 @@ class JobLeadClassifier:
             self._jev_shadow_session.close()
             self._jev_shadow_session = None
 
+    def jev_shadow_run_summary(self) -> dict[str, Any]:
+        """Return bounded-work state for the current scrape report."""
+
+        elapsed_ms = 0
+        if self._jev_shadow_run_started_at is not None:
+            elapsed_ms = max(
+                0,
+                round(
+                    (self._jev_shadow_clock() - self._jev_shadow_run_started_at) * 1000
+                ),
+            )
+        return {
+            "calls_started": self._jev_shadow_calls_started,
+            "max_calls": self._jev_shadow_max_calls,
+            "run_budget_seconds": self._jev_shadow_run_budget_seconds,
+            "run_elapsed_ms": elapsed_ms,
+            "budget_exhaustion_reason": self._jev_shadow_budget_exhaustion_reason,
+        }
+
+    def _next_jev_shadow_timeout(self) -> float | None:
+        if self._jev_shadow_calls_started >= self._jev_shadow_max_calls:
+            self._jev_shadow_budget_exhaustion_reason = "max_calls"
+            return None
+
+        now = self._jev_shadow_clock()
+        if self._jev_shadow_run_started_at is None:
+            self._jev_shadow_run_started_at = now
+        elapsed = max(0.0, now - self._jev_shadow_run_started_at)
+        remaining = self._jev_shadow_run_budget_seconds - elapsed
+        if remaining < 0.1:
+            self._jev_shadow_budget_exhaustion_reason = "run_budget"
+            return None
+
+        self._jev_shadow_calls_started += 1
+        return min(self._jev_shadow_timeout_seconds, remaining)
+
     def _attach_jev_shadow(
         self,
         comment_text: str,
@@ -728,14 +786,18 @@ class JobLeadClassifier:
         ):
             return classification
 
-        started = time.perf_counter()
+        shadow_timeout_seconds = self._next_jev_shadow_timeout()
+        if shadow_timeout_seconds is None:
+            return classification
+
+        started = self._jev_shadow_clock()
         try:
             decision = classify_job_lead_with_jev(
                 session=self._jev_shadow_session,
                 api_key=self._jev_shadow_api_key,
                 comment_text=comment_text,
                 model=self._jev_shadow_model,
-                timeout_seconds=self._jev_shadow_timeout_seconds,
+                timeout_seconds=shadow_timeout_seconds,
                 max_attempts=1,
             )
             observation = _successful_jev_shadow_observation(
@@ -751,7 +813,10 @@ class JobLeadClassifier:
                 confidence_threshold=self._jev_shadow_confidence_threshold,
                 primary_is_contractor_friendly=(classification.is_contractor_friendly),
                 primary_posting_type=classification.posting_type,
-                latency_ms=max(0, round((time.perf_counter() - started) * 1000)),
+                latency_ms=max(
+                    0,
+                    round((self._jev_shadow_clock() - started) * 1000),
+                ),
                 observed_at=datetime.now(timezone.utc),
                 error=_safe_jev_shadow_error(exc),
             )
@@ -854,6 +919,22 @@ def _bounded_float(
     return max(minimum, min(maximum, numeric))
 
 
+def _bounded_int(
+    value: object,
+    *,
+    minimum: int,
+    maximum: int,
+    default: int,
+) -> int:
+    if isinstance(value, bool) or not isinstance(value, int | str):
+        return default
+    try:
+        numeric = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(maximum, numeric))
+
+
 def _selected_for_jev_shadow(comment_text: str, sample_rate: float) -> bool:
     if sample_rate <= 0.0:
         return False
@@ -893,6 +974,7 @@ def _successful_jev_shadow_observation(
         latency_ms=decision.latency_ms,
         request_attempts=decision.request_attempts,
         input_tokens=decision.input_tokens,
+        cached_input_tokens=decision.cached_input_tokens,
         output_tokens=decision.output_tokens,
         total_tokens=decision.total_tokens,
         cost_usd=decision.cost_usd,
@@ -1226,6 +1308,8 @@ def build_job_lead_source(
 def _job_lead_jev_shadow_report(
     settings: SharedSettings,
     leads: list[JobLeadInput],
+    *,
+    runtime_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     enabled = bool(getattr(settings, "job_lead_jev_shadow_enabled", False))
     api_key_configured = bool(_clean(getattr(settings, "openrouter_api_key", None)))
@@ -1244,6 +1328,18 @@ def _job_lead_jev_shadow_report(
         minimum=0.5,
         maximum=1.0,
         default=0.8,
+    )
+    max_calls = _bounded_int(
+        getattr(settings, "job_lead_jev_shadow_max_calls", 25),
+        minimum=1,
+        maximum=100,
+        default=25,
+    )
+    run_budget_seconds = _bounded_float(
+        getattr(settings, "job_lead_jev_shadow_run_budget_seconds", 20.0),
+        minimum=0.1,
+        maximum=60.0,
+        default=20.0,
     )
     observed: list[tuple[JobLeadInput, dict[str, Any], dict[str, Any]]] = []
     for lead in leads:
@@ -1278,6 +1374,24 @@ def _job_lead_jev_shadow_report(
         if isinstance(item[2].get("cost_usd"), int | float)
         and not isinstance(item[2].get("cost_usd"), bool)
     ]
+    runtime = runtime_summary if isinstance(runtime_summary, dict) else {}
+    raw_calls_started = runtime.get("calls_started")
+    calls_started = (
+        int(raw_calls_started)
+        if isinstance(raw_calls_started, int)
+        and not isinstance(raw_calls_started, bool)
+        else len(observed)
+    )
+    raw_run_elapsed_ms = runtime.get("run_elapsed_ms")
+    run_elapsed_ms = (
+        int(raw_run_elapsed_ms)
+        if isinstance(raw_run_elapsed_ms, int | float)
+        and not isinstance(raw_run_elapsed_ms, bool)
+        else None
+    )
+    budget_exhaustion_reason = runtime.get("budget_exhaustion_reason")
+    if budget_exhaustion_reason not in {"max_calls", "run_budget"}:
+        budget_exhaustion_reason = None
 
     review_candidates: list[dict[str, Any]] = []
     for lead, primary, shadow in observed:
@@ -1329,6 +1443,8 @@ def _job_lead_jev_shadow_report(
         status = "no_sample_selected"
     elif failures:
         status = "completed_with_errors"
+    elif budget_exhaustion_reason is not None:
+        status = "completed_budget_limited"
     else:
         status = "completed"
 
@@ -1342,6 +1458,14 @@ def _job_lead_jev_shadow_report(
         "requested_model": model,
         "sample_rate": sample_rate,
         "confidence_threshold": confidence_threshold,
+        "limits": {
+            "max_calls": max_calls,
+            "run_budget_seconds": run_budget_seconds,
+        },
+        "calls_started": calls_started,
+        "run_elapsed_ms": run_elapsed_ms,
+        "budget_exhausted": budget_exhaustion_reason is not None,
+        "budget_exhaustion_reason": budget_exhaustion_reason,
         "eligible": len(leads),
         "attempted": attempted,
         "not_observed": max(0, len(leads) - attempted),
@@ -1372,6 +1496,9 @@ def _job_lead_jev_shadow_report(
         "usage": {
             "unit": "tokens",
             "input": sum(int(item[2].get("input_tokens") or 0) for item in successful),
+            "cached": sum(
+                int(item[2].get("cached_input_tokens") or 0) for item in successful
+            ),
             "output": sum(
                 int(item[2].get("output_tokens") or 0) for item in successful
             ),
@@ -1417,7 +1544,25 @@ def scrape_job_leads(
         close_classifier = getattr(classifier, "close", None)
         if callable(close_classifier):
             close_classifier()
-    shadow_report = _job_lead_jev_shadow_report(settings, leads)
+    shadow_runtime_summary_factory = getattr(
+        classifier,
+        "jev_shadow_run_summary",
+        None,
+    )
+    raw_shadow_runtime_summary = (
+        shadow_runtime_summary_factory()
+        if callable(shadow_runtime_summary_factory)
+        else None
+    )
+    shadow_report = _job_lead_jev_shadow_report(
+        settings,
+        leads,
+        runtime_summary=(
+            raw_shadow_runtime_summary
+            if isinstance(raw_shadow_runtime_summary, dict)
+            else None
+        ),
+    )
     collection_report_factory = getattr(adapter, "collection_report", None)
     raw_collection_report = (
         collection_report_factory() if callable(collection_report_factory) else {}
