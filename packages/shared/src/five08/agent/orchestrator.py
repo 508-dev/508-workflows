@@ -103,6 +103,7 @@ _OPERATIONAL_DATA_SUBJECT_RE = re.compile(
     r"purchase\s+orders?|sales\s+orders?|quotations?|expense\s+claims?|"
     r"journal\s+entr(?:y|ies)|delivery\s+notes?|(?:credit|debit)\s+notes?|"
     r"payment\s+entr(?:y|ies)|material\s+requests?|stock\s+entr(?:y|ies)|"
+    r"inventory|warehouses?|stock(?:\s+levels?)?|"
     r"balances?|owing|owed|owes?|receivables?|revenue|sales|profit|costs?|"
     r"onboarding|crm|contacts?|members?|"
     r"tasks?|github|issues?|projects?|database|records?)\b",
