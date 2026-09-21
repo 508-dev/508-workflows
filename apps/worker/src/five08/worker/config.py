@@ -78,6 +78,21 @@ class WorkerSettings(SharedSettings):
     job_lead_classifier_enabled: bool = True
     job_lead_classifier_model: str | None = None
     job_lead_classifier_timeout_seconds: float = Field(default=8.0, gt=0)
+    job_lead_jev_shadow_enabled: bool = False
+    job_lead_jev_shadow_model: str = "typesafe/jev-1.13"
+    job_lead_jev_shadow_sample_rate: float = Field(default=0.1, ge=0.0, le=1.0)
+    job_lead_jev_shadow_confidence_threshold: float = Field(
+        default=0.8,
+        ge=0.5,
+        le=1.0,
+    )
+    job_lead_jev_shadow_timeout_seconds: float = Field(default=4.0, gt=0, le=30.0)
+    job_lead_jev_shadow_max_calls: int = Field(default=25, ge=1, le=100)
+    job_lead_jev_shadow_run_budget_seconds: float = Field(
+        default=20.0,
+        gt=0,
+        le=60.0,
+    )
     resume_ai_api_key: str | None = None
     resume_ai_base_url: str | None = None
     resume_ai_model: str = "gpt-4.1-mini"

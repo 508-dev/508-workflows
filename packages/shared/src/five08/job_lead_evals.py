@@ -9,7 +9,7 @@ import subprocess
 import sys
 import time
 from collections import defaultdict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -18,6 +18,13 @@ import requests
 from openai import OpenAI
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from five08.job_lead_jev import (
+    DEFAULT_JOB_LEAD_JEV_MODEL,
+    OPENROUTER_DECISIONS_URL,
+    JobLeadJevRequestError,
+    classify_job_lead_with_jev,
+    job_lead_jev_questions,
+)
 from five08.job_lead_sources import (
     JobLeadClassifier,
     JobLeadLLMClassificationResponse,
@@ -25,7 +32,6 @@ from five08.job_lead_sources import (
     classify_contractor_lead_heuristic,
 )
 from five08.model_catalog import model_chat_completion_options
-from five08.tls import default_ca_bundle_path
 
 PostingType = Literal[
     "part_time",
@@ -39,9 +45,8 @@ DEFAULT_CORPUS_PATH = Path(
     "tests/evals/job-lead-classification/fixtures/v1/corpus.json"
 )
 DEFAULT_OUTPUT_DIR = Path("tests/evals/job-lead-classification/reports")
-DEFAULT_JEV_MODEL = "typesafe/jev-1.13"
+DEFAULT_JEV_MODEL = DEFAULT_JOB_LEAD_JEV_MODEL
 DEFAULT_LLM_MODEL = "gpt-5.6-luna"
-OPENROUTER_DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions"
 OPENAI_BASE_URL = "https://api.openai.com/v1"
 LUNA_INPUT_COST_PER_1M = 0.20
 LUNA_CACHED_INPUT_COST_PER_1M = 0.02
@@ -171,42 +176,7 @@ def load_job_lead_eval_corpus(path: Path = DEFAULT_CORPUS_PATH) -> JobLeadEvalCo
 def jev_questions() -> dict[str, dict[str, Any]]:
     """Return the stable Jev decision contract for this eval."""
 
-    return {
-        "contractor_friendly": {
-            "type": "noul",
-            "instructions": (
-                "Is this a direct employer or recruiter job posting that explicitly "
-                "offers contract, contractor, freelance, consulting, fractional, "
-                "1099, B2B contracting, or part-time work? Answer false for "
-                "full-time employee-only roles, people seeking work, replies, closed "
-                "roles, and company products or customer contracts."
-            ),
-        },
-        "posting_type": {
-            "type": "choice",
-            "instructions": (
-                "What employment arrangement does this direct job posting explicitly offer?"
-            ),
-            "criteria": {
-                "part_time": (
-                    "Contract, contractor, freelance, consulting, fractional, 1099, "
-                    "B2B contracting, or part-time work, without a full-time option."
-                ),
-                "full_time": (
-                    "Full-time or permanent employee work only, with no contract or "
-                    "part-time option."
-                ),
-                "part_time_or_full_time": (
-                    "Explicitly offers both full-time employment and contract, "
-                    "freelance, consulting, or part-time work."
-                ),
-                "unknown": (
-                    "Not a direct current job posting, or the employment arrangement "
-                    "is not stated clearly."
-                ),
-            },
-        },
-    }
+    return job_lead_jev_questions()
 
 
 def run_job_lead_eval_suite(
@@ -354,7 +324,9 @@ def _run_case(
             latency_ms=_elapsed_ms(started),
             requested_model={"jev": jev_model, "luna": llm_model}.get(profile),
             request_attempts=(
-                exc.request_attempts if isinstance(exc, _RequestFailure) else 1
+                exc.request_attempts
+                if isinstance(exc, _RequestFailure | JobLeadJevRequestError)
+                else 1
             ),
             error=_safe_error(exc),
         )
@@ -389,51 +361,34 @@ def _run_jev(
     max_attempts: int,
     started: float,
 ) -> JobLeadEvalObservation:
-    body, attempts = _post_json_with_retries(
+    decision = classify_job_lead_with_jev(
         session=session,
-        url=OPENROUTER_DECISIONS_URL,
         api_key=api_key,
-        payload={
-            "model": model,
-            "state": case.text,
-            "questions": jev_questions(),
-        },
+        comment_text=case.text,
+        model=model,
         timeout_seconds=timeout_seconds,
         max_attempts=max_attempts,
-        service_name="OpenRouter",
-        extra_headers={"X-OpenRouter-Title": "508.dev Job Lead Eval"},
+        request_title="508.dev Job Lead Eval",
     )
-    answers = _mapping(body.get("answers"), name="answers")
-    contractor_answer = _mapping(
-        answers.get("contractor_friendly"), name="answers.contractor_friendly"
-    )
-    posting_answer = _mapping(answers.get("posting_type"), name="answers.posting_type")
-    contractor_probability = _probability(
-        contractor_answer.get("noul"), name="answers.contractor_friendly.noul"
-    )
-    posting_type = _posting_type(
-        posting_answer.get("choice"), name="answers.posting_type.choice"
-    )
-    posting_probabilities = _probabilities(
-        posting_answer.get("probabilities"), name="answers.posting_type.probabilities"
-    )
-    confidence = _optional_probability(posting_answer.get("confidence"))
-    usage = _usage(body.get("usage"))
     return _base_observation(
         profile="jev",
         case=case,
         repeat=repeat,
         requested_model=model,
-        resolved_model=_optional_text(body.get("model")),
-        provider=_optional_text(body.get("provider")),
-        predicted_posting_type=posting_type,
-        predicted_contractor_friendly=contractor_probability >= 0.5,
-        contractor_probability=contractor_probability,
-        classification_confidence=confidence,
-        posting_probabilities=posting_probabilities,
+        resolved_model=decision.resolved_model,
+        provider=decision.provider,
+        predicted_posting_type=decision.posting_type.value,
+        predicted_contractor_friendly=decision.is_contractor_friendly,
+        contractor_probability=decision.contractor_probability,
+        classification_confidence=decision.posting_confidence,
+        posting_probabilities=decision.posting_probabilities,
         latency_ms=_elapsed_ms(started),
-        request_attempts=attempts,
-        **usage,
+        request_attempts=decision.request_attempts,
+        input_tokens=decision.input_tokens,
+        cached_input_tokens=decision.cached_input_tokens,
+        output_tokens=decision.output_tokens,
+        total_tokens=decision.total_tokens,
+        cost_usd=decision.cost_usd,
     )
 
 
@@ -1010,124 +965,10 @@ def _openai_parse_with_retries(
     raise RuntimeError("OpenAI request did not produce a response")
 
 
-def _post_json_with_retries(
-    *,
-    session: requests.Session,
-    url: str,
-    api_key: str,
-    payload: dict[str, Any],
-    timeout_seconds: float,
-    max_attempts: int,
-    service_name: str,
-    extra_headers: Mapping[str, str] | None = None,
-) -> tuple[dict[str, Any], int]:
-    if max_attempts < 1:
-        raise ValueError("max_attempts must be at least 1")
-    response: requests.Response | None = None
-    for attempt in range(1, max_attempts + 1):
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
-        if extra_headers:
-            headers.update(extra_headers)
-        try:
-            response = session.post(
-                url,
-                headers=headers,
-                json=payload,
-                timeout=timeout_seconds,
-                verify=default_ca_bundle_path(),
-            )
-        except requests.RequestException as exc:
-            if attempt == max_attempts:
-                raise _RequestFailure(exc, request_attempts=attempt) from exc
-            time.sleep(min(float(2 ** (attempt - 1)), 8.0))
-            continue
-        if (
-            response.status_code not in _RETRYABLE_STATUS_CODES
-            or attempt == max_attempts
-        ):
-            break
-        time.sleep(_retry_delay(response, attempt))
-    if response is None:
-        raise _RequestFailure(
-            RuntimeError(f"{service_name} request did not produce a response"),
-            request_attempts=max_attempts,
-        )
-    try:
-        body = response.json()
-    except ValueError as exc:
-        cause = ValueError(
-            f"{service_name} returned non-JSON HTTP {response.status_code}"
-        )
-        raise _RequestFailure(cause, request_attempts=attempt) from exc
-    if not response.ok:
-        error = body.get("error") if isinstance(body, dict) else None
-        if isinstance(error, dict):
-            message = _optional_text(error.get("message")) or "unknown error"
-        else:
-            message = _optional_text(error) or "unknown error"
-        raise _RequestFailure(
-            RuntimeError(
-                f"{service_name} HTTP {response.status_code}: {message[:300]}"
-            ),
-            request_attempts=attempt,
-        )
-    if not isinstance(body, dict):
-        raise _RequestFailure(
-            ValueError(f"{service_name} response must be a JSON object"),
-            request_attempts=attempt,
-        )
-    return body, attempt
-
-
-def _retry_delay(response: requests.Response, attempt: int) -> float:
-    retry_after = response.headers.get("retry-after")
-    if retry_after:
-        try:
-            return max(0.0, min(float(retry_after), 15.0))
-        except ValueError:
-            pass
-    return min(float(2 ** (attempt - 1)), 8.0)
-
-
-def _mapping(value: Any, *, name: str) -> Mapping[str, Any]:
-    if not isinstance(value, dict):
-        raise ValueError(f"{name} must be an object")
-    return value
-
-
 def _posting_type(value: Any, *, name: str) -> PostingType:
     if value not in _POSTING_TYPES:
         raise ValueError(f"{name} has unsupported value: {value!r}")
     return value
-
-
-def _probability(value: Any, *, name: str) -> float:
-    probability = _optional_probability(value)
-    if probability is None:
-        raise ValueError(f"{name} must be a probability")
-    return probability
-
-
-def _optional_probability(value: Any) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        return None
-    probability = float(value)
-    return probability if 0.0 <= probability <= 1.0 else None
-
-
-def _probabilities(value: Any, *, name: str) -> dict[str, float]:
-    source = _mapping(value, name=name)
-    probabilities = {
-        str(key): probability
-        for key, raw in source.items()
-        if (probability := _optional_probability(raw)) is not None
-    }
-    if not set(_POSTING_TYPES).issubset(probabilities):
-        raise ValueError(f"{name} must include all posting types")
-    return probabilities
 
 
 def _usage(value: Any) -> dict[str, Any]:
@@ -1201,7 +1042,7 @@ def _optional_text(value: Any) -> str | None:
 
 
 def _safe_error(exc: Exception) -> str:
-    if isinstance(exc, _RequestFailure):
+    if isinstance(exc, _RequestFailure | JobLeadJevRequestError):
         exc = exc.cause
     return f"{type(exc).__name__}: {str(exc)[:500]}"
 
