@@ -92,6 +92,15 @@ def test_format_agent_response_renders_generic_clarification_as_guidance() -> No
     )
 
 
+def test_format_agent_response_bounds_long_direct_chat_answer() -> None:
+    cog = AgentCog.__new__(AgentCog)
+
+    message = cog._format_agent_response({"status": "executed", "message": "A" * 4000})
+
+    assert len(message) == 1900
+    assert message.startswith("Agent status: executed\n\n")
+
+
 def test_agent_capabilities_include_steering_task_and_memory_workflows() -> None:
     message = AgentCog._agent_capabilities_message(
         roles=["Steering Committee"],
