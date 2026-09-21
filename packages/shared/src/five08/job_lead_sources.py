@@ -734,7 +734,7 @@ class JobLeadClassifier:
             self._jev_shadow_session = None
 
     def jev_shadow_run_summary(self) -> dict[str, Any]:
-        """Return bounded-work state for the current scrape report."""
+        """Return the captured configuration and bounded-work state for this run."""
 
         elapsed_ms = 0
         if self._jev_shadow_run_started_at is not None:
@@ -745,6 +745,12 @@ class JobLeadClassifier:
                 ),
             )
         return {
+            "enabled": self._jev_shadow_enabled,
+            "provider_configured": bool(self._jev_shadow_api_key),
+            "requested_model": self._jev_shadow_model,
+            "sample_rate": self._jev_shadow_sample_rate,
+            "confidence_threshold": self._jev_shadow_confidence_threshold,
+            "request_timeout_seconds": self._jev_shadow_timeout_seconds,
             "calls_started": self._jev_shadow_calls_started,
             "max_calls": self._jev_shadow_max_calls,
             "run_budget_seconds": self._jev_shadow_run_budget_seconds,
@@ -1311,32 +1317,61 @@ def _job_lead_jev_shadow_report(
     *,
     runtime_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    enabled = bool(getattr(settings, "job_lead_jev_shadow_enabled", False))
-    api_key_configured = bool(_clean(getattr(settings, "openrouter_api_key", None)))
-    model = (
-        _clean(getattr(settings, "job_lead_jev_shadow_model", None))
-        or DEFAULT_JOB_LEAD_JEV_MODEL
+    runtime = runtime_summary if isinstance(runtime_summary, dict) else {}
+    raw_enabled = runtime.get("enabled")
+    enabled = (
+        raw_enabled
+        if isinstance(raw_enabled, bool)
+        else bool(getattr(settings, "job_lead_jev_shadow_enabled", False))
     )
+    raw_provider_configured = runtime.get("provider_configured")
+    api_key_configured = (
+        raw_provider_configured
+        if isinstance(raw_provider_configured, bool)
+        else bool(_clean(getattr(settings, "openrouter_api_key", None)))
+    )
+    raw_model = (
+        runtime["requested_model"]
+        if "requested_model" in runtime
+        else getattr(settings, "job_lead_jev_shadow_model", None)
+    )
+    model = _clean(raw_model) or DEFAULT_JOB_LEAD_JEV_MODEL
     sample_rate = _bounded_float(
-        getattr(settings, "job_lead_jev_shadow_sample_rate", 0.1),
+        runtime["sample_rate"]
+        if "sample_rate" in runtime
+        else getattr(settings, "job_lead_jev_shadow_sample_rate", 0.1),
         minimum=0.0,
         maximum=1.0,
         default=0.1,
     )
     confidence_threshold = _bounded_float(
-        getattr(settings, "job_lead_jev_shadow_confidence_threshold", 0.8),
+        runtime["confidence_threshold"]
+        if "confidence_threshold" in runtime
+        else getattr(settings, "job_lead_jev_shadow_confidence_threshold", 0.8),
         minimum=0.5,
         maximum=1.0,
         default=0.8,
     )
+    request_timeout_seconds = _bounded_float(
+        runtime["request_timeout_seconds"]
+        if "request_timeout_seconds" in runtime
+        else getattr(settings, "job_lead_jev_shadow_timeout_seconds", 4.0),
+        minimum=0.1,
+        maximum=30.0,
+        default=4.0,
+    )
     max_calls = _bounded_int(
-        getattr(settings, "job_lead_jev_shadow_max_calls", 25),
+        runtime["max_calls"]
+        if "max_calls" in runtime
+        else getattr(settings, "job_lead_jev_shadow_max_calls", 25),
         minimum=1,
         maximum=100,
         default=25,
     )
     run_budget_seconds = _bounded_float(
-        getattr(settings, "job_lead_jev_shadow_run_budget_seconds", 20.0),
+        runtime["run_budget_seconds"]
+        if "run_budget_seconds" in runtime
+        else getattr(settings, "job_lead_jev_shadow_run_budget_seconds", 20.0),
         minimum=0.1,
         maximum=60.0,
         default=20.0,
@@ -1374,7 +1409,6 @@ def _job_lead_jev_shadow_report(
         if isinstance(item[2].get("cost_usd"), int | float)
         and not isinstance(item[2].get("cost_usd"), bool)
     ]
-    runtime = runtime_summary if isinstance(runtime_summary, dict) else {}
     raw_calls_started = runtime.get("calls_started")
     calls_started = (
         int(raw_calls_started)
@@ -1459,6 +1493,7 @@ def _job_lead_jev_shadow_report(
         "sample_rate": sample_rate,
         "confidence_threshold": confidence_threshold,
         "limits": {
+            "request_timeout_seconds": request_timeout_seconds,
             "max_calls": max_calls,
             "run_budget_seconds": run_budget_seconds,
         },

@@ -210,9 +210,7 @@ def _post_json_with_retries(
         else:
             message = _optional_text(error) or "unknown error"
         raise JobLeadJevRequestError(
-            RuntimeError(
-                f"OpenRouter HTTP {response.status_code}: {message[:300]}"
-            ),
+            RuntimeError(f"OpenRouter HTTP {response.status_code}: {message[:300]}"),
             request_attempts=attempt,
         )
     if not isinstance(body, dict):

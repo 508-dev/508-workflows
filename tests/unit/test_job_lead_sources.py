@@ -951,6 +951,52 @@ def test_jev_shadow_stops_at_per_run_call_cap(monkeypatch) -> None:
     )
 
 
+def test_jev_shadow_report_uses_classifier_configuration_snapshot() -> None:
+    settings = SimpleNamespace(
+        job_lead_jev_shadow_enabled=True,
+        job_lead_jev_shadow_model="typesafe/jev-1.13",
+        job_lead_jev_shadow_sample_rate=0.25,
+        job_lead_jev_shadow_confidence_threshold=0.85,
+        job_lead_jev_shadow_timeout_seconds=3.0,
+        job_lead_jev_shadow_max_calls=7,
+        job_lead_jev_shadow_run_budget_seconds=12.0,
+        openrouter_api_key="test-key",
+    )
+    classifier = JobLeadClassifier(
+        settings=settings,  # type: ignore[arg-type]
+        client=object(),
+        jev_shadow_session=object(),  # type: ignore[arg-type]
+    )
+    run_snapshot = classifier.jev_shadow_run_summary()
+
+    settings.job_lead_jev_shadow_enabled = False
+    settings.job_lead_jev_shadow_model = "typesafe/jev-changed"
+    settings.job_lead_jev_shadow_sample_rate = 0.0
+    settings.job_lead_jev_shadow_confidence_threshold = 0.95
+    settings.job_lead_jev_shadow_timeout_seconds = 9.0
+    settings.job_lead_jev_shadow_max_calls = 99
+    settings.job_lead_jev_shadow_run_budget_seconds = 55.0
+    settings.openrouter_api_key = None
+
+    report = job_lead_sources._job_lead_jev_shadow_report(  # noqa: SLF001
+        settings,  # type: ignore[arg-type]
+        [],
+        runtime_summary=run_snapshot,
+    )
+
+    assert report["status"] == "no_sample_selected"
+    assert report["enabled"] is True
+    assert report["provider_configured"] is True
+    assert report["requested_model"] == "typesafe/jev-1.13"
+    assert report["sample_rate"] == 0.25
+    assert report["confidence_threshold"] == 0.85
+    assert report["limits"] == {
+        "request_timeout_seconds": 3.0,
+        "max_calls": 7,
+        "run_budget_seconds": 12.0,
+    }
+
+
 def test_build_llm_client_uses_classifier_model_for_fireworks_direct(
     monkeypatch,
 ) -> None:
