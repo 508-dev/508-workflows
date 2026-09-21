@@ -17,6 +17,8 @@ from five08.job_lead_evals import (
     JobLeadEvalReport,
     JobLeadLLMClassificationResponse,
     JobLeadEvalObservation,
+    _direct_openai_api_key,
+    _run_case,
     _run_jev,
     _run_luna,
     jev_questions,
@@ -235,6 +237,54 @@ def test_luna_uses_schema_parse_and_official_rate_estimate() -> None:
     assert observation.cost_usd == 0.000122
 
 
+def test_luna_does_not_apply_luna_rates_to_custom_model() -> None:
+    observation = _run_luna(
+        case=_case(),
+        repeat=1,
+        client=_FakeOpenAIClient(),  # type: ignore[arg-type]
+        model="gpt-4.1-mini",
+        max_attempts=1,
+        started=0.0,
+    )
+
+    assert observation.cost_usd is None
+
+
+def test_exhausted_request_preserves_attempt_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = requests.Session()
+    attempts = 0
+
+    def timeout_post(*_args: object, **_kwargs: object) -> requests.Response:
+        nonlocal attempts
+        attempts += 1
+        raise requests.Timeout("persistent timeout")
+
+    monkeypatch.setattr(session, "post", timeout_post)
+    monkeypatch.setattr("five08.job_lead_evals.time.sleep", lambda _delay: None)
+
+    observation = _run_case(
+        profile="jev",
+        case=_case(),
+        repeat=1,
+        client=session,
+        openrouter_api_key="test-key",
+        openai_api_key=None,
+        jev_model="typesafe/jev-1.13",
+        llm_model="gpt-5.6-luna",
+        timeout_seconds=5.0,
+        max_attempts=2,
+    )
+
+    assert attempts == 2
+    assert observation.request_attempts == 2
+    assert observation.error == "Timeout: persistent timeout"
+    assert (
+        summarize_profile([observation], case_count=1)["usage"]["request_attempts"] == 2
+    )
+
+
 def test_heuristic_suite_requires_no_provider_key() -> None:
     corpus = SimpleNamespace(
         version="job-lead-classification.v1",
@@ -295,6 +345,39 @@ def test_summary_tracks_repeatability_and_confidence_gate() -> None:
     assert summary["repeatability"]["max_probability_span"] == 0.04
     assert summary["confidence_thresholds"][-1]["coverage"] == 0.0
     assert summary["usage"]["cost_usd"] == 0.00006
+
+
+def test_confidence_gate_counts_failed_calls_as_fallbacks() -> None:
+    observations = [
+        JobLeadEvalObservation(
+            profile="jev",
+            case_id="success",
+            group="core",
+            repeat=1,
+            expected_posting_type="part_time",
+            expected_contractor_friendly=True,
+            predicted_posting_type="part_time",
+            predicted_contractor_friendly=True,
+            contractor_probability=0.9,
+            latency_ms=200,
+        ),
+        JobLeadEvalObservation(
+            profile="jev",
+            case_id="failure",
+            group="core",
+            repeat=1,
+            expected_posting_type="full_time",
+            expected_contractor_friendly=False,
+            latency_ms=200,
+            error="provider unavailable",
+        ),
+    ]
+
+    thresholds = summarize_profile(observations, case_count=2)["confidence_thresholds"]
+
+    threshold_80 = next(item for item in thresholds if item["threshold"] == 0.8)
+    assert threshold_80["accepted"] == 1
+    assert threshold_80["coverage"] == 0.5
 
 
 def test_failed_repeat_is_not_reported_as_stable() -> None:
@@ -371,6 +454,40 @@ def test_report_renders_every_mismatch_group() -> None:
     markdown = render_job_lead_eval_report(report)
 
     assert "`mismatch_16`" in markdown
+    assert "| heuristic |" in markdown
+    assert "| deterministic |" in markdown
+
+
+def test_report_marks_single_network_run_stability_unmeasured() -> None:
+    observation = JobLeadEvalObservation(
+        profile="jev",
+        case_id="success",
+        group="core",
+        repeat=1,
+        expected_posting_type="part_time",
+        expected_contractor_friendly=True,
+        predicted_posting_type="part_time",
+        predicted_contractor_friendly=True,
+        contractor_probability=0.9,
+        latency_ms=200,
+    )
+    report = JobLeadEvalReport(
+        evaluated_at=datetime.now(timezone.utc),
+        runtime_revision=None,
+        corpus_version="job-lead-classification.v1",
+        corpus_path="corpus.json",
+        case_count=1,
+        network_repeats=1,
+        requested_models={"jev": "jev", "luna": "luna"},
+        endpoints={"jev": "https://example.com", "luna": "https://example.com"},
+        summary={"jev": summarize_profile([observation], case_count=1)},
+        observations=[observation],
+    )
+
+    markdown = render_job_lead_eval_report(report)
+
+    assert "| jev |" in markdown
+    assert "| unmeasured |" in markdown
 
 
 def test_env_file_loader_does_not_override_exported_value(
@@ -383,3 +500,19 @@ def test_env_file_loader_does_not_override_exported_value(
     load_env_file(env_file)
 
     assert __import__("os").environ["OPENROUTER_API_KEY"] == "exported"
+
+
+def test_direct_openai_key_prefers_explicit_direct_conventions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "gateway-or-legacy")
+    monkeypatch.setenv("OPENAI_API_KEY_DIRECT", "legacy-direct")
+    monkeypatch.setenv("OPENAI_DIRECT_API_KEY", "direct")
+
+    assert _direct_openai_api_key() == "direct"
+
+    monkeypatch.delenv("OPENAI_DIRECT_API_KEY")
+    assert _direct_openai_api_key() == "legacy-direct"
+
+    monkeypatch.delenv("OPENAI_API_KEY_DIRECT")
+    assert _direct_openai_api_key() == "gateway-or-legacy"

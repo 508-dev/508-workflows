@@ -55,6 +55,15 @@ _POSTING_TYPES: tuple[PostingType, ...] = (
 )
 
 
+class _RequestFailure(RuntimeError):
+    """Carry the number of provider attempts without exposing raw responses."""
+
+    def __init__(self, cause: Exception, *, request_attempts: int) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+        self.request_attempts = request_attempts
+
+
 class JobLeadEvalCase(BaseModel):
     """One manually labeled classification example."""
 
@@ -222,7 +231,7 @@ def run_job_lead_eval_suite(
     if "jev" in profiles and not openrouter_api_key:
         raise ValueError("OPENROUTER_API_KEY is required for Jev evals")
     if "luna" in profiles and not openai_api_key:
-        raise ValueError("OPENAI_API_KEY is required for Luna evals")
+        raise ValueError("A direct OpenAI API key is required for Luna evals")
 
     observations: list[JobLeadEvalObservation] = []
     for profile in profiles:
@@ -344,6 +353,9 @@ def _run_case(
             repeat=repeat,
             latency_ms=_elapsed_ms(started),
             requested_model={"jev": jev_model, "luna": llm_model}.get(profile),
+            request_attempts=(
+                exc.request_attempts if isinstance(exc, _RequestFailure) else 1
+            ),
             error=_safe_error(exc),
         )
 
@@ -469,7 +481,7 @@ def _run_luna(
         completion.usage.model_dump() if completion.usage is not None else {}
     )
     usage = _usage(usage_payload)
-    if usage["cost_usd"] is None:
+    if usage["cost_usd"] is None and _has_known_luna_pricing(model):
         usage["cost_usd"] = _luna_cost_usd(
             input_tokens=usage["input_tokens"],
             cached_input_tokens=usage["cached_input_tokens"],
@@ -698,6 +710,13 @@ def summarize_profile(
         "joint_accuracy": _ratio(joint_correct, len(successful)),
         "by_group": by_group,
         "repeatability": {
+            "status": (
+                "measured"
+                if repeated_groups
+                else "deterministic"
+                if profile == "heuristic"
+                else "unmeasured"
+            ),
             "repeated_cases": len(repeated_groups),
             "stable_cases": stable_cases,
             "incomplete_cases": incomplete_cases,
@@ -714,7 +733,7 @@ def summarize_profile(
             ),
         },
         "brier_score": brier_score,
-        "confidence_thresholds": _confidence_thresholds(probability_items),
+        "confidence_thresholds": _confidence_thresholds(observations),
         "latency_ms": {
             "mean": round(statistics.fmean(latencies), 1) if latencies else None,
             "p50": _percentile(latencies, 0.50),
@@ -765,7 +784,7 @@ def render_job_lead_eval_report(report: JobLeadEvalReport) -> str:
         stable = (
             f"{stability['stable_cases']}/{stability['repeated_cases']}"
             if stability["repeated_cases"]
-            else "deterministic"
+            else stability["status"]
         )
         latency = summary["latency_ms"]
         cost = summary["usage"]["cost_usd"]
@@ -871,7 +890,7 @@ def render_job_lead_eval_report(report: JobLeadEvalReport) -> str:
             "- Jev uses OpenRouter's Decisions endpoint and the pinned `typesafe/jev-1.13` request ID. The resolved dated snapshot is retained in the JSON observation report.",
             "- The Luna baseline uses the production job-lead prompt and schema through direct OpenAI. A preflight through OpenRouter returned HTTP 403 under provider terms, so the report does not present an unsupported route as a benchmark failure.",
             "- Luna's self-reported classification confidence is retained as diagnostic metadata, but it is not treated as a calibrated contractor probability or used in the Jev confidence-gate analysis.",
-            "- Jev cost is provider-reported. Luna cost is estimated from successful retained token usage at the official [$0.20/M input, $0.02/M cached input, and $1.20/M output rates](https://developers.openai.com/api/docs/models/gpt-5.6-luna). Retried failed requests may not expose usage and may be absent.",
+            "- Jev cost is provider-reported. For GPT-5.6 Luna only, missing cost is estimated from successful retained token usage at the official [$0.20/M input, $0.02/M cached input, and $1.20/M output rates](https://developers.openai.com/api/docs/models/gpt-5.6-luna); missing cost for a custom `--llm-model` remains unavailable. Retried failed requests may not expose usage and may be absent.",
             "- Raw observations are generated under the gitignored reports directory; this Markdown summary intentionally excludes provider payloads and secrets.",
             "",
         ]
@@ -925,7 +944,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         corpus_path=args.corpus,
         profiles=profiles,
         openrouter_api_key=_env("OPENROUTER_API_KEY"),
-        openai_api_key=_env("OPENAI_API_KEY"),
+        openai_api_key=_direct_openai_api_key(),
         jev_model=args.jev_model,
         llm_model=args.llm_model,
         llm_base_url=args.llm_base_url,
@@ -986,7 +1005,7 @@ def _openai_parse_with_retries(
                 "APITimeoutError",
             }
             if not retryable or attempt == max_attempts:
-                raise
+                raise _RequestFailure(exc, request_attempts=attempt) from exc
             time.sleep(min(float(2 ** (attempt - 1)), 8.0))
             continue
         return completion, attempt
@@ -1022,9 +1041,9 @@ def _post_json_with_retries(
                 timeout=timeout_seconds,
                 verify=default_ca_bundle_path(),
             )
-        except requests.RequestException:
+        except requests.RequestException as exc:
             if attempt == max_attempts:
-                raise
+                raise _RequestFailure(exc, request_attempts=attempt) from exc
             time.sleep(min(float(2 ** (attempt - 1)), 8.0))
             continue
         if (
@@ -1034,24 +1053,34 @@ def _post_json_with_retries(
             break
         time.sleep(_retry_delay(response, attempt))
     if response is None:
-        raise RuntimeError(f"{service_name} request did not produce a response")
+        raise _RequestFailure(
+            RuntimeError(f"{service_name} request did not produce a response"),
+            request_attempts=max_attempts,
+        )
     try:
         body = response.json()
     except ValueError as exc:
-        raise ValueError(
+        cause = ValueError(
             f"{service_name} returned non-JSON HTTP {response.status_code}"
-        ) from exc
+        )
+        raise _RequestFailure(cause, request_attempts=attempt) from exc
     if not response.ok:
         error = body.get("error") if isinstance(body, dict) else None
         if isinstance(error, dict):
             message = _optional_text(error.get("message")) or "unknown error"
         else:
             message = _optional_text(error) or "unknown error"
-        raise RuntimeError(
-            f"{service_name} HTTP {response.status_code}: {message[:300]}"
+        raise _RequestFailure(
+            RuntimeError(
+                f"{service_name} HTTP {response.status_code}: {message[:300]}"
+            ),
+            request_attempts=attempt,
         )
     if not isinstance(body, dict):
-        raise ValueError(f"{service_name} response must be a JSON object")
+        raise _RequestFailure(
+            ValueError(f"{service_name} response must be a JSON object"),
+            request_attempts=attempt,
+        )
     return body, attempt
 
 
@@ -1143,6 +1172,13 @@ def _luna_cost_usd(
     )
 
 
+def _has_known_luna_pricing(model: str) -> bool:
+    model_id = model.rsplit("/", 1)[-1].casefold()
+    return model_id == DEFAULT_LLM_MODEL or model_id.startswith(
+        f"{DEFAULT_LLM_MODEL}-20"
+    )
+
+
 def _integer(value: Any) -> int:
     if isinstance(value, bool):
         return int(value)
@@ -1167,6 +1203,8 @@ def _optional_text(value: Any) -> str | None:
 
 
 def _safe_error(exc: Exception) -> str:
+    if isinstance(exc, _RequestFailure):
+        exc = exc.cause
     return f"{type(exc).__name__}: {str(exc)[:500]}"
 
 
@@ -1336,6 +1374,14 @@ def _env(name: str) -> str | None:
         return None
     stripped = value.strip()
     return stripped or None
+
+
+def _direct_openai_api_key() -> str | None:
+    return (
+        _env("OPENAI_DIRECT_API_KEY")
+        or _env("OPENAI_API_KEY_DIRECT")
+        or _env("OPENAI_API_KEY")
+    )
 
 
 if __name__ == "__main__":

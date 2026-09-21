@@ -21,10 +21,11 @@ uv run job-lead-eval \
   --repeats 3
 ```
 
-`OPENROUTER_API_KEY` is required for Jev and `OPENAI_API_KEY` is required for
-Luna. Jev uses the pinned `typesafe/jev-1.13` request model and the OpenRouter
-Decisions endpoint. The runner records dated resolved models returned by the
-providers.
+`OPENROUTER_API_KEY` is required for Jev. Luna uses the first available direct
+OpenAI credential from `OPENAI_DIRECT_API_KEY`, legacy
+`OPENAI_API_KEY_DIRECT`, or `OPENAI_API_KEY`. Jev uses the pinned
+`typesafe/jev-1.13` request model and the OpenRouter Decisions endpoint. The
+runner records dated resolved models returned by the providers.
 
 Reports are written to `tests/evals/job-lead-classification/reports/` and are
 gitignored. The JSON report contains normalized observations but not raw model
