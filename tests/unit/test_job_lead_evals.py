@@ -200,7 +200,7 @@ def test_jev_retries_transport_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session = _FlakySession()
-    monkeypatch.setattr("five08.job_lead_evals.time.sleep", lambda _delay: None)
+    monkeypatch.setattr("five08.job_lead_jev.time.sleep", lambda _delay: None)
 
     observation = _run_jev(
         case=_case(),

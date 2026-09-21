@@ -498,6 +498,62 @@ _DEFINITIONS: tuple[RuntimeConfigDefinition, ...] = (
         min_value=0.1,
     ),
     RuntimeConfigDefinition(
+        key="JOB_LEAD_JEV_SHADOW_ENABLED",
+        attr="job_lead_jev_shadow_enabled",
+        label="Jev job lead shadow enabled",
+        category="AI",
+        description=(
+            "Observe sampled HN job leads with Jev without changing production "
+            "classification decisions."
+        ),
+        value_type="bool",
+        env_names=("JOB_LEAD_JEV_SHADOW_ENABLED",),
+    ),
+    RuntimeConfigDefinition(
+        key="JOB_LEAD_JEV_SHADOW_MODEL",
+        attr="job_lead_jev_shadow_model",
+        label="Jev job lead shadow model",
+        category="AI",
+        description="Pinned OpenRouter Jev model used for shadow decisions.",
+        env_names=("JOB_LEAD_JEV_SHADOW_MODEL",),
+    ),
+    RuntimeConfigDefinition(
+        key="JOB_LEAD_JEV_SHADOW_SAMPLE_RATE",
+        attr="job_lead_jev_shadow_sample_rate",
+        label="Jev job lead shadow sample rate",
+        category="AI",
+        description="Deterministic fraction of eligible HN posts sent to Jev.",
+        value_type="float",
+        env_names=("JOB_LEAD_JEV_SHADOW_SAMPLE_RATE",),
+        min_value=0.0,
+        max_value=1.0,
+    ),
+    RuntimeConfigDefinition(
+        key="JOB_LEAD_JEV_SHADOW_CONFIDENCE_THRESHOLD",
+        attr="job_lead_jev_shadow_confidence_threshold",
+        label="Jev job lead shadow confidence threshold",
+        category="AI",
+        description=(
+            "Symmetric positive or negative probability threshold used to mark "
+            "which Jev decisions would be accepted."
+        ),
+        value_type="float",
+        env_names=("JOB_LEAD_JEV_SHADOW_CONFIDENCE_THRESHOLD",),
+        min_value=0.5,
+        max_value=1.0,
+    ),
+    RuntimeConfigDefinition(
+        key="JOB_LEAD_JEV_SHADOW_TIMEOUT_SECONDS",
+        attr="job_lead_jev_shadow_timeout_seconds",
+        label="Jev job lead shadow timeout seconds",
+        category="AI",
+        description="Timeout for each non-authoritative Jev shadow request.",
+        value_type="float",
+        env_names=("JOB_LEAD_JEV_SHADOW_TIMEOUT_SECONDS",),
+        min_value=0.1,
+        max_value=30.0,
+    ),
+    RuntimeConfigDefinition(
         key="RESUME_AI_API_KEY",
         attr="resume_ai_api_key",
         label="Resume AI API key",

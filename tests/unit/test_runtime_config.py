@@ -178,6 +178,26 @@ def test_env_value_locks_matching_runtime_config(
     assert definition_is_env_locked(definition)
 
 
+def test_job_lead_jev_shadow_runtime_config_has_safe_bounds() -> None:
+    sample_rate = runtime_config_definition_for_key("JOB_LEAD_JEV_SHADOW_SAMPLE_RATE")
+    threshold = runtime_config_definition_for_key(
+        "JOB_LEAD_JEV_SHADOW_CONFIDENCE_THRESHOLD"
+    )
+    enabled = runtime_config_definition_for_key("JOB_LEAD_JEV_SHADOW_ENABLED")
+
+    assert enabled is not None
+    assert enabled.value_type == "bool"
+    assert sample_rate is not None
+    assert sample_rate.min_value == 0.0
+    assert sample_rate.max_value == 1.0
+    assert threshold is not None
+    assert threshold.min_value == 0.5
+    assert threshold.max_value == 1.0
+    assert coerce_runtime_config_value(threshold, "0.8") == "0.8"
+    with pytest.raises(ValueError, match="greater than or equal to 0.5"):
+        coerce_runtime_config_value(threshold, "0.4")
+
+
 def test_outline_admin_runtime_config_supports_legacy_dashboard_values(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import five08.job_lead_sources as job_lead_sources
+from five08.job_lead_jev import JobLeadJevDecision
 from five08.job_lead_sources import (
     HackerNewsThread,
     HackerNewsWhoIsHiringLeadSource,
@@ -632,6 +633,7 @@ def test_scrape_refreshes_existing_non_contractor_without_inserting(
     assert result["created"] == 1
     assert result["updated"] == 1
     assert result["lead_ids"] == ["lead-10", "lead-11"]
+    assert result["classifier_shadow"]["status"] == "disabled"
 
 
 def test_scrape_skips_reviewed_contractor_friendly_lead(monkeypatch) -> None:
@@ -694,6 +696,145 @@ def test_classifier_falls_back_without_second_llm_call_after_provider_failure() 
     assert client.parse_kwargs is not None
     assert client.parse_kwargs["temperature"] == 0
     assert client.chat_create_calls == 0
+
+
+def test_jev_shadow_records_disagreement_without_changing_primary(
+    monkeypatch,
+) -> None:
+    settings = SimpleNamespace(
+        job_lead_jev_shadow_enabled=True,
+        job_lead_jev_shadow_model="typesafe/jev-1.13",
+        job_lead_jev_shadow_sample_rate=1.0,
+        job_lead_jev_shadow_confidence_threshold=0.8,
+        job_lead_jev_shadow_timeout_seconds=4.0,
+        openrouter_api_key="test-key",
+    )
+    primary = JobLeadClassification(
+        is_contractor_friendly=False,
+        posting_type=JobPostingType.FULL_TIME,
+        tags=["full-time"],
+        confidence=0.9,
+        confidence_label="high",
+        rationale="Employee-only role.",
+        method="llm",
+    )
+    decision = JobLeadJevDecision(
+        requested_model="typesafe/jev-1.13",
+        resolved_model="typesafe/jev-1.13-20260917",
+        provider="TypeSafe",
+        is_contractor_friendly=True,
+        contractor_probability=0.91,
+        posting_type=JobPostingType.PART_TIME,
+        posting_confidence=0.98,
+        posting_probabilities={
+            "part_time": 0.98,
+            "full_time": 0.01,
+            "part_time_or_full_time": 0.01,
+            "unknown": 0.0,
+        },
+        latency_ms=420,
+        request_attempts=1,
+        input_tokens=450,
+        output_tokens=73,
+        total_tokens=523,
+        cost_usd=0.000019,
+    )
+    classifier = JobLeadClassifier(
+        settings=settings,  # type: ignore[arg-type]
+        client=object(),
+        jev_shadow_session=object(),  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(classifier, "_classify_with_llm", lambda _text: primary)
+    monkeypatch.setattr(
+        job_lead_sources,
+        "classify_job_lead_with_jev",
+        lambda **_kwargs: decision,
+    )
+
+    classification = classifier.classify("Acme | Full-time or contract | Remote")
+
+    assert classification.is_contractor_friendly is False
+    assert classification.posting_type is JobPostingType.FULL_TIME
+    assert classification.jev_shadow is not None
+    assert classification.jev_shadow.predicted_is_contractor_friendly is True
+    assert classification.jev_shadow.gate_accepted is True
+    assert classification.jev_shadow.agrees_with_primary is False
+    metadata = job_lead_sources._classification_metadata(classification)
+    assert metadata["contractor_classification"]["is_contractor_friendly"] is False
+    assert metadata["contractor_classification_shadow"]["cost_usd"] == 0.000019
+
+    lead = JobLeadInput(
+        source_key="hackernews_who_is_hiring",
+        source_type="hackernews",
+        external_id="42",
+        source_url="https://news.ycombinator.com/item?id=42",
+        title="Acme role",
+        body_raw="not retained in report",
+        body_normalized="not retained in report",
+        metadata=metadata,
+    )
+    report = job_lead_sources._job_lead_jev_shadow_report(  # noqa: SLF001
+        settings,  # type: ignore[arg-type]
+        [lead],
+    )
+
+    assert report["status"] == "completed"
+    assert report["attempted"] == 1
+    assert report["disagreements"] == 1
+    assert report["high_confidence_disagreements"] == 1
+    assert report["usage"] == {
+        "unit": "tokens",
+        "input": 450,
+        "output": 73,
+        "total": 523,
+        "cost_usd": 0.000019,
+    }
+    assert report["review_items"][0]["external_id"] == "42"
+    assert "body_raw" not in report["review_items"][0]
+
+
+def test_jev_shadow_failure_never_changes_primary(monkeypatch) -> None:
+    settings = SimpleNamespace(
+        job_lead_jev_shadow_enabled=True,
+        job_lead_jev_shadow_sample_rate=1.0,
+        job_lead_jev_shadow_confidence_threshold=0.8,
+        job_lead_jev_shadow_timeout_seconds=4.0,
+        openrouter_api_key="test-key",
+    )
+    primary = classify_contractor_lead_heuristic(
+        "Acme | Contract API engineer | Remote"
+    )
+    classifier = JobLeadClassifier(
+        settings=settings,  # type: ignore[arg-type]
+        client=object(),
+        jev_shadow_session=object(),  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(classifier, "_classify_with_llm", lambda _text: primary)
+
+    shadow_calls = 0
+
+    def fail_shadow(**_kwargs: object) -> JobLeadJevDecision:
+        nonlocal shadow_calls
+        shadow_calls += 1
+        raise TimeoutError("provider timed out")
+
+    monkeypatch.setattr(
+        job_lead_sources,
+        "classify_job_lead_with_jev",
+        fail_shadow,
+    )
+
+    classification = classifier.classify("Acme | Contract API engineer | Remote")
+
+    assert classification.is_contractor_friendly is True
+    assert classification.jev_shadow is not None
+    assert classification.jev_shadow.status == "failed"
+    assert classification.jev_shadow.error == "TimeoutError: provider timed out"
+
+    next_classification = classifier.classify("Beta | Contract API engineer | Remote")
+
+    assert shadow_calls == 1
+    assert next_classification.jev_shadow is None
 
 
 def test_build_llm_client_uses_classifier_model_for_fireworks_direct(
