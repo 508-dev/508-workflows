@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import five08.job_lead_sources as job_lead_sources
-from five08.job_lead_jev import JobLeadJevDecision
+from five08.job_lead_jev import JobLeadJevDecision, JobLeadJevRequestError
 from five08.job_lead_sources import (
     HackerNewsThread,
     HackerNewsWhoIsHiringLeadSource,
@@ -822,7 +822,10 @@ def test_jev_shadow_failure_never_changes_primary(monkeypatch) -> None:
     def fail_shadow(**_kwargs: object) -> JobLeadJevDecision:
         nonlocal shadow_calls
         shadow_calls += 1
-        raise TimeoutError("provider timed out")
+        raise JobLeadJevRequestError(
+            TimeoutError("provider echoed sensitive submitted text"),
+            request_attempts=2,
+        )
 
     monkeypatch.setattr(
         job_lead_sources,
@@ -835,7 +838,27 @@ def test_jev_shadow_failure_never_changes_primary(monkeypatch) -> None:
     assert classification.is_contractor_friendly is True
     assert classification.jev_shadow is not None
     assert classification.jev_shadow.status == "failed"
-    assert classification.jev_shadow.error == "TimeoutError: provider timed out"
+    assert classification.jev_shadow.request_attempts == 2
+    assert classification.jev_shadow.error == "provider_timeout"
+    metadata = job_lead_sources._classification_metadata(classification)  # noqa: SLF001
+    assert "sensitive submitted text" not in str(metadata)
+
+    lead = JobLeadInput(
+        source_key="hackernews_who_is_hiring",
+        source_type="hackernews",
+        external_id="failed-shadow",
+        source_url="https://news.ycombinator.com/item?id=failed-shadow",
+        title="Failed shadow",
+        body_raw="not retained in report",
+        body_normalized="not retained in report",
+        metadata=metadata,
+    )
+    report = job_lead_sources._job_lead_jev_shadow_report(  # noqa: SLF001
+        settings,  # type: ignore[arg-type]
+        [lead],
+    )
+    assert report["review_items"][0]["shadow"]["error"] == "provider_timeout"
+    assert "sensitive submitted text" not in str(report)
 
     next_classification = classifier.classify("Beta | Contract API engineer | Remote")
 

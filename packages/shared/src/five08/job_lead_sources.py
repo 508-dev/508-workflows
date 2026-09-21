@@ -23,6 +23,7 @@ from five08.job_channels import JobPostingType
 from five08.job_lead_jev import (
     DEFAULT_JOB_LEAD_JEV_MODEL,
     JobLeadJevDecision,
+    JobLeadJevRequestError,
     classify_job_lead_with_jev,
 )
 from five08.job_leads import (
@@ -813,6 +814,7 @@ class JobLeadClassifier:
             )
         except Exception as exc:
             self._jev_shadow_available = False
+            error_category = _safe_jev_shadow_error(exc)
             observation = JobLeadJevShadowObservation(
                 status="failed",
                 requested_model=self._jev_shadow_model,
@@ -824,12 +826,13 @@ class JobLeadClassifier:
                     round((self._jev_shadow_clock() - started) * 1000),
                 ),
                 observed_at=datetime.now(timezone.utc),
-                error=_safe_jev_shadow_error(exc),
+                request_attempts=_jev_shadow_request_attempts(exc),
+                error=error_category,
             )
             logger.warning(
                 "Jev job-lead shadow classification failed; disabling it for the "
                 "remainder of this scrape: %s",
-                exc,
+                error_category,
             )
         return replace(classification, jev_shadow=observation)
 
@@ -988,8 +991,24 @@ def _successful_jev_shadow_observation(
 
 
 def _safe_jev_shadow_error(exc: Exception) -> str:
-    message = " ".join(str(exc).split())[:240]
-    return f"{type(exc).__name__}: {message}" if message else type(exc).__name__
+    cause = exc.cause if isinstance(exc, JobLeadJevRequestError) else exc
+    if isinstance(cause, requests.Timeout | TimeoutError):
+        return "provider_timeout"
+    if isinstance(cause, requests.ConnectionError):
+        return "provider_connection_error"
+    if isinstance(cause, requests.RequestException):
+        return "provider_transport_error"
+    if isinstance(cause, ValueError):
+        return "invalid_provider_response"
+    if isinstance(cause, RuntimeError):
+        return "provider_request_failed"
+    return "provider_error"
+
+
+def _jev_shadow_request_attempts(exc: Exception) -> int:
+    if isinstance(exc, JobLeadJevRequestError):
+        return max(1, exc.request_attempts)
+    return 1
 
 
 def _classifier_model(settings: SharedSettings) -> str:
