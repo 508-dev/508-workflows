@@ -104,16 +104,24 @@ def test_run_agent_schedule_job_rejects_unsafe_endpoint_before_sending_secret(
     post.assert_not_called()
 
 
-def test_expired_agent_memory_cleanup_uses_only_the_worker_postgres_store(
+def test_expired_agent_memory_cleanup_purges_both_durable_memory_tables(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class FakeMemoryStore:
+    class FakeKnowledgeStore:
         def __init__(self, worker_settings: object) -> None:
             assert worker_settings is jobs.settings
 
         def purge_expired_all_organizations(self) -> int:
             return 4
 
-    monkeypatch.setattr(jobs, "PostgresKnowledgeStore", FakeMemoryStore)
+    class FakeAgentMemoryStore:
+        def __init__(self, postgres_url: str) -> None:
+            assert postgres_url == jobs.settings.postgres_url
 
-    assert jobs.purge_expired_agent_memory_facts_job() == {"purged_count": 4}
+        def purge_expired_all_organizations(self) -> int:
+            return 3
+
+    monkeypatch.setattr(jobs, "PostgresKnowledgeStore", FakeKnowledgeStore)
+    monkeypatch.setattr(jobs, "PostgresMemoryStore", FakeAgentMemoryStore)
+
+    assert jobs.purge_expired_agent_memory_facts_job() == {"purged_count": 7}
