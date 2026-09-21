@@ -457,12 +457,6 @@ def _run_luna(
         payload[max_tokens_parameter] = 700
     else:
         payload["max_tokens"] = 700
-    reasoning_effort = options.get("reasoning_effort")
-    if isinstance(reasoning_effort, str) and reasoning_effort:
-        payload["reasoning_effort"] = reasoning_effort
-    verbosity = options.get("verbosity")
-    if isinstance(verbosity, str) and verbosity:
-        payload["verbosity"] = verbosity
     if options.get("supports_temperature", True):
         payload["temperature"] = 0
 
@@ -599,14 +593,18 @@ def summarize_profile(
     posting_macro_f1 = round(
         statistics.fmean(metrics["f1"] for metrics in posting_labels.values()), 4
     )
-    latencies = [item.latency_ms for item in successful]
+    latencies = [item.latency_ms for item in observations]
     cost_values = [item.cost_usd for item in successful if item.cost_usd is not None]
     profile = observations[0].profile if observations else None
     expected_api_results = len(successful) if profile in {"jev", "luna"} else 0
     total_cost: float | None
     if profile == "heuristic":
         total_cost = 0.0
-    elif len(cost_values) == expected_api_results:
+    elif (
+        expected_api_results > 0
+        and len(successful) == len(observations)
+        and len(cost_values) == expected_api_results
+    ):
         total_cost = round(sum(cost_values), 8)
     else:
         total_cost = None
@@ -890,7 +888,7 @@ def render_job_lead_eval_report(report: JobLeadEvalReport) -> str:
             "- Jev uses OpenRouter's Decisions endpoint and the pinned `typesafe/jev-1.13` request ID. The resolved dated snapshot is retained in the JSON observation report.",
             "- The Luna baseline uses the production job-lead prompt and schema through direct OpenAI. A preflight through OpenRouter returned HTTP 403 under provider terms, so the report does not present an unsupported route as a benchmark failure.",
             "- Luna's self-reported classification confidence is retained as diagnostic metadata, but it is not treated as a calibrated contractor probability or used in the Jev confidence-gate analysis.",
-            "- Jev cost is provider-reported. For GPT-5.6 Luna only, missing cost is estimated from successful retained token usage at the official [$0.20/M input, $0.02/M cached input, and $1.20/M output rates](https://developers.openai.com/api/docs/models/gpt-5.6-luna); missing cost for a custom `--llm-model` remains unavailable. Retried failed requests may not expose usage and may be absent.",
+            "- Latency includes successful and failed calls. Jev cost is provider-reported. For GPT-5.6 Luna only, missing cost is estimated from successful retained token usage at the official [$0.20/M input, $0.02/M cached input, and $1.20/M output rates](https://developers.openai.com/api/docs/models/gpt-5.6-luna); missing cost for a custom `--llm-model` or any profile with unpriced failed calls remains unavailable.",
             "- Raw observations are generated under the gitignored reports directory; this Markdown summary intentionally excludes provider payloads and secrets.",
             "",
         ]

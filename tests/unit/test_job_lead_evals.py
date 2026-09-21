@@ -231,6 +231,10 @@ def test_luna_uses_schema_parse_and_official_rate_estimate() -> None:
 
     assert client.payload is not None
     assert client.payload["response_format"] is JobLeadLLMClassificationResponse
+    assert client.payload["max_completion_tokens"] == 700
+    assert "temperature" not in client.payload
+    assert "reasoning_effort" not in client.payload
+    assert "verbosity" not in client.payload
     assert observation.predicted_contractor_friendly is True
     assert observation.predicted_posting_type == "part_time"
     assert observation.cached_input_tokens == 100
@@ -280,9 +284,10 @@ def test_exhausted_request_preserves_attempt_count(
     assert attempts == 2
     assert observation.request_attempts == 2
     assert observation.error == "Timeout: persistent timeout"
-    assert (
-        summarize_profile([observation], case_count=1)["usage"]["request_attempts"] == 2
-    )
+    summary = summarize_profile([observation], case_count=1)
+    assert summary["usage"]["request_attempts"] == 2
+    assert summary["usage"]["cost_usd"] is None
+    assert summary["latency_ms"]["max"] == observation.latency_ms
 
 
 def test_heuristic_suite_requires_no_provider_key() -> None:
@@ -410,12 +415,15 @@ def test_failed_repeat_is_not_reported_as_stable() -> None:
         )
     )
 
-    repeatability = summarize_profile(observations, case_count=1)["repeatability"]
+    summary = summarize_profile(observations, case_count=1)
+    repeatability = summary["repeatability"]
 
     assert repeatability["repeated_cases"] == 1
     assert repeatability["stable_cases"] == 0
     assert repeatability["incomplete_cases"] == 1
     assert repeatability["stable_rate"] == 0.0
+    assert summary["latency_ms"]["max"] == 500
+    assert summary["usage"]["cost_usd"] is None
 
 
 def test_report_renders_every_mismatch_group() -> None:
