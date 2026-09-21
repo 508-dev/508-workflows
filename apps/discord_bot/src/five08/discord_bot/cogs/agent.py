@@ -565,19 +565,23 @@ class KnowledgeCaptureView(discord.ui.View):
         interaction: discord.Interaction,
     ) -> dict[str, Any]:
         context = self.cog._build_agent_context(interaction)
-        original_guild_id = self.context.get("guild_id")
+        original_guild_id = str(
+            self.context.get("guild_id") or self.context.get("organization_id") or ""
+        ).strip()
         if context.get("organization_id") is None and original_guild_id:
-            context["organization_id"] = self.context.get("organization_id")
+            context["organization_id"] = (
+                self.context.get("organization_id") or original_guild_id
+            )
             context["guild_id"] = original_guild_id
             context["channel_id"] = self.context.get("channel_id")
             context["thread_id"] = self.context.get("thread_id")
-            fresh_roles = await self.cog._guild_role_names(
+            fresh_roles, fresh_role_ids = await self.cog._guild_role_snapshot(
                 guild_id=str(original_guild_id),
                 user_id=interaction.user.id,
+                require_fresh=True,
             )
-            if fresh_roles is None:
-                raise RuntimeError("Discord role refresh unavailable")
             context["roles"] = fresh_roles
+            context["role_ids"] = fresh_role_ids
         original_message_id = self.context.get("message_id")
         if original_message_id:
             context["message_id"] = original_message_id
