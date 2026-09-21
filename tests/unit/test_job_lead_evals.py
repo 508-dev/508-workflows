@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import requests
 from pydantic import ValidationError
 
 from five08.job_lead_evals import (
     DEFAULT_CORPUS_PATH,
     JobLeadEvalCase,
+    JobLeadEvalReport,
     JobLeadLLMClassificationResponse,
     JobLeadEvalObservation,
     _run_jev,
@@ -19,6 +22,7 @@ from five08.job_lead_evals import (
     jev_questions,
     load_env_file,
     load_job_lead_eval_corpus,
+    render_job_lead_eval_report,
     run_job_lead_eval_suite,
     summarize_profile,
 )
@@ -62,6 +66,18 @@ class _FakeSession:
     def post(self, _url: str, **kwargs: object) -> _FakeResponse:
         self.payload = kwargs["json"]  # type: ignore[assignment]
         return _FakeResponse()
+
+
+class _FlakySession(_FakeSession):
+    def __init__(self) -> None:
+        super().__init__()
+        self.attempts = 0
+
+    def post(self, _url: str, **kwargs: object) -> _FakeResponse:
+        self.attempts += 1
+        if self.attempts == 1:
+            raise requests.Timeout("temporary timeout")
+        return super().post(_url, **kwargs)
 
 
 class _FakeOpenAIClient:
@@ -178,6 +194,27 @@ def test_jev_response_is_normalized_without_raw_provider_output() -> None:
     assert observation.cost_usd == 0.000019
 
 
+def test_jev_retries_transport_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _FlakySession()
+    monkeypatch.setattr("five08.job_lead_evals.time.sleep", lambda _delay: None)
+
+    observation = _run_jev(
+        case=_case(),
+        repeat=1,
+        session=session,  # type: ignore[arg-type]
+        api_key="test-key",
+        model="typesafe/jev-1.13",
+        timeout_seconds=5.0,
+        max_attempts=2,
+        started=0.0,
+    )
+
+    assert session.attempts == 2
+    assert observation.request_attempts == 2
+
+
 def test_luna_uses_schema_parse_and_official_rate_estimate() -> None:
     client = _FakeOpenAIClient()
 
@@ -258,6 +295,82 @@ def test_summary_tracks_repeatability_and_confidence_gate() -> None:
     assert summary["repeatability"]["max_probability_span"] == 0.04
     assert summary["confidence_thresholds"][-1]["coverage"] == 0.0
     assert summary["usage"]["cost_usd"] == 0.00006
+
+
+def test_failed_repeat_is_not_reported_as_stable() -> None:
+    observations = [
+        JobLeadEvalObservation(
+            profile="jev",
+            case_id="sometimes_fails",
+            group="challenge",
+            repeat=repeat,
+            expected_posting_type="part_time",
+            expected_contractor_friendly=True,
+            predicted_posting_type="part_time",
+            predicted_contractor_friendly=True,
+            contractor_probability=0.9,
+            latency_ms=200,
+            cost_usd=0.00001,
+        )
+        for repeat in (1, 2)
+    ]
+    observations.append(
+        JobLeadEvalObservation(
+            profile="jev",
+            case_id="sometimes_fails",
+            group="challenge",
+            repeat=3,
+            expected_posting_type="part_time",
+            expected_contractor_friendly=True,
+            latency_ms=500,
+            error="temporary provider failure",
+        )
+    )
+
+    repeatability = summarize_profile(observations, case_count=1)["repeatability"]
+
+    assert repeatability["repeated_cases"] == 1
+    assert repeatability["stable_cases"] == 0
+    assert repeatability["incomplete_cases"] == 1
+    assert repeatability["stable_rate"] == 0.0
+
+
+def test_report_renders_every_mismatch_group() -> None:
+    observations = [
+        JobLeadEvalObservation(
+            profile="heuristic",
+            case_id=f"mismatch_{index:02d}",
+            group="challenge",
+            repeat=1,
+            expected_posting_type="part_time",
+            expected_contractor_friendly=True,
+            predicted_posting_type="full_time",
+            predicted_contractor_friendly=False,
+            latency_ms=0,
+        )
+        for index in range(17)
+    ]
+    report = JobLeadEvalReport(
+        evaluated_at=datetime.now(timezone.utc),
+        runtime_revision=None,
+        corpus_version="job-lead-classification.v1",
+        corpus_path="corpus.json",
+        case_count=len(observations),
+        network_repeats=1,
+        requested_models={"jev": "jev", "luna": "luna"},
+        endpoints={"jev": "https://example.com", "luna": "https://example.com"},
+        summary={
+            "heuristic": summarize_profile(
+                observations,
+                case_count=len(observations),
+            )
+        },
+        observations=observations,
+    )
+
+    markdown = render_job_lead_eval_report(report)
+
+    assert "`mismatch_16`" in markdown
 
 
 def test_env_file_loader_does_not_override_exported_value(

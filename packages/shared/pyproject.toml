@@ -18,6 +18,7 @@ dependencies = [
     "sentry-sdk>=2.30.0",
     # Exact-pin v4.6.1 while we wire the v4 observation-centric SDK surface.
     "langfuse==4.6.1",
+    "openai>=2.0.0",
 ]
 
 [tool.pyrefly]

@@ -94,6 +94,8 @@ Jev contractor-probability Brier score: `0.012865`. Lower is better.
 | `unknown_closed_role_001` | 1 | unknown/false | part_time/true | - |
 | `unknown_past_contractors_001` | 1 | unknown/false | part_time/true | - |
 | `unknown_prompt_injection_001` | 1 | unknown/false | part_time/true | - |
+| `unknown_reply_001` | 1 | unknown/false | part_time/true | - |
+| `unknown_terms_unsettled_001` | 1 | unknown/false | part_time/true | - |
 
 ### jev
 

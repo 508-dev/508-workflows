@@ -631,21 +631,22 @@ def summarize_profile(
         }
 
     grouped: dict[str, list[JobLeadEvalObservation]] = defaultdict(list)
-    for item in successful:
+    for item in observations:
         grouped[item.case_id].append(item)
     repeated_groups = [items for items in grouped.values() if len(items) > 1]
     stable_cases = sum(
-        len(
+        all(item.succeeded for item in items)
+        and len(
             {
-                (
-                    item.predicted_contractor_friendly,
-                    item.predicted_posting_type,
-                )
+                (item.predicted_contractor_friendly, item.predicted_posting_type)
                 for item in items
             }
         )
         == 1
         for items in repeated_groups
+    )
+    incomplete_cases = sum(
+        not all(item.succeeded for item in items) for items in repeated_groups
     )
     probability_spans = [
         max(probabilities) - min(probabilities)
@@ -699,6 +700,7 @@ def summarize_profile(
         "repeatability": {
             "repeated_cases": len(repeated_groups),
             "stable_cases": stable_cases,
+            "incomplete_cases": incomplete_cases,
             "stable_rate": (
                 _ratio(stable_cases, len(repeated_groups)) if repeated_groups else None
             ),
@@ -849,7 +851,7 @@ def render_job_lead_eval_report(report: JobLeadEvalReport) -> str:
                 "| --- | ---: | --- | --- | ---: |",
             ]
         )
-        for item in failures[:16]:
+        for item in failures:
             lines.append(
                 f"| `{item['case_id']}` | {item['count']} "
                 f"| {item['expected']} | {item['observed']} "
@@ -1012,13 +1014,19 @@ def _post_json_with_retries(
         }
         if extra_headers:
             headers.update(extra_headers)
-        response = session.post(
-            url,
-            headers=headers,
-            json=payload,
-            timeout=timeout_seconds,
-            verify=default_ca_bundle_path(),
-        )
+        try:
+            response = session.post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=timeout_seconds,
+                verify=default_ca_bundle_path(),
+            )
+        except requests.RequestException:
+            if attempt == max_attempts:
+                raise
+            time.sleep(min(float(2 ** (attempt - 1)), 8.0))
+            continue
         if (
             response.status_code not in _RETRYABLE_STATUS_CODES
             or attempt == max_attempts
