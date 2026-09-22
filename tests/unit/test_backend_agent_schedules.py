@@ -1718,6 +1718,7 @@ async def test_confirmed_agent_schedule_creation_binds_current_channel(
     assert getattr(fields, "channel_id") == "2000"
     assert getattr(fields, "execution_mode") == "agent_loop"
     assert getattr(fields, "tool_allowlist") == []
+    assert getattr(fields, "operation_id") == "schedule-plan-1"
     assert captured["context"] == context
 
 

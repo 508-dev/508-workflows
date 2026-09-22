@@ -58,6 +58,7 @@ export type AgentSchedulesResponse = {
 }
 
 export type AgentScheduleCreateValues = {
+  operation_id: string
   name: string
   cron_expression: string
   timezone: string
@@ -122,6 +123,7 @@ export function AgentSchedulesView({
   const [timezone, setTimezone] = useState("UTC")
   const [channelId, setChannelId] = useState("")
   const [prompt, setPrompt] = useState("")
+  const [operationId, setOperationId] = useState(() => crypto.randomUUID())
 
   const canSubmit =
     canCreate &&
@@ -136,6 +138,7 @@ export function AgentSchedulesView({
   async function submit() {
     if (!canSubmit) return
     const created = await onCreate({
+      operation_id: operationId,
       name: name.trim(),
       cron_expression: cronExpression.trim(),
       timezone: timezone.trim(),
@@ -147,6 +150,7 @@ export function AgentSchedulesView({
     setName("")
     setChannelId("")
     setPrompt("")
+    setOperationId(crypto.randomUUID())
   }
 
   return (
@@ -249,7 +253,10 @@ export function AgentSchedulesView({
                   maxLength={140}
                   disabled={!canCreate}
                   placeholder="Weekly GitHub triage"
-                  onChange={(event) => setName(event.target.value)}
+                  onChange={(event) => {
+                    setName(event.target.value)
+                    setOperationId(crypto.randomUUID())
+                  }}
                 />
               </Label>
               <Label>
@@ -259,7 +266,10 @@ export function AgentSchedulesView({
                   value={cronExpression}
                   disabled={!canCreate}
                   placeholder="0 9 * * 1"
-                  onChange={(event) => setCronExpression(event.target.value)}
+                  onChange={(event) => {
+                    setCronExpression(event.target.value)
+                    setOperationId(crypto.randomUUID())
+                  }}
                 />
               </Label>
               <Label>
@@ -269,7 +279,10 @@ export function AgentSchedulesView({
                   value={timezone}
                   disabled={!canCreate}
                   placeholder="Asia/Tokyo"
-                  onChange={(event) => setTimezone(event.target.value)}
+                  onChange={(event) => {
+                    setTimezone(event.target.value)
+                    setOperationId(crypto.randomUUID())
+                  }}
                 />
               </Label>
               <Label>
@@ -280,7 +293,10 @@ export function AgentSchedulesView({
                   inputMode="numeric"
                   disabled={!canCreate}
                   placeholder="123456789012345678"
-                  onChange={(event) => setChannelId(event.target.value)}
+                  onChange={(event) => {
+                    setChannelId(event.target.value)
+                    setOperationId(crypto.randomUUID())
+                  }}
                 />
               </Label>
             </div>
@@ -293,7 +309,10 @@ export function AgentSchedulesView({
                 maxLength={4000}
                 disabled={!canCreate}
                 placeholder="Inspect the onboarding queue and ERP projects at risk. Summarize trends, blockers, and the next sensible follow-up."
-                onChange={(event) => setPrompt(event.target.value)}
+                onChange={(event) => {
+                  setPrompt(event.target.value)
+                  setOperationId(crypto.randomUUID())
+                }}
               />
             </Label>
             <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">

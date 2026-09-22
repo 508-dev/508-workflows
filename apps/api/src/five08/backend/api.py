@@ -11879,6 +11879,7 @@ async def _create_agent_schedule_for_context(
             or "",
             guild_id=fresh_context.guild_id or "",
             owner_discord_user_id=fresh_context.discord_user_id,
+            creation_operation_id=str(payload.operation_id),
             name=str(payload.name),
             cron_expression=str(payload.cron_expression),
             timezone_name=str(payload.timezone),
@@ -12617,6 +12618,7 @@ async def _execute_confirmed_agent_schedule_creation_plan(
     try:
         proposal = AgentScheduleProposal.model_validate(action.arguments)
         payload = AgentScheduleCreateFields(
+            operation_id=plan.operation_id or plan.plan_id,
             name=proposal.name,
             cron_expression=proposal.cron_expression,
             timezone=proposal.timezone,

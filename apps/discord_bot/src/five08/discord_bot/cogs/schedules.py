@@ -68,6 +68,7 @@ class AgentSchedulesCog(commands.Cog):
             return
         payload = {
             "context": context,
+            "operation_id": str(interaction.id),
             "name": name,
             "cron_expression": cron,
             "timezone": timezone,
@@ -142,6 +143,7 @@ class AgentSchedulesCog(commands.Cog):
             return
         payload = {
             "context": context,
+            "operation_id": str(interaction.id),
             "name": name,
             "cron_expression": cron,
             "timezone": timezone,

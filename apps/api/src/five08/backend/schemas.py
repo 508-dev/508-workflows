@@ -46,6 +46,7 @@ class AgentConfirmationRequest(BaseModel):
 class AgentScheduleCreateFields(BaseModel):
     """Human-facing fields for a bounded recurring agent schedule."""
 
+    operation_id: str = Field(min_length=1, max_length=128)
     name: str = Field(min_length=1, max_length=140)
     cron_expression: str = Field(min_length=1, max_length=128)
     timezone: str = Field(default="UTC", min_length=1, max_length=128)

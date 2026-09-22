@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import {
@@ -90,5 +90,51 @@ describe("AgentSchedulesView", () => {
     fireEvent.click(screen.getByRole("button", { name: "Mark outcome unknown" }))
 
     expect(onResolveDelivery).toHaveBeenCalledWith(staleDelivery.id)
+  })
+
+  it("reuses a creation operation ID after response loss", async () => {
+    const onCreate = vi.fn().mockResolvedValue(false)
+    render(
+      <AgentSchedulesView
+        schedules={[]}
+        deliveryAttention={[]}
+        schedulerEnabled
+        loading={{}}
+        canWrite
+        canCreate
+        onRefresh={vi.fn()}
+        onCreate={onCreate}
+        onControl={vi.fn()}
+        onRun={vi.fn()}
+        onResolveDelivery={vi.fn()}
+      />,
+    )
+
+    fireEvent.change(screen.getByLabelText("Schedule name"), {
+      target: { value: "Weekly operations" },
+    })
+    fireEvent.change(screen.getByLabelText("Discord channel ID"), {
+      target: { value: "789" },
+    })
+    fireEvent.change(screen.getByLabelText("Report prompt"), {
+      target: { value: "Review operational health." },
+    })
+    const createButton = screen.getByRole("button", { name: "Create schedule" })
+
+    fireEvent.click(createButton)
+    await waitFor(() => expect(onCreate).toHaveBeenCalledTimes(1))
+    fireEvent.click(createButton)
+    await waitFor(() => expect(onCreate).toHaveBeenCalledTimes(2))
+
+    const firstOperationId = onCreate.mock.calls[0][0].operation_id
+    expect(firstOperationId).toMatch(/^[0-9a-f-]{36}$/i)
+    expect(onCreate.mock.calls[1][0].operation_id).toBe(firstOperationId)
+
+    fireEvent.change(screen.getByLabelText("Report prompt"), {
+      target: { value: "Review updated operational health." },
+    })
+    fireEvent.click(createButton)
+    await waitFor(() => expect(onCreate).toHaveBeenCalledTimes(3))
+    expect(onCreate.mock.calls[2][0].operation_id).not.toBe(firstOperationId)
   })
 })

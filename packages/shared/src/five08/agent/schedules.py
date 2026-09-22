@@ -525,6 +525,7 @@ def create_agent_schedule(
     organization_id: str,
     guild_id: str,
     owner_discord_user_id: str,
+    creation_operation_id: str,
     name: str,
     cron_expression: str,
     timezone_name: str,
@@ -548,6 +549,9 @@ def create_agent_schedule(
         raise ValueError("organization_id is required")
     if definition.delivery.guild_id != normalized_guild_id:
         raise ValueError("schedule delivery must stay inside its configured guild")
+    normalized_operation_id = str(creation_operation_id or "").strip()
+    if not normalized_operation_id or len(normalized_operation_id) > 128:
+        raise ValueError("schedule creation operation_id is required")
 
     normalized_cron, normalized_timezone, next_run_at = validate_agent_schedule_timing(
         cron_expression,
@@ -559,6 +563,9 @@ def create_agent_schedule(
     if not normalized_scopes:
         raise ValueError("schedule requires at least one approved execution scope")
 
+    normalized_name = _normalize_schedule_name(name)
+    definition_payload = definition.model_dump(mode="json")
+    scopes_payload = sorted(normalized_scopes)
     schedule_id = str(uuid4())
     query = """
         INSERT INTO agent_schedules (
@@ -566,6 +573,7 @@ def create_agent_schedule(
             organization_id,
             guild_id,
             owner_discord_user_id,
+            creation_operation_id,
             name,
             cron_expression,
             timezone,
@@ -573,7 +581,13 @@ def create_agent_schedule(
             allowed_scopes,
             status,
             next_run_at
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (
+            organization_id,
+            owner_discord_user_id,
+            creation_operation_id
+        ) WHERE creation_operation_id IS NOT NULL
+        DO NOTHING
         RETURNING *
     """
     with get_postgres_connection(settings) as conn:
@@ -585,18 +599,46 @@ def create_agent_schedule(
                     normalized_organization_id,
                     normalized_guild_id,
                     normalized_owner_id,
-                    _normalize_schedule_name(name),
+                    normalized_operation_id,
+                    normalized_name,
                     normalized_cron,
                     normalized_timezone,
-                    Jsonb(definition.model_dump(mode="json")),
-                    Jsonb(sorted(normalized_scopes)),
+                    Jsonb(definition_payload),
+                    Jsonb(scopes_payload),
                     AgentScheduleStatus.ACTIVE.value,
                     next_run_at,
                 ),
             )
             row = cursor.fetchone()
+            if row is None:
+                cursor.execute(
+                    """
+                    SELECT *
+                    FROM agent_schedules
+                    WHERE organization_id = %s
+                      AND owner_discord_user_id = %s
+                      AND creation_operation_id = %s
+                    """,
+                    (
+                        normalized_organization_id,
+                        normalized_owner_id,
+                        normalized_operation_id,
+                    ),
+                )
+                row = cursor.fetchone()
     if row is None:
         raise RuntimeError("unable to create agent schedule")
+    if (
+        str(row["guild_id"]) != normalized_guild_id
+        or str(row["name"]) != normalized_name
+        or str(row["cron_expression"]) != normalized_cron
+        or str(row["timezone"]) != normalized_timezone
+        or row["definition"] != definition_payload
+        or set(row["allowed_scopes"]) != normalized_scopes
+    ):
+        raise ValueError(
+            "schedule operation_id was already used with different schedule fields"
+        )
     return _as_schedule_record(row)
 
 

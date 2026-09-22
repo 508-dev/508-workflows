@@ -309,6 +309,125 @@ def test_schedule_ids_are_rejected_before_opening_a_database_connection(
     )
 
 
+def test_schedule_creation_reuses_a_matching_operation_after_response_loss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retried create returns the row won by the unique operation key."""
+
+    now = datetime(2026, 7, 28, 9, 0, tzinfo=timezone.utc)
+    schedule_id = "00000000-0000-4000-8000-000000000010"
+    definition = AgentScheduleDefinition(
+        prompt="Report open GitHub issues.",
+        actions=[_github_action()],
+        delivery=_delivery(),
+    )
+    schedule_row = {
+        "id": schedule_id,
+        "organization_id": "1000",
+        "guild_id": "1000",
+        "owner_discord_user_id": "1001",
+        "creation_operation_id": "create-op-1",
+        "name": "Daily GitHub report",
+        "cron_expression": "0 9 * * *",
+        "timezone": "UTC",
+        "definition": definition.model_dump(mode="json"),
+        "allowed_scopes": ["agent:schedule:manage", "github:issue:read"],
+        "status": "active",
+        "next_run_at": datetime(2026, 7, 29, 9, 0, tzinfo=timezone.utc),
+        "last_run_at": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    cursor = MagicMock()
+    cursor.fetchone.side_effect = [None, schedule_row]
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.cursor.return_value.__enter__.return_value = cursor
+    monkeypatch.setattr(
+        schedules,
+        "get_postgres_connection",
+        lambda _settings: connection,
+    )
+
+    created = schedules.create_agent_schedule(
+        SharedSettings(),
+        organization_id="1000",
+        guild_id="1000",
+        owner_discord_user_id="1001",
+        creation_operation_id="create-op-1",
+        name="Daily GitHub report",
+        cron_expression="0 9 * * *",
+        timezone_name="UTC",
+        definition=definition,
+        allowed_scopes={"github:issue:read", "agent:schedule:manage"},
+        now=now,
+    )
+
+    assert created.id == schedule_id
+    insert_query, insert_params = cursor.execute.call_args_list[0].args
+    select_query, select_params = cursor.execute.call_args_list[1].args
+    assert "ON CONFLICT" in insert_query
+    assert "DO NOTHING" in insert_query
+    assert insert_params[4] == "create-op-1"
+    assert "creation_operation_id = %s" in select_query
+    assert select_params == ("1000", "1001", "create-op-1")
+
+
+def test_schedule_creation_rejects_operation_reuse_with_different_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client cannot accidentally alias different schedules to one key."""
+
+    now = datetime(2026, 7, 28, 9, 0, tzinfo=timezone.utc)
+    definition = AgentScheduleDefinition(
+        prompt="Report open GitHub issues.",
+        actions=[_github_action()],
+        delivery=_delivery(),
+    )
+    existing_row = {
+        "id": "00000000-0000-4000-8000-000000000010",
+        "organization_id": "1000",
+        "guild_id": "1000",
+        "owner_discord_user_id": "1001",
+        "creation_operation_id": "create-op-1",
+        "name": "A different report",
+        "cron_expression": "0 9 * * *",
+        "timezone": "UTC",
+        "definition": definition.model_dump(mode="json"),
+        "allowed_scopes": ["agent:schedule:manage", "github:issue:read"],
+        "status": "active",
+        "next_run_at": datetime(2026, 7, 29, 9, 0, tzinfo=timezone.utc),
+        "last_run_at": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    cursor = MagicMock()
+    cursor.fetchone.side_effect = [None, existing_row]
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.cursor.return_value.__enter__.return_value = cursor
+    monkeypatch.setattr(
+        schedules,
+        "get_postgres_connection",
+        lambda _settings: connection,
+    )
+
+    with pytest.raises(ValueError, match="already used with different"):
+        schedules.create_agent_schedule(
+            SharedSettings(),
+            organization_id="1000",
+            guild_id="1000",
+            owner_discord_user_id="1001",
+            creation_operation_id="create-op-1",
+            name="Daily GitHub report",
+            cron_expression="0 9 * * *",
+            timezone_name="UTC",
+            definition=definition,
+            allowed_scopes={"github:issue:read", "agent:schedule:manage"},
+            now=now,
+        )
+
+
 class _FakeScheduleCursor:
     def __init__(
         self,
@@ -1001,6 +1120,7 @@ def test_legacy_catalog_cannot_be_written_as_a_new_schedule(
             organization_id="1000",
             guild_id="1000",
             owner_discord_user_id="1001",
+            creation_operation_id="copy-legacy-schedule",
             name="Copied legacy schedule",
             cron_expression="0 9 * * *",
             timezone_name="UTC",
