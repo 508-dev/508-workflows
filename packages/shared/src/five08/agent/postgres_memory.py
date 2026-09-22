@@ -7,6 +7,7 @@ wiring remains responsible for selecting it instead of the in-memory store.
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
 from typing import Any, cast
@@ -23,6 +24,7 @@ from five08.agent.memory import (
     authorize_memory_fact_deletion,
     normalize_memory_time,
     normalize_organization_id,
+    memory_slot,
     validate_memory_value_for_persistence,
 )
 from five08.agent.models import (
@@ -164,6 +166,20 @@ class PostgresMemoryStore:
                     organization_id=normalized_organization_id,
                     now=now,
                 )
+                slot = memory_slot(draft.key, draft.value_json)
+                cursor.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (
+                        json.dumps(
+                            [
+                                normalized_organization_id,
+                                scope_type,
+                                scope_id,
+                                slot,
+                            ]
+                        ),
+                    ),
+                )
                 if replaces_id:
                     cursor.execute(
                         """
@@ -206,6 +222,54 @@ class PostgresMemoryStore:
                             normalized_organization_id,
                         ),
                     )
+                else:
+                    cursor.execute(
+                        """
+                        SELECT id, key, value_json
+                        FROM agent_memory_facts
+                        WHERE organization_id = %s
+                          AND scope_type = %s
+                          AND scope_id = %s
+                          AND deleted_at IS NULL
+                          AND (
+                              (lower(btrim(key)) <> 'note'
+                               AND lower(btrim(key)) = lower(btrim(%s)))
+                              OR
+                              (lower(btrim(key)) = 'note'
+                               AND lower(btrim(%s)) = 'note'
+                               AND value_json = %s)
+                          )
+                        ORDER BY updated_at DESC, id DESC
+                        FOR UPDATE
+                        """,
+                        (
+                            normalized_organization_id,
+                            scope_type,
+                            scope_id,
+                            draft.key,
+                            draft.key,
+                            Jsonb(draft.value_json),
+                        ),
+                    )
+                    existing_rows = cursor.fetchall()
+                    if existing_rows:
+                        superseded_id = str(existing_rows[0]["id"])
+                        cursor.execute(
+                            """
+                            UPDATE agent_memory_facts
+                            SET deleted_at = %s,
+                                updated_at = %s
+                            WHERE id = ANY(%s::uuid[])
+                              AND organization_id = %s
+                              AND deleted_at IS NULL
+                            """,
+                            (
+                                now,
+                                now,
+                                [str(existing["id"]) for existing in existing_rows],
+                                normalized_organization_id,
+                            ),
+                        )
                 cursor.execute(
                     query,
                     (

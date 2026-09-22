@@ -126,7 +126,11 @@ def test_remember_fact_inserts_tenant_hashed_provenance_and_default_retention() 
     assert purge_params is not None
     assert purge_params[0] == "org-1"
 
-    query, params = cursor.calls[1]
+    lock_query, _ = cursor.calls[1]
+    select_query, _ = cursor.calls[2]
+    query, params = cursor.calls[3]
+    assert "pg_advisory_xact_lock" in lock_query
+    assert "FOR UPDATE" in select_query
     assert "INSERT INTO agent_memory_facts" in query
     assert "organization_id" in query
     assert params is not None
@@ -172,15 +176,56 @@ def test_remember_fact_atomically_supersedes_an_owned_fact() -> None:
     )
 
     assert fact.supersedes_id == old_id
-    select_query, select_params = cursor.calls[1]
-    update_query, update_params = cursor.calls[2]
-    insert_query, _ = cursor.calls[3]
+    lock_query, _ = cursor.calls[1]
+    select_query, select_params = cursor.calls[2]
+    update_query, update_params = cursor.calls[3]
+    insert_query, _ = cursor.calls[4]
+    assert "pg_advisory_xact_lock" in lock_query
     assert "FOR UPDATE" in select_query
     assert select_params == (old_id, "org-1")
     assert "SET deleted_at = %s" in update_query
     assert update_params is not None
     assert update_params[2:] == (old_id, "org-1")
     assert "INSERT INTO agent_memory_facts" in insert_query
+
+
+def test_remember_fact_supersedes_the_active_fact_in_the_same_named_slot() -> None:
+    old_id = "0e5e5302-8d36-4bc8-954d-68332b36949a"
+    cursor = FakeCursor(
+        one_rows=[_row()],
+        all_rows=[
+            {
+                "id": UUID(old_id),
+                "key": "TimeZone",
+                "value_json": {"text": "America/New_York"},
+            }
+        ],
+    )
+    store = PostgresMemoryStore(connection_factory=lambda: FakeConnection(cursor))
+
+    fact = store.remember_fact(
+        organization_id="org-1",
+        scope_type="user",
+        scope_id="123",
+        key="timezone",
+        value_json={"text": "Asia/Taipei"},
+        visibility="private",
+        source_type="request",
+        source_ref="agent_request",
+        source_excerpt=None,
+        created_by="123",
+        verification_status="user_confirmed",
+    )
+
+    assert fact.supersedes_id == old_id
+    select_query, select_params = cursor.calls[2]
+    update_query, update_params = cursor.calls[3]
+    assert "FOR UPDATE" in select_query
+    assert select_params is not None
+    assert select_params[:5] == ("org-1", "user", "123", "timezone", "timezone")
+    assert "id = ANY(%s::uuid[])" in update_query
+    assert update_params is not None
+    assert update_params[2] == [old_id]
 
 
 def test_list_facts_filters_by_tenant_visibility_soft_delete_and_expiry() -> None:
