@@ -9788,10 +9788,11 @@ def _agent_schedule_definition_from_fields(
         # read-only tool (including GitHub search) never joins a model loop by
         # accident.
         runtime_config = ToolRuntimeConfig.from_settings(settings)
-        tool_allowlist = requested_tools or _default_agent_schedule_tool_allowlist(
+        configured_tools = _default_agent_schedule_tool_allowlist(
             runtime_config,
             guild_id=guild_id,
         )
+        tool_allowlist = requested_tools or configured_tools
         if (
             set(tool_allowlist) & _AGENT_SCHEDULE_ERP_TOOL_NAMES
             and str(runtime_config.agent_erp_organization_id or "").strip()
@@ -9800,6 +9801,12 @@ def _agent_schedule_definition_from_fields(
             raise ValueError(
                 "scheduled ERP tools require AGENT_ERP_ORGANIZATION_ID to match "
                 "the schedule Discord guild"
+            )
+        unavailable_tools = sorted(set(requested_tools) - set(configured_tools))
+        if unavailable_tools:
+            raise ValueError(
+                "scheduled tools are unavailable for the current integration "
+                f"configuration: {', '.join(unavailable_tools)}"
             )
         return AgentScheduleDefinition(
             prompt=prompt,

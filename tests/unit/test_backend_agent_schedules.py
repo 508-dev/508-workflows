@@ -454,6 +454,61 @@ def test_agent_loop_creation_rejects_explicit_erp_tools_for_a_different_tenant(
         )
 
 
+@pytest.mark.parametrize(
+    ("tool_name", "missing_settings"),
+    [
+        (
+            "github_issue.search_issues",
+            {
+                "github_app_client_id": None,
+                "github_app_installation_id": None,
+                "github_app_private_key": None,
+                "github_api_token": None,
+            },
+        ),
+        (
+            "crm_read.search_contacts",
+            {"espo_base_url": None, "espo_api_key": None},
+        ),
+        (
+            "web_read.search",
+            {
+                "agent_web_search_provider_order": "searxng",
+                "searxng_base_url": None,
+            },
+        ),
+        (
+            "erp_read.search_projects",
+            {
+                "erpnext_base_url": None,
+                "erpnext_api_key": None,
+                "agent_erp_organization_id": "1000",
+            },
+        ),
+    ],
+)
+def test_agent_loop_creation_rejects_explicit_unconfigured_tools(
+    monkeypatch: pytest.MonkeyPatch,
+    tool_name: str,
+    missing_settings: dict[str, str | None],
+) -> None:
+    """An explicit catalog cannot persist tools that cannot execute."""
+
+    for setting_name, value in missing_settings.items():
+        monkeypatch.setattr(api.settings, setting_name, value)
+
+    with pytest.raises(ValueError, match="unavailable.*integration configuration"):
+        api._agent_schedule_definition_from_fields(
+            SimpleNamespace(
+                prompt="Review configured operational data.",
+                execution_mode="agent_loop",
+                tool_allowlist=[tool_name],
+                channel_id="2000",
+            ),
+            guild_id="1000",
+        )
+
+
 def test_frozen_github_schedule_requires_an_allowlisted_repository(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
