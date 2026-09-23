@@ -8,7 +8,7 @@ import json
 import logging
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -703,6 +703,8 @@ class JobLeadClassifier:
         self._jev_shadow_budget_exhaustion_reason: (
             Literal["max_calls", "run_budget"] | None
         ) = None
+        self._jev_shadow_planned_fingerprints: dict[bytes, int] | None = None
+        self._jev_shadow_cohort_was_capped = False
         self._owns_jev_shadow_session = False
         self._jev_shadow_available = True
         self._jev_shadow_session = jev_shadow_session
@@ -745,6 +747,13 @@ class JobLeadClassifier:
                     (self._jev_shadow_clock() - self._jev_shadow_run_started_at) * 1000
                 ),
             )
+        budget_exhaustion_reason = self._jev_shadow_budget_exhaustion_reason
+        if (
+            budget_exhaustion_reason is None
+            and self._jev_shadow_cohort_was_capped
+            and self._jev_shadow_calls_started >= self._jev_shadow_max_calls
+        ):
+            budget_exhaustion_reason = "max_calls"
         return {
             "enabled": self._jev_shadow_enabled,
             "provider_configured": bool(self._jev_shadow_api_key),
@@ -756,8 +765,24 @@ class JobLeadClassifier:
             "max_calls": self._jev_shadow_max_calls,
             "run_budget_seconds": self._jev_shadow_run_budget_seconds,
             "run_elapsed_ms": elapsed_ms,
-            "budget_exhaustion_reason": self._jev_shadow_budget_exhaustion_reason,
+            "budget_exhaustion_reason": budget_exhaustion_reason,
         }
+
+    def prepare_jev_shadow_cohort(self, comment_texts: Sequence[str]) -> None:
+        """Choose a stable capped cohort from all eligible comments in this run."""
+
+        candidates = sorted(
+            _jev_shadow_fingerprint(comment_text)
+            for comment_text in comment_texts
+            if _selected_for_jev_shadow(comment_text, self._jev_shadow_sample_rate)
+        )
+        self._jev_shadow_cohort_was_capped = (
+            len(candidates) > self._jev_shadow_max_calls
+        )
+        planned: dict[bytes, int] = {}
+        for fingerprint in candidates[: self._jev_shadow_max_calls]:
+            planned[fingerprint] = planned.get(fingerprint, 0) + 1
+        self._jev_shadow_planned_fingerprints = planned
 
     def _next_jev_shadow_timeout(self) -> float | None:
         if self._jev_shadow_calls_started >= self._jev_shadow_max_calls:
@@ -781,21 +806,34 @@ class JobLeadClassifier:
         comment_text: str,
         classification: JobLeadClassification,
     ) -> JobLeadClassification:
+        fingerprint = _jev_shadow_fingerprint(comment_text)
+        planned_fingerprints = self._jev_shadow_planned_fingerprints
+        planned_count = (
+            planned_fingerprints.get(fingerprint, 0)
+            if planned_fingerprints is not None
+            else None
+        )
         if (
             not self._jev_shadow_enabled
             or not self._jev_shadow_available
             or not self._jev_shadow_api_key
             or self._jev_shadow_session is None
-            or not _selected_for_jev_shadow(
-                comment_text,
-                self._jev_shadow_sample_rate,
+            or (
+                planned_count is None
+                and not _selected_for_jev_shadow(
+                    comment_text,
+                    self._jev_shadow_sample_rate,
+                )
             )
+            or planned_count == 0
         ):
             return classification
 
         shadow_timeout_seconds = self._next_jev_shadow_timeout()
         if shadow_timeout_seconds is None:
             return classification
+        if planned_count is not None and planned_fingerprints is not None:
+            planned_fingerprints[fingerprint] = planned_count - 1
 
         started = self._jev_shadow_clock()
         try:
@@ -944,12 +982,16 @@ def _bounded_int(
     return max(minimum, min(maximum, numeric))
 
 
+def _jev_shadow_fingerprint(comment_text: str) -> bytes:
+    return hashlib.sha256(comment_text.encode("utf-8")).digest()
+
+
 def _selected_for_jev_shadow(comment_text: str, sample_rate: float) -> bool:
     if sample_rate <= 0.0:
         return False
     if sample_rate >= 1.0:
         return True
-    digest = hashlib.sha256(comment_text.encode("utf-8")).digest()
+    digest = _jev_shadow_fingerprint(comment_text)
     bucket = int.from_bytes(digest[:8], "big") / float(2**64)
     return bucket < sample_rate
 
@@ -1250,9 +1292,31 @@ class HackerNewsWhoIsHiringLeadSource:
     def collect(self) -> list[JobLeadInput]:
         leads: list[JobLeadInput] = []
         self._thread_reports = []
+        thread_children: list[tuple[HackerNewsThread, list[Any]]] = []
         for thread in self.discover_threads():
             tree = self.client.get_algolia_item_tree(thread.story_id)
             children = tree.get("children") or []
+            thread_children.append((thread, children))
+
+        prepare_shadow_cohort = getattr(
+            self.classifier,
+            "prepare_jev_shadow_cohort",
+            None,
+        )
+        if callable(prepare_shadow_cohort):
+            eligible_comment_texts: list[str] = []
+            for thread, children in thread_children:
+                for child in children:
+                    if not isinstance(child, dict):
+                        continue
+                    if child.get("parent_id") != thread.story_id:
+                        continue
+                    text = html_to_text(child.get("text"))
+                    if text and not _SEEKING_WORK_RE.search(text):
+                        eligible_comment_texts.append(text)
+            prepare_shadow_cohort(eligible_comment_texts)
+
+        for thread, children in thread_children:
             report = HackerNewsThreadScrapeReport(thread=thread)
             for child in children:
                 if not isinstance(child, dict):
@@ -1428,6 +1492,9 @@ def _job_lead_jev_shadow_report(
         if isinstance(item[2].get("cost_usd"), int | float)
         and not isinstance(item[2].get("cost_usd"), bool)
     ]
+    complete_cost = (
+        bool(successful) and not failures and len(cost_values) == len(successful)
+    )
     raw_calls_started = runtime.get("calls_started")
     calls_started = (
         int(raw_calls_started)
@@ -1557,7 +1624,7 @@ def _job_lead_jev_shadow_report(
                 int(item[2].get("output_tokens") or 0) for item in successful
             ),
             "total": sum(int(item[2].get("total_tokens") or 0) for item in successful),
-            "cost_usd": round(sum(cost_values), 8) if cost_values else None,
+            "cost_usd": round(sum(cost_values), 8) if complete_cost else None,
         },
         "review_items": review_candidates[:_JOB_LEAD_JEV_SHADOW_REVIEW_LIMIT],
         "review_items_truncated": max(

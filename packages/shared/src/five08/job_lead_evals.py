@@ -717,6 +717,10 @@ def summarize_profile(
 def render_job_lead_eval_report(report: JobLeadEvalReport) -> str:
     """Render a compact, reviewable Markdown report."""
 
+    jev_model = report.requested_models.get("jev", "unknown")
+    llm_model = report.requested_models.get("luna", "unknown")
+    jev_endpoint = report.endpoints.get("jev", "unknown")
+    llm_endpoint = report.endpoints.get("luna", "unknown")
     lines = [
         "# Jev job-lead classification evaluation",
         "",
@@ -724,8 +728,8 @@ def render_job_lead_eval_report(report: JobLeadEvalReport) -> str:
         f"- Runtime revision: `{report.runtime_revision or 'unknown'}`",
         f"- Corpus: `{report.corpus_path}` ({report.case_count} cases)",
         f"- Network repeats per case: {report.network_repeats}",
-        f"- Jev: `{report.requested_models['jev']}` through OpenRouter Decisions",
-        f"- LLM baseline: `{report.requested_models['luna']}` through direct OpenAI",
+        f"- Jev: `{jev_model}` through `{jev_endpoint}`",
+        f"- LLM baseline: `{llm_model}` through `{llm_endpoint}`",
         "",
         "## Results",
         "",
@@ -840,9 +844,9 @@ def render_job_lead_eval_report(report: JobLeadEvalReport) -> str:
             "",
             "- The corpus is a balanced, synthetic challenge set derived from the production label contract. It deliberately over-represents negation, commercial uses of the word `contract`, non-posts, and prompt-injection-like text; it does not estimate live HN prevalence.",
             "- Golden labels are exact and scoring is deterministic. No model judges another model.",
-            "- Jev uses OpenRouter's Decisions endpoint and the pinned `typesafe/jev-1.13` request ID. The resolved dated snapshot is retained in the JSON observation report.",
-            "- The Luna baseline uses the production job-lead prompt and schema through direct OpenAI. A preflight through OpenRouter returned HTTP 403 under provider terms, so the report does not present an unsupported route as a benchmark failure.",
-            "- Luna's self-reported classification confidence is retained as diagnostic metadata, but it is not treated as a calibrated contractor probability or used in the Jev confidence-gate analysis.",
+            f"- Jev uses the requested `{jev_model}` model through `{jev_endpoint}`. Provider-resolved model IDs are retained in the JSON observation report.",
+            f"- The LLM baseline uses the requested `{llm_model}` model and the production job-lead prompt and schema through `{llm_endpoint}`.",
+            "- The LLM baseline's self-reported classification confidence is retained as diagnostic metadata, but it is not treated as a calibrated contractor probability or used in the Jev confidence-gate analysis.",
             "- Latency includes successful and failed calls. Jev cost is provider-reported. For GPT-5.6 Luna only, missing cost is estimated from successful retained token usage at the official [$0.20/M input, $0.02/M cached input, and $1.20/M output rates](https://developers.openai.com/api/docs/models/gpt-5.6-luna); missing cost for a custom `--llm-model` or any profile with unpriced failed calls remains unavailable.",
             "- Raw observations are generated under the gitignored reports directory; this Markdown summary intentionally excludes provider payloads and secrets.",
             "",

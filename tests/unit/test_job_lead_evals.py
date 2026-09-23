@@ -500,6 +500,46 @@ def test_report_marks_single_network_run_stability_unmeasured() -> None:
     assert "| unmeasured |" in markdown
 
 
+def test_report_methodology_uses_actual_models_and_endpoints() -> None:
+    observation = JobLeadEvalObservation(
+        profile="jev",
+        case_id="success",
+        group="core",
+        repeat=1,
+        expected_posting_type="part_time",
+        expected_contractor_friendly=True,
+        predicted_posting_type="part_time",
+        predicted_contractor_friendly=True,
+        contractor_probability=0.9,
+        latency_ms=200,
+    )
+    report = JobLeadEvalReport(
+        evaluated_at=datetime.now(timezone.utc),
+        runtime_revision=None,
+        corpus_version="job-lead-classification.v1",
+        corpus_path="corpus.json",
+        case_count=1,
+        network_repeats=1,
+        requested_models={"jev": "custom/jev", "luna": "custom/baseline"},
+        endpoints={
+            "jev": "https://router.example/decisions",
+            "luna": "https://models.example/chat/completions",
+        },
+        summary={"jev": summarize_profile([observation], case_count=1)},
+        observations=[observation],
+    )
+
+    markdown = render_job_lead_eval_report(report)
+
+    assert "`custom/jev`" in markdown
+    assert "`custom/baseline`" in markdown
+    assert "`https://router.example/decisions`" in markdown
+    assert "`https://models.example/chat/completions`" in markdown
+    assert "typesafe/jev-1.13" not in markdown
+    assert "preflight" not in markdown
+    assert "HTTP 403" not in markdown
+
+
 def test_env_file_loader_does_not_override_exported_value(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
