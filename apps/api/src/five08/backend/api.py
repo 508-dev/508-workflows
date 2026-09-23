@@ -12676,13 +12676,10 @@ async def _execute_confirmed_agent_schedule_creation_plan(
 
     detail = str(created.get("detail") or created.get("error") or "").strip()
     denied = status_code in {401, 403}
-    # Every 5xx except schedule_create_failed is emitted before the persistence
-    # call. It is therefore safe to restore the confirmation for retry. A
-    # database write failure is intentionally treated as ambiguous so a retry
-    # cannot create a duplicate schedule after an uncertain commit.
-    retryable_preflight_failure = (
-        status_code >= 500 and created.get("error") != "schedule_create_failed"
-    )
+    # Schedule creation is idempotent by the plan's stable operation ID. Restore
+    # every infrastructure failure, including an ambiguous lost response after
+    # commit, so the same confirmation can safely recover the existing row.
+    retryable_preflight_failure = status_code >= 500
     return _ConfirmedAgentScheduleCreationResult(
         response=AgentResponse(
             status="denied" if denied else "failed",

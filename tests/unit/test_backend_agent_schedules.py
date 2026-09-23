@@ -1728,7 +1728,7 @@ async def test_confirmed_agent_schedule_creation_binds_current_channel(
     [
         ("member_snapshot_failed", True),
         ("schedule_channel_validation_failed", True),
-        ("schedule_create_failed", False),
+        ("schedule_create_failed", True),
     ],
 )
 async def test_confirmed_schedule_retry_requires_a_proven_preflight_failure(
@@ -1736,7 +1736,7 @@ async def test_confirmed_schedule_retry_requires_a_proven_preflight_failure(
     error: str,
     retryable_preflight_failure: bool,
 ) -> None:
-    """An ambiguous persistence failure must never permit a duplicate retry."""
+    """Every infrastructure failure restores the idempotent confirmation."""
 
     async def create_schedule(*_args: object, **_kwargs: object):
         return {"error": error}, 503
