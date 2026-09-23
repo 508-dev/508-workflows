@@ -380,6 +380,50 @@ def test_format_agent_response_renders_public_web_search_results() -> None:
     assert "Grant announcement https://example.com/grant" in message
 
 
+def test_format_agent_response_escapes_untrusted_public_web_text() -> None:
+    """Provider-controlled text cannot forge Discord formatting or mentions."""
+
+    cog = AgentCog.__new__(AgentCog)
+
+    message = cog._format_agent_response(
+        {
+            "status": "executed",
+            "results": [
+                {
+                    "tool_name": "web_read.search",
+                    "status": "succeeded",
+                    "result": {
+                        "provider": "**hostile**",
+                        "results": [
+                            {
+                                "title": "# [Admin notice](https://evil.test)",
+                                "url": "https://example.com/result",
+                                "snippet": "||secret|| @everyone `command`",
+                            }
+                        ],
+                    },
+                },
+                {
+                    "tool_name": "web_read.extract",
+                    "status": "succeeded",
+                    "result": {
+                        "provider": "firecrawl",
+                        "title": "# Fake heading",
+                        "url": "https://example.com/page",
+                        "content": "[masked](https://evil.test) @here",
+                    },
+                },
+            ],
+        }
+    )
+
+    assert "\\*\\*hostile\\*\\*" in message
+    assert "\\# \\[Admin notice](https://evil.test)" in message
+    assert "\\|\\|secret\\|\\| @\u200beveryone \\`command\\`" in message
+    assert "\\# Fake heading" in message
+    assert "\\[masked](https://evil.test) @\u200bhere" in message
+
+
 def test_format_agent_response_renders_public_web_extract() -> None:
     cog = AgentCog.__new__(AgentCog)
 

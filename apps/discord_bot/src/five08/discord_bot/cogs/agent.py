@@ -2393,14 +2393,20 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
     def _format_web_search_result_lines(payload: dict[str, Any]) -> list[str]:
         items = payload.get("results")
         results = items if isinstance(items, list) else []
-        provider = str(payload.get("provider") or "web").strip()
+        provider = AgentCog._safe_discord_text(
+            str(payload.get("provider") or "web").strip()
+        )
         lines = [f"- web_read.search ({provider}): {len(results)} results"]
         for item in results[:3]:
             if not isinstance(item, dict):
                 continue
-            title = str(item.get("title") or "Untitled result").strip()
+            title = AgentCog._safe_discord_text(
+                str(item.get("title") or "Untitled result").strip()
+            )
             url = str(item.get("url") or "").strip()
-            snippet = " ".join(str(item.get("snippet") or "").split())
+            snippet = AgentCog._safe_discord_text(
+                " ".join(str(item.get("snippet") or "").split())
+            )
             lines.append(f"  - {title} {url}".strip())
             if snippet:
                 lines.append(f"    {snippet[:240]}")
@@ -2408,10 +2414,16 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
 
     @staticmethod
     def _format_web_extract_result_lines(payload: dict[str, Any]) -> list[str]:
-        provider = str(payload.get("provider") or "firecrawl").strip()
-        title = str(payload.get("title") or "Public web page").strip()
+        provider = AgentCog._safe_discord_text(
+            str(payload.get("provider") or "firecrawl").strip()
+        )
+        title = AgentCog._safe_discord_text(
+            str(payload.get("title") or "Public web page").strip()
+        )
         url = str(payload.get("url") or "").strip()
-        content = " ".join(str(payload.get("content") or "").split())
+        content = AgentCog._safe_discord_text(
+            " ".join(str(payload.get("content") or "").split())
+        )
         lines = [f"- web_read.extract ({provider}): {title} {url}".strip()]
         if content:
             lines.append(f"  {content[:600]}")
