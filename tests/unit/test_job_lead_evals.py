@@ -108,7 +108,10 @@ class _FakeOpenAIClient:
             usage=SimpleNamespace(
                 model_dump=lambda: {
                     "prompt_tokens": 400,
-                    "prompt_tokens_details": {"cached_tokens": 100},
+                    "prompt_tokens_details": {
+                        "cached_tokens": 100,
+                        "cache_write_tokens": 50,
+                    },
                     "completion_tokens": 50,
                     "total_tokens": 450,
                 }
@@ -240,7 +243,8 @@ def test_luna_uses_schema_parse_and_official_rate_estimate() -> None:
     assert observation.predicted_contractor_friendly is True
     assert observation.predicted_posting_type == "part_time"
     assert observation.cached_input_tokens == 100
-    assert observation.cost_usd == 0.000122
+    assert observation.cache_write_tokens == 50
+    assert observation.cost_usd == 0.0001245
 
 
 def test_luna_does_not_apply_luna_rates_to_custom_model() -> None:

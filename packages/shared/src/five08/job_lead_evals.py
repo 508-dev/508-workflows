@@ -50,6 +50,7 @@ DEFAULT_LLM_MODEL = "gpt-5.6-luna"
 OPENAI_BASE_URL = "https://api.openai.com/v1"
 LUNA_INPUT_COST_PER_1M = 0.20
 LUNA_CACHED_INPUT_COST_PER_1M = 0.02
+LUNA_CACHE_WRITE_COST_PER_1M = 0.25
 LUNA_OUTPUT_COST_PER_1M = 1.20
 _RETRYABLE_STATUS_CODES = frozenset({408, 409, 429, 500, 502, 503, 504, 529})
 _POSTING_TYPES: tuple[PostingType, ...] = (
@@ -134,6 +135,7 @@ class JobLeadEvalObservation(BaseModel):
     latency_ms: int = Field(ge=0)
     input_tokens: int = Field(default=0, ge=0)
     cached_input_tokens: int = Field(default=0, ge=0)
+    cache_write_tokens: int = Field(default=0, ge=0)
     output_tokens: int = Field(default=0, ge=0)
     total_tokens: int = Field(default=0, ge=0)
     cost_usd: float | None = Field(default=None, ge=0.0)
@@ -434,6 +436,7 @@ def _run_luna(
         usage["cost_usd"] = _luna_cost_usd(
             input_tokens=usage["input_tokens"],
             cached_input_tokens=usage["cached_input_tokens"],
+            cache_write_tokens=usage["cache_write_tokens"],
             output_tokens=usage["output_tokens"],
         )
     return _base_observation(
@@ -468,6 +471,7 @@ def _base_observation(
     posting_probabilities: dict[str, float] | None = None,
     input_tokens: int = 0,
     cached_input_tokens: int = 0,
+    cache_write_tokens: int = 0,
     output_tokens: int = 0,
     total_tokens: int = 0,
     cost_usd: float | None = None,
@@ -497,6 +501,7 @@ def _base_observation(
         latency_ms=latency_ms,
         input_tokens=input_tokens,
         cached_input_tokens=cached_input_tokens,
+        cache_write_tokens=cache_write_tokens,
         output_tokens=output_tokens,
         total_tokens=total_tokens,
         cost_usd=cost_usd,
@@ -696,6 +701,7 @@ def summarize_profile(
         "usage": {
             "input_tokens": sum(item.input_tokens for item in successful),
             "cached_input_tokens": sum(item.cached_input_tokens for item in successful),
+            "cache_write_tokens": sum(item.cache_write_tokens for item in successful),
             "output_tokens": sum(item.output_tokens for item in successful),
             "total_tokens": sum(item.total_tokens for item in successful),
             "cost_usd": total_cost,
@@ -733,7 +739,7 @@ def render_job_lead_eval_report(report: JobLeadEvalReport) -> str:
         "",
         "## Results",
         "",
-        "| Profile | Successful calls | Contractor F1 | Posting accuracy | Joint accuracy | Stable cases | Latency p50 / p95 / max | Input / cached / output tokens | Cost |",
+        "| Profile | Successful calls | Contractor F1 | Posting accuracy | Joint accuracy | Stable cases | Latency p50 / p95 / max | Input / cached / cache-write / output tokens | Cost |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for profile, summary in report.summary.items():
@@ -759,6 +765,7 @@ def render_job_lead_eval_report(report: JobLeadEvalReport) -> str:
                     (
                         f"{summary['usage']['input_tokens']} / "
                         f"{summary['usage']['cached_input_tokens']} / "
+                        f"{summary['usage']['cache_write_tokens']} / "
                         f"{summary['usage']['output_tokens']}"
                     ),
                     _money(cost),
@@ -847,7 +854,7 @@ def render_job_lead_eval_report(report: JobLeadEvalReport) -> str:
             f"- Jev uses the requested `{jev_model}` model through `{jev_endpoint}`. Provider-resolved model IDs are retained in the JSON observation report.",
             f"- The LLM baseline uses the requested `{llm_model}` model and the production job-lead prompt and schema through `{llm_endpoint}`.",
             "- The LLM baseline's self-reported classification confidence is retained as diagnostic metadata, but it is not treated as a calibrated contractor probability or used in the Jev confidence-gate analysis.",
-            "- Latency includes successful and failed calls. Jev cost is provider-reported. For GPT-5.6 Luna only, missing cost is estimated from successful retained token usage at the official [$0.20/M input, $0.02/M cached input, and $1.20/M output rates](https://developers.openai.com/api/docs/models/gpt-5.6-luna); missing cost for a custom `--llm-model` or any profile with unpriced failed calls remains unavailable.",
+            "- Latency includes successful and failed calls. Jev cost is provider-reported. For GPT-5.6 Luna only, missing cost is estimated from successful retained token usage at the official [$0.20/M input, $0.02/M cached input, $0.25/M cache-write, and $1.20/M output rates](https://developers.openai.com/api/docs/models/gpt-5.6-luna); missing cost for a custom `--llm-model` or any profile with unpriced failed calls remains unavailable.",
             "- Raw observations are generated under the gitignored reports directory; this Markdown summary intentionally excludes provider payloads and secrets.",
             "",
         ]
@@ -983,6 +990,7 @@ def _usage(value: Any) -> dict[str, Any]:
     )
     details = raw_details if isinstance(raw_details, dict) else {}
     cached_input_tokens = _integer(details.get("cached_tokens"))
+    cache_write_tokens = _integer(details.get("cache_write_tokens"))
     output_tokens = _integer(
         source.get("output_tokens", source.get("completion_tokens"))
     )
@@ -994,6 +1002,7 @@ def _usage(value: Any) -> dict[str, Any]:
     return {
         "input_tokens": input_tokens,
         "cached_input_tokens": cached_input_tokens,
+        "cache_write_tokens": cache_write_tokens,
         "output_tokens": output_tokens,
         "total_tokens": total_tokens,
         "cost_usd": cost_usd,
@@ -1001,13 +1010,21 @@ def _usage(value: Any) -> dict[str, Any]:
 
 
 def _luna_cost_usd(
-    *, input_tokens: int, cached_input_tokens: int, output_tokens: int
+    *,
+    input_tokens: int,
+    cached_input_tokens: int,
+    cache_write_tokens: int,
+    output_tokens: int,
 ) -> float:
-    uncached_input_tokens = max(0, input_tokens - cached_input_tokens)
+    uncached_input_tokens = max(
+        0,
+        input_tokens - cached_input_tokens - cache_write_tokens,
+    )
     return round(
         (
             uncached_input_tokens * LUNA_INPUT_COST_PER_1M
             + cached_input_tokens * LUNA_CACHED_INPUT_COST_PER_1M
+            + cache_write_tokens * LUNA_CACHE_WRITE_COST_PER_1M
             + output_tokens * LUNA_OUTPUT_COST_PER_1M
         )
         / 1_000_000,
