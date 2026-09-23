@@ -17,6 +17,10 @@ from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 import requests
+from curl_cffi.requests import Session as CurlSession
+from curl_cffi.requests.exceptions import ConnectionError as CurlConnectionError
+from curl_cffi.requests.exceptions import RequestException as CurlRequestException
+from curl_cffi.requests.exceptions import Timeout as CurlTimeout
 from pydantic import BaseModel, ConfigDict, Field
 
 from five08.job_channels import JobPostingType
@@ -654,7 +658,7 @@ class JobLeadClassifier:
         *,
         settings: SharedSettings,
         client: Any | None = None,
-        jev_shadow_session: requests.Session | None = None,
+        jev_shadow_session: CurlSession | None = None,
         jev_shadow_clock: Callable[[], float] | None = None,
     ) -> None:
         self.settings = settings
@@ -713,7 +717,10 @@ class JobLeadClassifier:
             and self._jev_shadow_enabled
             and self._jev_shadow_api_key
         ):
-            self._jev_shadow_session = requests.Session()
+            # A scalar curl-cffi timeout maps to libcurl's total-transfer
+            # deadline. Requests' scalar timeout only bounds socket inactivity
+            # and can be defeated by a response that continuously trickles data.
+            self._jev_shadow_session = CurlSession()
             self._owns_jev_shadow_session = True
 
     def classify(self, comment_text: str) -> JobLeadClassification:
@@ -1049,11 +1056,11 @@ def _successful_jev_shadow_observation(
 
 def _safe_jev_shadow_error(exc: Exception) -> str:
     cause = exc.cause if isinstance(exc, JobLeadJevRequestError) else exc
-    if isinstance(cause, requests.Timeout | TimeoutError):
+    if isinstance(cause, requests.Timeout | CurlTimeout | TimeoutError):
         return "provider_timeout"
-    if isinstance(cause, requests.ConnectionError):
+    if isinstance(cause, requests.ConnectionError | CurlConnectionError):
         return "provider_connection_error"
-    if isinstance(cause, requests.RequestException):
+    if isinstance(cause, requests.RequestException | CurlRequestException):
         return "provider_transport_error"
     if isinstance(cause, ValueError):
         return "invalid_provider_response"

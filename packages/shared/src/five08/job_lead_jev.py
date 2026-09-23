@@ -5,9 +5,11 @@ from __future__ import annotations
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import requests
+from curl_cffi.requests import RequestsError as CurlRequestsError
+from curl_cffi.requests import Session as CurlSession
 
 from five08.job_channels import JobPostingType
 from five08.tls import default_ca_bundle_path
@@ -15,6 +17,8 @@ from five08.tls import default_ca_bundle_path
 DEFAULT_JOB_LEAD_JEV_MODEL = "typesafe/jev-1.13"
 OPENROUTER_DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions"
 _RETRYABLE_STATUS_CODES = frozenset({408, 409, 429, 500, 502, 503, 504, 529})
+
+JobLeadJevSession = requests.Session | CurlSession
 
 
 class JobLeadJevRequestError(RuntimeError):
@@ -90,7 +94,7 @@ def job_lead_jev_questions() -> dict[str, dict[str, Any]]:
 
 def classify_job_lead_with_jev(
     *,
-    session: requests.Session,
+    session: JobLeadJevSession,
     api_key: str,
     comment_text: str,
     model: str = DEFAULT_JOB_LEAD_JEV_MODEL,
@@ -156,7 +160,7 @@ def classify_job_lead_with_jev(
 
 def _post_json_with_retries(
     *,
-    session: requests.Session,
+    session: JobLeadJevSession,
     api_key: str,
     payload: dict[str, Any],
     timeout_seconds: float,
@@ -168,7 +172,7 @@ def _post_json_with_retries(
     response: requests.Response | None = None
     for attempt in range(1, max_attempts + 1):
         try:
-            response = session.post(
+            response = cast(Any, session).post(
                 OPENROUTER_DECISIONS_URL,
                 headers={
                     "Authorization": f"Bearer {api_key}",
@@ -179,7 +183,7 @@ def _post_json_with_retries(
                 timeout=timeout_seconds,
                 verify=default_ca_bundle_path(),
             )
-        except requests.RequestException as exc:
+        except (requests.RequestException, CurlRequestsError) as exc:
             if attempt == max_attempts:
                 raise JobLeadJevRequestError(
                     exc,

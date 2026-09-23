@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import five08.job_lead_sources as job_lead_sources
+from curl_cffi.requests import Session as CurlSession
+from curl_cffi.requests.exceptions import Timeout as CurlTimeout
 from five08.job_lead_jev import JobLeadJevDecision, JobLeadJevRequestError
 from five08.job_lead_sources import (
     HackerNewsThread,
@@ -810,6 +812,27 @@ def test_classifier_falls_back_without_second_llm_call_after_provider_failure() 
     assert client.parse_kwargs is not None
     assert client.parse_kwargs["temperature"] == 0
     assert client.chat_create_calls == 0
+
+
+def test_jev_shadow_defaults_to_total_deadline_transport() -> None:
+    classifier = JobLeadClassifier(
+        settings=SimpleNamespace(
+            job_lead_jev_shadow_enabled=True,
+            openrouter_api_key="test-key",
+        ),  # type: ignore[arg-type]
+        client=object(),
+    )
+
+    try:
+        assert isinstance(classifier._jev_shadow_session, CurlSession)  # noqa: SLF001
+        assert (
+            job_lead_sources._safe_jev_shadow_error(  # noqa: SLF001
+                CurlTimeout("operation timed out")
+            )
+            == "provider_timeout"
+        )
+    finally:
+        classifier.close()
 
 
 def test_jev_shadow_records_disagreement_without_changing_primary(
