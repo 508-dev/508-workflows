@@ -717,6 +717,12 @@ class JobLeadClassifier:
             self._owns_jev_shadow_session = True
 
     def classify(self, comment_text: str) -> JobLeadClassification:
+        classification = self.classify_primary(comment_text)
+        return self.attach_jev_shadow(comment_text, classification)
+
+    def classify_primary(self, comment_text: str) -> JobLeadClassification:
+        """Classify a post without running the optional Jev shadow."""
+
         if _SEEKING_WORK_RE.search(comment_text):
             return classify_contractor_lead_heuristic(comment_text)
         classification: JobLeadClassification | None = None
@@ -727,6 +733,15 @@ class JobLeadClassifier:
                 logger.warning("Job lead LLM classification failed: %s", exc)
         if classification is None:
             classification = classify_contractor_lead_heuristic(comment_text)
+        return classification
+
+    def attach_jev_shadow(
+        self,
+        comment_text: str,
+        classification: JobLeadClassification,
+    ) -> JobLeadClassification:
+        """Attach a bounded Jev observation to an existing primary decision."""
+
         return self._attach_jev_shadow(comment_text, classification)
 
     def close(self) -> None:
@@ -1196,6 +1211,7 @@ def _lead_from_hn_comment(
     story_title: str,
     comment: dict[str, Any],
     classifier: JobLeadClassifier | None = None,
+    precomputed_classification: JobLeadClassification | None = None,
     include_non_contractor: bool = False,
 ) -> JobLeadInput | None:
     text = html_to_text(comment.get("text"))
@@ -1203,11 +1219,13 @@ def _lead_from_hn_comment(
         return None
     if _SEEKING_WORK_RE.search(text):
         return None
-    classification = (
-        classifier.classify(text)
-        if classifier is not None
-        else classify_contractor_lead_heuristic(text)
-    )
+    classification = precomputed_classification
+    if classification is None:
+        classification = (
+            classifier.classify(text)
+            if classifier is not None
+            else classify_contractor_lead_heuristic(text)
+        )
     if not classification.is_contractor_friendly and not include_non_contractor:
         return None
 
@@ -1303,8 +1321,8 @@ class HackerNewsWhoIsHiringLeadSource:
             "prepare_jev_shadow_cohort",
             None,
         )
+        eligible_comments: list[tuple[dict[str, Any], str]] = []
         if callable(prepare_shadow_cohort):
-            eligible_comment_texts: list[str] = []
             for thread, children in thread_children:
                 for child in children:
                     if not isinstance(child, dict):
@@ -1313,8 +1331,23 @@ class HackerNewsWhoIsHiringLeadSource:
                         continue
                     text = html_to_text(child.get("text"))
                     if text and not _SEEKING_WORK_RE.search(text):
-                        eligible_comment_texts.append(text)
-            prepare_shadow_cohort(eligible_comment_texts)
+                        eligible_comments.append((child, text))
+            prepare_shadow_cohort([text for _, text in eligible_comments])
+
+        precomputed_classifications: dict[int, JobLeadClassification] = {}
+        if isinstance(self.classifier, JobLeadClassifier):
+            for child, text in eligible_comments:
+                precomputed_classifications[id(child)] = (
+                    self.classifier.classify_primary(text)
+                )
+            # Keep Jev calls in one contiguous phase. The existing wall-clock
+            # budget then measures only shadow-added scrape delay, rather than
+            # consuming the cohort window on intervening primary LLM calls.
+            for child, text in eligible_comments:
+                primary = precomputed_classifications[id(child)]
+                precomputed_classifications[id(child)] = (
+                    self.classifier.attach_jev_shadow(text, primary)
+                )
 
         for thread, children in thread_children:
             report = HackerNewsThreadScrapeReport(thread=thread)
@@ -1336,6 +1369,9 @@ class HackerNewsWhoIsHiringLeadSource:
                     story_title=thread.title,
                     comment=child,
                     classifier=self.classifier,
+                    precomputed_classification=precomputed_classifications.get(
+                        id(child)
+                    ),
                     include_non_contractor=self.include_non_contractor,
                 )
                 if lead is None:

@@ -623,6 +623,75 @@ def test_hacker_news_source_prepares_shadow_cohort_from_all_eligible_posts() -> 
     assert classifier.candidates[0].startswith("Acme | Contract Backend Engineer")
 
 
+def test_hacker_news_source_runs_planned_shadows_after_slow_primary_phase(
+    monkeypatch,
+) -> None:
+    settings = SimpleNamespace(
+        job_lead_jev_shadow_enabled=True,
+        job_lead_jev_shadow_sample_rate=1.0,
+        job_lead_jev_shadow_confidence_threshold=0.8,
+        job_lead_jev_shadow_timeout_seconds=0.5,
+        job_lead_jev_shadow_max_calls=2,
+        job_lead_jev_shadow_run_budget_seconds=0.5,
+        openrouter_api_key="test-key",
+    )
+    primary = classify_contractor_lead_heuristic(
+        "Acme | Contract API engineer | Remote"
+    )
+    now = [10.0]
+    events: list[str] = []
+    timeouts: list[float] = []
+    classifier = JobLeadClassifier(
+        settings=settings,  # type: ignore[arg-type]
+        client=object(),
+        jev_shadow_session=object(),  # type: ignore[arg-type]
+        jev_shadow_clock=lambda: now[0],
+    )
+
+    def classify_primary(comment_text: str) -> JobLeadClassification:
+        events.append(f"primary:{comment_text.split(' | ', 1)[0]}")
+        now[0] += 1.0
+        return primary
+
+    def classify_shadow(**kwargs: object) -> JobLeadJevDecision:
+        comment_text = str(kwargs["comment_text"])
+        events.append(f"shadow:{comment_text.split(' | ', 1)[0]}")
+        timeout_seconds = kwargs["timeout_seconds"]
+        assert isinstance(timeout_seconds, int | float)
+        timeouts.append(float(timeout_seconds))
+        now[0] += 0.2
+        return _jev_decision()
+
+    monkeypatch.setattr(classifier, "_classify_with_llm", classify_primary)
+    monkeypatch.setattr(
+        job_lead_sources,
+        "classify_job_lead_with_jev",
+        classify_shadow,
+    )
+    source = HackerNewsWhoIsHiringLeadSource(
+        client=_FakeClassifierHackerNewsClient(),  # type: ignore[arg-type]
+        classifier=classifier,
+    )
+
+    leads = source.collect()
+
+    assert events == [
+        "primary:Acme",
+        "primary:Fulltime Co",
+        "shadow:Acme",
+        "shadow:Fulltime Co",
+    ]
+    assert [lead.external_id for lead in leads] == ["10", "11"]
+    assert all(
+        job_lead_sources.JOB_LEAD_JEV_SHADOW_METADATA_KEY in (lead.metadata or {})
+        for lead in leads
+    )
+    assert len(timeouts) == 2
+    assert 0.49 <= timeouts[0] <= 0.5
+    assert 0.29 <= timeouts[1] <= 0.31
+    assert classifier.jev_shadow_run_summary()["run_elapsed_ms"] == 400
+
+
 def test_scrape_refreshes_existing_non_contractor_without_inserting(
     monkeypatch,
 ) -> None:
