@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from five08.settings import SharedSettings
 from five08.wiki_editing.models import (
     WikiBaseDocumentSnapshot,
     WikiConflictDetails,
@@ -23,7 +26,10 @@ from five08.wiki_editing.models import (
     WikiSourceReference,
     wiki_content_hash,
 )
-from five08.wiki_editing.store import InMemoryWikiEditingStore
+from five08.wiki_editing.store import (
+    InMemoryWikiEditingStore,
+    PostgresWikiEditingStore,
+)
 
 
 def _request() -> WikiEditRequestInput:
@@ -77,6 +83,42 @@ def _initial_proposal_input(request: WikiEditRequestInput) -> WikiProposalCreate
         organization_id=request.organization_id,
         target_action="create",
     )
+
+
+def test_postgres_authoring_claim_locks_request_before_proposal() -> None:
+    store = PostgresWikiEditingStore(SharedSettings())
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value.__enter__.return_value
+    cursor.fetchone.return_value = {"request_id": "request-1"}
+    lock_order: list[str] = []
+
+    def lock_request(*_args: object, **_kwargs: object) -> dict[str, object]:
+        lock_order.append("request")
+        return {}
+
+    def lock_proposal(*_args: object, **_kwargs: object) -> dict[str, object]:
+        lock_order.append("proposal")
+        return {}
+
+    with (
+        patch.object(store, "_connection", return_value=connection),
+        patch.object(store, "_locked_request", side_effect=lock_request),
+        patch.object(store, "_locked_proposal", side_effect=lock_proposal),
+        patch(
+            "five08.wiki_editing.store._proposal_from_row",
+            return_value=SimpleNamespace(status="proposed"),
+        ),
+    ):
+        result = store.claim_authoring(
+            "proposal-1",
+            organization_id="org-1",
+            omp_metadata=_metadata(),
+        )
+
+    assert result is None
+    assert lock_order == ["request", "proposal"]
+    assert cursor.execute.call_args_list[0].args[1] == ("proposal-1", "org-1")
 
 
 def test_request_idempotency_and_public_reads_exclude_source_text() -> None:

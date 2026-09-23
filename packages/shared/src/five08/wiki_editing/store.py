@@ -1735,6 +1735,25 @@ class PostgresWikiEditingStore:
         lease_seconds = _validated_authoring_lease_seconds(authoring_lease_seconds)
         with self._connection() as conn:
             with conn.cursor(row_factory=dict_row) as cursor:
+                # Every transaction that needs both rows locks the request
+                # before the proposal. Resolve the immutable request ID without
+                # a row lock first so an idempotent API replay cannot deadlock
+                # against this worker claim.
+                cursor.execute(
+                    """
+                    SELECT request_id FROM wiki_edit_proposals
+                    WHERE id = %s::uuid AND organization_id = %s
+                    """,
+                    (proposal_id, organization_id),
+                )
+                proposal_reference = cursor.fetchone()
+                if proposal_reference is None:
+                    raise WikiEditNotFoundError("wiki proposal was not found")
+                request_row = self._locked_request(
+                    cursor,
+                    str(proposal_reference["request_id"]),
+                    organization_id,
+                )
                 row = self._locked_proposal(cursor, proposal_id, organization_id)
                 current = _proposal_from_row(row)
                 if current.status == "queued":
@@ -1788,11 +1807,6 @@ class PostgresWikiEditingStore:
                         raise RuntimeError("unable to reclaim wiki proposal authoring")
                 else:
                     return None
-                request_row = self._locked_request(
-                    cursor,
-                    current.request_id,
-                    organization_id,
-                )
                 revision_parent_draft = self._revision_parent_draft(cursor, row)
                 return WikiAuthoringWorkItem(
                     request=_authoring_request_from_row(request_row),

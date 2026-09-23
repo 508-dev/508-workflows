@@ -12,6 +12,7 @@ from five08.discord_bot.cogs import wiki_writer as wiki_writer_module
 from five08.discord_bot.cogs.wiki_writer import (
     NO_MENTIONS,
     WikiProposalView,
+    WikiRevisionModal,
     WikiReviewAcknowledgementButton,
     WikiUpdateDynamicButton,
     WikiWriterCog,
@@ -113,6 +114,47 @@ def test_unacknowledged_proposal_only_shows_ack_after_a_complete_packet() -> Non
         "revise",
         "cancel",
         "refresh",
+    )
+
+
+@pytest.mark.asyncio
+async def test_wiki_inputs_honor_the_configured_instruction_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        wiki_writer_module.settings,
+        "wiki_editing_max_instruction_characters",
+        100,
+    )
+    cog, _guild = _cog_with_member(_member("Steering Committee"))
+    interaction = _interaction()
+    cog._create_wiki_update = AsyncMock()
+
+    await cog.wiki_update.callback(cog, interaction, "x" * 101)
+
+    cog._create_wiki_update.assert_not_awaited()
+    assert (
+        interaction.response.send_message.await_args.args[0]
+        == "Wiki update instructions must be 100 characters or fewer."
+    )
+
+    view = WikiProposalView(
+        cog=cog,
+        requester_id=123,
+        proposal_id="11111111-1111-1111-1111-111111111111",
+        guild_id="123",
+    )
+    modal = WikiRevisionModal(view=view)
+    assert modal.instruction.max_length == 100
+
+    revision_interaction = _interaction()
+    cog._post_proposal_action = AsyncMock()
+    await view.submit_revision(revision_interaction, "y" * 101)
+
+    cog._post_proposal_action.assert_not_awaited()
+    assert (
+        revision_interaction.response.send_message.await_args.args[0]
+        == "Revision instructions must be 100 characters or fewer."
     )
 
 

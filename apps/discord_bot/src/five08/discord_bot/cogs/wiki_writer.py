@@ -33,7 +33,6 @@ from five08.wiki_editing.models import WikiEditReviewArtifact
 
 logger = logging.getLogger(__name__)
 NO_MENTIONS = discord.AllowedMentions.none()
-WIKI_UPDATE_INSTRUCTION_MAX_LENGTH = 4_000
 WIKI_TARGET_DOCUMENT_ID_MAX_LENGTH = 256
 WIKI_THREAD_MESSAGE_LIMIT = 20
 # Keep the bot-side snapshot inside the backend/OMP aggregate source budget:
@@ -76,6 +75,11 @@ _BUTTON_STYLES: dict[WikiUpdateAction, discord.ButtonStyle] = {
     "cancel": discord.ButtonStyle.danger,
     "refresh": discord.ButtonStyle.secondary,
 }
+
+
+def _wiki_instruction_max_length() -> int:
+    """Return the shared backend limit enforced for Discord wiki inputs."""
+    return settings.wiki_editing_max_instruction_characters
 
 
 class WikiWriterConfigurationError(RuntimeError):
@@ -371,7 +375,7 @@ class WikiRevisionModal(discord.ui.Modal):
         self.instruction = discord.ui.TextInput(
             label="What should change?",
             style=discord.TextStyle.paragraph,
-            max_length=WIKI_UPDATE_INSTRUCTION_MAX_LENGTH,
+            max_length=_wiki_instruction_max_length(),
             required=True,
         )
         self.add_item(self.instruction)
@@ -481,10 +485,11 @@ class WikiProposalView(discord.ui.View):
         if not normalized_instruction:
             await _send_ephemeral(interaction, "A revision instruction is required.")
             return
-        if len(normalized_instruction) > WIKI_UPDATE_INSTRUCTION_MAX_LENGTH:
+        instruction_limit = _wiki_instruction_max_length()
+        if len(normalized_instruction) > instruction_limit:
             await _send_ephemeral(
                 interaction,
-                "Revision instructions must be 4,000 characters or fewer.",
+                f"Revision instructions must be {instruction_limit:,} characters or fewer.",
             )
             return
 
@@ -646,10 +651,11 @@ class WikiWriterCog(DiscordAuditCogMixin, commands.Cog):
         if not normalized_instruction:
             await _send_ephemeral(interaction, "A wiki update instruction is required.")
             return
-        if len(normalized_instruction) > WIKI_UPDATE_INSTRUCTION_MAX_LENGTH:
+        instruction_limit = _wiki_instruction_max_length()
+        if len(normalized_instruction) > instruction_limit:
             await _send_ephemeral(
                 interaction,
-                "Wiki update instructions must be 4,000 characters or fewer.",
+                f"Wiki update instructions must be {instruction_limit:,} characters or fewer.",
             )
             return
 
