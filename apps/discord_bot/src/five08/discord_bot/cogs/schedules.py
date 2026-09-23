@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 from typing import Any
 
@@ -68,7 +70,6 @@ class AgentSchedulesCog(commands.Cog):
             return
         payload = {
             "context": context,
-            "operation_id": str(interaction.id),
             "name": name,
             "cron_expression": cron,
             "timezone": timezone,
@@ -84,6 +85,7 @@ class AgentSchedulesCog(commands.Cog):
             ),
             "sources_are_public": public_sources,
         }
+        payload["operation_id"] = self._schedule_creation_operation_id(payload)
         response = await self._post_backend("/agent/schedules", payload)
         if response.get("http_status", 500) >= 400:
             await interaction.followup.send(
@@ -143,7 +145,6 @@ class AgentSchedulesCog(commands.Cog):
             return
         payload = {
             "context": context,
-            "operation_id": str(interaction.id),
             "name": name,
             "cron_expression": cron,
             "timezone": timezone,
@@ -151,6 +152,7 @@ class AgentSchedulesCog(commands.Cog):
             "execution_mode": "agent_loop",
             "channel_id": str(channel.id),
         }
+        payload["operation_id"] = self._schedule_creation_operation_id(payload)
         response = await self._post_backend("/agent/schedules", payload)
         if response.get("http_status", 500) >= 400:
             await interaction.followup.send(
@@ -312,6 +314,38 @@ class AgentSchedulesCog(commands.Cog):
         return (
             f"Schedule run `{run_id}` request accepted ({status or 'unknown status'})."
         )
+
+    @staticmethod
+    def _schedule_creation_operation_id(payload: dict[str, Any]) -> str:
+        """Return one stable key for semantically identical slash-command retries."""
+
+        context = payload.get("context")
+        identity = context if isinstance(context, dict) else {}
+        canonical_fields: dict[str, object] = {
+            "discord_user_id": str(identity.get("discord_user_id") or "").strip(),
+            "guild_id": str(identity.get("guild_id") or "").strip(),
+        }
+        for key, value in payload.items():
+            if key in {"context", "operation_id"}:
+                continue
+            if isinstance(value, str):
+                normalized = value.strip()
+                if key in {"name", "cron_expression"}:
+                    normalized = " ".join(normalized.split())
+                elif key == "repository":
+                    normalized = normalized.strip("/").casefold()
+                elif key == "state":
+                    normalized = normalized.casefold()
+                canonical_fields[key] = normalized
+            else:
+                canonical_fields[key] = value
+        serialized = json.dumps(
+            canonical_fields,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        return "discord-schedule:" + hashlib.sha256(serialized.encode()).hexdigest()
 
     def _context(self, interaction: discord.Interaction) -> dict[str, Any] | None:
         guild_id = getattr(interaction, "guild_id", None)
