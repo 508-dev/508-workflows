@@ -2,6 +2,7 @@
 
 import os
 import sys
+from typing import ClassVar
 
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -21,6 +22,12 @@ DEFAULT_POSTGRES_URL = "postgresql://postgres:postgres@127.0.0.1:5432/workflows"
 
 class SharedSettings(BaseSettings):
     """Base settings shared by all services in the monorepo."""
+
+    # A service can explicitly opt out of the database-backed runtime overlay
+    # for credentials it is never allowed to receive. This is separate from
+    # an empty environment variable: empty values otherwise leave a setting
+    # eligible for the runtime-config fallback.
+    runtime_config_overlay_excluded_attributes: ClassVar[frozenset[str]] = frozenset()
 
     environment: str = "local"
     log_level: str = "INFO"
@@ -171,6 +178,28 @@ class SharedSettings(BaseSettings):
     # project wiki matching. Keep it separate from the invitation-only key.
     outline_contents_api_key: str | None = None
     outline_api_timeout_seconds: float = 20.0
+    # Wiki authorship is opt-in.  The writer uses the admin credential only in
+    # backend/worker processes; the Discord bot keeps using the member-safe
+    # contents credential above for read-only /wiki commands.
+    wiki_editing_enabled: bool = False
+    wiki_outline_collection_id: str | None = None
+    # Separate from API_SHARED_SECRET. Only the Discord bot and API receive
+    # this key, so a routine service credential cannot forge a role-bearing
+    # request context for an approval-gated wiki action.
+    wiki_editing_assertion_secret: str | None = None
+    wiki_editing_api_timeout_seconds: float = Field(default=20.0, gt=0)
+    wiki_editing_max_instruction_characters: int = Field(
+        default=4_000,
+        ge=100,
+        le=4_000,
+    )
+    wiki_editing_max_document_characters: int = Field(
+        # This bound is deliberately aligned with the maximum source text that
+        # the OMP adapter may send to its external model provider.
+        default=16_000,
+        ge=1_000,
+        le=16_000,
+    )
     brevo_api_key: str | None = None
     brevo_api_base_url: str = "https://api.brevo.com/v3"
     brevo_api_timeout_seconds: float = 20.0
@@ -263,6 +292,8 @@ class SharedSettings(BaseSettings):
     def __getattribute__(self, name: str) -> object:
         value = super().__getattribute__(name)
         if name.startswith("_"):
+            return value
+        if name in type(self).runtime_config_overlay_excluded_attributes:
             return value
         try:
             from five08.runtime_config import resolve_runtime_setting_value

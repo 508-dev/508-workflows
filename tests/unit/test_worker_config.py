@@ -62,6 +62,82 @@ def test_discord_bot_internal_url_requires_safe_transport(
     assert settings.resolved_discord_bot_internal_base_url == expected
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("http://wiki_omp_sandbox:8080", "http://wiki_omp_sandbox:8080"),
+        ("https://wiki-omp.example.com", "https://wiki-omp.example.com"),
+        ("https://127.0.0.1:8443", None),
+        ("https://10.0.0.5:8443", None),
+        ("https://localhost:8443", None),
+        ("http://127.0.0.1:8080", None),
+        ("http://sandbox.example.com", None),
+        ("https://sandbox", None),
+        ("http://wiki_omp_sandbox/run", None),
+        ("https://user@wiki-omp.example.com", None),
+    ],
+)
+def test_wiki_omp_sandbox_url_requires_an_isolated_transport(
+    value: str,
+    expected: str | None,
+) -> None:
+    settings = WorkerSettings(wiki_omp_sandbox_url=value)
+
+    assert settings.resolved_wiki_omp_sandbox_url == expected
+
+
+def test_wiki_authoring_refuses_the_legacy_local_omp_launcher() -> None:
+    settings = WorkerSettings(
+        wiki_editing_enabled=True,
+        wiki_outline_collection_id="shared-wiki",
+        outline_admin_api_key="writer-key",
+        wiki_omp_sandbox_url="http://wiki_omp_sandbox:8080",
+        wiki_omp_sandbox_token="sandbox-token",
+        wiki_omp_command="/usr/local/bin/omp",
+    )
+
+    assert settings.wiki_authoring_configured is False
+    assert settings.wiki_authoring_configuration_error is not None
+    assert "Local WIKI_OMP_COMMAND" in settings.wiki_authoring_configuration_error
+
+
+def test_wiki_authoring_accepts_a_separately_credentialed_sandbox() -> None:
+    settings = WorkerSettings(
+        wiki_editing_enabled=True,
+        wiki_outline_collection_id="shared-wiki",
+        outline_admin_api_key="writer-key",
+        wiki_omp_sandbox_url="http://wiki_omp_sandbox:8080",
+        wiki_omp_sandbox_token="sandbox-token",
+    )
+
+    assert settings.wiki_authoring_configured is True
+    assert settings.wiki_authoring_configuration_error is None
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected_error"),
+    [
+        ({"wiki_omp_model": "openai/gpt-5"}, "WIKI_OMP_MODEL"),
+        ({"wiki_omp_thinking": "turbo"}, "WIKI_OMP_THINKING"),
+    ],
+)
+def test_wiki_authoring_rejects_sandbox_incompatible_runtime_settings(
+    overrides: dict[str, str],
+    expected_error: str,
+) -> None:
+    settings = WorkerSettings(
+        wiki_editing_enabled=True,
+        wiki_outline_collection_id="shared-wiki",
+        outline_admin_api_key="writer-key",
+        wiki_omp_sandbox_url="http://wiki_omp_sandbox:8080",
+        wiki_omp_sandbox_token="sandbox-token",
+        **overrides,
+    )
+
+    assert settings.wiki_authoring_configured is False
+    assert expected_error in str(settings.wiki_authoring_configuration_error)
+
+
 def test_email_intake_requires_mailbox_credentials() -> None:
     with pytest.raises(ValidationError, match="EMAIL_PASSWORD must be set"):
         WorkerSettings(
