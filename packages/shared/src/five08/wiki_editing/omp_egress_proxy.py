@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import math
 import os
 import select
 import socket
@@ -28,7 +29,8 @@ _ALLOWED_HOSTS = frozenset({"openrouter.ai"})
 _CONNECT_PORT = 443
 _MAX_CONCURRENCY = 4
 _CONNECT_TIMEOUT_SECONDS = 10.0
-_MAX_TUNNEL_SECONDS = 330.0
+_DEFAULT_TUNNEL_SECONDS = 330.0
+_TUNNEL_HEADROOM_SECONDS = 60.0
 _MAX_BUFFER_BYTES = 1_000_000
 
 
@@ -43,6 +45,7 @@ class EgressProxySettings:
     listen_host: str = "0.0.0.0"
     listen_port: int = 3128
     max_concurrency: int = 1
+    tunnel_timeout_seconds: float = _DEFAULT_TUNNEL_SECONDS
 
     @classmethod
     def from_environment(
@@ -59,10 +62,17 @@ class EgressProxySettings:
             minimum=1,
             maximum=_MAX_CONCURRENCY,
         )
+        sandbox_timeout = _parse_bounded_float(
+            values.get("WIKI_OMP_SANDBOX_RUN_TIMEOUT_SECONDS", "270"),
+            name="WIKI_OMP_SANDBOX_RUN_TIMEOUT_SECONDS",
+            minimum=30.0,
+            maximum=600.0,
+        )
         return cls(
             listen_host=host,
             listen_port=port,
             max_concurrency=max_concurrency,
+            tunnel_timeout_seconds=sandbox_timeout + _TUNNEL_HEADROOM_SECONDS,
         )
 
 
@@ -93,6 +103,22 @@ def _parse_bounded_int(
     except (TypeError, ValueError) as exc:
         raise RuntimeError(f"{name} must be an integer") from exc
     if not minimum <= parsed <= maximum:
+        raise RuntimeError(f"{name} is outside its safe range")
+    return parsed
+
+
+def _parse_bounded_float(
+    value: object,
+    *,
+    name: str,
+    minimum: float,
+    maximum: float,
+) -> float:
+    try:
+        parsed = float(str(value))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"{name} must be a number") from exc
+    if not math.isfinite(parsed) or not minimum <= parsed <= maximum:
         raise RuntimeError(f"{name} is outside its safe range")
     return parsed
 
@@ -169,8 +195,10 @@ class OpenRouterEgressProxy(ThreadingHTTPServer):
         server_address: tuple[str, int],
         *,
         max_concurrency: int,
+        tunnel_timeout_seconds: float,
     ) -> None:
         self.tunnel_slots = threading.BoundedSemaphore(max_concurrency)
+        self.tunnel_timeout_seconds = tunnel_timeout_seconds
         super().__init__(server_address, OpenRouterEgressProxyHandler)
 
 
@@ -209,7 +237,12 @@ class OpenRouterEgressProxyHandler(BaseHTTPRequestHandler):
 
     def _relay(self, upstream: socket.socket) -> None:
         """Bidirectionally relay bytes without buffering an unbounded stream."""
-        _relay_tunnel(self.connection, upstream)
+        server = cast(OpenRouterEgressProxy, self.server)
+        _relay_tunnel(
+            self.connection,
+            upstream,
+            timeout_seconds=server.tunnel_timeout_seconds,
+        )
 
     def do_GET(self) -> None:  # noqa: N802 - HTTP method hook
         self.send_error(HTTPStatus.METHOD_NOT_ALLOWED)
@@ -226,13 +259,18 @@ class OpenRouterEgressProxyHandler(BaseHTTPRequestHandler):
         logger.info("OMP egress proxy: " + format, *args)
 
 
-def _relay_tunnel(downstream: socket.socket, upstream: socket.socket) -> None:
+def _relay_tunnel(
+    downstream: socket.socket,
+    upstream: socket.socket,
+    *,
+    timeout_seconds: float = _DEFAULT_TUNNEL_SECONDS,
+) -> None:
     """Relay a tunnel while preserving buffered data across TCP half-closes."""
     peers = {downstream: upstream, upstream: downstream}
     pending = {downstream: bytearray(), upstream: bytearray()}
     read_open = {downstream: True, upstream: True}
     write_open = {downstream: True, upstream: True}
-    deadline = time.monotonic() + _MAX_TUNNEL_SECONDS
+    deadline = time.monotonic() + timeout_seconds
 
     def shutdown_drained_destinations() -> bool:
         """Propagate EOF after the matching direction's buffered data is sent."""
@@ -307,6 +345,7 @@ def serve(settings: EgressProxySettings) -> None:
     server = OpenRouterEgressProxy(
         (settings.listen_host, settings.listen_port),
         max_concurrency=settings.max_concurrency,
+        tunnel_timeout_seconds=settings.tunnel_timeout_seconds,
     )
     logger.info(
         "Starting OpenRouter-only OMP egress proxy on %s:%s",

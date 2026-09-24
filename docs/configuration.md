@@ -320,9 +320,10 @@ Agent gateway:
 - `WIKI_EDITING_API_TIMEOUT_SECONDS`: Postgres connection/statement timeout for
   durable workflow state. Outline calls use `OUTLINE_API_TIMEOUT_SECONDS`.
 - `WIKI_EDITING_REQUEST_TIMEOUT_SECONDS`: Discord bot-to-backend wiki request
-  timeout (default and minimum: 45 seconds). It covers a confirmed publish's
-  synchronous Outline conflict read and write, each with the default 20-second
-  provider timeout, plus transport overhead.
+  timeout (default and minimum: 90 seconds). This covers four default
+  `OUTLINE_API_TIMEOUT_SECONDS` windows plus 10 seconds because a confirmed
+  publish's conflict read and write can each consume separate connect and read
+  windows. Increase it too when increasing the provider timeout.
 - `WIKI_EDITING_MAX_INSTRUCTION_CHARACTERS`: maximum explicit request or
   revision feedback length (fixed maximum and default: 4000).
 - `WIKI_EDITING_MAX_DOCUMENT_CHARACTERS`: maximum full target article sent to
@@ -349,6 +350,9 @@ Agent gateway:
   organization knowledge (never private/project knowledge), capped at 32
   sources and 48,000 characters. The sandbox can only return one typed draft;
   it receives no backend-hosted write tools and cannot publish.
+- `WIKI_OMP_SANDBOX_RUN_TIMEOUT_SECONDS`: sandbox-wide run deadline (30–600
+  seconds, default: 270). Compose gives the fixed OpenRouter proxy tunnel 60
+  seconds of additional shutdown headroom over this same configured value.
 
 For Compose deployments, inject wiki-related secrets by service rather than
 placing them in a globally inherited production `.env` file:

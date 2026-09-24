@@ -561,7 +561,17 @@ class OmpRpcSession:
 
         def _write_frame() -> None:
             try:
-                process.stdin.write(encoded + b"\n")
+                frame = encoded + b"\n"
+                written = 0
+                while written < len(frame):
+                    count = process.stdin.write(frame[written:])
+                    if (
+                        not isinstance(count, int)
+                        or isinstance(count, bool)
+                        or count <= 0
+                    ):
+                        raise OSError("OMP pipe accepted an invalid byte count")
+                    written += count
                 process.stdin.flush()
             except Exception as exc:
                 write_errors.append(exc)

@@ -193,6 +193,7 @@ def test_sandbox_settings_require_the_internal_egress_proxy(tmp_path: Any) -> No
 def _rpc_process(*, frames: list[bytes]) -> tuple[Mock, Mock]:
     process = Mock()
     process.stdin = Mock()
+    process.stdin.write.side_effect = lambda frame: len(frame)
     process.stdout = Mock()
     process.stdout.fileno.return_value = 42
     process.poll.return_value = 0
@@ -349,7 +350,12 @@ def test_partial_rpc_frame_honors_the_session_deadline(
 def test_rpc_write_honors_the_session_deadline() -> None:
     release_writer = threading.Event()
     process = Mock()
-    process.stdin.write.side_effect = lambda _frame: release_writer.wait(timeout=1.0)
+
+    def _blocked_write(frame: bytes) -> int:
+        release_writer.wait(timeout=1.0)
+        return len(frame)
+
+    process.stdin.write.side_effect = _blocked_write
     session = OmpRpcSession(
         settings=SandboxSettings(
             token="sandbox-token",
@@ -372,6 +378,43 @@ def test_rpc_write_honors_the_session_deadline() -> None:
         release_writer.set()
 
     mock_close.assert_called_once_with()
+
+
+def test_rpc_write_completes_a_short_unbuffered_write() -> None:
+    process = Mock()
+    writes = 0
+    accepted = bytearray()
+
+    def _short_write(frame: bytes) -> int:
+        nonlocal writes
+        writes += 1
+        count = min(7, len(frame))
+        accepted.extend(frame[:count])
+        return count
+
+    process.stdin.write.side_effect = _short_write
+    session = OmpRpcSession(
+        settings=SandboxSettings(
+            token="sandbox-token",
+            openrouter_api_key="openrouter-key",
+            egress_proxy_url="http://wiki_omp_egress_proxy:3128",
+        ),
+        model="openrouter/test-model",
+        thinking="medium",
+    )
+    session.process = process
+    session._deadline = omp_sandbox_server.time.monotonic() + 1.0
+
+    request_id = session._send({"type": "prompt", "message": "x" * 100})
+
+    assert request_id == "wiki_1"
+    assert writes > 1
+    assert json.loads(accepted) == {
+        "id": "wiki_1",
+        "type": "prompt",
+        "message": "x" * 100,
+    }
+    process.stdin.flush.assert_called_once_with()
 
 
 def test_maximum_size_unterminated_rpc_frame_is_rejected_without_waiting(

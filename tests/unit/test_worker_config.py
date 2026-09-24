@@ -114,6 +114,30 @@ def test_wiki_authoring_accepts_a_separately_credentialed_sandbox() -> None:
     assert settings.wiki_authoring_configuration_error is None
 
 
+@pytest.mark.parametrize(
+    ("overrides", "expected_error"),
+    [
+        ({"wiki_omp_model": "openai/gpt-5"}, "WIKI_OMP_MODEL"),
+        ({"wiki_omp_thinking": "turbo"}, "WIKI_OMP_THINKING"),
+    ],
+)
+def test_wiki_authoring_rejects_sandbox_incompatible_runtime_settings(
+    overrides: dict[str, str],
+    expected_error: str,
+) -> None:
+    settings = WorkerSettings(
+        wiki_editing_enabled=True,
+        wiki_outline_collection_id="shared-wiki",
+        outline_admin_api_key="writer-key",
+        wiki_omp_sandbox_url="http://wiki_omp_sandbox:8080",
+        wiki_omp_sandbox_token="sandbox-token",
+        **overrides,
+    )
+
+    assert settings.wiki_authoring_configured is False
+    assert expected_error in str(settings.wiki_authoring_configuration_error)
+
+
 def test_email_intake_requires_mailbox_credentials() -> None:
     with pytest.raises(ValidationError, match="EMAIL_PASSWORD must be set"):
         WorkerSettings(

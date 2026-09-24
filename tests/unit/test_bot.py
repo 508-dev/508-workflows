@@ -188,12 +188,12 @@ class TestBot508:
     def test_wiki_editing_request_timeout_covers_two_outline_calls(self) -> None:
         config = Settings(discord_bot_token="token")
 
-        assert config.wiki_editing_request_timeout_seconds == 45.0
+        assert config.wiki_editing_request_timeout_seconds == 90.0
 
         with pytest.raises(ValidationError):
             Settings(
                 discord_bot_token="token",
-                wiki_editing_request_timeout_seconds=44.0,
+                wiki_editing_request_timeout_seconds=89.0,
             )
 
     @pytest.mark.parametrize(

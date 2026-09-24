@@ -1,5 +1,6 @@
 """Configuration for webhook ingest and worker services."""
 
+import re
 from ipaddress import ip_address
 from urllib.parse import urlparse
 
@@ -10,6 +11,12 @@ from five08.openai_fallback import (
     build_openai_compatible_provider_attempts,
 )
 from five08.settings import SharedSettings
+
+
+_WIKI_OMP_MODEL_PATTERN = re.compile(r"^openrouter/[A-Za-z0-9._:/-]{1,240}$")
+_WIKI_OMP_THINKING_LEVELS = frozenset(
+    {"off", "minimal", "low", "medium", "high", "xhigh", "max"}
+)
 
 
 class WorkerSettings(SharedSettings):
@@ -175,6 +182,10 @@ class WorkerSettings(SharedSettings):
             return "WIKI_OMP_SANDBOX_TOKEN is required for isolated wiki authoring."
         if self.wiki_omp_sandbox_protocol_version.strip() != "v1":
             return "WIKI_OMP_SANDBOX_PROTOCOL_VERSION must be v1."
+        if not _WIKI_OMP_MODEL_PATTERN.fullmatch(self.wiki_omp_model.strip()):
+            return "WIKI_OMP_MODEL must use the sandbox's openrouter/... format."
+        if self.wiki_omp_thinking.strip().lower() not in _WIKI_OMP_THINKING_LEVELS:
+            return "WIKI_OMP_THINKING is not supported by the sandbox."
         if not (self.outline_admin_api_key or "").strip():
             return "OUTLINE_ADMIN_API_KEY is required for wiki editing."
         if not str(self.wiki_outline_collection_id or "").strip():

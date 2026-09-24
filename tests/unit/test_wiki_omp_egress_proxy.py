@@ -71,6 +71,14 @@ def test_proxy_settings_reject_an_external_listener() -> None:
         )
 
 
+def test_proxy_tunnel_outlives_the_configured_sandbox_run() -> None:
+    settings = EgressProxySettings.from_environment(
+        {"WIKI_OMP_SANDBOX_RUN_TIMEOUT_SECONDS": "600"}
+    )
+
+    assert settings.tunnel_timeout_seconds == 660.0
+
+
 def test_tunnel_drains_buffered_bytes_before_propagating_half_closes() -> None:
     client, downstream = socket.socketpair()
     upstream, provider = socket.socketpair()

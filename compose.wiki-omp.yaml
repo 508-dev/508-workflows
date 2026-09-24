@@ -87,6 +87,7 @@ services:
     environment:
       WIKI_OMP_EGRESS_PROXY_LISTEN_ADDR: 0.0.0.0:3128
       WIKI_OMP_EGRESS_PROXY_MAX_CONCURRENCY: ${WIKI_OMP_SANDBOX_MAX_CONCURRENCY:-1}
+      WIKI_OMP_SANDBOX_RUN_TIMEOUT_SECONDS: ${WIKI_OMP_SANDBOX_RUN_TIMEOUT_SECONDS:-270}
     networks:
       - wiki_omp_proxy
       - wiki_omp_egress
