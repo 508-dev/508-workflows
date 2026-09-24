@@ -542,6 +542,9 @@ class OmpRpcSession:
         process = self.process
         if process is None or process.stdin is None:
             raise OmpRunError("OMP process is unavailable")
+        deadline = self._deadline
+        if deadline is None:  # pragma: no cover - class lifecycle invariant
+            raise OmpRunError("OMP deadline is unavailable")
         self._next_id += 1
         request_id = f"wiki_{self._next_id}"
         message = {"id": request_id, **payload}
@@ -553,11 +556,31 @@ class OmpRpcSession:
         ).encode("utf-8")
         if len(encoded) > MAX_RPC_FRAME_BYTES:
             raise OmpRunError("OMP request exceeded its safe boundary")
-        try:
-            process.stdin.write(encoded + b"\n")
-            process.stdin.flush()
-        except (BrokenPipeError, OSError) as exc:
-            raise OmpRunError("OMP process stopped unexpectedly") from exc
+        write_finished = threading.Event()
+        write_errors: list[Exception] = []
+
+        def _write_frame() -> None:
+            try:
+                process.stdin.write(encoded + b"\n")
+                process.stdin.flush()
+            except Exception as exc:
+                write_errors.append(exc)
+            finally:
+                write_finished.set()
+
+        writer = threading.Thread(target=_write_frame, daemon=True)
+        writer.start()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not write_finished.wait(timeout=remaining):
+            # Killing the child closes the pipe and releases the blocked writer.
+            # The daemon thread is only a watchdog boundary, never a durable task.
+            self.close()
+            raise OmpRunTimeout("OMP authoring timed out")
+        if write_errors:
+            error = write_errors[0]
+            if isinstance(error, (BrokenPipeError, OSError)):
+                raise OmpRunError("OMP process stopped unexpectedly") from error
+            raise OmpRunError("OMP request could not be written") from error
         return request_id
 
     def _read_frame(self) -> dict[str, object]:

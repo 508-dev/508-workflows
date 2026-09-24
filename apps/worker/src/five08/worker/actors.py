@@ -212,13 +212,16 @@ def _schedule_retry(
         else max(1, math.ceil(delay_seconds))
     )
     retry_at = datetime.now(tz=timezone.utc) + timedelta(seconds=retry_delay_seconds)
-    mark_job_retry(
+    updated = mark_job_retry(
         settings,
-        job_id,
+        job,
         attempts=attempts,
         run_after=retry_at,
         last_error=error,
     )
+    if not updated:
+        logger.warning("Skipping stale retry transition job_id=%s", job_id)
+        return
     if _should_log_job_event(event_type="retrying", job_type=job.type):
         _log_job_event(
             event_type="retrying",
@@ -230,6 +233,27 @@ def _schedule_retry(
             error=error,
         )
     execute_job.send_with_options(args=(job_id,), delay=retry_delay_seconds * 1000)
+
+
+def _reschedule_held_wiki_job(job: JobRecord) -> bool:
+    """Ensure a redelivery survives until an active wiki job lease expires."""
+    if job.type != _WIKI_AUTHORING_JOB_NAME or job.locked_at is None:
+        return False
+    elapsed = max(
+        0.0,
+        (datetime.now(tz=timezone.utc) - job.locked_at).total_seconds(),
+    )
+    retry_delay_seconds = max(
+        1,
+        math.ceil(_wiki_authoring_job_lease_seconds() - elapsed),
+    )
+    execute_job.send_with_options(args=(job.id,), delay=retry_delay_seconds * 1000)
+    logger.info(
+        "Wiki job lease held id=%s; redelivering after %ss",
+        job.id,
+        retry_delay_seconds,
+    )
+    return True
 
 
 def _mark_exhausted_wiki_authoring(job: JobRecord) -> None:
@@ -272,11 +296,12 @@ def _run_job(job_id: str) -> None:
                 existing_job.status,
             )
         elif existing_job.status == JobStatus.RUNNING:
-            logger.warning(
-                "Skipping job_id=%s locked by worker=%s",
-                job_id,
-                existing_job.locked_by,
-            )
+            if not _reschedule_held_wiki_job(existing_job):
+                logger.warning(
+                    "Skipping job_id=%s locked by worker=%s",
+                    job_id,
+                    existing_job.locked_by,
+                )
         else:
             logger.info(
                 "Skipping job_id=%s because it is not eligible to run (%s)",
@@ -285,20 +310,33 @@ def _run_job(job_id: str) -> None:
             )
         return
 
-    handler = _HANDLERS.get(job.type)
-    if handler is None:
-        error = f"Unknown job type: {job.type}"
-        logger.error("Marking job dead id=%s error=%s", job_id, error)
-        mark_job_dead(settings, job_id, attempts=job.attempts, last_error=error)
+    if job.status == JobStatus.DEAD:
+        _mark_exhausted_wiki_authoring(job)
         _log_job_event(
             event_type="dead",
             job_id=job.id,
             job_type=job.type,
-            attempts=_job_attempt_display(job.attempts),
+            attempts=job.attempts,
             max_attempts=job.max_attempts,
             worker_name=settings.worker_name,
-            error=error,
+            error=job.last_error,
         )
+        return
+
+    handler = _HANDLERS.get(job.type)
+    if handler is None:
+        error = f"Unknown job type: {job.type}"
+        logger.error("Marking job dead id=%s error=%s", job_id, error)
+        if mark_job_dead(settings, job, attempts=job.attempts, last_error=error):
+            _log_job_event(
+                event_type="dead",
+                job_id=job.id,
+                job_type=job.type,
+                attempts=_job_attempt_display(job.attempts),
+                max_attempts=job.max_attempts,
+                worker_name=settings.worker_name,
+                error=error,
+            )
         return
 
     if _should_log_job_event(event_type="started", job_type=job.type):
@@ -314,12 +352,15 @@ def _run_job(job_id: str) -> None:
     try:
         args, kwargs = _extract_call_args(job)
         result = handler(*args, **kwargs)
-        mark_job_succeeded(
+        updated = mark_job_succeeded(
             settings,
-            job_id,
+            job,
             result=result,
             base_payload=job.payload,
         )
+        if not updated:
+            logger.warning("Ignoring stale success transition job_id=%s", job_id)
+            return
         logger.info("Completed job_id=%s type=%s", job_id, job.type)
         if _should_log_job_event(event_type="succeeded", job_type=job.type):
             _log_job_event(
@@ -356,12 +397,15 @@ def _run_job(job_id: str) -> None:
             next_attempt,
             error,
         )
-        mark_job_dead(
+        updated = mark_job_dead(
             settings,
-            job_id,
+            job,
             attempts=next_attempt,
             last_error=error,
         )
+        if not updated:
+            logger.warning("Ignoring stale dead transition job_id=%s", job_id)
+            return
         _log_job_event(
             event_type="dead",
             job_id=job.id,
@@ -379,13 +423,16 @@ def _run_job(job_id: str) -> None:
         )
 
         if next_attempt >= job.max_attempts:
-            _mark_exhausted_wiki_authoring(job)
-            mark_job_dead(
+            updated = mark_job_dead(
                 settings,
-                job_id,
+                job,
                 attempts=next_attempt,
                 last_error=error,
             )
+            if not updated:
+                logger.warning("Ignoring stale dead transition job_id=%s", job_id)
+                return
+            _mark_exhausted_wiki_authoring(job)
             _log_job_event(
                 event_type="dead",
                 job_id=job.id,

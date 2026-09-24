@@ -276,7 +276,11 @@ def _mark_job(
     locked_by: Any = _UNSET,
     run_after: Any = _UNSET,
     last_error: Any = _UNSET,
-) -> None:
+    expected_locked_at: datetime | None = None,
+    expected_locked_by: str | None = None,
+) -> bool:
+    if (expected_locked_at is None) != (expected_locked_by is None):
+        raise ValueError("Claim fencing requires both lock timestamp and owner.")
     updates: list[str] = []
     params: list[Any] = []
 
@@ -302,19 +306,35 @@ def _mark_job(
         updates.append("last_error = %s")
         params.append(last_error)
     if not updates:
-        return
+        return False
 
     updates.append("updated_at = NOW()")
     params.append(job_id)
+    claim_clause = ""
+    if expected_locked_at is not None and expected_locked_by is not None:
+        claim_clause = """
+          AND status = %s
+          AND locked_at = %s
+          AND locked_by = %s
+        """
+        params.extend(
+            (
+                JobStatus.RUNNING.value,
+                expected_locked_at,
+                expected_locked_by,
+            )
+        )
 
     query = f"""
         UPDATE jobs
         SET {", ".join(updates)}
-        WHERE id = %s;
+        WHERE id = %s
+        {claim_clause};
     """
     with get_postgres_connection(settings) as conn:
         with conn.cursor() as cursor:
             cursor.execute(trusted_sql(query), params)
+            return cursor.rowcount == 1
 
 
 def mark_job_running(
@@ -332,6 +352,15 @@ def mark_job_running(
     )
 
 
+def _claim_fence(claim: JobRecord) -> tuple[datetime, str]:
+    """Return the immutable identity of an active durable claim."""
+    if claim.status != JobStatus.RUNNING:
+        raise ValueError("Job claim must be running before it can be resolved.")
+    if claim.locked_at is None or claim.locked_by is None:
+        raise ValueError("Job claim is missing its lock identity.")
+    return claim.locked_at, claim.locked_by
+
+
 def claim_job(
     settings: SharedSettings,
     job_id: str,
@@ -347,12 +376,17 @@ def claim_job(
     once. A caller may additionally reclaim one job type after its bounded
     running lease expires. A missing row means another worker has already
     claimed the job, it is terminal, or its retry delay or lease has not
-    elapsed yet.
+    elapsed yet. Reclaiming an expired lease consumes an attempt; an exhausted
+    reclaim is returned as ``dead`` so the caller can perform type-specific
+    terminal cleanup without executing the handler again.
     """
     if (reclaim_running_job_type is None) != (reclaim_running_after_seconds is None):
         raise ValueError("Running-job reclaim requires both a job type and timeout.")
     if reclaim_running_after_seconds is not None and reclaim_running_after_seconds <= 0:
         raise ValueError("Running-job reclaim timeout must be positive.")
+    # Replicas commonly share ``worker_name``. Add a per-claim nonce so the
+    # persisted owner is also an unambiguous fencing token.
+    claim_owner = f"{worker_name}:{uuid4()}"
 
     eligible_clause = """
           status IN (%s, %s)
@@ -377,17 +411,37 @@ def claim_job(
         )
 
     query = f"""
-        UPDATE jobs
+        WITH eligible AS (
+            SELECT
+                id,
+                status = %s AS reclaiming,
+                status = %s AND attempts + 1 >= max_attempts AS exhausted
+            FROM jobs
+            WHERE id = %s
+              AND ({eligible_clause})
+            FOR UPDATE
+        )
+        UPDATE jobs AS jobs
         SET
-            status = %s,
-            locked_at = NOW(),
-            locked_by = %s,
+            status = CASE
+                WHEN eligible.exhausted THEN %s
+                ELSE %s
+            END,
+            attempts = CASE
+                WHEN eligible.reclaiming THEN jobs.attempts + 1
+                ELSE jobs.attempts
+            END,
+            locked_at = CASE WHEN eligible.exhausted THEN NULL ELSE NOW() END,
+            locked_by = CASE WHEN eligible.exhausted THEN NULL ELSE %s END,
             run_after = NULL,
-            last_error = NULL,
+            last_error = CASE
+                WHEN eligible.exhausted THEN %s
+                ELSE NULL
+            END,
             updated_at = NOW()
-        WHERE id = %s
-          AND ({eligible_clause})
-        RETURNING *;
+        FROM eligible
+        WHERE jobs.id = eligible.id
+        RETURNING jobs.*;
     """
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
@@ -395,9 +449,13 @@ def claim_job(
                 query,
                 (
                     JobStatus.RUNNING.value,
-                    worker_name,
+                    JobStatus.RUNNING.value,
                     job_id,
                     *eligibility_params,
+                    JobStatus.DEAD.value,
+                    JobStatus.RUNNING.value,
+                    claim_owner,
+                    "Worker lease expired before completion.",
                 ),
             )
             row = cursor.fetchone()
@@ -406,73 +464,82 @@ def claim_job(
 
 def mark_job_succeeded(
     settings: SharedSettings,
-    job_id: str,
+    claim: JobRecord,
     *,
     result: Any | None = None,
     base_payload: dict[str, Any] | None = None,
-) -> None:
+) -> bool:
     """Mark successful completion."""
+    locked_at, locked_by = _claim_fence(claim)
     payload: Any = _UNSET
     if result is not None:
         merged_payload = dict(base_payload or {})
         merged_payload["result"] = result
         payload = merged_payload
 
-    _mark_job(
+    return _mark_job(
         settings,
-        job_id,
+        claim.id,
         status=JobStatus.SUCCEEDED,
         payload=payload,
         locked_at=None,
         locked_by=None,
         run_after=None,
         last_error=None,
+        expected_locked_at=locked_at,
+        expected_locked_by=locked_by,
     )
 
 
 def mark_job_retry(
     settings: SharedSettings,
-    job_id: str,
+    claim: JobRecord,
     *,
     attempts: int,
     run_after: datetime,
     last_error: str,
-) -> None:
+) -> bool:
     """Record a retryable failure using `_mark_job` with `JobStatus.FAILED`.
 
     This marks a non-terminal failure state while attempts are still below the
     max-attempts threshold. Callers should use this for retry scheduling paths;
     terminal failures should use `mark_job_dead`, which writes `JobStatus.DEAD`.
     """
-    _mark_job(
+    locked_at, locked_by = _claim_fence(claim)
+    return _mark_job(
         settings,
-        job_id,
+        claim.id,
         status=JobStatus.FAILED,
         attempts=attempts,
         run_after=run_after,
         last_error=last_error,
         locked_at=None,
         locked_by=None,
+        expected_locked_at=locked_at,
+        expected_locked_by=locked_by,
     )
 
 
 def mark_job_dead(
     settings: SharedSettings,
-    job_id: str,
+    claim: JobRecord,
     *,
     attempts: int,
     last_error: str,
-) -> None:
+) -> bool:
     """Mark a job as permanently dead."""
-    _mark_job(
+    locked_at, locked_by = _claim_fence(claim)
+    return _mark_job(
         settings,
-        job_id,
+        claim.id,
         status=JobStatus.DEAD,
         attempts=attempts,
         run_after=None,
         last_error=last_error,
         locked_at=None,
         locked_by=None,
+        expected_locked_at=locked_at,
+        expected_locked_by=locked_by,
     )
 
 

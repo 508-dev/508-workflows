@@ -121,6 +121,44 @@ def test_postgres_authoring_claim_locks_request_before_proposal() -> None:
     assert cursor.execute.call_args_list[0].args[1] == ("proposal-1", "org-1")
 
 
+def test_postgres_publish_reconciliation_preserves_unknown_resolution_time() -> None:
+    store = PostgresWikiEditingStore(SharedSettings())
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value.__enter__.return_value
+    cursor.fetchone.return_value = {"completed": True}
+    operation = SimpleNamespace(status="unknown", id="operation-1")
+    completed = SimpleNamespace(status="succeeded")
+
+    with (
+        patch.object(store, "_connection", return_value=connection),
+        patch.object(store, "_locked_proposal", return_value={}),
+        patch.object(store, "_locked_operation", return_value={}),
+        patch(
+            "five08.wiki_editing.store._proposal_from_row",
+            return_value=SimpleNamespace(status="publish_unknown"),
+        ),
+        patch(
+            "five08.wiki_editing.store._operation_from_row",
+            side_effect=(operation, completed),
+        ),
+    ):
+        result = store.mark_publish_succeeded(
+            "proposal-1",
+            organization_id="org-1",
+            result=WikiPublishResult(
+                document_id="outline-doc-1",
+                document_url="https://outline.example/doc-1",
+                document_version="7",
+                content_hash=wiki_content_hash("published text"),
+            ),
+        )
+
+    assert result is completed
+    operation_update = cursor.execute.call_args_list[0].args[0]
+    assert "resolved_at = COALESCE(resolved_at, %s)" in operation_update
+
+
 def test_request_idempotency_and_public_reads_exclude_source_text() -> None:
     store = InMemoryWikiEditingStore()
     request = _request()
@@ -544,7 +582,12 @@ def test_publish_attempt_is_recorded_before_external_write_and_never_reclaimed()
     assert second_claim.should_execute is False
     assert second_claim.operation.id == first_claim.operation.id
 
-    unknown = store.mark_publish_unknown(proposal.id, organization_id="org-1")
+    unknown_at = datetime(2026, 9, 18, 12, tzinfo=timezone.utc)
+    unknown = store.mark_publish_unknown(
+        proposal.id,
+        organization_id="org-1",
+        now=unknown_at,
+    )
     assert unknown.status == "unknown"
     still_not_claimed = store.claim_publish_attempt(
         proposal.id,
@@ -561,8 +604,10 @@ def test_publish_attempt_is_recorded_before_external_write_and_never_reclaimed()
             document_version="7",
             content_hash=wiki_content_hash(_output().proposed_text),
         ),
+        now=unknown_at + timedelta(minutes=5),
     )
     assert published.status == "succeeded"
+    assert published.resolved_at == unknown_at
     final = store.get_proposal(proposal.id, organization_id="org-1")
     assert final is not None
     assert final.status == "published"

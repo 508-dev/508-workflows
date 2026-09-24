@@ -776,6 +776,14 @@ def test_backend_post_rejects_redirects_before_parsing_response() -> None:
     assert mock_post.call_args.kwargs["allow_redirects"] is False
 
 
+def test_wiki_response_surfaces_structured_backend_failures() -> None:
+    message = WikiWriterCog._format_wiki_response(
+        {"error": "forbidden", "http_status": 403}
+    )
+
+    assert message.splitlines()[0] == "Wiki update failed (HTTP 403): forbidden."
+
+
 def test_audit_metadata_excludes_instruction_summary_and_raw_source_text() -> None:
     cog = WikiWriterCog.__new__(WikiWriterCog)
     cog._audit_command_safe = Mock()

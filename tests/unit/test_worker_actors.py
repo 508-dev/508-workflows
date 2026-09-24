@@ -1,6 +1,6 @@
 """Unit tests for worker actor job state transitions."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 
 from five08.queue import JobRecord, JobStatus
@@ -38,6 +38,76 @@ def test_run_job_reclaims_wiki_jobs_after_the_authoring_lease() -> None:
         reclaim_running_job_type="author_wiki_edit_proposal_job",
         reclaim_running_after_seconds=195.0,
     )
+
+
+def test_run_job_redelivers_a_wiki_job_after_its_active_lease() -> None:
+    now = datetime.now(timezone.utc)
+    running = JobRecord(
+        id="job-wiki-running",
+        type="author_wiki_edit_proposal_job",
+        status=JobStatus.RUNNING,
+        payload={"args": ["proposal-1", "guild-1"], "kwargs": {}},
+        idempotency_key=None,
+        attempts=0,
+        max_attempts=3,
+        run_after=None,
+        locked_at=now - timedelta(seconds=20),
+        locked_by="other-worker",
+        last_error=None,
+        created_at=now,
+        updated_at=now,
+    )
+
+    with (
+        patch("five08.worker.actors.claim_job", return_value=None),
+        patch("five08.worker.actors.get_job", return_value=running),
+        patch(
+            "five08.worker.actors._wiki_authoring_job_lease_seconds",
+            return_value=100.0,
+        ),
+        patch.object(actors.execute_job, "send_with_options") as mock_send,
+    ):
+        actors._run_job(running.id)
+
+    mock_send.assert_called_once()
+    assert mock_send.call_args.kwargs["args"] == (running.id,)
+    assert 79_000 <= mock_send.call_args.kwargs["delay"] <= 80_000
+
+
+def test_run_job_finishes_an_exhausted_expired_wiki_claim_without_executing() -> None:
+    now = datetime.now(timezone.utc)
+    exhausted = JobRecord(
+        id="job-wiki-dead",
+        type="author_wiki_edit_proposal_job",
+        status=JobStatus.DEAD,
+        payload={"args": ["proposal-1", "guild-1"], "kwargs": {}},
+        idempotency_key=None,
+        attempts=3,
+        max_attempts=3,
+        run_after=None,
+        locked_at=None,
+        locked_by=None,
+        last_error="Worker lease expired before completion.",
+        created_at=now,
+        updated_at=now,
+    )
+    handler = Mock()
+
+    with (
+        patch("five08.worker.actors.claim_job", return_value=exhausted),
+        patch(
+            "five08.worker.actors.mark_wiki_authoring_retry_exhausted"
+        ) as mock_mark_proposal,
+        patch.dict(
+            actors._HANDLERS,
+            {"author_wiki_edit_proposal_job": handler},
+            clear=False,
+        ),
+    ):
+        actors._run_job(exhausted.id)
+
+    handler.assert_not_called()
+    mock_mark_proposal.assert_called_once_with("proposal-1", "guild-1")
 
 
 def test_run_job_schedules_retry_for_docuseal_processing_error() -> None:
@@ -134,7 +204,7 @@ def test_run_job_marks_dead_for_non_retryable_docuseal_error() -> None:
     mock_schedule_retry.assert_not_called()
     mock_mark_dead.assert_called_once()
     call_args = mock_mark_dead.call_args
-    assert call_args.args[1] == "job-124"
+    assert call_args.args[1].id == "job-124"
     assert call_args.kwargs["attempts"] == 1
     assert (
         call_args.kwargs["last_error"]

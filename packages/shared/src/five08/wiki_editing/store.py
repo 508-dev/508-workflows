@@ -1204,7 +1204,7 @@ class InMemoryWikiEditingStore:
                 update={
                     "status": "succeeded",
                     "result": result,
-                    "resolved_at": comparison_time,
+                    "resolved_at": operation.resolved_at or comparison_time,
                     "updated_at": comparison_time,
                 },
                 deep=True,
@@ -2205,7 +2205,8 @@ class PostgresWikiEditingStore:
                 cursor.execute(
                     """
                     UPDATE wiki_edit_publish_operations
-                    SET status = 'succeeded', result_payload = %s, resolved_at = %s,
+                    SET status = 'succeeded', result_payload = %s,
+                        resolved_at = COALESCE(resolved_at, %s),
                         updated_at = %s
                     WHERE id = %s::uuid
                     RETURNING *

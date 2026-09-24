@@ -487,11 +487,6 @@ class WikiEditingService:
                 complete_diff=output.proposed_diff,
                 source_refs=output.source_refs,
             )
-            completed = self.store.complete_proposal(
-                proposal.id,
-                organization_id=organization_id,
-                output=output,
-            )
         except WikiAuthoringTransientError:
             # The OMP draft phase has no write capability, so a transport or
             # capacity retry is safe. Release the durable claim before raising
@@ -513,8 +508,15 @@ class WikiEditingService:
                     raise WikiEditNotFoundError("Wiki proposal was not found.")
                 return self._response_for(latest)
             raise
-        except WikiAuthoringError:
+        except (WikiAuthoringError, ValueError, WikiEditStateError):
             return self._fail_authoring(proposal.id, organization_id)
+
+        try:
+            completed = self.store.complete_proposal(
+                proposal.id,
+                organization_id=organization_id,
+                output=output,
+            )
         except WikiEditStateError:
             # Cancellation may win while OMP is writing its final draft. Do not
             # resurrect the proposal or change the cancellation outcome.
@@ -524,8 +526,6 @@ class WikiEditingService:
             if latest is None:  # pragma: no cover - state-store invariant
                 raise
             return self._response_for(latest)
-        except Exception:
-            return self._fail_authoring(proposal.id, organization_id)
         return self._response_for(completed)
 
     def mark_authoring_retry_exhausted(

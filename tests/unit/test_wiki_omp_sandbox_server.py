@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+import threading
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -343,6 +344,34 @@ def test_partial_rpc_frame_honors_the_session_deadline(
 
     read_chunk.assert_called_once_with(42, omp_sandbox_server.MAX_RPC_FRAME_BYTES + 1)
     process.stdout.readline.assert_not_called()
+
+
+def test_rpc_write_honors_the_session_deadline() -> None:
+    release_writer = threading.Event()
+    process = Mock()
+    process.stdin.write.side_effect = lambda _frame: release_writer.wait(timeout=1.0)
+    session = OmpRpcSession(
+        settings=SandboxSettings(
+            token="sandbox-token",
+            openrouter_api_key="openrouter-key",
+            egress_proxy_url="http://wiki_omp_egress_proxy:3128",
+        ),
+        model="openrouter/test-model",
+        thinking="medium",
+    )
+    session.process = process
+    session._deadline = omp_sandbox_server.time.monotonic() + 0.01
+
+    try:
+        with (
+            patch.object(session, "close") as mock_close,
+            pytest.raises(OmpRunTimeout, match="timed out"),
+        ):
+            session._send({"type": "prompt", "message": "x" * 100_000})
+    finally:
+        release_writer.set()
+
+    mock_close.assert_called_once_with()
 
 
 def test_maximum_size_unterminated_rpc_frame_is_rejected_without_waiting(

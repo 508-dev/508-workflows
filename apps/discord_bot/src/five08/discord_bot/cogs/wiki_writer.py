@@ -1087,8 +1087,23 @@ class WikiWriterCog(DiscordAuditCogMixin, commands.Cog):
         review_attached: bool = False,
     ) -> str:
         """Render only compact metadata; full content lives in a private file."""
+        raw_message = response.get("message")
+        http_status = response.get("http_status")
+        failed_status = (
+            isinstance(http_status, int)
+            and not isinstance(http_status, bool)
+            and http_status >= 400
+        )
+        if not raw_message and (response.get("error") or failed_status):
+            error = _safe_display_text(response.get("error"), max_length=300)
+            status_suffix = f" (HTTP {http_status})" if failed_status else ""
+            raw_message = (
+                f"Wiki update failed{status_suffix}: {error}."
+                if error
+                else f"Wiki update failed{status_suffix}."
+            )
         message = _safe_display_text(
-            response.get("message") or "Wiki update status received.",
+            raw_message or "Wiki update status received.",
             max_length=700,
         )
         lines = [message]

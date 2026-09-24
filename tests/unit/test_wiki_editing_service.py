@@ -285,6 +285,31 @@ def test_transient_authoring_releases_the_lease_for_queue_retry() -> None:
     assert exhausted.action == "revise"
 
 
+def test_authoring_persistence_failure_propagates_for_queue_retry(monkeypatch) -> None:
+    service = _service(_Outline(), _Author())
+    started = service.create(_create_request())
+    assert started.response.proposal_id is not None
+
+    def _fail_complete(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(service.store, "complete_proposal", _fail_complete)
+
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        service.author_proposal(
+            started.response.proposal_id,
+            organization_id="guild-1",
+        )
+
+    proposal = service.store.get_proposal(
+        started.response.proposal_id,
+        organization_id="guild-1",
+    )
+    assert proposal is not None
+    assert proposal.status == "authoring"
+    assert proposal.failure_code is None
+
+
 def test_revision_preserves_immutable_history_and_passes_feedback_to_author() -> None:
     outline = _Outline()
     author = _Author()
