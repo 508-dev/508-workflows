@@ -723,25 +723,32 @@ def summarize_profile(
 def render_job_lead_eval_report(report: JobLeadEvalReport) -> str:
     """Render a compact, reviewable Markdown report."""
 
+    profiles = set(report.summary)
     jev_model = report.requested_models.get("jev", "unknown")
     llm_model = report.requested_models.get("luna", "unknown")
     jev_endpoint = report.endpoints.get("jev", "unknown")
     llm_endpoint = report.endpoints.get("luna", "unknown")
     lines = [
-        "# Jev job-lead classification evaluation",
+        "# Job-lead classification evaluation",
         "",
         f"- Evaluated (UTC): `{report.evaluated_at.isoformat()}`",
         f"- Runtime revision: `{report.runtime_revision or 'unknown'}`",
         f"- Corpus: `{report.corpus_path}` ({report.case_count} cases)",
         f"- Network repeats per case: {report.network_repeats}",
-        f"- Jev: `{jev_model}` through `{jev_endpoint}`",
-        f"- LLM baseline: `{llm_model}` through `{llm_endpoint}`",
-        "",
-        "## Results",
-        "",
-        "| Profile | Successful calls | Contractor F1 | Posting accuracy | Joint accuracy | Stable cases | Latency p50 / p95 / max | Input / cached / cache-write / output tokens | Cost |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
+    if "jev" in profiles:
+        lines.append(f"- Jev: `{jev_model}` through `{jev_endpoint}`")
+    if "luna" in profiles:
+        lines.append(f"- LLM baseline: `{llm_model}` through `{llm_endpoint}`")
+    lines.extend(
+        [
+            "",
+            "## Results",
+            "",
+            "| Profile | Successful calls | Contractor F1 | Posting accuracy | Joint accuracy | Stable cases | Latency p50 / p95 / max | Input / cached / cache-write / output tokens | Cost |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
     for profile, summary in report.summary.items():
         stability = summary["repeatability"]
         stable = (
@@ -774,10 +781,19 @@ def render_job_lead_eval_report(report: JobLeadEvalReport) -> str:
             + " |"
         )
 
+    result_note = (
+        "Joint accuracy requires both the contractor-friendly boolean and the "
+        "four-way posting type to match the golden label."
+    )
+    if "heuristic" in profiles:
+        result_note = (
+            "The heuristic is local code, so its latency and zero cost are not an "
+            f"API-to-API comparison. {result_note}"
+        )
     lines.extend(
         [
             "",
-            "The heuristic is local code, so its latency and zero cost are not an API-to-API comparison. Joint accuracy requires both the contractor-friendly boolean and the four-way posting type to match the golden label.",
+            result_note,
             "",
             "## Core versus challenge cases",
             "",
@@ -851,10 +867,26 @@ def render_job_lead_eval_report(report: JobLeadEvalReport) -> str:
             "",
             "- The corpus is a balanced, synthetic challenge set derived from the production label contract. It deliberately over-represents negation, commercial uses of the word `contract`, non-posts, and prompt-injection-like text; it does not estimate live HN prevalence.",
             "- Golden labels are exact and scoring is deterministic. No model judges another model.",
-            f"- Jev uses the requested `{jev_model}` model through `{jev_endpoint}`. Provider-resolved model IDs are retained in the JSON observation report.",
-            f"- The LLM baseline uses the requested `{llm_model}` model and the production job-lead prompt and schema through `{llm_endpoint}`.",
-            "- The LLM baseline's self-reported classification confidence is retained as diagnostic metadata, but it is not treated as a calibrated contractor probability or used in the Jev confidence-gate analysis.",
-            "- Latency includes successful and failed calls. Jev cost is provider-reported. For GPT-5.6 Luna only, missing cost is estimated from successful retained token usage at the official [$0.20/M input, $0.02/M cached input, $0.25/M cache-write, and $1.20/M output rates](https://developers.openai.com/api/docs/models/gpt-5.6-luna); missing cost for a custom `--llm-model` or any profile with unpriced failed calls remains unavailable.",
+        ]
+    )
+    if "jev" in profiles:
+        lines.extend(
+            [
+                f"- Jev uses the requested `{jev_model}` model through `{jev_endpoint}`. Provider-resolved model IDs are retained in the JSON observation report.",
+                "- Jev cost is provider-reported.",
+            ]
+        )
+    if "luna" in profiles:
+        lines.extend(
+            [
+                f"- The LLM baseline uses the requested `{llm_model}` model and the production job-lead prompt and schema through `{llm_endpoint}`.",
+                "- The LLM baseline's self-reported classification confidence is retained as diagnostic metadata, but it is not treated as a calibrated contractor probability or used in the Jev confidence-gate analysis.",
+                "- For GPT-5.6 Luna only, missing cost is estimated from successful retained token usage at the official [$0.20/M input, $0.02/M cached input, $0.25/M cache-write, and $1.20/M output rates](https://developers.openai.com/api/docs/models/gpt-5.6-luna); missing cost for a custom `--llm-model` or any profile with unpriced failed calls remains unavailable.",
+            ]
+        )
+    lines.extend(
+        [
+            "- Latency includes successful and failed calls.",
             "- Raw observations are generated under the gitignored reports directory; this Markdown summary intentionally excludes provider payloads and secrets.",
             "",
         ]

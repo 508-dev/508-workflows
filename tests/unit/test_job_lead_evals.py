@@ -472,6 +472,43 @@ def test_report_renders_every_mismatch_group() -> None:
     assert "| deterministic |" in markdown
 
 
+def test_report_omits_provenance_for_profiles_that_were_not_run() -> None:
+    observation = JobLeadEvalObservation(
+        profile="heuristic",
+        case_id="success",
+        group="core",
+        repeat=1,
+        expected_posting_type="part_time",
+        expected_contractor_friendly=True,
+        predicted_posting_type="part_time",
+        predicted_contractor_friendly=True,
+        latency_ms=0,
+    )
+    report = JobLeadEvalReport(
+        evaluated_at=datetime.now(timezone.utc),
+        runtime_revision=None,
+        corpus_version="job-lead-classification.v1",
+        corpus_path="corpus.json",
+        case_count=1,
+        network_repeats=1,
+        requested_models={"jev": "unrun/jev", "luna": "unrun/luna"},
+        endpoints={
+            "jev": "https://unrun.example/decisions",
+            "luna": "https://unrun.example/chat/completions",
+        },
+        summary={"heuristic": summarize_profile([observation], case_count=1)},
+        observations=[observation],
+    )
+
+    markdown = render_job_lead_eval_report(report)
+
+    assert "unrun/jev" not in markdown
+    assert "unrun/luna" not in markdown
+    assert "https://unrun.example" not in markdown
+    assert "Jev cost is provider-reported" not in markdown
+    assert "GPT-5.6 Luna" not in markdown
+
+
 def test_report_marks_single_network_run_stability_unmeasured() -> None:
     observation = JobLeadEvalObservation(
         profile="jev",
@@ -505,7 +542,7 @@ def test_report_marks_single_network_run_stability_unmeasured() -> None:
 
 
 def test_report_methodology_uses_actual_models_and_endpoints() -> None:
-    observation = JobLeadEvalObservation(
+    jev_observation = JobLeadEvalObservation(
         profile="jev",
         case_id="success",
         group="core",
@@ -516,6 +553,13 @@ def test_report_methodology_uses_actual_models_and_endpoints() -> None:
         predicted_contractor_friendly=True,
         contractor_probability=0.9,
         latency_ms=200,
+    )
+    luna_observation = jev_observation.model_copy(
+        update={
+            "profile": "luna",
+            "contractor_probability": None,
+            "classification_confidence": 0.9,
+        }
     )
     report = JobLeadEvalReport(
         evaluated_at=datetime.now(timezone.utc),
@@ -529,8 +573,11 @@ def test_report_methodology_uses_actual_models_and_endpoints() -> None:
             "jev": "https://router.example/decisions",
             "luna": "https://models.example/chat/completions",
         },
-        summary={"jev": summarize_profile([observation], case_count=1)},
-        observations=[observation],
+        summary={
+            "jev": summarize_profile([jev_observation], case_count=1),
+            "luna": summarize_profile([luna_observation], case_count=1),
+        },
+        observations=[jev_observation, luna_observation],
     )
 
     markdown = render_job_lead_eval_report(report)
