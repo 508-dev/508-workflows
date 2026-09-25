@@ -267,6 +267,21 @@ async def test_disabled_knowledge_does_not_collect_discord_history(
 
 
 @pytest.mark.asyncio
+async def test_knowledge_capture_timeout_covers_serial_backend_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "knowledge_api_timeout_seconds", 15.0)
+    monkeypatch.setattr(settings, "knowledge_source_timeout_seconds", 6.0)
+    monkeypatch.setattr(settings, "knowledge_model_timeout_seconds", 6.0)
+    cog = AgentCog.__new__(AgentCog)
+    cog._post_backend_json = Mock(return_value={"status": "requires_confirmation"})
+
+    await cog._post_knowledge_capture({"context": {}})
+
+    assert cog._post_backend_json.call_args.args[2] == 31.0
+
+
+@pytest.mark.asyncio
 async def test_knowledge_confirmation_fails_closed_when_roles_cannot_refresh() -> None:
     cog = AgentCog.__new__(AgentCog)
     cog.bot = SimpleNamespace(get_guild=Mock(return_value=None))
