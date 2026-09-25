@@ -41,8 +41,9 @@ PostingType = Literal[
 ]
 EvalProfile = Literal["heuristic", "jev", "luna"]
 
-DEFAULT_CORPUS_PATH = Path(
-    "tests/evals/job-lead-classification/fixtures/v1/corpus.json"
+DEFAULT_CORPUS_PATH = (
+    Path(__file__).resolve().parents[4]
+    / "tests/evals/job-lead-classification/fixtures/v1/corpus.json"
 )
 DEFAULT_OUTPUT_DIR = Path("tests/evals/job-lead-classification/reports")
 DEFAULT_JEV_MODEL = DEFAULT_JOB_LEAD_JEV_MODEL

@@ -148,6 +148,17 @@ def test_checked_in_corpus_is_balanced_and_versioned() -> None:
     }
 
 
+def test_default_corpus_path_is_independent_of_working_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    corpus = load_job_lead_eval_corpus()
+
+    assert corpus.version == "job-lead-classification.v1"
+    assert len(corpus.cases) == 48
+
+
 def test_corpus_rejects_inconsistent_derived_contractor_label() -> None:
     with pytest.raises(ValidationError, match="must be derived"):
         JobLeadEvalCase(
