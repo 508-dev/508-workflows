@@ -87,8 +87,9 @@ class _FlakySession(_FakeSession):
 
 
 class _FakeOpenAIClient:
-    def __init__(self) -> None:
+    def __init__(self, *, include_usage: bool = True) -> None:
         self.payload: dict | None = None
+        self.include_usage = include_usage
         self.beta = SimpleNamespace(
             chat=SimpleNamespace(
                 completions=SimpleNamespace(parse=self._parse),
@@ -108,16 +109,20 @@ class _FakeOpenAIClient:
         return SimpleNamespace(
             model="gpt-5.6-luna",
             choices=[SimpleNamespace(message=SimpleNamespace(parsed=parsed))],
-            usage=SimpleNamespace(
-                model_dump=lambda: {
-                    "prompt_tokens": 400,
-                    "prompt_tokens_details": {
-                        "cached_tokens": 100,
-                        "cache_write_tokens": 50,
-                    },
-                    "completion_tokens": 50,
-                    "total_tokens": 450,
-                }
+            usage=(
+                SimpleNamespace(
+                    model_dump=lambda: {
+                        "prompt_tokens": 400,
+                        "prompt_tokens_details": {
+                            "cached_tokens": 100,
+                            "cache_write_tokens": 50,
+                        },
+                        "completion_tokens": 50,
+                        "total_tokens": 450,
+                    }
+                )
+                if self.include_usage
+                else None
             ),
         )
 
@@ -301,6 +306,21 @@ def test_luna_does_not_apply_luna_rates_to_custom_model() -> None:
         started=0.0,
     )
 
+    assert observation.cost_usd is None
+
+
+def test_luna_leaves_cost_unavailable_when_usage_is_missing() -> None:
+    observation = _run_luna(
+        case=_case(),
+        repeat=1,
+        client=_FakeOpenAIClient(include_usage=False),  # type: ignore[arg-type]
+        model="gpt-5.6-luna",
+        max_attempts=1,
+        started=0.0,
+    )
+
+    assert observation.input_tokens == 0
+    assert observation.output_tokens == 0
     assert observation.cost_usd is None
 
 

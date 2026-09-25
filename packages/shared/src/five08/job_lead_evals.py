@@ -433,7 +433,11 @@ def _run_luna(
         completion.usage.model_dump() if completion.usage is not None else {}
     )
     usage = _usage(usage_payload)
-    if usage["cost_usd"] is None and _has_known_luna_pricing(model):
+    if (
+        usage["cost_usd"] is None
+        and _has_known_luna_pricing(model)
+        and _has_billable_token_usage(usage_payload)
+    ):
         usage["cost_usd"] = _luna_cost_usd(
             input_tokens=usage["input_tokens"],
             cached_input_tokens=usage["cached_input_tokens"],
@@ -1040,6 +1044,16 @@ def _usage(value: Any) -> dict[str, Any]:
         "total_tokens": total_tokens,
         "cost_usd": cost_usd,
     }
+
+
+def _has_billable_token_usage(value: Any) -> bool:
+    source = value if isinstance(value, dict) else {}
+    input_tokens = source.get("input_tokens", source.get("prompt_tokens"))
+    output_tokens = source.get("output_tokens", source.get("completion_tokens"))
+    return all(
+        isinstance(item, int | float) and not isinstance(item, bool) and item >= 0
+        for item in (input_tokens, output_tokens)
+    )
 
 
 def _luna_cost_usd(
