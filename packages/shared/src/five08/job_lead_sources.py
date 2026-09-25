@@ -704,6 +704,7 @@ class JobLeadClassifier:
         self._jev_shadow_clock = jev_shadow_clock or time.perf_counter
         self._jev_shadow_calls_started = 0
         self._jev_shadow_run_started_at: float | None = None
+        self._jev_shadow_run_finished_at: float | None = None
         self._jev_shadow_budget_exhaustion_reason: (
             Literal["max_calls", "run_budget"] | None
         ) = None
@@ -763,11 +764,14 @@ class JobLeadClassifier:
 
         elapsed_ms = 0
         if self._jev_shadow_run_started_at is not None:
+            finished_at = (
+                self._jev_shadow_run_finished_at
+                if self._jev_shadow_run_finished_at is not None
+                else self._jev_shadow_clock()
+            )
             elapsed_ms = max(
                 0,
-                round(
-                    (self._jev_shadow_clock() - self._jev_shadow_run_started_at) * 1000
-                ),
+                round((finished_at - self._jev_shadow_run_started_at) * 1000),
             )
         budget_exhaustion_reason = self._jev_shadow_budget_exhaustion_reason
         if (
@@ -806,7 +810,18 @@ class JobLeadClassifier:
             planned[fingerprint] = planned.get(fingerprint, 0) + 1
         self._jev_shadow_planned_fingerprints = planned
 
+    def finish_jev_shadow_phase(self) -> None:
+        """Freeze elapsed time when the contiguous shadow phase ends."""
+
+        if (
+            self._jev_shadow_run_started_at is not None
+            and self._jev_shadow_run_finished_at is None
+        ):
+            self._jev_shadow_run_finished_at = self._jev_shadow_clock()
+
     def _next_jev_shadow_timeout(self) -> float | None:
+        if self._jev_shadow_run_finished_at is not None:
+            return None
         if self._jev_shadow_calls_started >= self._jev_shadow_max_calls:
             self._jev_shadow_budget_exhaustion_reason = "max_calls"
             return None
@@ -1355,6 +1370,7 @@ class HackerNewsWhoIsHiringLeadSource:
                 precomputed_classifications[id(child)] = (
                     self.classifier.attach_jev_shadow(text, primary)
                 )
+            self.classifier.finish_jev_shadow_phase()
 
         for thread, children in thread_children:
             report = HackerNewsThreadScrapeReport(thread=thread)

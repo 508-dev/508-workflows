@@ -670,6 +670,19 @@ def test_hacker_news_source_runs_planned_shadows_after_slow_primary_phase(
         "classify_job_lead_with_jev",
         classify_shadow,
     )
+    original_classification_metadata = job_lead_sources._classification_metadata
+
+    def classification_metadata(
+        classification: JobLeadClassification,
+    ) -> dict[str, object]:
+        now[0] += 1.0
+        return original_classification_metadata(classification)
+
+    monkeypatch.setattr(
+        job_lead_sources,
+        "_classification_metadata",
+        classification_metadata,
+    )
     source = HackerNewsWhoIsHiringLeadSource(
         client=_FakeClassifierHackerNewsClient(),  # type: ignore[arg-type]
         classifier=classifier,
@@ -691,6 +704,7 @@ def test_hacker_news_source_runs_planned_shadows_after_slow_primary_phase(
     assert len(timeouts) == 2
     assert 0.49 <= timeouts[0] <= 0.5
     assert 0.29 <= timeouts[1] <= 0.31
+    assert now[0] > 14.0
     assert classifier.jev_shadow_run_summary()["run_elapsed_ms"] == 400
 
 
