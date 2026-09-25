@@ -11,6 +11,7 @@ import pytest
 import requests
 from pydantic import ValidationError
 
+import five08.job_lead_evals as job_lead_evals
 from five08.job_lead_evals import (
     DEFAULT_CORPUS_PATH,
     JobLeadEvalCase,
@@ -18,6 +19,7 @@ from five08.job_lead_evals import (
     JobLeadLLMClassificationResponse,
     JobLeadEvalObservation,
     _direct_openai_api_key,
+    _git_revision,
     _run_case,
     _run_jev,
     _run_luna,
@@ -157,6 +159,36 @@ def test_default_corpus_path_is_independent_of_working_directory(
 
     assert corpus.version == "job-lead-classification.v1"
     assert len(corpus.cases) == 48
+
+
+def test_git_revision_is_resolved_from_harness_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    command: list[str] = []
+
+    def fake_run(args: list[str], **_kwargs: object) -> SimpleNamespace:
+        command.extend(args)
+        return SimpleNamespace(stdout="abc123\n")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(job_lead_evals.subprocess, "run", fake_run)
+
+    assert _git_revision() == "abc123"
+    assert command[:2] == ["git", "-C"]
+    repository_root = Path(command[2])
+    assert command[3:] == ["rev-parse", "HEAD"]
+    assert (
+        repository_root / "packages/shared/src/five08/job_lead_evals.py"
+    ).resolve() == Path(job_lead_evals.__file__).resolve()
+
+
+def test_git_revision_is_unknown_outside_a_source_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    installed_module = tmp_path / "site-packages/five08/job_lead_evals.py"
+    monkeypatch.setattr(job_lead_evals, "__file__", str(installed_module))
+
+    assert _git_revision() is None
 
 
 def test_corpus_rejects_inconsistent_derived_contractor_label() -> None:

@@ -1238,9 +1238,17 @@ def _elapsed_ms(started: float) -> int:
 
 
 def _git_revision() -> str | None:
+    module_path = Path(__file__).resolve()
+    try:
+        repository_root = module_path.parents[4]
+    except IndexError:
+        return None
+    source_module = repository_root / "packages/shared/src/five08/job_lead_evals.py"
+    if not source_module.is_file() or source_module.resolve() != module_path:
+        return None
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+            ["git", "-C", str(repository_root), "rev-parse", "HEAD"],
             check=True,
             capture_output=True,
             text=True,
