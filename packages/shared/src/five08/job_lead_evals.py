@@ -1098,7 +1098,26 @@ def _optional_text(value: Any) -> str | None:
 def _safe_error(exc: Exception) -> str:
     if isinstance(exc, _RequestFailure | JobLeadJevRequestError):
         exc = exc.cause
-    return f"{type(exc).__name__}: {str(exc)[:500]}"
+    status_code = getattr(exc, "status_code", None)
+    if not isinstance(status_code, int):
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+    if isinstance(status_code, int) and 100 <= status_code <= 599:
+        return f"provider_http_{status_code}"
+    error_name = type(exc).__name__
+    if (
+        isinstance(exc, requests.Timeout | TimeoutError)
+        or error_name == "APITimeoutError"
+    ):
+        return "provider_timeout"
+    if isinstance(exc, requests.ConnectionError) or error_name == "APIConnectionError":
+        return "provider_connection_error"
+    if isinstance(exc, requests.RequestException):
+        return "provider_transport_error"
+    if isinstance(exc, ValueError):
+        return "invalid_provider_response"
+    if isinstance(exc, RuntimeError):
+        return "provider_request_failed"
+    return "provider_error"
 
 
 def _ratio(numerator: int, denominator: int) -> float:

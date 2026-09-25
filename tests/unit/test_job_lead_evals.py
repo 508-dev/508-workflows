@@ -23,6 +23,7 @@ from five08.job_lead_evals import (
     _run_case,
     _run_jev,
     _run_luna,
+    _safe_error,
     jev_questions,
     load_env_file,
     load_job_lead_eval_corpus,
@@ -332,11 +333,22 @@ def test_exhausted_request_preserves_attempt_count(
 
     assert attempts == 2
     assert observation.request_attempts == 2
-    assert observation.error == "Timeout: persistent timeout"
+    assert observation.error == "provider_timeout"
     summary = summarize_profile([observation], case_count=1)
     assert summary["usage"]["request_attempts"] == 2
     assert summary["usage"]["cost_usd"] is None
     assert summary["latency_ms"]["max"] == observation.latency_ms
+
+
+def test_provider_error_artifacts_exclude_provider_message() -> None:
+    class ProviderError(RuntimeError):
+        status_code = 403
+
+    secret = "submitted corpus text and provider response details"
+    error = _safe_error(ProviderError(secret))
+
+    assert error == "provider_http_403"
+    assert secret not in error
 
 
 def test_heuristic_suite_requires_no_provider_key() -> None:
