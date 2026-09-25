@@ -41,7 +41,7 @@ def test_manual_schedule_run_message_reflects_the_backend_status(
 
 
 def test_schedule_creation_operation_id_is_stable_across_discord_retries() -> None:
-    """A new Discord interaction for the same schedule reuses its durable key."""
+    """Only retries of one Discord interaction reuse its durable key."""
 
     first = {
         "context": {
@@ -61,17 +61,25 @@ def test_schedule_creation_operation_id_is_stable_across_discord_retries() -> No
         **first,
         "context": {
             **first["context"],
-            "interaction_id": "2002",
             "roles": ["Renamed Admin Role"],
         },
         "name": "Weekly operations",
         "cron_expression": "0 9 * * 1",
     }
+    recreated = {
+        **retried,
+        "context": {
+            **retried["context"],
+            "interaction_id": "2002",
+        },
+    }
 
     first_id = AgentSchedulesCog._schedule_creation_operation_id(first)
     retry_id = AgentSchedulesCog._schedule_creation_operation_id(retried)
+    recreated_id = AgentSchedulesCog._schedule_creation_operation_id(recreated)
 
     assert first_id == retry_id
+    assert first_id != recreated_id
     assert first_id.startswith("discord-schedule:")
     assert len(first_id) <= 128
 
