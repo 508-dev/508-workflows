@@ -14,7 +14,7 @@ Jev is strong enough to test as a shadow or canary classifier for the binary
 evidence for an immediate production replacement. Across 144 repeated calls,
 Jev reached 100.0% binary F1 with stable labels on all 48 cases. Compared with
 Luna on the same calls, Jev was 4.8x faster at p50, 4.7x faster at p95, and
-11.1x cheaper, while improving joint accuracy from 71.5% to 95.8%.
+improved joint accuracy from 71.5% to 95.8%.
 
 A reasonable first canary policy is a symmetric `0.80` confidence gate: this
 accepted 93.1% of calls at 100.0% binary accuracy in this run and would send the
@@ -42,11 +42,11 @@ No production classification path was changed by this evaluation.
 
 ## Results
 
-| Profile | Successful calls | Contractor F1 | Posting accuracy | Joint accuracy | Stable cases | Latency p50 / p95 / max | Input / cached / output tokens | Cost |
+| Profile | Successful calls | Contractor F1 | Posting accuracy | Joint accuracy | Stable cases | Latency p50 / p95 / max | Input / cached / cache-write / output tokens | Cost |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| heuristic | 48/48 | 79.2% | 62.5% | 62.5% | deterministic | 0 / 0 / 1 ms | 0 / 0 / 0 | $0.000000 |
-| jev | 144/144 | 100.0% | 95.8% | 95.8% | 48/48 | 428 / 616 / 3292 ms | 73650 / 0 / 10590 | $0.003093 |
-| luna | 144/144 | 60.2% | 71.5% | 71.5% | 44/48 | 2046 / 2873 / 4602 ms | 56109 / 0 / 19221 | $0.034287 |
+| heuristic | 48/48 | 79.2% | 62.5% | 62.5% | deterministic | 0 / 0 / 1 ms | 0 / 0 / 0 / 0 | $0.000000 |
+| jev | 144/144 | 100.0% | 95.8% | 95.8% | 48/48 | 428 / 616 / 3292 ms | 73650 / 0 / 0 / 10590 | $0.003093 |
+| luna | 144/144 | 60.2% | 71.5% | 71.5% | 44/48 | 2046 / 2873 / 4602 ms | 56109 / 0 / unavailable / 19221 | unavailable |
 
 The heuristic is local code, so its latency and zero cost are not an API-to-API comparison. Joint accuracy requires both the contractor-friendly boolean and the four-way posting type to match the golden label.
 
@@ -135,5 +135,5 @@ Jev contractor-probability Brier score: `0.012865`. Lower is better.
 - Jev uses OpenRouter's `/api/alpha/decisions` endpoint and the pinned [`typesafe/jev-1.13`](https://openrouter.ai/typesafe/jev-1.13/) request ID. The resolved dated snapshot is retained in the JSON observation report.
 - The Luna baseline uses the production job-lead prompt and schema through direct OpenAI. A preflight through OpenRouter returned HTTP 403 under provider terms, so the report does not present an unsupported route as a benchmark failure.
 - Luna's self-reported classification confidence is retained as diagnostic metadata, but it is not treated as a calibrated contractor probability or used in the Jev confidence-gate analysis.
-- Latency includes successful and failed calls. Jev cost is provider-reported. For GPT-5.6 Luna only, missing cost is estimated from successful retained token usage at the official [$0.20/M input, $0.02/M cached input, and $1.20/M output rates](https://developers.openai.com/api/docs/models/gpt-5.6-luna); missing cost for a custom `--llm-model` or any profile with unpriced failed calls remains unavailable.
+- Latency includes successful and failed calls. Jev cost is provider-reported. This historical Luna aggregate predates cache-write accounting, and its gitignored raw observations are no longer available, so its cache-write token count and corrected cost are marked unavailable instead of applying an incomplete formula. Future GPT-5.6 Luna runs use the official [$0.20/M input, $0.02/M cached input, $0.25/M cache-write, and $1.20/M output rates](https://developers.openai.com/api/docs/models/gpt-5.6-luna); missing cost for a custom `--llm-model` or any profile with unpriced failed calls remains unavailable.
 - Raw observations are generated under the gitignored reports directory; this Markdown summary intentionally excludes provider payloads and secrets.
