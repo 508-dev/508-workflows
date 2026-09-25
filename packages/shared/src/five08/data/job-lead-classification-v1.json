@@ -1,6 +1,6 @@
 {
   "version": "job-lead-classification.v1",
-  "description": "Balanced synthetic corpus for the 508.dev contractor-friendly HN job-lead label contract.",
+  "description": "Versioned balanced synthetic corpus for the 508.dev contractor-friendly HN job-lead label contract.",
   "cases": [
     {
       "id": "part_time_contract_explicit_001",

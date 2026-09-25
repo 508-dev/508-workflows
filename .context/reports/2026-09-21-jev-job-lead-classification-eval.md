@@ -2,7 +2,7 @@
 
 - Report assembled (UTC): `2026-09-21T07:53:03.903685+00:00`
 - Harness revision: `a935bede453dc0a77339095e166113b8f4d6ea8f`
-- Corpus: `tests/evals/job-lead-classification/fixtures/v1/corpus.json` (48 cases)
+- Corpus: `packages/shared/src/five08/data/job-lead-classification-v1.json` (48 cases)
 - Network repeats per case: 3
 - Jev: `typesafe/jev-1.13` through OpenRouter Decisions
 - LLM baseline: `gpt-5.6-luna` through direct OpenAI

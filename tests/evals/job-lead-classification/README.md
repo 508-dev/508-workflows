@@ -7,10 +7,12 @@ post is contractor-friendly and assigns one of four posting types. It compares:
 - TypeSafe Jev through OpenRouter's Decisions API
 - the production job-lead prompt with GPT-5.6 Luna through direct OpenAI
 
-The checked-in `fixtures/v1/corpus.json` corpus contains synthetic, manually
-labeled examples. It is balanced across the four posting types and deliberately
-includes negation, non-job uses of `contract`, closed roles, replies, and prompt
-injection. It is a challenge set, not an estimate of live Hacker News traffic.
+The checked-in and packaged
+`packages/shared/src/five08/data/job-lead-classification-v1.json` corpus contains
+synthetic, manually labeled examples. It is balanced across the four posting
+types and deliberately includes negation, non-job uses of `contract`, closed
+roles, replies, and prompt injection. It is a challenge set, not an estimate of
+live Hacker News traffic.
 
 ## Run
 
