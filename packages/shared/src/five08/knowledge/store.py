@@ -360,40 +360,40 @@ class InMemoryKnowledgeStore:
             updated_at=now,
         )
         with self._lock:
-            existing = (
-                self._facts.get(replaces_id)
-                if replaces_id
-                else next(
-                    (
-                        old
-                        for old in reversed(list(self._facts.values()))
-                        if old.organization_id == fact.organization_id
-                        and old.scope_type == scope_type
-                        and old.scope_id == scope_id
-                        and old.status == "active"
-                        and old.deleted_at is None
-                        and memory_slot(
-                            old.key,
-                            self._memory_values.get(old.id, {"text": old.answer}),
-                        )
-                        == memory_slot(key, value_json)
-                    ),
-                    None,
-                )
+            replaced = self._facts.get(replaces_id) if replaces_id else None
+            target = next(
+                (
+                    old
+                    for old in reversed(list(self._facts.values()))
+                    if old.id != replaces_id
+                    and old.organization_id == fact.organization_id
+                    and old.scope_type == scope_type
+                    and old.scope_id == scope_id
+                    and old.status == "active"
+                    and old.deleted_at is None
+                    and memory_slot(
+                        old.key,
+                        self._memory_values.get(old.id, {"text": old.answer}),
+                    )
+                    == memory_slot(key, value_json)
+                ),
+                None,
             )
             if replaces_id and (
-                existing is None
-                or existing.organization_id != fact.organization_id
-                or existing.scope_type != scope_type
-                or existing.scope_id != scope_id
-                or existing.created_by != created_by
-                or existing.status != "active"
+                replaced is None
+                or replaced.organization_id != fact.organization_id
+                or replaced.scope_type != scope_type
+                or replaced.scope_id != scope_id
+                or replaced.created_by != created_by
+                or replaced.status != "active"
             ):
                 raise PermissionError(
                     "Memory to edit is unavailable or not owned by you"
                 )
-            if existing is not None:
-                fact = fact.model_copy(update={"supersedes_id": existing.id})
+            previous = [item for item in (replaced, target) if item is not None]
+            if previous:
+                fact = fact.model_copy(update={"supersedes_id": previous[0].id})
+            for existing in previous:
                 self._facts[existing.id] = existing.model_copy(
                     update={"status": "superseded", "updated_at": now}
                 )
@@ -1012,7 +1012,7 @@ class PostgresKnowledgeStore:
                     WHERE organization_id = %s AND scope_type = %s AND scope_id = %s
                       AND status = 'active' AND deleted_at IS NULL
                       AND ((%s::uuid IS NOT NULL AND id = %s::uuid)
-                           OR (%s::uuid IS NULL AND kind = 'fact'
+                           OR (kind = 'fact'
                                AND (dedupe_key = %s OR (dedupe_key IS NULL AND key = %s AND key <> 'note'))))
                     ORDER BY updated_at DESC FOR UPDATE
                     """,
@@ -1022,19 +1022,32 @@ class PostgresKnowledgeStore:
                         scope_id,
                         replaces_id,
                         replaces_id,
-                        replaces_id,
                         slot,
                         key,
                     ),
                 )
                 previous = cursor.fetchall()
+                replaced = next(
+                    (
+                        row
+                        for row in previous
+                        if replaces_id and str(row["id"]) == replaces_id
+                    ),
+                    None,
+                )
                 if replaces_id and (
-                    not previous or str(previous[0]["created_by"]) != created_by
+                    replaced is None or str(replaced["created_by"]) != created_by
                 ):
                     raise PermissionError(
                         "Memory to edit is unavailable or not owned by you"
                     )
-                supersedes_id = str(previous[0]["id"]) if previous else None
+                supersedes_id = (
+                    str(replaced["id"])
+                    if replaced is not None
+                    else str(previous[0]["id"])
+                    if previous
+                    else None
+                )
                 if previous:
                     cursor.execute(
                         "UPDATE memory_facts SET status = 'superseded', updated_at = %s WHERE id = ANY(%s::uuid[])",

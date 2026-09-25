@@ -728,7 +728,10 @@ class KnowledgeService:
     ) -> list[KnowledgeEvidence]:
         deduplicated: dict[tuple[str, str], KnowledgeEvidence] = {}
         for item in evidence:
-            key = (item.source_type, item.source_ref)
+            key = (
+                item.source_type,
+                item.evidence_id if item.source_type == "memory" else item.source_ref,
+            )
             existing = deduplicated.get(key)
             if existing is None or (item.relevance, item.authority) > (
                 existing.relevance,
