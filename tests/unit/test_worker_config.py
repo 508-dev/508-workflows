@@ -39,6 +39,48 @@ def test_structured_planner_timeout_leaves_gateway_fallback_headroom() -> None:
     assert settings.agent_structured_planner_timeout_seconds == 6.0
 
 
+def test_agent_schedule_api_timeout_covers_the_entire_schedule_request() -> None:
+    settings = WorkerSettings(
+        agent_schedule_execution_timeout_seconds=300.0,
+        agent_schedule_api_timeout_seconds=360.0,
+        job_timeout_seconds=366,
+    )
+
+    assert settings.agent_schedule_api_timeout_seconds == 360.0
+
+
+def test_agent_schedule_api_timeout_requires_endpoint_headroom() -> None:
+    with pytest.raises(
+        ValidationError,
+        match="AGENT_SCHEDULE_API_TIMEOUT_SECONDS must be at least",
+    ):
+        WorkerSettings(
+            agent_schedule_execution_timeout_seconds=300.0,
+            agent_schedule_api_timeout_seconds=359.0,
+        )
+
+
+def test_agent_schedule_api_timeout_fits_inside_the_worker_lease() -> None:
+    with pytest.raises(ValidationError, match="JOB_TIMEOUT_SECONDS must exceed"):
+        WorkerSettings(
+            agent_schedule_execution_timeout_seconds=120.0,
+            agent_schedule_api_timeout_seconds=180.0,
+            job_timeout_seconds=185,
+        )
+
+
+def test_disabled_agent_schedules_skip_unused_timeout_relationships() -> None:
+    settings = WorkerSettings(
+        agent_schedule_enabled=False,
+        agent_schedule_execution_timeout_seconds=300.0,
+        agent_schedule_api_timeout_seconds=360.0,
+        job_timeout_seconds=300,
+    )
+
+    assert settings.agent_schedule_enabled is False
+    assert settings.job_timeout_seconds == 300
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
@@ -60,6 +102,28 @@ def test_discord_bot_internal_url_requires_safe_transport(
     settings = WorkerSettings(discord_bot_internal_base_url=value)
 
     assert settings.resolved_discord_bot_internal_base_url == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("https://api.example/", "https://api.example"),
+        ("http://127.0.0.1:8090", "http://127.0.0.1:8090"),
+        ("http://[::1]:8090", "http://[::1]:8090"),
+        ("http://localhost:8090", "http://localhost:8090"),
+        ("http://web:8090", "http://web:8090"),
+        ("http://api.example", None),
+        ("http://discord_bot:8090", None),
+        ("https://user@api.example", None),
+    ],
+)
+def test_agent_schedule_api_url_requires_safe_transport(
+    value: str,
+    expected: str | None,
+) -> None:
+    settings = WorkerSettings(agent_schedule_api_base_url=value)
+
+    assert settings.resolved_agent_schedule_api_base_url == expected
 
 
 def test_email_intake_requires_mailbox_credentials() -> None:

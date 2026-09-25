@@ -36,11 +36,12 @@ class Settings(SharedSettings):
     # CRM/EspoCRM settings
     espo_api_key: str = ""
     espo_base_url: str = ""
-    discord_server_id: str | None = None
     backend_api_base_url: str = "http://127.0.0.1:8090"
     audit_api_base_url: str | None = None
     audit_api_timeout_seconds: float = 2.0
-    agent_api_timeout_seconds: float = 8.0
+    # Public-web research can make a bounded provider fallback plus planner
+    # follow-up calls after Discord has already acknowledged the interaction.
+    agent_api_timeout_seconds: float = 60.0
     openai_api_key: str | None = None
     openai_base_url: str | None = None
     openai_model: str = "gpt-5-mini"

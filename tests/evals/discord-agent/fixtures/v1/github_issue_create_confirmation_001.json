@@ -28,7 +28,7 @@
       {
         "tool_name": "github_issue.create_issue",
         "requires_confirmation": true,
-        "required_scopes": ["github:repository:member:write"],
+        "required_scopes": ["github:issue:create"],
         "arguments_contains": {
           "title": "improve search UI",
           "repository": "508-dev/508-workflows"

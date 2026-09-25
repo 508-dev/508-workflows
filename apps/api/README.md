@@ -2,7 +2,8 @@
 
 ## Auth
 
-- Non-dashboard protected ingest/job endpoints require `API_SHARED_SECRET` to be configured on the API.
+- Non-dashboard protected ingest/job and agent endpoints require
+  `API_SHARED_SECRET` to be configured on the API.
 - Send the secret in header `X-API-Secret`.
 - Header name is exactly `X-API-Secret` (not `X-API-Secret-Key`).
 - `GET /dashboard` and `/dashboard/api/*` use the HttpOnly session cookie created by OIDC or Discord dashboard login flows. They do not accept `X-API-Secret`.
@@ -12,7 +13,15 @@
 
 ### API auth strategy
 
-- Non-dashboard protected routes (including webhooks) use `X-API-Secret` with `API_SHARED_SECRET`.
+- Non-dashboard protected routes (including agent routes and webhooks) use
+  `X-API-Secret` with `API_SHARED_SECRET`.
+- Agent authorization additionally requires `DISCORD_SERVER_ID` and matching
+  per-bundle `AGENT_DISCORD_*_ROLE_IDS` configuration in deployed
+  environments. Discord role names are ignored there; missing or unapproved
+  guild/role-ID bindings fail closed before planning and at confirmation.
+- Billing/ERP agent reads require `AGENT_ERP_ORGANIZATION_ID` to exactly match
+  the requesting Discord organization as well as configured ERPNext credentials;
+  this intentionally supports one ERP tenant per deployment/credential boundary.
 - Dashboard browser routes (`/dashboard` and `/dashboard/api/*`) are session-authenticated dashboard routes and are intentionally exempt from `X-API-Secret`.
 - The dashboard UI is a Bun-built React/Tailwind/shadcn bundle committed under the API package and served by this same FastAPI app at `/dashboard` and `/dashboard/assets/*`; there is no separate web service, port, or DNS entry.
 
@@ -40,6 +49,14 @@ curl -X GET "http://localhost:8090/jobs/<job_id>" \
 - `GET /dashboard/api/jobs`: Session-authenticated recent jobs list for the dashboard.
 - `GET /dashboard/api/jobs/{job_id}`: Session-authenticated dashboard job detail with sensitive payload keys redacted.
 - `POST /dashboard/api/jobs/{job_id}/rerun`: Session-authenticated dashboard job rerun.
+- `GET /dashboard/api/agent-schedules`: Admin configuration-read list of
+  retained recurring agent schedules and dispatcher state. Results are ordered
+  newest first and paginated with `limit` (1-100), `offset`, and `next_offset`;
+  the dashboard follows every page so archived definitions remain auditable.
+- `POST /dashboard/api/agent-schedules`,
+  `PUT /dashboard/api/agent-schedules/{schedule_id}`, and
+  `POST /dashboard/api/agent-schedules/{schedule_id}/run`: create, control,
+  and manually queue a schedule from a Discord-linked Admin dashboard session.
 - `GET /dashboard/api/gigs`: Session-authenticated Discord gig list with candidate/application summaries.
 - `GET /dashboard/api/notifications`: Session-authenticated dashboard notifications, including stale recruiting gigs.
 - `POST /dashboard/api/gigs/{engagement_id}/status`: Session-authenticated gig status update for visible pending gigs.
@@ -48,6 +65,10 @@ curl -X GET "http://localhost:8090/jobs/<job_id>" \
 - `GET /dashboard/api/onboarding`: Session-authenticated prospect onboarding queue from the CRM people cache.
 - `POST /dashboard/api/onboarding/{contact_id}/onboarder`: Session-authenticated CRM onboarder assignment for one prospect.
 - `GET /dashboard/api/audit-events`: Session-authenticated recent human audit events.
+- `GET /dashboard/api/discord-diagnostics`: Admin-only read-only snapshot of the
+  configured Discord server's roles and agent role-ID binding health. The API
+  proxies the bot's authenticated internal endpoint; it never changes Discord
+  roles or deployment configuration.
 - `POST /dashboard/api/sync/people`: Session-authenticated dashboard people-cache sync.
 - `GET /jobs/{job_id}`: Fetch queued job status/result payload.
 - `POST /jobs/{job_id}/rerun`: Enqueue a duplicate rerun of an existing job id.
@@ -68,6 +89,33 @@ curl -X GET "http://localhost:8090/jobs/<job_id>" \
 - `GET /auth/discord/link/{token}`: Show a no-store confirmation page for a Discord dashboard deep link without consuming the token.
 - `POST /auth/discord/link/{token}/consume`: Consume the one-time Discord dashboard deep link and redirect to the authenticated dashboard session.
 - Auth flows emit best-effort human audit events (`auth.login`, `auth.logout`) under source `admin_dashboard`.
+
+### Recurring agent schedules
+
+Recurring schedules are durable worker jobs, not long-lived Discord requests.
+New schedules retain a natural-language objective plus an explicit, fixed
+catalog of schedule-safe read-only tool IDs. The run-time planner can make a
+short bounded loop over that catalog (GitHub, CRM, Billing/ERP, onboarding, or
+public web), but cannot select a write, add a capability, or change delivery.
+The older frozen GitHub envelope remains supported for `/schedule-github-issues`.
+
+Schedule management requires `agent:schedule:manage`, which is Admin-only. On
+every create, control, manual run, and background execution, the API retrieves
+a fresh Discord member-role snapshot from the bot. A run requires the owner to
+still hold the manager scope and every saved read scope; a role revocation
+therefore skips it before a tool call or Discord post. CRM, ERP, billing, and
+onboarding output is reduced to bounded aggregate observations before a
+follow-up model step and before generic Discord delivery. Legacy public-data
+GitHub summaries remain opt-in.
+
+The internal bot-facing management routes live under `/agent/schedules*`; the
+worker calls `POST /internal/agent-schedules/runs/{run_id}` using the existing
+`API_SHARED_SECRET`. Neither route is a browser-facing authorization surface.
+
+Terminal run history is bounded per schedule. By default the API retains the
+newest 100 outcomes for audit, keeps full report output only on the newest 20,
+and clears/deletes older data in bounded hourly batches. Queued and running
+occurrences are never removed by retention maintenance.
 
 Discord deep-link identity policy:
 

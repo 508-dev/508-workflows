@@ -1,7 +1,7 @@
 {
   "version": "discord-agent-trajectory.v1",
   "id": "task_assign_member_denied_001",
-  "description": "Members cannot reassign tasks because assignment requires task:assign in addition to task:update_own.",
+  "description": "Members have no privileged agent workflows, including task reassignment.",
   "tags": ["weekly", "task", "policy", "denied"],
   "suite": {
     "canonical": true,
@@ -18,20 +18,6 @@
   },
   "expect": {
     "status": "denied",
-    "intent": "update_task",
-    "model_tier": "strong",
-    "requires_confirmation": false,
-    "message_contains": "task:assign",
-    "actions": [
-      {
-        "tool_name": "task_write.update_task",
-        "requires_confirmation": false,
-        "required_scopes": ["task:update_own", "task:assign"],
-        "arguments_contains": {
-          "task_id": "TASK-001",
-          "assignee": "Sarah"
-        }
-      }
-    ]
+    "message_contains": "do not grant access to agent workflows"
   }
 }
