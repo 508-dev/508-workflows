@@ -17,7 +17,7 @@ from five08.settings import SharedSettings
 # public-data summary call, and delivers its report after the tool deadline.
 # Reserve a conservative minute for those endpoint steps around the configured
 # schedule execution window.
-_AGENT_SCHEDULE_ENDPOINT_OVERHEAD_SECONDS: Final[float] = 60.0
+AGENT_SCHEDULE_ENDPOINT_OVERHEAD_SECONDS: Final[float] = 60.0
 _JOB_LEASE_EXPIRY_MARGIN_SECONDS: Final[float] = 5.0
 
 
@@ -289,7 +289,7 @@ class WorkerSettings(SharedSettings):
 
         minimum_api_timeout_seconds = (
             self.agent_schedule_execution_timeout_seconds
-            + _AGENT_SCHEDULE_ENDPOINT_OVERHEAD_SECONDS
+            + AGENT_SCHEDULE_ENDPOINT_OVERHEAD_SECONDS
         )
         if self.agent_schedule_api_timeout_seconds < minimum_api_timeout_seconds:
             raise ValueError(

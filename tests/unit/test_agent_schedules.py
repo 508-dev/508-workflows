@@ -1172,8 +1172,11 @@ def test_queue_reconciliation_includes_an_attached_queued_worker_job(
     assert reconciliations[0].run.id == "run-1"
     assert reconciliations[0].job_status == "queued"
     query, params = cursor.calls[0]
-    assert "runs.status = 'queued' AND jobs.status = 'queued'" in query
-    assert params == (25,)
+    assert "runs.status = 'queued'" in query
+    assert "jobs.status = 'queued'" in query
+    assert "jobs.updated_at <= NOW() - (%s * INTERVAL '1 second')" in query
+    assert "ORDER BY COALESCE(jobs.updated_at, runs.created_at) ASC" in query
+    assert params == (60.0, 60.0, 25)
 
 
 @pytest.mark.parametrize("run_status", ["running", "failed"])
@@ -1223,7 +1226,8 @@ def test_queue_reconciliation_includes_a_due_retryable_failed_worker_job(
     assert "runs.status IN ('queued', 'running', 'failed')" in query
     assert "jobs.attempts < jobs.max_attempts" in query
     assert "jobs.run_after <= NOW()" in query
-    assert params == (25,)
+    assert "jobs.updated_at <= GREATEST" in query
+    assert params == (60.0, 60.0, 25)
 
 
 def test_claim_can_recover_a_running_schedule_after_its_lease_expires(
@@ -1268,17 +1272,18 @@ def test_claim_can_recover_a_running_schedule_after_its_lease_expires(
     assert "status = 'running'" in query
     assert "started_at <= %s" in query
     assert "execution_token = %s" in query
-    assert "delivery_status <> %s" in query
+    assert "delivery_status NOT IN (%s, %s)" in query
     assert params == (
         AgentScheduleRunStatus.RUNNING.value,
         execution_token,
         run_id,
         stale_before,
         AgentScheduleRunDeliveryStatus.CLAIMED.value,
+        AgentScheduleRunDeliveryStatus.POSTED.value,
     )
 
 
-def test_claim_does_not_reclaim_a_run_with_an_in_flight_delivery(
+def test_claim_does_not_reclaim_a_run_with_a_recorded_delivery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A stale run remains operator-visible while Discord delivery is claimed."""
@@ -1303,8 +1308,11 @@ def test_claim_does_not_reclaim_a_run_with_an_in_flight_delivery(
 
     assert claimed is None
     query, params = cursor.execute.call_args.args
-    assert "delivery_status <> %s" in query
-    assert params[-1] == AgentScheduleRunDeliveryStatus.CLAIMED.value
+    assert "delivery_status NOT IN (%s, %s)" in query
+    assert params[-2:] == (
+        AgentScheduleRunDeliveryStatus.CLAIMED.value,
+        AgentScheduleRunDeliveryStatus.POSTED.value,
+    )
 
 
 def test_pre_send_delivery_failure_releases_only_the_claimed_running_run(

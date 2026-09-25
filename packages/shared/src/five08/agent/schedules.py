@@ -1059,6 +1059,7 @@ def list_agent_schedule_runs_needing_queue_reconciliation(
     settings: SharedSettings,
     *,
     limit: int = 100,
+    minimum_age_seconds: float = 60.0,
 ) -> list[AgentScheduleRunQueueReconciliation]:
     """Find runs whose worker job needs durable recovery.
 
@@ -1071,6 +1072,7 @@ def list_agent_schedule_runs_needing_queue_reconciliation(
     """
 
     bounded_limit = max(1, min(int(limit), 500))
+    backoff_seconds = max(1.0, float(minimum_age_seconds))
     query = """
         SELECT runs.*, jobs.status AS worker_job_status,
                jobs.last_error AS worker_job_last_error
@@ -1083,7 +1085,11 @@ def list_agent_schedule_runs_needing_queue_reconciliation(
                   AND (
                       jobs.id IS NULL
                       OR jobs.status IN ('dead', 'canceled')
-                      OR (runs.status = 'queued' AND jobs.status = 'queued')
+                      OR (
+                          runs.status = 'queued'
+                          AND jobs.status = 'queued'
+                          AND jobs.updated_at <= NOW() - (%s * INTERVAL '1 second')
+                      )
                   )
               )
               OR (
@@ -1092,14 +1098,18 @@ def list_agent_schedule_runs_needing_queue_reconciliation(
                   AND jobs.attempts < jobs.max_attempts
                   AND jobs.run_after IS NOT NULL
                   AND jobs.run_after <= NOW()
+                  AND jobs.updated_at <= GREATEST(
+                      jobs.run_after,
+                      NOW() - (%s * INTERVAL '1 second')
+                  )
               )
           )
-        ORDER BY runs.created_at ASC
+        ORDER BY COALESCE(jobs.updated_at, runs.created_at) ASC, runs.created_at ASC
         LIMIT %s
     """
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
-            cursor.execute(query, (bounded_limit,))
+            cursor.execute(query, (backoff_seconds, backoff_seconds, bounded_limit))
             rows = cursor.fetchall()
     return [
         AgentScheduleRunQueueReconciliation(
@@ -1458,7 +1468,7 @@ def claim_agent_schedule_run(
                   OR (
                       status = 'running'
                       AND started_at <= %s
-                      AND delivery_status <> %s
+                      AND delivery_status NOT IN (%s, %s)
                   )
               )
             RETURNING *
@@ -1469,6 +1479,7 @@ def claim_agent_schedule_run(
             normalized_run_id,
             _utc_datetime(reclaim_running_before),
             AgentScheduleRunDeliveryStatus.CLAIMED.value,
+            AgentScheduleRunDeliveryStatus.POSTED.value,
         )
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:

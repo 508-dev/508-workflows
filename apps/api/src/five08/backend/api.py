@@ -294,7 +294,7 @@ from five08.runtime_config import (
     set_runtime_config_value,
 )
 from five08.redaction import redact_email_addresses
-from five08.worker.config import settings
+from five08.worker.config import AGENT_SCHEDULE_ENDPOINT_OVERHEAD_SECONDS, settings
 from five08.worker.db_migrations import run_job_migrations
 from five08.worker.dispatcher import build_queue_client
 from five08.worker.masking import mask_email
@@ -451,8 +451,9 @@ _AGENT_AUDIT_TASKS: set[asyncio.Task[None]] = set()
 _AGENT_SCHEDULE_MANAGE_SCOPE = "agent:schedule:manage"
 _AGENT_SCHEDULE_REPORT_MAX_CHARS = 1_900
 # The schedule runtime is capped at five minutes. Keep a run leased for at
-# least that long so a slow-but-live worker is never duplicated, while allowing
-# a later durable retry to recover from a killed API process.
+# least that long and through the worker's endpoint-overhead allowance, so a
+# slow-but-live worker is never duplicated while a later retry can recover a
+# killed API process.
 _AGENT_SCHEDULE_RUNNING_LEASE_SECONDS = 300
 _AGENT_SCHEDULE_QUEUED_JOB_REDELIVERY_BACKOFF_SECONDS = 60.0
 _AGENT_SCHEDULE_LOOP_MAX_ACTIONS_PER_STEP = 2
@@ -10036,6 +10037,7 @@ async def _dispatch_pending_agent_schedule_runs(queue: QueueClient) -> None:
         list_agent_schedule_runs_needing_queue_reconciliation,
         settings,
         limit=settings.agent_schedule_dispatch_batch_size,
+        minimum_age_seconds=_AGENT_SCHEDULE_QUEUED_JOB_REDELIVERY_BACKOFF_SECONDS,
     )
     for reconciliation in reconciliation_needed:
         run = reconciliation.run
@@ -11180,7 +11182,8 @@ def _agent_schedule_running_reclaim_before(*, now: datetime | None = None) -> da
     comparison_time = now or datetime.now(tz=timezone.utc)
     lease_seconds = max(
         _AGENT_SCHEDULE_RUNNING_LEASE_SECONDS,
-        settings.agent_schedule_execution_timeout_seconds,
+        settings.agent_schedule_execution_timeout_seconds
+        + AGENT_SCHEDULE_ENDPOINT_OVERHEAD_SECONDS,
     )
     return comparison_time - timedelta(seconds=lease_seconds)
 
@@ -11235,10 +11238,41 @@ async def _execute_agent_schedule_run(
             "run": _agent_schedule_run_payload(existing),
         }, 200
     reclaim_running_before = _agent_schedule_running_reclaim_before()
-    if existing.status is AgentScheduleRunStatus.RUNNING and (
-        existing.started_at is None or existing.started_at > reclaim_running_before
-    ):
-        return {"error": "schedule_run_already_running"}, 409
+    if existing.status is AgentScheduleRunStatus.RUNNING:
+        if existing.started_at is None or existing.started_at > reclaim_running_before:
+            return {"error": "schedule_run_already_running"}, 409
+        if existing.delivery_status is AgentScheduleRunDeliveryStatus.POSTED:
+            # Discord already accepted this report. A retry after the API
+            # crashed before terminal completion must preserve that delivery
+            # and finish its existing execution lease, never regenerate data.
+            execution_token = existing.execution_token
+            if execution_token is None:
+                logger.error(
+                    "Posted schedule run has no execution token run_id=%s", existing.id
+                )
+                return {"error": "schedule_run_claim_missing_execution_token"}, 409
+            completed = await asyncio.to_thread(
+                complete_agent_schedule_run,
+                settings,
+                run_id=existing.id,
+                execution_token=execution_token,
+                status=AgentScheduleRunStatus.SUCCEEDED,
+                output=existing.output,
+            )
+            current = completed or await asyncio.to_thread(
+                get_agent_schedule_run, settings, run_id=existing.id
+            )
+            if (
+                current is not None
+                and current.status is AgentScheduleRunStatus.SUCCEEDED
+            ):
+                return {
+                    "status": AgentScheduleRunStatus.SUCCEEDED.value,
+                    "schedule_id": existing.schedule_id,
+                    "delivery_status": "already_posted",
+                    "run": _agent_schedule_run_payload(current),
+                }, 200
+            return {"error": "schedule_run_completion_failed"}, 409
 
     run = await asyncio.to_thread(
         claim_agent_schedule_run,

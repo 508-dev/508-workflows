@@ -2242,69 +2242,22 @@ async def test_schedule_execution_never_posts_a_report_twice_after_recorded_deli
         status=AgentScheduleRunStatus.RUNNING,
         started_at=datetime.now(tz=timezone.utc) - timedelta(seconds=301),
         execution_token="00000000-0000-0000-0000-000000000010",
+        output="Original report content",
         delivery_status=AgentScheduleRunDeliveryStatus.POSTED,
         delivery_message_id="discord-message-1",
         delivery_claimed_at=datetime.now(tz=timezone.utc) - timedelta(seconds=302),
     )
-    reclaimed_run = replace(
-        stale_running_run,
-        started_at=datetime.now(tz=timezone.utc),
-        execution_token="00000000-0000-0000-0000-000000000011",
-    )
     completed_run = replace(
-        reclaimed_run,
+        stale_running_run,
         status=AgentScheduleRunStatus.SUCCEEDED,
         finished_at=datetime.now(tz=timezone.utc),
     )
-    schedule = _schedule()
-    context = AgentIdentityContext(
-        discord_user_id="1001",
-        organization_id="1000",
-        guild_id="1000",
-        roles=["Admin"],
-    )
-
-    async def refreshed_context(*_args: object, **_kwargs: object):
-        return context, None, 200
-
-    post_report = AsyncMock(side_effect=AssertionError("must not post twice"))
     complete_run = Mock(return_value=completed_run)
-    run_synchronously = AsyncMock(
-        return_value=[
-            AgentExecutionResult(
-                tool_name="github_issue.search_issues",
-                status="succeeded",
-                result={"issues": []},
-            )
-        ]
-    )
-    orchestrator = SimpleNamespace(
-        policy=SimpleNamespace(
-            scopes_for_context=Mock(return_value=set(schedule.allowed_scopes))
-        ),
-        execute_plan=Mock(side_effect=AssertionError("must use bounded worker")),
-    )
-    monkeypatch.setattr(
-        api,
-        "get_agent_schedule_run",
-        Mock(side_effect=[stale_running_run, reclaimed_run]),
-    )
-    monkeypatch.setattr(
-        api, "claim_agent_schedule_run", Mock(return_value=reclaimed_run)
-    )
-    monkeypatch.setattr(api, "get_agent_schedule", Mock(return_value=schedule))
-    monkeypatch.setattr(api, "_fresh_agent_schedule_context", refreshed_context)
-    monkeypatch.setattr(api, "_get_agent_orchestrator", lambda: orchestrator)
-    monkeypatch.setattr(api, "_agent_schedule_plan", Mock(return_value=object()))
-    monkeypatch.setattr(api, "_run_agent_schedule_sync_bounded", run_synchronously)
-    monkeypatch.setattr(api, "_model_agent_schedule_summary", Mock(return_value=None))
-    monkeypatch.setattr(
-        api,
-        "claim_agent_schedule_run_delivery",
-        Mock(return_value=None),
-    )
+    get_run = Mock(return_value=stale_running_run)
+    claim_run = Mock(side_effect=AssertionError("must not reclaim a posted run"))
+    monkeypatch.setattr(api, "get_agent_schedule_run", get_run)
+    monkeypatch.setattr(api, "claim_agent_schedule_run", claim_run)
     monkeypatch.setattr(api, "complete_agent_schedule_run", complete_run)
-    monkeypatch.setattr(api, "_post_agent_schedule_report_to_bot", post_report)
 
     response, status_code = await api._execute_agent_schedule_run(
         cast(Request, SimpleNamespace()),
@@ -2314,16 +2267,28 @@ async def test_schedule_execution_never_posts_a_report_twice_after_recorded_deli
     assert status_code == 200
     assert response["status"] == "succeeded"
     assert response["delivery_status"] == "already_posted"
-    post_report.assert_not_awaited()
-    assert run_synchronously.await_count == 2
-    assert all(
-        callable(call.kwargs["callback"]) for call in run_synchronously.await_args_list
-    )
-    orchestrator.execute_plan.assert_not_called()
+    claim_run.assert_not_called()
+    assert get_run.call_count == 1
     assert complete_run.call_args.kwargs["status"] is AgentScheduleRunStatus.SUCCEEDED
+    assert complete_run.call_args.kwargs["output"] == "Original report content"
     assert (
         complete_run.call_args.kwargs["execution_token"]
-        == reclaimed_run.execution_token
+        == stale_running_run.execution_token
+    )
+
+
+def test_schedule_running_reclaim_lease_covers_endpoint_overhead(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The API cannot reclaim a run before its bounded worker request expires."""
+
+    now = datetime(2026, 9, 23, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(api.settings, "agent_schedule_execution_timeout_seconds", 300.0)
+
+    reclaim_before = api._agent_schedule_running_reclaim_before(now=now)
+
+    assert reclaim_before == now - timedelta(
+        seconds=300 + api.AGENT_SCHEDULE_ENDPOINT_OVERHEAD_SECONDS
     )
 
 
