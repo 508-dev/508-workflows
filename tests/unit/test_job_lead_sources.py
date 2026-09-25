@@ -983,6 +983,8 @@ def test_jev_shadow_failure_never_changes_primary(monkeypatch) -> None:
         settings,  # type: ignore[arg-type]
         [lead],
     )
+    assert report["gate_accepted"] == 0
+    assert report["gate_fallback"] == 1
     assert report["review_items"][0]["shadow"]["error"] == "provider_timeout"
     assert "sensitive submitted text" not in str(report)
 

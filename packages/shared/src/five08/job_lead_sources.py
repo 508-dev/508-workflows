@@ -1533,7 +1533,7 @@ def _job_lead_jev_shadow_report(
         item for item in successful if item[2].get("agrees_with_primary") is False
     ]
     gate_accepted = [item for item in successful if item[2].get("gate_accepted")]
-    gate_fallback = [
+    gate_fallback = failures + [
         item for item in successful if item[2].get("gate_accepted") is False
     ]
     high_confidence_disagreements = [
