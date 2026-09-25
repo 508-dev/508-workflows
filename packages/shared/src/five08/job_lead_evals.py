@@ -1110,9 +1110,11 @@ def _optional_text(value: Any) -> str | None:
 
 
 def _safe_error(exc: Exception) -> str:
+    status_code = getattr(exc, "status_code", None)
     if isinstance(exc, _RequestFailure | JobLeadJevRequestError):
         exc = exc.cause
-    status_code = getattr(exc, "status_code", None)
+    if not isinstance(status_code, int):
+        status_code = getattr(exc, "status_code", None)
     if not isinstance(status_code, int):
         status_code = getattr(getattr(exc, "response", None), "status_code", None)
     if isinstance(status_code, int) and 100 <= status_code <= 599:

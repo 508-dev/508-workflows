@@ -24,10 +24,17 @@ JobLeadJevSession = requests.Session | CurlSession
 class JobLeadJevRequestError(RuntimeError):
     """Carry provider attempt metadata while retaining a safe root cause."""
 
-    def __init__(self, cause: Exception, *, request_attempts: int) -> None:
+    def __init__(
+        self,
+        cause: Exception,
+        *,
+        request_attempts: int,
+        status_code: int | None = None,
+    ) -> None:
         super().__init__(str(cause))
         self.cause = cause
         self.request_attempts = request_attempts
+        self.status_code = status_code
 
 
 @dataclass(frozen=True)
@@ -206,7 +213,11 @@ def _post_json_with_retries(
         body = response.json()
     except ValueError as exc:
         cause = ValueError(f"OpenRouter returned non-JSON HTTP {response.status_code}")
-        raise JobLeadJevRequestError(cause, request_attempts=attempt) from exc
+        raise JobLeadJevRequestError(
+            cause,
+            request_attempts=attempt,
+            status_code=response.status_code if not response.ok else None,
+        ) from exc
     if not response.ok:
         error = body.get("error") if isinstance(body, dict) else None
         if isinstance(error, dict):
@@ -216,6 +227,7 @@ def _post_json_with_retries(
         raise JobLeadJevRequestError(
             RuntimeError(f"OpenRouter HTTP {response.status_code}: {message[:300]}"),
             request_attempts=attempt,
+            status_code=response.status_code,
         )
     if not isinstance(body, dict):
         raise JobLeadJevRequestError(

@@ -74,6 +74,14 @@ class _FakeSession:
         return _FakeResponse()
 
 
+class _ForbiddenResponse(_FakeResponse):
+    status_code = 403
+    ok = False
+
+    def json(self) -> dict:
+        return {"error": {"message": "provider echoed submitted corpus text"}}
+
+
 class _FlakySession(_FakeSession):
     def __init__(self) -> None:
         super().__init__()
@@ -269,6 +277,32 @@ def test_jev_retries_transport_errors(
 
     assert session.attempts == 2
     assert observation.request_attempts == 2
+
+
+def test_jev_http_failure_retains_only_structured_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = requests.Session()
+    monkeypatch.setattr(
+        session,
+        "post",
+        lambda *_args, **_kwargs: _ForbiddenResponse(),
+    )
+    observation = _run_case(
+        profile="jev",
+        case=_case(),
+        repeat=1,
+        client=session,
+        openrouter_api_key="test-key",
+        openai_api_key=None,
+        jev_model="typesafe/jev-1.13",
+        llm_model="gpt-5.6-luna",
+        timeout_seconds=5.0,
+        max_attempts=1,
+    )
+
+    assert observation.error == "provider_http_403"
+    assert "submitted corpus text" not in observation.error
 
 
 def test_luna_uses_schema_parse_and_official_rate_estimate() -> None:
