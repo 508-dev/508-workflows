@@ -1,0 +1,139 @@
+# Jev job-lead classification evaluation
+
+- Report assembled (UTC): `2026-09-21T07:53:03.903685+00:00`
+- Harness revision: `a935bede453dc0a77339095e166113b8f4d6ea8f`
+- Corpus: `packages/shared/src/five08/data/job-lead-classification-v1.json` (48 cases)
+- Network repeats per case: 3
+- Jev: `typesafe/jev-1.13` through OpenRouter Decisions
+- LLM baseline: `gpt-5.6-luna` through direct OpenAI
+
+## Decision
+
+Jev is strong enough to test as a shadow or canary classifier for the binary
+"contractor-friendly" decision, but this synthetic corpus is not sufficient
+evidence for an immediate production replacement. Across 144 repeated calls,
+Jev reached 100.0% binary F1 with stable labels on all 48 cases. Compared with
+Luna on the same calls, Jev was 4.8x faster at p50, 4.7x faster at p95, and
+improved joint accuracy from 71.5% to 95.8%.
+
+A reasonable first canary policy is a symmetric `0.80` confidence gate: this
+accepted 93.1% of calls at 100.0% binary accuracy in this run and would send the
+remaining 6.9% to the existing classifier. Keep the deterministic source,
+reply, and seeking-work filters, plus the production output validator, in front
+of any model decision. Validate next on a sanitized, held-out sample of
+historical posts and then with labeled live shadow traffic before raising
+coverage. The OpenRouter Decisions route is currently under `/api/alpha`, so
+pin and monitor its request/response contract before production use.
+
+Use Jev only for the binary decision initially. Its only errors were two
+four-way posting-type classifications: it labeled a closed role and a
+seeking-work post as `part_time`, while still correctly rejecting both as not
+contractor-friendly. If the four-way type is operationally required, add an
+explicit current-job-post gate or retain the existing normalizer for that
+field.
+
+Luna's result measures the actual production prompt, schema, effective request
+options, and normalizer, not unconstrained model capability. It still produced
+41 binary false negatives across 144 calls, concentrated on contract and
+part-time alternatives normalized as `full_time` or `unknown`. Improve that
+contract before using this result to make broader conclusions about Luna.
+
+No production classification path was changed by this evaluation.
+
+## Results
+
+| Profile | Successful calls | Contractor F1 | Posting accuracy | Joint accuracy | Stable cases | Latency p50 / p95 / max | Input / cached / cache-write / output tokens | Cost |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| heuristic | 48/48 | 79.2% | 62.5% | 62.5% | deterministic | 0 / 0 / 1 ms | 0 / 0 / 0 / 0 | $0.000000 |
+| jev | 144/144 | 100.0% | 95.8% | 95.8% | 48/48 | 428 / 616 / 3292 ms | 73650 / 0 / 0 / 10590 | $0.003093 |
+| luna | 144/144 | 60.2% | 71.5% | 71.5% | 44/48 | 2046 / 2873 / 4602 ms | 56109 / 0 / unavailable / 19221 | unavailable |
+
+The heuristic is local code, so its latency and zero cost are not an API-to-API comparison. Joint accuracy requires both the contractor-friendly boolean and the four-way posting type to match the golden label.
+
+## Core versus challenge cases
+
+| Profile | Core joint accuracy | Challenge joint accuracy | False positives | False negatives |
+| --- | ---: | ---: | ---: | ---: |
+| heuristic | 65.6% | 56.2% | 5 | 5 |
+| jev | 96.9% | 93.8% | 0 | 0 |
+| luna | 74.0% | 66.7% | 0 | 41 |
+
+## Jev confidence gate
+
+A symmetric gate accepts positive decisions at or above the threshold, negative decisions at or below `1 - threshold`, and falls back for the middle band.
+
+| Threshold | Coverage | Accuracy when accepted | False positives | False negatives |
+| ---: | ---: | ---: | ---: | ---: |
+| 0.50 | 100.0% | 100.0% | 0 | 0 |
+| 0.70 | 97.9% | 100.0% | 0 | 0 |
+| 0.80 | 93.1% | 100.0% | 0 | 0 |
+| 0.90 | 70.8% | 100.0% | 0 | 0 |
+| 0.95 | 50.7% | 100.0% | 0 | 0 |
+
+Jev contractor-probability Brier score: `0.012865`. Lower is better.
+
+## Classification mismatches
+
+### heuristic
+
+| Case | Runs | Expected | Observed | Contractor probability |
+| --- | ---: | --- | --- | ---: |
+| `both_contract_to_hire_choices_001` | 1 | part_time_or_full_time/true | unknown/false | - |
+| `both_employee_or_b2b_001` | 1 | part_time_or_full_time/true | part_time/true | - |
+| `both_hours_or_salary_001` | 1 | part_time_or_full_time/true | full_time/false | - |
+| `both_permanent_or_fixed_001` | 1 | part_time_or_full_time/true | part_time/true | - |
+| `both_staff_and_freelance_001` | 1 | part_time_or_full_time/true | part_time/true | - |
+| `both_w2_or_1099_001` | 1 | part_time_or_full_time/true | part_time/true | - |
+| `full_time_employee_only_001` | 1 | full_time/false | unknown/false | - |
+| `full_time_salaried_001` | 1 | full_time/false | unknown/false | - |
+| `full_time_vendor_contract_001` | 1 | full_time/false | unknown/false | - |
+| `full_time_w2_001` | 1 | full_time/false | unknown/false | - |
+| `part_time_b2b_001` | 1 | part_time/true | unknown/false | - |
+| `part_time_consulting_001` | 1 | part_time/true | unknown/false | - |
+| `part_time_unrelated_negation_001` | 1 | part_time/true | unknown/false | - |
+| `unknown_closed_role_001` | 1 | unknown/false | part_time/true | - |
+| `unknown_past_contractors_001` | 1 | unknown/false | part_time/true | - |
+| `unknown_prompt_injection_001` | 1 | unknown/false | part_time/true | - |
+| `unknown_reply_001` | 1 | unknown/false | part_time/true | - |
+| `unknown_terms_unsettled_001` | 1 | unknown/false | part_time/true | - |
+
+### jev
+
+| Case | Runs | Expected | Observed | Contractor probability |
+| --- | ---: | --- | --- | ---: |
+| `unknown_closed_role_001` | 3 | unknown/false | part_time/false | 0.18 |
+| `unknown_seeking_work_001` | 3 | unknown/false | part_time/false | 0.04 |
+
+### luna
+
+| Case | Runs | Expected | Observed | Contractor probability |
+| --- | ---: | --- | --- | ---: |
+| `both_contract_to_hire_choices_001` | 1 | part_time_or_full_time/true | full_time/false | - |
+| `both_employee_or_b2b_001` | 3 | part_time_or_full_time/true | full_time/false | - |
+| `both_full_time_or_contract_001` | 1 | part_time_or_full_time/true | full_time/false | - |
+| `both_permanent_or_fixed_001` | 2 | part_time_or_full_time/true | full_time/false | - |
+| `both_region_specific_001` | 3 | part_time_or_full_time/true | full_time/false | - |
+| `both_staff_and_freelance_001` | 1 | part_time_or_full_time/true | full_time/false | - |
+| `both_w2_or_1099_001` | 3 | part_time_or_full_time/true | full_time/false | - |
+| `part_time_b2b_001` | 3 | part_time/true | unknown/false | - |
+| `part_time_cant_wait_001` | 3 | part_time/true | unknown/false | - |
+| `part_time_consulting_001` | 3 | part_time/true | unknown/false | - |
+| `part_time_contract_explicit_001` | 3 | part_time/true | unknown/false | - |
+| `part_time_freelance_001` | 3 | part_time/true | unknown/false | - |
+| `part_time_negated_full_time_001` | 3 | part_time/true | unknown/false | - |
+| `part_time_not_only_001` | 3 | part_time/true | unknown/false | - |
+| `part_time_project_001` | 3 | part_time/true | unknown/false | - |
+| `part_time_unrelated_negation_001` | 3 | part_time/true | unknown/false | - |
+
+
+## Method and limitations
+
+- The corpus is a balanced, synthetic challenge set derived from the production label contract. It deliberately over-represents negation, commercial uses of the word `contract`, non-posts, and prompt-injection-like text; it does not estimate live HN prevalence.
+- Golden labels are exact and scoring is deterministic. No model judges another model.
+- The experiment applies the classification-harness pattern described in LangChain's [Jev harness article](https://www.langchain.com/blog/building-a-harness-with-jev).
+- The heuristic and Jev observations were captured at `2026-09-20T19:57:45.070955+00:00` on revision `3853befc65ddb6e37840084858a64fdb6204e5cf`. Luna was rerun at the report-assembly time on the harness revision above after its request options were aligned with production; the aggregate tables were then recomputed from both normalized observation sets.
+- Jev uses OpenRouter's `/api/alpha/decisions` endpoint and the pinned [`typesafe/jev-1.13`](https://openrouter.ai/typesafe/jev-1.13/) request ID. The resolved dated snapshot is retained in the JSON observation report.
+- The Luna baseline uses the production job-lead prompt and schema through direct OpenAI. A preflight through OpenRouter returned HTTP 403 under provider terms, so the report does not present an unsupported route as a benchmark failure.
+- Luna's self-reported classification confidence is retained as diagnostic metadata, but it is not treated as a calibrated contractor probability or used in the Jev confidence-gate analysis.
+- Latency includes successful and failed calls. Jev cost is provider-reported. This historical Luna aggregate predates cache-write accounting, and its gitignored raw observations are no longer available, so its cache-write token count and corrected cost are marked unavailable instead of applying an incomplete formula. Future GPT-5.6 Luna runs use the official [$0.20/M input, $0.02/M cached input, $0.25/M cache-write, and $1.20/M output rates](https://developers.openai.com/api/docs/models/gpt-5.6-luna); missing cost for a custom `--llm-model` or any profile with unpriced failed calls remains unavailable.
+- Raw observations are generated under the gitignored reports directory; this Markdown summary intentionally excludes provider payloads and secrets.

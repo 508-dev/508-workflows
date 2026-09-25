@@ -18,6 +18,7 @@ dependencies = [
     "sentry-sdk>=2.30.0",
     # Exact-pin v4.6.1 while we wire the v4 observation-centric SDK surface.
     "langfuse==4.6.1",
+    "openai>=2.0.0",
 ]
 
 [tool.pyrefly]
@@ -36,6 +37,7 @@ ignore-missing-imports = [".*"]
 crmctl = "five08.crm_cli:run"
 agent-eval = "five08.agent.evals:main"
 resume-eval = "five08.resume_evals:main"
+job-lead-eval = "five08.job_lead_evals:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -45,5 +47,6 @@ build-backend = "hatchling.build"
 packages = ["src/five08"]
 
 [tool.hatch.build.targets.wheel.force-include]
+"src/five08/data/job-lead-classification-v1.json" = "five08/data/job-lead-classification-v1.json"
 "src/five08/data/model-profiles.json" = "five08/data/model-profiles.json"
 "src/five08/llm_model_profiles.json" = "five08/llm_model_profiles.json"

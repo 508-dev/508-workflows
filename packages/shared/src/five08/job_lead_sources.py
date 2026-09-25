@@ -2,20 +2,34 @@
 
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import logging
 import re
-from dataclasses import dataclass
+import time
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from typing import Any, Literal, Protocol
 from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
+import requests
+from curl_cffi.requests import Session as CurlSession
+from curl_cffi.requests.exceptions import ConnectionError as CurlConnectionError
+from curl_cffi.requests.exceptions import RequestException as CurlRequestException
+from curl_cffi.requests.exceptions import Timeout as CurlTimeout
 from pydantic import BaseModel, ConfigDict, Field
 
 from five08.job_channels import JobPostingType
+from five08.job_lead_jev import (
+    DEFAULT_JOB_LEAD_JEV_MODEL,
+    JobLeadJevDecision,
+    JobLeadJevRequestError,
+    classify_job_lead_with_jev,
+)
 from five08.job_leads import (
     JobLeadInput,
     existing_job_lead_external_ids,
@@ -40,6 +54,9 @@ HN_ALGOLIA_BASE_URL = "https://hn.algolia.com/api/v1"
 HN_WHO_IS_HIRING_SOURCE_KEY = "hackernews_who_is_hiring"
 HN_WHO_IS_HIRING_SOURCE_TYPE = "hackernews"
 DEFAULT_JOB_LEAD_CLASSIFIER_MODEL = "gpt-4.1-mini"
+JOB_LEAD_JEV_SHADOW_METADATA_KEY = "contractor_classification_shadow"
+_JOB_LEAD_JEV_SHADOW_REPORT_VERSION = "job-lead-jev-shadow.v1"
+_JOB_LEAD_JEV_SHADOW_REVIEW_LIMIT = 50
 
 _WHO_IS_HIRING_TITLE_RE = re.compile(
     r"^Ask HN: Who is hiring\? \((?P<month>[A-Za-z]+) (?P<year>20\d\d)\)$"
@@ -152,6 +169,65 @@ class JobLeadSource(Protocol):
 
 
 @dataclass(frozen=True)
+class JobLeadJevShadowObservation:
+    """One normalized, non-authoritative Jev shadow observation."""
+
+    status: Literal["succeeded", "failed"]
+    requested_model: str
+    confidence_threshold: float
+    primary_is_contractor_friendly: bool
+    primary_posting_type: JobPostingType
+    latency_ms: int
+    observed_at: datetime
+    resolved_model: str | None = None
+    provider: str | None = None
+    predicted_is_contractor_friendly: bool | None = None
+    predicted_posting_type: JobPostingType | None = None
+    contractor_probability: float | None = None
+    gate_accepted: bool | None = None
+    agrees_with_primary: bool | None = None
+    request_attempts: int = 0
+    input_tokens: int = 0
+    cached_input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    cost_usd: float | None = None
+    error: str | None = None
+
+    def payload(self) -> dict[str, Any]:
+        """Return dashboard-safe metadata without raw prompts or responses."""
+
+        return {
+            "version": _JOB_LEAD_JEV_SHADOW_REPORT_VERSION,
+            "status": self.status,
+            "requested_model": self.requested_model,
+            "resolved_model": self.resolved_model,
+            "provider": self.provider,
+            "confidence_threshold": self.confidence_threshold,
+            "primary_is_contractor_friendly": (self.primary_is_contractor_friendly),
+            "primary_posting_type": self.primary_posting_type.value,
+            "observed_at": self.observed_at.isoformat(),
+            "predicted_is_contractor_friendly": (self.predicted_is_contractor_friendly),
+            "predicted_posting_type": (
+                self.predicted_posting_type.value
+                if self.predicted_posting_type is not None
+                else None
+            ),
+            "contractor_probability": self.contractor_probability,
+            "gate_accepted": self.gate_accepted,
+            "agrees_with_primary": self.agrees_with_primary,
+            "latency_ms": self.latency_ms,
+            "request_attempts": self.request_attempts,
+            "input_tokens": self.input_tokens,
+            "cached_input_tokens": self.cached_input_tokens,
+            "output_tokens": self.output_tokens,
+            "total_tokens": self.total_tokens,
+            "cost_usd": self.cost_usd,
+            "error": self.error,
+        }
+
+
+@dataclass(frozen=True)
 class JobLeadClassification:
     """Contractor-friendliness classification for one external lead."""
 
@@ -164,6 +240,7 @@ class JobLeadClassification:
     method: Literal["llm", "heuristic"]
     apply_url: str | None = None
     contact_email: str | None = None
+    jev_shadow: JobLeadJevShadowObservation | None = None
 
 
 class JobLeadLLMClassificationResponse(BaseModel):
@@ -581,19 +658,258 @@ class JobLeadClassifier:
         *,
         settings: SharedSettings,
         client: Any | None = None,
+        jev_shadow_session: CurlSession | None = None,
+        jev_shadow_clock: Callable[[], float] | None = None,
     ) -> None:
         self.settings = settings
         self.client = client if client is not None else _build_llm_client(settings)
+        self._jev_shadow_enabled = bool(
+            getattr(settings, "job_lead_jev_shadow_enabled", False)
+        )
+        self._jev_shadow_model = (
+            _clean(getattr(settings, "job_lead_jev_shadow_model", None))
+            or DEFAULT_JOB_LEAD_JEV_MODEL
+        )
+        self._jev_shadow_api_key = _clean(getattr(settings, "openrouter_api_key", None))
+        self._jev_shadow_sample_rate = _bounded_float(
+            getattr(settings, "job_lead_jev_shadow_sample_rate", 0.1),
+            minimum=0.0,
+            maximum=1.0,
+            default=0.1,
+        )
+        self._jev_shadow_confidence_threshold = _bounded_float(
+            getattr(settings, "job_lead_jev_shadow_confidence_threshold", 0.8),
+            minimum=0.5,
+            maximum=1.0,
+            default=0.8,
+        )
+        self._jev_shadow_timeout_seconds = _bounded_float(
+            getattr(settings, "job_lead_jev_shadow_timeout_seconds", 4.0),
+            minimum=0.1,
+            maximum=30.0,
+            default=4.0,
+        )
+        self._jev_shadow_max_calls = _bounded_int(
+            getattr(settings, "job_lead_jev_shadow_max_calls", 25),
+            minimum=1,
+            maximum=100,
+            default=25,
+        )
+        self._jev_shadow_run_budget_seconds = _bounded_float(
+            getattr(settings, "job_lead_jev_shadow_run_budget_seconds", 20.0),
+            minimum=0.1,
+            maximum=60.0,
+            default=20.0,
+        )
+        self._jev_shadow_clock = jev_shadow_clock or time.perf_counter
+        self._jev_shadow_calls_started = 0
+        self._jev_shadow_run_started_at: float | None = None
+        self._jev_shadow_run_finished_at: float | None = None
+        self._jev_shadow_budget_exhaustion_reason: (
+            Literal["max_calls", "run_budget"] | None
+        ) = None
+        self._jev_shadow_planned_fingerprints: dict[bytes, int] | None = None
+        self._jev_shadow_cohort_was_capped = False
+        self._owns_jev_shadow_session = False
+        self._jev_shadow_available = True
+        self._jev_shadow_session = jev_shadow_session
+        if (
+            self._jev_shadow_session is None
+            and self._jev_shadow_enabled
+            and self._jev_shadow_api_key
+        ):
+            # A scalar curl-cffi timeout maps to libcurl's total-transfer
+            # deadline. Requests' scalar timeout only bounds socket inactivity
+            # and can be defeated by a response that continuously trickles data.
+            self._jev_shadow_session = CurlSession()
+            self._owns_jev_shadow_session = True
 
     def classify(self, comment_text: str) -> JobLeadClassification:
+        classification = self.classify_primary(comment_text)
+        return self.attach_jev_shadow(comment_text, classification)
+
+    def classify_primary(self, comment_text: str) -> JobLeadClassification:
+        """Classify a post without running the optional Jev shadow."""
+
         if _SEEKING_WORK_RE.search(comment_text):
             return classify_contractor_lead_heuristic(comment_text)
+        classification: JobLeadClassification | None = None
         if self.client is not None:
             try:
-                return self._classify_with_llm(comment_text)
+                classification = self._classify_with_llm(comment_text)
             except Exception as exc:
                 logger.warning("Job lead LLM classification failed: %s", exc)
-        return classify_contractor_lead_heuristic(comment_text)
+        if classification is None:
+            classification = classify_contractor_lead_heuristic(comment_text)
+        return classification
+
+    def attach_jev_shadow(
+        self,
+        comment_text: str,
+        classification: JobLeadClassification,
+    ) -> JobLeadClassification:
+        """Attach a bounded Jev observation to an existing primary decision."""
+
+        return self._attach_jev_shadow(comment_text, classification)
+
+    def close(self) -> None:
+        """Close only the Jev session owned by this classifier."""
+
+        if self._owns_jev_shadow_session and self._jev_shadow_session is not None:
+            self._jev_shadow_session.close()
+            self._jev_shadow_session = None
+
+    def jev_shadow_run_summary(self) -> dict[str, Any]:
+        """Return the captured configuration and bounded-work state for this run."""
+
+        elapsed_ms = 0
+        if self._jev_shadow_run_started_at is not None:
+            finished_at = (
+                self._jev_shadow_run_finished_at
+                if self._jev_shadow_run_finished_at is not None
+                else self._jev_shadow_clock()
+            )
+            elapsed_ms = max(
+                0,
+                round((finished_at - self._jev_shadow_run_started_at) * 1000),
+            )
+        budget_exhaustion_reason = self._jev_shadow_budget_exhaustion_reason
+        if (
+            budget_exhaustion_reason is None
+            and self._jev_shadow_cohort_was_capped
+            and self._jev_shadow_calls_started >= self._jev_shadow_max_calls
+        ):
+            budget_exhaustion_reason = "max_calls"
+        return {
+            "enabled": self._jev_shadow_enabled,
+            "provider_configured": bool(self._jev_shadow_api_key),
+            "requested_model": self._jev_shadow_model,
+            "sample_rate": self._jev_shadow_sample_rate,
+            "confidence_threshold": self._jev_shadow_confidence_threshold,
+            "request_timeout_seconds": self._jev_shadow_timeout_seconds,
+            "calls_started": self._jev_shadow_calls_started,
+            "max_calls": self._jev_shadow_max_calls,
+            "run_budget_seconds": self._jev_shadow_run_budget_seconds,
+            "run_elapsed_ms": elapsed_ms,
+            "budget_exhaustion_reason": budget_exhaustion_reason,
+        }
+
+    def prepare_jev_shadow_cohort(self, comment_texts: Sequence[str]) -> None:
+        """Choose a stable capped cohort from all eligible comments in this run."""
+
+        candidates = sorted(
+            _jev_shadow_fingerprint(comment_text)
+            for comment_text in comment_texts
+            if _selected_for_jev_shadow(comment_text, self._jev_shadow_sample_rate)
+        )
+        self._jev_shadow_cohort_was_capped = (
+            len(candidates) > self._jev_shadow_max_calls
+        )
+        planned: dict[bytes, int] = {}
+        for fingerprint in candidates[: self._jev_shadow_max_calls]:
+            planned[fingerprint] = planned.get(fingerprint, 0) + 1
+        self._jev_shadow_planned_fingerprints = planned
+
+    def finish_jev_shadow_phase(self) -> None:
+        """Freeze elapsed time when the contiguous shadow phase ends."""
+
+        if (
+            self._jev_shadow_run_started_at is not None
+            and self._jev_shadow_run_finished_at is None
+        ):
+            self._jev_shadow_run_finished_at = self._jev_shadow_clock()
+
+    def _next_jev_shadow_timeout(self) -> float | None:
+        if self._jev_shadow_run_finished_at is not None:
+            return None
+        if self._jev_shadow_calls_started >= self._jev_shadow_max_calls:
+            self._jev_shadow_budget_exhaustion_reason = "max_calls"
+            return None
+
+        now = self._jev_shadow_clock()
+        if self._jev_shadow_run_started_at is None:
+            self._jev_shadow_run_started_at = now
+        elapsed = max(0.0, now - self._jev_shadow_run_started_at)
+        remaining = self._jev_shadow_run_budget_seconds - elapsed
+        if remaining < 0.1:
+            self._jev_shadow_budget_exhaustion_reason = "run_budget"
+            return None
+
+        self._jev_shadow_calls_started += 1
+        return min(self._jev_shadow_timeout_seconds, remaining)
+
+    def _attach_jev_shadow(
+        self,
+        comment_text: str,
+        classification: JobLeadClassification,
+    ) -> JobLeadClassification:
+        fingerprint = _jev_shadow_fingerprint(comment_text)
+        planned_fingerprints = self._jev_shadow_planned_fingerprints
+        planned_count = (
+            planned_fingerprints.get(fingerprint, 0)
+            if planned_fingerprints is not None
+            else None
+        )
+        if (
+            not self._jev_shadow_enabled
+            or not self._jev_shadow_available
+            or not self._jev_shadow_api_key
+            or self._jev_shadow_session is None
+            or (
+                planned_count is None
+                and not _selected_for_jev_shadow(
+                    comment_text,
+                    self._jev_shadow_sample_rate,
+                )
+            )
+            or planned_count == 0
+        ):
+            return classification
+
+        shadow_timeout_seconds = self._next_jev_shadow_timeout()
+        if shadow_timeout_seconds is None:
+            return classification
+        if planned_count is not None and planned_fingerprints is not None:
+            planned_fingerprints[fingerprint] = planned_count - 1
+
+        started = self._jev_shadow_clock()
+        try:
+            decision = classify_job_lead_with_jev(
+                session=self._jev_shadow_session,
+                api_key=self._jev_shadow_api_key,
+                comment_text=comment_text,
+                model=self._jev_shadow_model,
+                timeout_seconds=shadow_timeout_seconds,
+                max_attempts=1,
+            )
+            observation = _successful_jev_shadow_observation(
+                decision=decision,
+                classification=classification,
+                confidence_threshold=self._jev_shadow_confidence_threshold,
+            )
+        except Exception as exc:
+            self._jev_shadow_available = False
+            error_category = _safe_jev_shadow_error(exc)
+            observation = JobLeadJevShadowObservation(
+                status="failed",
+                requested_model=self._jev_shadow_model,
+                confidence_threshold=self._jev_shadow_confidence_threshold,
+                primary_is_contractor_friendly=(classification.is_contractor_friendly),
+                primary_posting_type=classification.posting_type,
+                latency_ms=max(
+                    0,
+                    round((self._jev_shadow_clock() - started) * 1000),
+                ),
+                observed_at=datetime.now(timezone.utc),
+                request_attempts=_jev_shadow_request_attempts(exc),
+                error=error_category,
+            )
+            logger.warning(
+                "Jev job-lead shadow classification failed; disabling it for the "
+                "remainder of this scrape: %s",
+                error_category,
+            )
+        return replace(classification, jev_shadow=observation)
 
     @staticmethod
     def _messages(comment_text: str) -> list[dict[str, str]]:
@@ -669,6 +985,109 @@ def _clean(value: object) -> str | None:
         return None
     stripped = str(value).strip()
     return stripped or None
+
+
+def _bounded_float(
+    value: object,
+    *,
+    minimum: float,
+    maximum: float,
+    default: float,
+) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float | str):
+        return default
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(maximum, numeric))
+
+
+def _bounded_int(
+    value: object,
+    *,
+    minimum: int,
+    maximum: int,
+    default: int,
+) -> int:
+    if isinstance(value, bool) or not isinstance(value, int | str):
+        return default
+    try:
+        numeric = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(maximum, numeric))
+
+
+def _jev_shadow_fingerprint(comment_text: str) -> bytes:
+    return hashlib.sha256(comment_text.encode("utf-8")).digest()
+
+
+def _selected_for_jev_shadow(comment_text: str, sample_rate: float) -> bool:
+    if sample_rate <= 0.0:
+        return False
+    if sample_rate >= 1.0:
+        return True
+    digest = _jev_shadow_fingerprint(comment_text)
+    bucket = int.from_bytes(digest[:8], "big") / float(2**64)
+    return bucket < sample_rate
+
+
+def _successful_jev_shadow_observation(
+    *,
+    decision: JobLeadJevDecision,
+    classification: JobLeadClassification,
+    confidence_threshold: float,
+) -> JobLeadJevShadowObservation:
+    probability = decision.contractor_probability
+    gate_accepted = (
+        probability >= confidence_threshold or probability <= 1.0 - confidence_threshold
+    )
+    return JobLeadJevShadowObservation(
+        status="succeeded",
+        requested_model=decision.requested_model,
+        resolved_model=decision.resolved_model,
+        provider=decision.provider,
+        confidence_threshold=confidence_threshold,
+        primary_is_contractor_friendly=classification.is_contractor_friendly,
+        primary_posting_type=classification.posting_type,
+        observed_at=datetime.now(timezone.utc),
+        predicted_is_contractor_friendly=decision.is_contractor_friendly,
+        predicted_posting_type=decision.posting_type,
+        contractor_probability=probability,
+        gate_accepted=gate_accepted,
+        agrees_with_primary=(
+            decision.is_contractor_friendly == classification.is_contractor_friendly
+        ),
+        latency_ms=decision.latency_ms,
+        request_attempts=decision.request_attempts,
+        input_tokens=decision.input_tokens,
+        cached_input_tokens=decision.cached_input_tokens,
+        output_tokens=decision.output_tokens,
+        total_tokens=decision.total_tokens,
+        cost_usd=decision.cost_usd,
+    )
+
+
+def _safe_jev_shadow_error(exc: Exception) -> str:
+    cause = exc.cause if isinstance(exc, JobLeadJevRequestError) else exc
+    if isinstance(cause, requests.Timeout | CurlTimeout | TimeoutError):
+        return "provider_timeout"
+    if isinstance(cause, requests.ConnectionError | CurlConnectionError):
+        return "provider_connection_error"
+    if isinstance(cause, requests.RequestException | CurlRequestException):
+        return "provider_transport_error"
+    if isinstance(cause, ValueError):
+        return "invalid_provider_response"
+    if isinstance(cause, RuntimeError):
+        return "provider_request_failed"
+    return "provider_error"
+
+
+def _jev_shadow_request_attempts(exc: Exception) -> int:
+    if isinstance(exc, JobLeadJevRequestError):
+        return max(1, exc.request_attempts)
+    return 1
 
 
 def _classifier_model(settings: SharedSettings) -> str:
@@ -791,7 +1210,7 @@ def _classification_from_llm_response(
 def _classification_metadata(
     classification: JobLeadClassification,
 ) -> dict[str, Any]:
-    return {
+    metadata = {
         "contractor_classification": {
             "is_contractor_friendly": classification.is_contractor_friendly,
             "posting_type": classification.posting_type.value,
@@ -803,6 +1222,9 @@ def _classification_metadata(
             "contact_email": classification.contact_email,
         }
     }
+    if classification.jev_shadow is not None:
+        metadata[JOB_LEAD_JEV_SHADOW_METADATA_KEY] = classification.jev_shadow.payload()
+    return metadata
 
 
 def _lead_from_hn_comment(
@@ -811,6 +1233,7 @@ def _lead_from_hn_comment(
     story_title: str,
     comment: dict[str, Any],
     classifier: JobLeadClassifier | None = None,
+    precomputed_classification: JobLeadClassification | None = None,
     include_non_contractor: bool = False,
 ) -> JobLeadInput | None:
     text = html_to_text(comment.get("text"))
@@ -818,11 +1241,13 @@ def _lead_from_hn_comment(
         return None
     if _SEEKING_WORK_RE.search(text):
         return None
-    classification = (
-        classifier.classify(text)
-        if classifier is not None
-        else classify_contractor_lead_heuristic(text)
-    )
+    classification = precomputed_classification
+    if classification is None:
+        classification = (
+            classifier.classify(text)
+            if classifier is not None
+            else classify_contractor_lead_heuristic(text)
+        )
     if not classification.is_contractor_friendly and not include_non_contractor:
         return None
 
@@ -907,9 +1332,47 @@ class HackerNewsWhoIsHiringLeadSource:
     def collect(self) -> list[JobLeadInput]:
         leads: list[JobLeadInput] = []
         self._thread_reports = []
+        thread_children: list[tuple[HackerNewsThread, list[Any]]] = []
         for thread in self.discover_threads():
             tree = self.client.get_algolia_item_tree(thread.story_id)
             children = tree.get("children") or []
+            thread_children.append((thread, children))
+
+        prepare_shadow_cohort = getattr(
+            self.classifier,
+            "prepare_jev_shadow_cohort",
+            None,
+        )
+        eligible_comments: list[tuple[dict[str, Any], str]] = []
+        if callable(prepare_shadow_cohort):
+            for thread, children in thread_children:
+                for child in children:
+                    if not isinstance(child, dict):
+                        continue
+                    if child.get("parent_id") != thread.story_id:
+                        continue
+                    text = html_to_text(child.get("text"))
+                    if text and not _SEEKING_WORK_RE.search(text):
+                        eligible_comments.append((child, text))
+            prepare_shadow_cohort([text for _, text in eligible_comments])
+
+        precomputed_classifications: dict[int, JobLeadClassification] = {}
+        if isinstance(self.classifier, JobLeadClassifier):
+            for child, text in eligible_comments:
+                precomputed_classifications[id(child)] = (
+                    self.classifier.classify_primary(text)
+                )
+            # Keep Jev calls in one contiguous phase. The existing wall-clock
+            # budget then measures only shadow-added scrape delay, rather than
+            # consuming the cohort window on intervening primary LLM calls.
+            for child, text in eligible_comments:
+                primary = precomputed_classifications[id(child)]
+                precomputed_classifications[id(child)] = (
+                    self.classifier.attach_jev_shadow(text, primary)
+                )
+            self.classifier.finish_jev_shadow_phase()
+
+        for thread, children in thread_children:
             report = HackerNewsThreadScrapeReport(thread=thread)
             for child in children:
                 if not isinstance(child, dict):
@@ -929,6 +1392,9 @@ class HackerNewsWhoIsHiringLeadSource:
                     story_title=thread.title,
                     comment=child,
                     classifier=self.classifier,
+                    precomputed_classification=precomputed_classifications.get(
+                        id(child)
+                    ),
                     include_non_contractor=self.include_non_contractor,
                 )
                 if lead is None:
@@ -987,6 +1453,254 @@ def build_job_lead_source(
     raise ValueError(f"Unsupported job lead source: {source}")
 
 
+def _job_lead_jev_shadow_report(
+    settings: SharedSettings,
+    leads: list[JobLeadInput],
+    *,
+    runtime_summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    runtime = runtime_summary if isinstance(runtime_summary, dict) else {}
+    raw_enabled = runtime.get("enabled")
+    enabled = (
+        raw_enabled
+        if isinstance(raw_enabled, bool)
+        else bool(getattr(settings, "job_lead_jev_shadow_enabled", False))
+    )
+    raw_provider_configured = runtime.get("provider_configured")
+    api_key_configured = (
+        raw_provider_configured
+        if isinstance(raw_provider_configured, bool)
+        else bool(_clean(getattr(settings, "openrouter_api_key", None)))
+    )
+    raw_model = (
+        runtime["requested_model"]
+        if "requested_model" in runtime
+        else getattr(settings, "job_lead_jev_shadow_model", None)
+    )
+    model = _clean(raw_model) or DEFAULT_JOB_LEAD_JEV_MODEL
+    sample_rate = _bounded_float(
+        runtime["sample_rate"]
+        if "sample_rate" in runtime
+        else getattr(settings, "job_lead_jev_shadow_sample_rate", 0.1),
+        minimum=0.0,
+        maximum=1.0,
+        default=0.1,
+    )
+    confidence_threshold = _bounded_float(
+        runtime["confidence_threshold"]
+        if "confidence_threshold" in runtime
+        else getattr(settings, "job_lead_jev_shadow_confidence_threshold", 0.8),
+        minimum=0.5,
+        maximum=1.0,
+        default=0.8,
+    )
+    request_timeout_seconds = _bounded_float(
+        runtime["request_timeout_seconds"]
+        if "request_timeout_seconds" in runtime
+        else getattr(settings, "job_lead_jev_shadow_timeout_seconds", 4.0),
+        minimum=0.1,
+        maximum=30.0,
+        default=4.0,
+    )
+    max_calls = _bounded_int(
+        runtime["max_calls"]
+        if "max_calls" in runtime
+        else getattr(settings, "job_lead_jev_shadow_max_calls", 25),
+        minimum=1,
+        maximum=100,
+        default=25,
+    )
+    run_budget_seconds = _bounded_float(
+        runtime["run_budget_seconds"]
+        if "run_budget_seconds" in runtime
+        else getattr(settings, "job_lead_jev_shadow_run_budget_seconds", 20.0),
+        minimum=0.1,
+        maximum=60.0,
+        default=20.0,
+    )
+    observed: list[tuple[JobLeadInput, dict[str, Any], dict[str, Any]]] = []
+    for lead in leads:
+        metadata = lead.metadata if isinstance(lead.metadata, dict) else {}
+        primary = metadata.get("contractor_classification")
+        shadow = metadata.get(JOB_LEAD_JEV_SHADOW_METADATA_KEY)
+        if isinstance(primary, dict) and isinstance(shadow, dict):
+            observed.append((lead, primary, shadow))
+
+    successful = [item for item in observed if item[2].get("status") == "succeeded"]
+    failures = [item for item in observed if item[2].get("status") == "failed"]
+    agreements = [item for item in successful if item[2].get("agrees_with_primary")]
+    disagreements = [
+        item for item in successful if item[2].get("agrees_with_primary") is False
+    ]
+    gate_accepted = [item for item in successful if item[2].get("gate_accepted")]
+    gate_fallback = failures + [
+        item for item in successful if item[2].get("gate_accepted") is False
+    ]
+    high_confidence_disagreements = [
+        item for item in disagreements if item[2].get("gate_accepted") is True
+    ]
+    latencies = [
+        int(item[2]["latency_ms"])
+        for item in observed
+        if isinstance(item[2].get("latency_ms"), int | float)
+        and not isinstance(item[2].get("latency_ms"), bool)
+    ]
+    cost_values = [
+        float(item[2]["cost_usd"])
+        for item in successful
+        if isinstance(item[2].get("cost_usd"), int | float)
+        and not isinstance(item[2].get("cost_usd"), bool)
+    ]
+    complete_cost = (
+        bool(successful) and not failures and len(cost_values) == len(successful)
+    )
+    raw_calls_started = runtime.get("calls_started")
+    calls_started = (
+        int(raw_calls_started)
+        if isinstance(raw_calls_started, int)
+        and not isinstance(raw_calls_started, bool)
+        else len(observed)
+    )
+    raw_run_elapsed_ms = runtime.get("run_elapsed_ms")
+    run_elapsed_ms = (
+        int(raw_run_elapsed_ms)
+        if isinstance(raw_run_elapsed_ms, int | float)
+        and not isinstance(raw_run_elapsed_ms, bool)
+        else None
+    )
+    budget_exhaustion_reason = runtime.get("budget_exhaustion_reason")
+    if budget_exhaustion_reason not in {"max_calls", "run_budget"}:
+        budget_exhaustion_reason = None
+
+    review_candidates: list[dict[str, Any]] = []
+    for lead, primary, shadow in observed:
+        reasons: list[str] = []
+        if shadow.get("status") == "failed":
+            reasons.append("provider_failure")
+        else:
+            if shadow.get("agrees_with_primary") is False:
+                reasons.append("binary_disagreement")
+            if shadow.get("gate_accepted") is False:
+                reasons.append("confidence_fallback")
+        if not reasons:
+            continue
+        review_candidates.append(
+            {
+                "external_id": lead.external_id,
+                "source_url": lead.source_url,
+                "reasons": reasons,
+                "primary": {
+                    "method": primary.get("method"),
+                    "is_contractor_friendly": primary.get("is_contractor_friendly"),
+                    "posting_type": primary.get("posting_type"),
+                    "confidence": primary.get("confidence"),
+                },
+                "shadow": {
+                    "status": shadow.get("status"),
+                    "is_contractor_friendly": shadow.get(
+                        "predicted_is_contractor_friendly"
+                    ),
+                    "posting_type": shadow.get("predicted_posting_type"),
+                    "contractor_probability": shadow.get("contractor_probability"),
+                    "gate_accepted": shadow.get("gate_accepted"),
+                    "resolved_model": shadow.get("resolved_model"),
+                    "provider": shadow.get("provider"),
+                    "latency_ms": shadow.get("latency_ms"),
+                    "observed_at": shadow.get("observed_at"),
+                    "error": shadow.get("error"),
+                },
+            }
+        )
+
+    if not enabled:
+        status = "disabled"
+    elif not api_key_configured:
+        status = "missing_openrouter_api_key"
+    elif sample_rate <= 0.0:
+        status = "paused"
+    elif not observed:
+        status = "no_sample_selected"
+    elif failures:
+        status = "completed_with_errors"
+    elif budget_exhaustion_reason is not None:
+        status = "completed_budget_limited"
+    else:
+        status = "completed"
+
+    attempted = len(observed)
+    succeeded = len(successful)
+    return {
+        "version": _JOB_LEAD_JEV_SHADOW_REPORT_VERSION,
+        "status": status,
+        "enabled": enabled,
+        "provider_configured": api_key_configured,
+        "requested_model": model,
+        "sample_rate": sample_rate,
+        "confidence_threshold": confidence_threshold,
+        "limits": {
+            "request_timeout_seconds": request_timeout_seconds,
+            "max_calls": max_calls,
+            "run_budget_seconds": run_budget_seconds,
+        },
+        "calls_started": calls_started,
+        "run_elapsed_ms": run_elapsed_ms,
+        "budget_exhausted": budget_exhaustion_reason is not None,
+        "budget_exhaustion_reason": budget_exhaustion_reason,
+        "eligible": len(leads),
+        "attempted": attempted,
+        "not_observed": max(0, len(leads) - attempted),
+        "succeeded": succeeded,
+        "failed": len(failures),
+        "success_rate": round(succeeded / attempted, 4) if attempted else None,
+        "agreements": len(agreements),
+        "disagreements": len(disagreements),
+        "agreement_rate": round(len(agreements) / succeeded, 4) if succeeded else None,
+        "gate_accepted": len(gate_accepted),
+        "gate_fallback": len(gate_fallback),
+        "high_confidence_disagreements": len(high_confidence_disagreements),
+        "resolved_models": sorted(
+            {
+                str(item[2]["resolved_model"])
+                for item in successful
+                if item[2].get("resolved_model")
+            }
+        ),
+        "providers": sorted(
+            {str(item[2]["provider"]) for item in successful if item[2].get("provider")}
+        ),
+        "latency_ms": {
+            "p50": _shadow_percentile(latencies, 0.50),
+            "p95": _shadow_percentile(latencies, 0.95),
+            "max": max(latencies) if latencies else None,
+        },
+        "usage": {
+            "unit": "tokens",
+            "input": sum(int(item[2].get("input_tokens") or 0) for item in successful),
+            "cached": sum(
+                int(item[2].get("cached_input_tokens") or 0) for item in successful
+            ),
+            "output": sum(
+                int(item[2].get("output_tokens") or 0) for item in successful
+            ),
+            "total": sum(int(item[2].get("total_tokens") or 0) for item in successful),
+            "cost_usd": round(sum(cost_values), 8) if complete_cost else None,
+        },
+        "review_items": review_candidates[:_JOB_LEAD_JEV_SHADOW_REVIEW_LIMIT],
+        "review_items_truncated": max(
+            0,
+            len(review_candidates) - _JOB_LEAD_JEV_SHADOW_REVIEW_LIMIT,
+        ),
+    }
+
+
+def _shadow_percentile(values: list[int], quantile: float) -> int | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = round((len(ordered) - 1) * quantile)
+    return ordered[index]
+
+
 def scrape_job_leads(
     settings: SharedSettings,
     *,
@@ -1004,7 +1718,31 @@ def scrape_job_leads(
     created = 0
     updated = 0
     lead_ids: list[str] = []
-    leads = adapter.collect()
+    try:
+        leads = adapter.collect()
+    finally:
+        close_classifier = getattr(classifier, "close", None)
+        if callable(close_classifier):
+            close_classifier()
+    shadow_runtime_summary_factory = getattr(
+        classifier,
+        "jev_shadow_run_summary",
+        None,
+    )
+    raw_shadow_runtime_summary = (
+        shadow_runtime_summary_factory()
+        if callable(shadow_runtime_summary_factory)
+        else None
+    )
+    shadow_report = _job_lead_jev_shadow_report(
+        settings,
+        leads,
+        runtime_summary=(
+            raw_shadow_runtime_summary
+            if isinstance(raw_shadow_runtime_summary, dict)
+            else None
+        ),
+    )
     collection_report_factory = getattr(adapter, "collection_report", None)
     raw_collection_report = (
         collection_report_factory() if callable(collection_report_factory) else {}
@@ -1048,6 +1786,7 @@ def scrape_job_leads(
     return {
         "source": adapter.source_key,
         **collection_report,
+        "classifier_shadow": shadow_report,
         "created": created,
         "updated": updated,
         "total": len(lead_ids),
