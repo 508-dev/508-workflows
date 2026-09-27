@@ -366,6 +366,7 @@ class InMemoryKnowledgeStore:
                     old
                     for old in reversed(list(self._facts.values()))
                     if old.id != replaces_id
+                    and old.kind == "fact"
                     and old.organization_id == fact.organization_id
                     and old.scope_type == scope_type
                     and old.scope_id == scope_id

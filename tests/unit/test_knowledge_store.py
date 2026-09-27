@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from five08.knowledge import store as knowledge_store
+from five08.knowledge.models import KnowledgeFact
 from five08.knowledge.store import InMemoryKnowledgeStore, PostgresKnowledgeStore
 
 
@@ -193,6 +194,63 @@ def test_in_memory_edit_merges_an_occupied_destination_slot() -> None:
     assert edited.supersedes_id == first.id
     assert [fact.id for fact in active] == [edited.id]
     assert destination.id != edited.id
+
+
+def test_in_memory_edit_does_not_supersede_non_memory_knowledge() -> None:
+    now = datetime.now(timezone.utc)
+    captured_knowledge = KnowledgeFact(
+        id="captured-location",
+        organization_id="org-1",
+        scope_type="user",
+        scope_id="user-1",
+        kind="qa",
+        key="location",
+        question="Where is the meetup?",
+        answer="Tokyo",
+        visibility="private",
+        created_by="user-1",
+        created_at=now,
+        updated_at=now,
+    )
+    store = InMemoryKnowledgeStore(facts=[captured_knowledge])
+    original = store.remember_fact(
+        scope_type="user",
+        scope_id="user-1",
+        key="timezone",
+        value_json={"text": "Asia/Tokyo"},
+        visibility="private",
+        source_type="request",
+        source_ref="original",
+        source_excerpt=None,
+        created_by="user-1",
+        verification_status="user_confirmed",
+        organization_id="org-1",
+    )
+
+    edited = store.remember_fact(
+        scope_type="user",
+        scope_id="user-1",
+        key="location",
+        value_json={"text": "Tokyo"},
+        visibility="private",
+        source_type="request",
+        source_ref="edit",
+        source_excerpt=None,
+        created_by="user-1",
+        verification_status="user_confirmed",
+        organization_id="org-1",
+        replaces_id=original.id,
+    )
+
+    active = store.list_facts(
+        scope_type="user",
+        scope_id="user-1",
+        visible_to_user_id="user-1",
+        visible_to_project_id=None,
+        visible_to_org_id="org-1",
+    )
+    assert {fact.id for fact in active} == {captured_knowledge.id, edited.id}
+    assert edited.supersedes_id == original.id
 
 
 def test_postgres_edit_selects_replaced_and_destination_rows(
