@@ -605,6 +605,36 @@ def test_report_renders_every_mismatch_group() -> None:
     assert "| deterministic |" in markdown
 
 
+def test_report_renders_sanitized_provider_failures() -> None:
+    observation = JobLeadEvalObservation(
+        profile="jev",
+        case_id="provider_failure",
+        group="challenge",
+        repeat=2,
+        expected_posting_type="part_time",
+        expected_contractor_friendly=True,
+        latency_ms=200,
+        error="provider_http_503",
+    )
+    report = JobLeadEvalReport(
+        evaluated_at=datetime.now(timezone.utc),
+        runtime_revision=None,
+        corpus_version="job-lead-classification.v1",
+        corpus_path="corpus.json",
+        case_count=1,
+        network_repeats=1,
+        requested_models={"jev": "jev", "luna": "luna"},
+        endpoints={"jev": "https://example.com", "luna": "https://example.com"},
+        summary={"jev": summarize_profile([observation], case_count=1)},
+        observations=[observation],
+    )
+
+    markdown = render_job_lead_eval_report(report)
+
+    assert "## Provider failures" in markdown
+    assert "| `provider_failure` | 2 | `provider_http_503` |" in markdown
+
+
 def test_report_omits_provenance_for_profiles_that_were_not_run() -> None:
     observation = JobLeadEvalObservation(
         profile="heuristic",

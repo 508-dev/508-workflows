@@ -853,12 +853,12 @@ def render_job_lead_eval_report(report: JobLeadEvalReport) -> str:
         )
 
     lines.extend(["", "## Classification mismatches", ""])
-    any_failures = False
+    any_mismatches = False
     for profile, summary in report.summary.items():
         failures = summary["failure_examples"]
         if not failures:
             continue
-        any_failures = True
+        any_mismatches = True
         lines.extend(
             [
                 f"### {profile}",
@@ -874,8 +874,38 @@ def render_job_lead_eval_report(report: JobLeadEvalReport) -> str:
                 f"| {item['contractor_probability']} |"
             )
         lines.append("")
-    if not any_failures:
+    if not any_mismatches:
         lines.append("No classification mismatches were observed.")
+
+    lines.extend(["", "## Provider failures", ""])
+    any_provider_failures = False
+    for profile, summary in report.summary.items():
+        errors = summary["error_examples"]
+        if not errors:
+            continue
+        any_provider_failures = True
+        lines.extend(
+            [
+                f"### {profile}",
+                "",
+                "| Case | Run | Error |",
+                "| --- | ---: | --- |",
+            ]
+        )
+        for item in errors:
+            lines.append(
+                f"| `{item['case_id']}` | {item['repeat']} | `{item['error']}` |"
+            )
+        hidden_failures = summary["hard_failures"] - len(errors)
+        if hidden_failures > 0:
+            lines.append("")
+            lines.append(
+                f"Showing the first {len(errors)} failures; "
+                f"{hidden_failures} additional failures are omitted."
+            )
+        lines.append("")
+    if not any_provider_failures:
+        lines.append("No provider failures were observed.")
 
     lines.extend(
         [
