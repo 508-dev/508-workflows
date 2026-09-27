@@ -1282,15 +1282,31 @@ def _git_revision() -> str | None:
     if not source_module.is_file() or source_module.resolve() != module_path:
         return None
     try:
-        result = subprocess.run(
+        revision_result = subprocess.run(
             ["git", "-C", str(repository_root), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        status_result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repository_root),
+                "status",
+                "--porcelain",
+                "--untracked-files=no",
+            ],
             check=True,
             capture_output=True,
             text=True,
         )
     except (OSError, subprocess.CalledProcessError):
         return None
-    return result.stdout.strip() or None
+    revision = revision_result.stdout.strip()
+    if not revision:
+        return None
+    return f"{revision}-dirty" if status_result.stdout.strip() else revision
 
 
 def _parse_profiles(value: str) -> list[EvalProfile]:

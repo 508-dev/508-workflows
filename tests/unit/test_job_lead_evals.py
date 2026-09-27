@@ -178,22 +178,36 @@ def test_default_corpus_path_is_independent_of_working_directory(
 def test_git_revision_is_resolved_from_harness_checkout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    command: list[str] = []
+    commands: list[list[str]] = []
 
     def fake_run(args: list[str], **_kwargs: object) -> SimpleNamespace:
-        command.extend(args)
-        return SimpleNamespace(stdout="abc123\n")
+        commands.append(args)
+        return SimpleNamespace(stdout="abc123\n" if "rev-parse" in args else "")
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(job_lead_evals.subprocess, "run", fake_run)
 
     assert _git_revision() == "abc123"
-    assert command[:2] == ["git", "-C"]
-    repository_root = Path(command[2])
-    assert command[3:] == ["rev-parse", "HEAD"]
+    assert len(commands) == 2
+    assert all(command[:2] == ["git", "-C"] for command in commands)
+    repository_root = Path(commands[0][2])
+    assert commands[0][3:] == ["rev-parse", "HEAD"]
+    assert commands[1][3:] == ["status", "--porcelain", "--untracked-files=no"]
     assert (
         repository_root / "packages/shared/src/five08/job_lead_evals.py"
     ).resolve() == Path(job_lead_evals.__file__).resolve()
+
+
+def test_git_revision_marks_tracked_checkout_changes_dirty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(args: list[str], **_kwargs: object) -> SimpleNamespace:
+        output = "abc123\n" if "rev-parse" in args else " M corpus.json\n"
+        return SimpleNamespace(stdout=output)
+
+    monkeypatch.setattr(job_lead_evals.subprocess, "run", fake_run)
+
+    assert _git_revision() == "abc123-dirty"
 
 
 def test_git_revision_is_unknown_outside_a_source_checkout(
