@@ -320,6 +320,50 @@ def test_format_agent_response_renders_read_only_erp_results() -> None:
     assert "must never render" not in message
 
 
+def test_format_agent_response_escapes_untrusted_erp_fields() -> None:
+    """ERP values cannot inject Discord markdown or notifications."""
+
+    cog = AgentCog.__new__(AgentCog)
+    message = cog._format_agent_response(
+        {
+            "status": "executed",
+            "results": [
+                {
+                    "tool_name": "billing_read.search_suppliers",
+                    "status": "succeeded",
+                    "result": {
+                        "suppliers": [
+                            {
+                                "supplier_id": "SUP-001",
+                                "supplier_name": "**Injected** @everyone",
+                                "email": "[open](https://evil.test)",
+                            }
+                        ]
+                    },
+                },
+                {
+                    "tool_name": "erp_read.get_project_summary",
+                    "status": "succeeded",
+                    "result": {
+                        "project": {
+                            "project_id": "PROJ-001",
+                            "project_name": "||hidden||",
+                            "status": "# forged heading",
+                            "customer": "@here",
+                        }
+                    },
+                },
+            ],
+        }
+    )
+
+    assert "\\*\\*Injected\\*\\* @\u200beveryone" in message
+    assert "\\[open](https://evil.test)" in message
+    assert "\\|\\|hidden\\|\\|" in message
+    assert "\\# forged heading" in message
+    assert "@\u200bhere" in message
+
+
 def test_format_agent_response_renders_memory_facts() -> None:
     cog = AgentCog.__new__(AgentCog)
 

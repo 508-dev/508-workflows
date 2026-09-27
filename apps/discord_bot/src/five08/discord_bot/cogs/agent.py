@@ -2484,6 +2484,9 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         tool_name: object,
         payload: dict[str, Any],
     ) -> list[str]:
+        def safe_field(value: object) -> str:
+            return AgentCog._safe_discord_text(str(value).strip())
+
         if "invoices" in payload:
             raw_invoices = payload.get("invoices")
             invoices = raw_invoices if isinstance(raw_invoices, list) else []
@@ -2491,9 +2494,9 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             for invoice in invoices[:5]:
                 if not isinstance(invoice, dict):
                     continue
-                invoice_id = str(invoice.get("invoice_id") or "Unknown invoice").strip()
-                status = str(invoice.get("status") or "unknown").strip()
-                posting_date = str(invoice.get("posting_date") or "").strip()
+                invoice_id = safe_field(invoice.get("invoice_id") or "Unknown invoice")
+                status = safe_field(invoice.get("status") or "unknown")
+                posting_date = safe_field(invoice.get("posting_date") or "")
                 lines.append(
                     "  - "
                     + " · ".join(
@@ -2506,15 +2509,13 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             invoice = payload.get("invoice")
             if not isinstance(invoice, dict):
                 return [f"- {tool_name}: no matching invoice"]
-            invoice_id = str(invoice.get("invoice_id") or "Unknown invoice").strip()
-            status = str(invoice.get("status") or "unknown").strip()
-            party = str(
-                invoice.get("customer") or invoice.get("supplier") or ""
-            ).strip()
-            currency = str(invoice.get("currency") or "").strip()
+            invoice_id = safe_field(invoice.get("invoice_id") or "Unknown invoice")
+            status = safe_field(invoice.get("status") or "unknown")
+            party = safe_field(invoice.get("customer") or invoice.get("supplier") or "")
+            currency = invoice.get("currency") or ""
             total = invoice.get("grand_total")
             suffix = " ".join(
-                str(part).strip()
+                safe_field(part)
                 for part in (currency, total)
                 if part is not None and str(part).strip()
             )
@@ -2534,10 +2535,10 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                 if not isinstance(supplier, dict):
                     continue
                 supplier_id = str(supplier.get("supplier_id") or "").strip()
-                name = str(
+                name = safe_field(
                     supplier.get("supplier_name") or supplier_id or "Unknown supplier"
-                ).strip()
-                email = str(supplier.get("email") or "").strip()
+                )
+                email = safe_field(supplier.get("email") or "")
                 lines.append(
                     "  - " + " · ".join(part for part in [name, email] if part)
                 )
@@ -2550,9 +2551,9 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             for project in projects[:5]:
                 if not isinstance(project, dict):
                     continue
-                project_id = str(project.get("project_id") or "Unknown project").strip()
-                name = str(project.get("project_name") or "").strip()
-                status = str(project.get("status") or "").strip()
+                project_id = safe_field(project.get("project_id") or "Unknown project")
+                name = safe_field(project.get("project_name") or "")
+                status = safe_field(project.get("status") or "")
                 lines.append(
                     "  - "
                     + " · ".join(part for part in [project_id, name, status] if part)
@@ -2563,10 +2564,10 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             project = payload.get("project")
             if not isinstance(project, dict):
                 return [f"- {tool_name}: no matching ERP project"]
-            project_id = str(project.get("project_id") or "Unknown project").strip()
-            name = str(project.get("project_name") or "").strip()
-            status = str(project.get("status") or "").strip()
-            customer = str(project.get("customer") or "").strip()
+            project_id = safe_field(project.get("project_id") or "Unknown project")
+            name = safe_field(project.get("project_name") or "")
+            status = safe_field(project.get("status") or "")
+            customer = safe_field(project.get("customer") or "")
             return [
                 f"- {tool_name}: ERP project summary",
                 "  - "
