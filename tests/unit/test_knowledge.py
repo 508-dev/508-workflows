@@ -571,6 +571,39 @@ def test_repeated_question_supersedes_changed_answer() -> None:
     ]
 
 
+def test_rank_evidence_keeps_distinct_memory_facts_from_one_capture() -> None:
+    now = datetime.now(timezone.utc)
+    evidence = [
+        KnowledgeEvidence(
+            evidence_id="memory:deploy-method",
+            source_type="memory",
+            source_ref="https://discord.example/thread/1",
+            title="How does the site deploy?",
+            excerpt="Cloudflare Pages.",
+            visibility="org",
+            relevance=0.9,
+            updated_at=now,
+        ),
+        KnowledgeEvidence(
+            evidence_id="memory:deploy-owner",
+            source_type="memory",
+            source_ref="https://discord.example/thread/1",
+            title="Who owns deployment?",
+            excerpt="Michael.",
+            visibility="org",
+            relevance=0.8,
+            updated_at=now,
+        ),
+    ]
+
+    ranked = KnowledgeService._rank_evidence(evidence)
+
+    assert [item.evidence_id for item in ranked] == [
+        "memory:deploy-method",
+        "memory:deploy-owner",
+    ]
+
+
 def test_lower_authority_conflict_does_not_supersede_stronger_fact() -> None:
     store = InMemoryKnowledgeStore()
     service = _service(store)

@@ -1801,11 +1801,19 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         self,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
+        # Project captures may serially resolve the project, actor identity, and
+        # project access before model extraction and draft persistence. Each
+        # database stage has separate connection and statement deadlines.
+        pipeline_timeout = (
+            settings.knowledge_source_timeout_seconds * 2 * 4
+            + settings.knowledge_model_timeout_seconds * 2
+            + 1.0
+        )
         return await asyncio.to_thread(
             self._post_backend_json,
             "/knowledge/captures",
             payload,
-            settings.knowledge_api_timeout_seconds,
+            max(settings.knowledge_api_timeout_seconds, pipeline_timeout),
         )
 
     async def _post_knowledge_confirmation(
