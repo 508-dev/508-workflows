@@ -507,8 +507,18 @@ def test_confidence_gate_counts_failed_calls_as_fallbacks() -> None:
         ),
     ]
 
-    thresholds = summarize_profile(observations, case_count=2)["confidence_thresholds"]
+    summary = summarize_profile(observations, case_count=2)
+    thresholds = summary["confidence_thresholds"]
 
+    assert summary["contractor_accuracy"] == 0.5
+    assert summary["contractor_precision"] == 0.5
+    assert summary["contractor_recall"] == 1.0
+    assert summary["contractor_f1"] == 0.6667
+    assert summary["contractor_false_positives"] == 1
+    assert summary["posting_accuracy"] == 0.5
+    assert summary["joint_accuracy"] == 0.5
+    assert summary["by_group"]["core"]["calls"] == 2
+    assert summary["by_group"]["core"]["successful_calls"] == 1
     threshold_80 = next(item for item in thresholds if item["threshold"] == 0.8)
     assert threshold_80["accepted"] == 1
     assert threshold_80["coverage"] == 0.5
@@ -712,6 +722,7 @@ def test_report_methodology_uses_actual_models_and_endpoints() -> None:
     assert "typesafe/jev-1.13" not in markdown
     assert "preflight" not in markdown
     assert "HTTP 403" not in markdown
+    assert "provider failures as incorrect classifications" in markdown
 
 
 def test_env_file_loader_does_not_override_exported_value(

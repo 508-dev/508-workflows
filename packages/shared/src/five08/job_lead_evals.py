@@ -523,6 +523,9 @@ def summarize_profile(
     """Calculate exact-label, binary, stability, latency, and cost metrics."""
 
     successful = [item for item in observations if item.succeeded]
+    failed = [item for item in observations if not item.succeeded]
+    failed_positive = sum(item.expected_contractor_friendly for item in failed)
+    failed_negative = len(failed) - failed_positive
     contractor_correct = sum(
         item.predicted_contractor_friendly == item.expected_contractor_friendly
         for item in successful
@@ -539,21 +542,29 @@ def summarize_profile(
         item.expected_contractor_friendly and item.predicted_contractor_friendly is True
         for item in successful
     )
-    false_positive = sum(
-        not item.expected_contractor_friendly
-        and item.predicted_contractor_friendly is True
-        for item in successful
+    # Score an abstention against the expected class so every provider failure
+    # penalizes binary F1 instead of disappearing from the headline metric.
+    false_positive = (
+        sum(
+            not item.expected_contractor_friendly
+            and item.predicted_contractor_friendly is True
+            for item in successful
+        )
+        + failed_negative
     )
-    false_negative = sum(
-        item.expected_contractor_friendly
-        and item.predicted_contractor_friendly is False
-        for item in successful
+    false_negative = (
+        sum(
+            item.expected_contractor_friendly
+            and item.predicted_contractor_friendly is False
+            for item in successful
+        )
+        + failed_positive
     )
     precision = _ratio(true_positive, true_positive + false_positive)
     recall = _ratio(true_positive, true_positive + false_negative)
     f1 = _f1(precision, recall)
     posting_labels = {
-        label: _label_metrics(successful, label) for label in _POSTING_TYPES
+        label: _label_metrics(observations, label) for label in _POSTING_TYPES
     }
     posting_macro_f1 = round(
         statistics.fmean(metrics["f1"] for metrics in posting_labels.values()), 4
@@ -576,9 +587,10 @@ def summarize_profile(
 
     by_group: dict[str, dict[str, Any]] = {}
     for group in ("core", "challenge"):
-        items = [item for item in successful if item.group == group]
+        items = [item for item in observations if item.group == group]
         by_group[group] = {
             "calls": len(items),
+            "successful_calls": sum(item.succeeded for item in items),
             "contractor_accuracy": _ratio(
                 sum(
                     item.predicted_contractor_friendly
@@ -661,16 +673,16 @@ def summarize_profile(
         "calls": len(observations),
         "successful_calls": len(successful),
         "hard_failures": len(observations) - len(successful),
-        "contractor_accuracy": _ratio(contractor_correct, len(successful)),
+        "contractor_accuracy": _ratio(contractor_correct, len(observations)),
         "contractor_precision": precision,
         "contractor_recall": recall,
         "contractor_f1": f1,
         "contractor_false_positives": false_positive,
         "contractor_false_negatives": false_negative,
-        "posting_accuracy": _ratio(posting_correct, len(successful)),
+        "posting_accuracy": _ratio(posting_correct, len(observations)),
         "posting_macro_f1": posting_macro_f1,
         "posting_labels": posting_labels,
-        "joint_accuracy": _ratio(joint_correct, len(successful)),
+        "joint_accuracy": _ratio(joint_correct, len(observations)),
         "by_group": by_group,
         "repeatability": {
             "status": (
@@ -872,6 +884,7 @@ def render_job_lead_eval_report(report: JobLeadEvalReport) -> str:
             "",
             "- The corpus is a balanced, synthetic challenge set derived from the production label contract. It deliberately over-represents negation, commercial uses of the word `contract`, non-posts, and prompt-injection-like text; it does not estimate live HN prevalence.",
             "- Golden labels are exact and scoring is deterministic. No model judges another model.",
+            "- Accuracy and F1 metrics score provider failures as incorrect classifications; successful-call counts and provider errors remain visible separately.",
         ]
     )
     if "jev" in profiles:
