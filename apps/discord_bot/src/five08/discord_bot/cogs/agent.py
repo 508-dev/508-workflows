@@ -1802,10 +1802,10 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         payload: dict[str, Any],
     ) -> dict[str, Any]:
         # Project captures may serially resolve the project, actor identity, and
-        # project access before model extraction and draft persistence. Keep the
-        # client alive for every individually bounded backend stage.
+        # project access before model extraction and draft persistence. Each
+        # database stage has separate connection and statement deadlines.
         pipeline_timeout = (
-            settings.knowledge_source_timeout_seconds * 4
+            settings.knowledge_source_timeout_seconds * 2 * 4
             + settings.knowledge_model_timeout_seconds
             + 1.0
         )
