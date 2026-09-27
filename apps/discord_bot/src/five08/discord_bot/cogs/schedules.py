@@ -317,18 +317,13 @@ class AgentSchedulesCog(commands.Cog):
 
     @staticmethod
     def _schedule_creation_operation_id(payload: dict[str, Any]) -> str:
-        """Return a stable key for retries of one Discord create interaction."""
+        """Return a stable key for retries of one semantic schedule request."""
 
         context = payload.get("context")
         identity = context if isinstance(context, dict) else {}
         canonical_fields: dict[str, object] = {
             "discord_user_id": str(identity.get("discord_user_id") or "").strip(),
             "guild_id": str(identity.get("guild_id") or "").strip(),
-            # A Discord interaction is stable if its backend request is retried,
-            # but differs for a later intentional invocation with identical
-            # fields. Keeping it in the durable operation key lets an archived
-            # schedule be created again without weakening response-loss retries.
-            "interaction_id": str(identity.get("interaction_id") or "").strip(),
         }
         for key, value in payload.items():
             if key in {"context", "operation_id"}:

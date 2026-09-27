@@ -810,6 +810,7 @@ def archive_agent_schedule(
         UPDATE agent_schedules
         SET status = %s,
             next_run_at = NULL,
+            creation_operation_id = NULL,
             updated_at = NOW()
         WHERE id = %s AND guild_id = %s
         RETURNING *
@@ -1275,12 +1276,16 @@ def mark_agent_schedule_run_delivery_posted(
     run_id: str,
     execution_token: str,
     message_id: str,
+    output: str,
 ) -> AgentScheduleRunRecord | None:
-    """Record a confirmed Discord message for a claimed schedule run."""
+    """Record a confirmed Discord message and its report in one transition."""
 
     normalized_message_id = str(message_id or "").strip()
     if not normalized_message_id:
         raise ValueError("schedule delivery message id is required")
+    normalized_output = _bounded_text(output, MAX_AGENT_SCHEDULE_OUTPUT_CHARS)
+    if normalized_output is None:
+        raise ValueError("schedule delivery output is required")
     normalized_run_id = _normalize_uuid(run_id)
     normalized_execution_token = _normalize_uuid(execution_token)
     if normalized_run_id is None or normalized_execution_token is None:
@@ -1292,6 +1297,7 @@ def mark_agent_schedule_run_delivery_posted(
                 UPDATE agent_schedule_runs
                 SET delivery_status = %s,
                     delivery_message_id = %s,
+                    output = %s,
                     updated_at = NOW()
                 WHERE id = %s
                   AND status = 'running'
@@ -1302,6 +1308,7 @@ def mark_agent_schedule_run_delivery_posted(
                 (
                     AgentScheduleRunDeliveryStatus.POSTED.value,
                     normalized_message_id,
+                    normalized_output,
                     normalized_run_id,
                     normalized_execution_token,
                     AgentScheduleRunDeliveryStatus.CLAIMED.value,

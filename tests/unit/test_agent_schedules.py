@@ -373,6 +373,34 @@ def test_schedule_creation_reuses_a_matching_operation_after_response_loss(
     assert select_params == ("1000", "1001", "create-op-1")
 
 
+def test_archiving_schedule_releases_its_creation_operation_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An archived definition cannot block a later intentional recreation."""
+
+    cursor = MagicMock()
+    cursor.fetchone.return_value = None
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.cursor.return_value.__enter__.return_value = cursor
+    monkeypatch.setattr(
+        schedules,
+        "get_postgres_connection",
+        lambda _settings: connection,
+    )
+
+    archived = schedules.archive_agent_schedule(
+        SharedSettings(),
+        schedule_id="00000000-0000-4000-8000-000000000010",
+        guild_id="1000",
+    )
+
+    assert archived is None
+    query, params = cursor.execute.call_args.args
+    assert "creation_operation_id = NULL" in query
+    assert params == ("archived", "00000000-0000-4000-8000-000000000010", "1000")
+
+
 def test_schedule_creation_rejects_operation_reuse_with_different_fields(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1521,7 +1549,10 @@ def test_terminal_run_updates_keep_schedule_last_run_at_monotonic(
         (fail_agent_schedule_run, {"error": "late dispatch failure"}),
         (claim_agent_schedule_run_delivery, {}),
         (release_agent_schedule_run_delivery_claim, {}),
-        (mark_agent_schedule_run_delivery_posted, {"message_id": "message-1"}),
+        (
+            mark_agent_schedule_run_delivery_posted,
+            {"message_id": "message-1", "output": "Scheduled report"},
+        ),
         (mark_agent_schedule_run_delivery_unknown, {}),
     ],
 )
@@ -1556,3 +1587,34 @@ def test_stale_execution_token_cannot_change_a_reclaimed_run(
     query, params = cursor.execute.call_args.args
     assert "execution_token = %s" in query
     assert token in params
+
+
+def test_mark_delivery_persists_report_with_discord_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A confirmed post durably carries its exact bounded report text."""
+
+    cursor = MagicMock()
+    cursor.fetchone.return_value = None
+    connection = MagicMock()
+    connection.__enter__.return_value.cursor.return_value.__enter__.return_value = (
+        cursor
+    )
+    monkeypatch.setattr(
+        schedules,
+        "get_postgres_connection",
+        lambda _settings: connection,
+    )
+
+    posted = mark_agent_schedule_run_delivery_posted(
+        SharedSettings(),
+        run_id="00000000-0000-0000-0000-000000000001",
+        execution_token="00000000-0000-0000-0000-000000000002",
+        message_id="message-1",
+        output="Scheduled report: open issues",
+    )
+
+    assert posted is None
+    query, params = cursor.execute.call_args.args
+    assert "output = %s" in query
+    assert params[:3] == ("posted", "message-1", "Scheduled report: open issues")

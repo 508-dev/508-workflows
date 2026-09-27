@@ -41,7 +41,7 @@ def test_manual_schedule_run_message_reflects_the_backend_status(
 
 
 def test_schedule_creation_operation_id_is_stable_across_discord_retries() -> None:
-    """Only retries of one Discord interaction reuse its durable key."""
+    """A lost Discord response does not create a duplicate schedule."""
 
     first = {
         "context": {
@@ -79,7 +79,7 @@ def test_schedule_creation_operation_id_is_stable_across_discord_retries() -> No
     recreated_id = AgentSchedulesCog._schedule_creation_operation_id(recreated)
 
     assert first_id == retry_id
-    assert first_id != recreated_id
+    assert first_id == recreated_id
     assert first_id.startswith("discord-schedule:")
     assert len(first_id) <= 128
 

@@ -1642,10 +1642,21 @@ def _agent_schedule_report_was_not_sent(delivery: Mapping[str, Any]) -> bool:
     return str(delivery.get("delivery_outcome") or "") == "not_attempted"
 
 
-def _agent_schedule_channel_failure_is_permanent(status_code: int) -> bool:
+def _agent_schedule_channel_failure_is_permanent(
+    status_code: int,
+    error: str | None = None,
+) -> bool:
     """Classify invalid saved destinations separately from bot outages."""
 
-    return 400 <= status_code < 500 and status_code not in {401, 429}
+    if not 400 <= status_code < 500 or status_code in {401, 429}:
+        return False
+    # The bot could not inspect the channel/member because its own Discord
+    # permissions are incomplete. Those are operationally repairable, unlike a
+    # deleted channel or an owner who no longer has access.
+    return error not in {
+        "channel_lookup_forbidden",
+        "schedule_owner_lookup_forbidden",
+    }
 
 
 async def _validate_agent_schedule_channel_with_bot(
@@ -11425,7 +11436,10 @@ async def _execute_agent_schedule_run(
         channel_error = str(
             channel_validation.get("error") or "schedule_channel_validation_failed"
         )
-        permanent_failure = _agent_schedule_channel_failure_is_permanent(channel_status)
+        permanent_failure = _agent_schedule_channel_failure_is_permanent(
+            channel_status,
+            channel_error,
+        )
         terminal_status = (
             AgentScheduleRunStatus.SKIPPED
             if permanent_failure
@@ -11794,6 +11808,7 @@ async def _execute_agent_schedule_run(
         run_id=run.id,
         execution_token=execution_token,
         message_id=message_id,
+        output=report_content,
     )
     if recorded_delivery is None:
         current = await asyncio.to_thread(

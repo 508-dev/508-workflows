@@ -2083,6 +2083,18 @@ async def test_schedule_execution_skips_revoked_owner_before_tools_or_discord(
             503,
         ),
         (
+            {"error": "channel_lookup_forbidden"},
+            403,
+            AgentScheduleRunStatus.FAILED,
+            503,
+        ),
+        (
+            {"error": "schedule_owner_lookup_forbidden"},
+            403,
+            AgentScheduleRunStatus.FAILED,
+            503,
+        ),
+        (
             {"error": "unauthorized"},
             401,
             AgentScheduleRunStatus.FAILED,
@@ -2486,6 +2498,10 @@ async def test_frozen_schedule_summary_uses_bounded_executor_and_falls_back(
     assert bound_calls[0]["deadline_monotonic"] == bound_calls[1]["deadline_monotonic"]
     assert callable(bound_calls[1]["callback"])
     assert "Scheduled report" in post_report.await_args.kwargs["content"]
+    assert (
+        api.mark_agent_schedule_run_delivery_posted.call_args.kwargs["output"]
+        == post_report.await_args.kwargs["content"]
+    )
     complete_run.assert_called_once()
 
 
