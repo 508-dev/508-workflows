@@ -9,7 +9,7 @@ import re
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Literal, Protocol, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
@@ -361,25 +361,22 @@ class InMemoryKnowledgeStore:
         )
         with self._lock:
             replaced = self._facts.get(replaces_id) if replaces_id else None
-            target = next(
-                (
-                    old
-                    for old in reversed(list(self._facts.values()))
-                    if old.id != replaces_id
-                    and old.kind == "fact"
-                    and old.organization_id == fact.organization_id
-                    and old.scope_type == scope_type
-                    and old.scope_id == scope_id
-                    and old.status == "active"
-                    and old.deleted_at is None
-                    and memory_slot(
-                        old.key,
-                        self._memory_values.get(old.id, {"text": old.answer}),
-                    )
-                    == memory_slot(key, value_json)
-                ),
-                None,
-            )
+            targets = [
+                old
+                for old in reversed(list(self._facts.values()))
+                if old.id != replaces_id
+                and old.kind == "fact"
+                and old.organization_id == fact.organization_id
+                and old.scope_type == scope_type
+                and old.scope_id == scope_id
+                and old.status == "active"
+                and old.deleted_at is None
+                and memory_slot(
+                    old.key,
+                    self._memory_values.get(old.id, {"text": old.answer}),
+                )
+                == memory_slot(key, value_json)
+            ]
             if replaces_id and (
                 replaced is None
                 or replaced.organization_id != fact.organization_id
@@ -391,7 +388,7 @@ class InMemoryKnowledgeStore:
                 raise PermissionError(
                     "Memory to edit is unavailable or not owned by you"
                 )
-            previous = [item for item in (replaced, target) if item is not None]
+            previous = ([replaced] if replaced is not None else []) + targets
             if previous:
                 fact = fact.model_copy(update={"supersedes_id": previous[0].id})
             for existing in previous:
@@ -1028,11 +1025,13 @@ class PostgresKnowledgeStore:
                     ),
                 )
                 previous = cursor.fetchall()
+                replacement_uuid = UUID(replaces_id) if replaces_id else None
                 replaced = next(
                     (
                         row
                         for row in previous
-                        if replaces_id and str(row["id"]) == replaces_id
+                        if replacement_uuid is not None
+                        and UUID(str(row["id"])) == replacement_uuid
                     ),
                     None,
                 )

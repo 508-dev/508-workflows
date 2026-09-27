@@ -253,10 +253,70 @@ def test_in_memory_edit_does_not_supersede_non_memory_knowledge() -> None:
     assert edited.supersedes_id == original.id
 
 
+def test_in_memory_edit_supersedes_every_destination_fact() -> None:
+    now = datetime.now(timezone.utc)
+    destinations = [
+        KnowledgeFact(
+            id=f"destination-{index}",
+            organization_id="org-1",
+            scope_type="user",
+            scope_id="user-1",
+            kind="fact",
+            key="location",
+            answer=value,
+            visibility="private",
+            created_by="user-1",
+            created_at=now,
+            updated_at=now,
+        )
+        for index, value in enumerate(("Tokyo", "Kyoto"), start=1)
+    ]
+    store = InMemoryKnowledgeStore(facts=destinations)
+    original = store.remember_fact(
+        scope_type="user",
+        scope_id="user-1",
+        key="timezone",
+        value_json={"text": "Asia/Tokyo"},
+        visibility="private",
+        source_type="request",
+        source_ref="original",
+        source_excerpt=None,
+        created_by="user-1",
+        verification_status="user_confirmed",
+        organization_id="org-1",
+    )
+
+    edited = store.remember_fact(
+        scope_type="user",
+        scope_id="user-1",
+        key="location",
+        value_json={"text": "Osaka"},
+        visibility="private",
+        source_type="request",
+        source_ref="edit",
+        source_excerpt=None,
+        created_by="user-1",
+        verification_status="user_confirmed",
+        organization_id="org-1",
+        replaces_id=original.id,
+    )
+
+    active = store.list_facts(
+        scope_type="user",
+        scope_id="user-1",
+        visible_to_user_id="user-1",
+        visible_to_project_id=None,
+        visible_to_org_id="org-1",
+    )
+    assert [fact.id for fact in active] == [edited.id]
+    assert edited.supersedes_id == original.id
+
+
 def test_postgres_edit_selects_replaced_and_destination_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     replaced_id = "11111111-1111-1111-1111-111111111111"
+    noncanonical_replaced_id = "11111111111111111111111111111111"
     destination_id = "22222222-2222-2222-2222-222222222222"
     cursor = _FakeCursor(
         selected_rows=[
@@ -282,7 +342,7 @@ def test_postgres_edit_selects_replaced_and_destination_rows(
         created_by="user-1",
         verification_status="user_confirmed",
         organization_id="org-1",
-        replaces_id=replaced_id,
+        replaces_id=noncanonical_replaced_id,
     )
 
     select_query, select_params = next(
@@ -290,7 +350,10 @@ def test_postgres_edit_selects_replaced_and_destination_rows(
     )
     assert "%s::uuid IS NULL AND kind = 'fact'" not in select_query
     assert select_params is not None
-    assert select_params[3:5] == (replaced_id, replaced_id)
+    assert select_params[3:5] == (
+        noncanonical_replaced_id,
+        noncanonical_replaced_id,
+    )
     update_params = next(
         params
         for query, params in cursor.calls
