@@ -1070,7 +1070,14 @@ def _successful_jev_shadow_observation(
 
 
 def _safe_jev_shadow_error(exc: Exception) -> str:
+    status_code = getattr(exc, "status_code", None)
     cause = exc.cause if isinstance(exc, JobLeadJevRequestError) else exc
+    if not isinstance(status_code, int):
+        status_code = getattr(cause, "status_code", None)
+    if not isinstance(status_code, int):
+        status_code = getattr(getattr(cause, "response", None), "status_code", None)
+    if isinstance(status_code, int) and 100 <= status_code <= 599:
+        return f"provider_http_{status_code}"
     if isinstance(cause, requests.Timeout | CurlTimeout | TimeoutError):
         return "provider_timeout"
     if isinstance(cause, requests.ConnectionError | CurlConnectionError):

@@ -849,6 +849,19 @@ def test_jev_shadow_defaults_to_total_deadline_transport() -> None:
         classifier.close()
 
 
+def test_jev_shadow_error_preserves_structured_http_status() -> None:
+    error = JobLeadJevRequestError(
+        RuntimeError("provider echoed sensitive submitted text"),
+        request_attempts=2,
+        status_code=429,
+    )
+
+    category = job_lead_sources._safe_jev_shadow_error(error)  # noqa: SLF001
+
+    assert category == "provider_http_429"
+    assert "sensitive submitted text" not in category
+
+
 def test_jev_shadow_records_disagreement_without_changing_primary(
     monkeypatch,
 ) -> None:
