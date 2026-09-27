@@ -70,7 +70,7 @@ A symmetric gate accepts positive decisions at or above the threshold, negative 
 | 0.90 | 70.8% | 100.0% | 0 | 0 |
 | 0.95 | 50.7% | 100.0% | 0 | 0 |
 
-Jev contractor-probability Brier score: `0.012865`. Lower is better.
+Jev contractor-probability Brier score: `0.012865`. Lower is better. Probability coverage: 100.0%.
 
 ## Classification mismatches
 
@@ -125,11 +125,16 @@ Jev contractor-probability Brier score: `0.012865`. Lower is better.
 | `part_time_project_001` | 3 | part_time/true | unknown/false | - |
 | `part_time_unrelated_negation_001` | 3 | part_time/true | unknown/false | - |
 
+## Provider failures
+
+No provider failures were observed.
 
 ## Method and limitations
 
 - The corpus is a balanced, synthetic challenge set derived from the production label contract. It deliberately over-represents negation, commercial uses of the word `contract`, non-posts, and prompt-injection-like text; it does not estimate live HN prevalence.
 - Golden labels are exact and scoring is deterministic. No model judges another model.
+- Accuracy and F1 metrics score provider failures as incorrect classifications; successful-call counts and provider errors remain visible separately.
+- The Brier score is reported only when every observation includes a contractor probability; incomplete probability coverage is shown as unavailable. This run had 100.0% probability coverage for Jev.
 - The experiment applies the classification-harness pattern described in LangChain's [Jev harness article](https://www.langchain.com/blog/building-a-harness-with-jev).
 - The heuristic and Jev observations were captured at `2026-09-20T19:57:45.070955+00:00` on revision `3853befc65ddb6e37840084858a64fdb6204e5cf`. Luna was rerun at the report-assembly time on the harness revision above after its request options were aligned with production; the aggregate tables were then recomputed from both normalized observation sets.
 - Jev uses OpenRouter's `/api/alpha/decisions` endpoint and the pinned [`typesafe/jev-1.13`](https://openrouter.ai/typesafe/jev-1.13/) request ID. The resolved dated snapshot is retained in the JSON observation report.

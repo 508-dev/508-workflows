@@ -517,6 +517,8 @@ def test_confidence_gate_counts_failed_calls_as_fallbacks() -> None:
     assert summary["contractor_false_positives"] == 1
     assert summary["posting_accuracy"] == 0.5
     assert summary["joint_accuracy"] == 0.5
+    assert summary["brier_score"] is None
+    assert summary["brier_coverage"] == 0.5
     assert summary["by_group"]["core"]["calls"] == 2
     assert summary["by_group"]["core"]["successful_calls"] == 1
     threshold_80 = next(item for item in thresholds if item["threshold"] == 0.8)
@@ -633,6 +635,7 @@ def test_report_renders_sanitized_provider_failures() -> None:
 
     assert "## Provider failures" in markdown
     assert "| `provider_failure` | 2 | `provider_http_503` |" in markdown
+    assert "Brier score: unavailable (probability coverage: 0.0%)" in markdown
 
 
 def test_report_omits_provenance_for_profiles_that_were_not_run() -> None:
@@ -753,6 +756,7 @@ def test_report_methodology_uses_actual_models_and_endpoints() -> None:
     assert "preflight" not in markdown
     assert "HTTP 403" not in markdown
     assert "provider failures as incorrect classifications" in markdown
+    assert "Brier score is reported only when every observation" in markdown
 
 
 def test_env_file_loader_does_not_override_exported_value(

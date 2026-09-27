@@ -647,13 +647,11 @@ def summarize_profile(
         )
         > 1
     ]
-    probability_items: list[JobLeadEvalObservation] = []
     brier_inputs: list[tuple[float, bool]] = []
-    for item in successful:
+    for item in observations:
         probability = item.contractor_probability
         if probability is None:
             continue
-        probability_items.append(item)
         brier_inputs.append((probability, item.expected_contractor_friendly))
     brier_score = (
         round(
@@ -663,7 +661,7 @@ def summarize_profile(
             ),
             6,
         )
-        if brier_inputs
+        if brier_inputs and len(brier_inputs) == len(observations)
         else None
     )
 
@@ -708,6 +706,7 @@ def summarize_profile(
             ),
         },
         "brier_score": brier_score,
+        "brier_coverage": _ratio(len(brier_inputs), len(observations)),
         "confidence_thresholds": _confidence_thresholds(observations),
         "latency_ms": {
             "mean": round(statistics.fmean(latencies), 1) if latencies else None,
@@ -845,12 +844,19 @@ def render_job_lead_eval_report(report: JobLeadEvalReport) -> str:
                 f"| {_percent(item['accuracy'])} | {item['false_positives']} "
                 f"| {item['false_negatives']} |"
             )
-        lines.extend(
-            [
-                "",
-                f"Jev contractor-probability Brier score: `{jev_summary['brier_score']}`. Lower is better.",
-            ]
-        )
+        brier_score = jev_summary["brier_score"]
+        brier_coverage = _percent(jev_summary["brier_coverage"])
+        if brier_score is None:
+            brier_note = (
+                "Jev contractor-probability Brier score: unavailable "
+                f"(probability coverage: {brier_coverage})."
+            )
+        else:
+            brier_note = (
+                f"Jev contractor-probability Brier score: `{brier_score}`. "
+                f"Lower is better. Probability coverage: {brier_coverage}."
+            )
+        lines.extend(["", brier_note])
 
     lines.extend(["", "## Classification mismatches", ""])
     any_mismatches = False
@@ -915,6 +921,7 @@ def render_job_lead_eval_report(report: JobLeadEvalReport) -> str:
             "- The corpus is a balanced, synthetic challenge set derived from the production label contract. It deliberately over-represents negation, commercial uses of the word `contract`, non-posts, and prompt-injection-like text; it does not estimate live HN prevalence.",
             "- Golden labels are exact and scoring is deterministic. No model judges another model.",
             "- Accuracy and F1 metrics score provider failures as incorrect classifications; successful-call counts and provider errors remain visible separately.",
+            "- The Brier score is reported only when every observation includes a contractor probability; incomplete probability coverage is shown as unavailable.",
         ]
     )
     if "jev" in profiles:
