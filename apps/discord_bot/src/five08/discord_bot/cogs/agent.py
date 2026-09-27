@@ -1806,7 +1806,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         # database stage has separate connection and statement deadlines.
         pipeline_timeout = (
             settings.knowledge_source_timeout_seconds * 2 * 4
-            + settings.knowledge_model_timeout_seconds
+            + settings.knowledge_model_timeout_seconds * 2
             + 1.0
         )
         return await asyncio.to_thread(

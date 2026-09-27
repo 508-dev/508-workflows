@@ -278,7 +278,7 @@ async def test_knowledge_capture_timeout_covers_serial_backend_pipeline(
 
     await cog._post_knowledge_capture({"context": {}})
 
-    assert cog._post_backend_json.call_args.args[2] == 55.0
+    assert cog._post_backend_json.call_args.args[2] == 61.0
 
 
 @pytest.mark.asyncio
