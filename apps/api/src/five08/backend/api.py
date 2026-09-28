@@ -9707,11 +9707,9 @@ def _default_agent_schedule_tool_allowlist(
     schedule_safe_tools = ToolRegistry(
         runtime_config=runtime_config
     ).schedule_safe_tool_names()
-    # A generic schedule should not advertise an optional integration that
-    # cannot serve the planner at execution time. Explicit administrator
-    # selections remain deliberate, subject to tenant invariants below.
-    if not _agent_github_client_is_usable(runtime_config):
-        schedule_safe_tools -= {"github_issue.search_issues"}
+    # An agent-loop schedule has no pinned repository, so never give its model
+    # GitHub search. Repository-bound GitHub reports use frozen actions instead.
+    schedule_safe_tools -= {"github_issue.search_issues"}
 
     web_provider_order = {
         value.strip().casefold()
@@ -9796,9 +9794,9 @@ def _agent_schedule_definition_from_fields(
         # A generic schedule is useful without a tool-picker ceremony. Its
         # persisted catalog is still exact: newly added tools do not reach an
         # existing schedule until an admin creates or replaces it deliberately.
-        # Derive defaults from the stricter manifest opt-in so a merely
-        # read-only tool (including GitHub search) never joins a model loop by
-        # accident.
+        # Derive defaults from the stricter manifest opt-in. The generic
+        # catalog additionally excludes GitHub search because only frozen
+        # definitions pin a repository for that tool.
         runtime_config = ToolRuntimeConfig.from_settings(settings)
         configured_tools = _default_agent_schedule_tool_allowlist(
             runtime_config,

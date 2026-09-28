@@ -169,10 +169,10 @@ def test_agent_loop_creation_persists_an_exact_default_tool_catalog(
     )
 
 
-def test_agent_loop_creation_includes_configured_github_and_public_web_search(
+def test_agent_loop_creation_omits_github_but_includes_public_web_search(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Generic schedules expose only configured GitHub and web-read clients."""
+    """Generic schedules never grant unpinned GitHub repository access."""
 
     monkeypatch.setattr(api.settings, "github_app_client_id", None)
     monkeypatch.setattr(api.settings, "github_app_installation_id", None)
@@ -193,9 +193,31 @@ def test_agent_loop_creation_includes_configured_github_and_public_web_search(
         guild_id="1000",
     )
 
-    assert "github_issue.search_issues" in definition.tool_allowlist
+    assert "github_issue.search_issues" not in definition.tool_allowlist
     assert "web_read.search" in definition.tool_allowlist
     assert "web_read.extract" not in definition.tool_allowlist
+
+
+def test_agent_loop_creation_rejects_explicit_unpinned_github_search(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a repository-bound frozen schedule can retain GitHub search."""
+
+    monkeypatch.setattr(api.settings, "github_app_client_id", None)
+    monkeypatch.setattr(api.settings, "github_app_installation_id", None)
+    monkeypatch.setattr(api.settings, "github_app_private_key", None)
+    monkeypatch.setattr(api.settings, "github_api_token", "github-token")
+
+    with pytest.raises(ValueError, match="github_issue.search_issues"):
+        api._agent_schedule_definition_from_fields(
+            SimpleNamespace(
+                prompt="Review GitHub issues.",
+                execution_mode="agent_loop",
+                tool_allowlist=["github_issue.search_issues"],
+                channel_id="2000",
+            ),
+            guild_id="1000",
+        )
 
 
 def test_default_agent_loop_omits_github_for_an_incomplete_app_configuration() -> None:
