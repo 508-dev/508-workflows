@@ -106,6 +106,8 @@ _OPERATIONAL_DATA_SUBJECT_RE = re.compile(
     r"inventory|warehouses?|stock(?:\s+levels?)?|"
     r"payroll|salar(?:y|ies)|wages?|compensation|"
     r"employees?|personnel|head\s*count|"
+    r"job\s+leads?|gigs?|recruit(?:ing|ment)?(?:\s+(?:pipeline|leads?))?|"
+    r"hiring(?:\s+pipeline)?|candidates?|applicants?|"
     r"balances?|owing|owed|owes?|receivables?|revenue|sales|profit|costs?|"
     r"onboarding|crm|contacts?|members?|"
     r"tasks?|github|issues?|projects?|database|records?)\b",

@@ -10,6 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import unquote
 
 from psycopg import connect
 from psycopg.rows import dict_row
@@ -61,6 +62,15 @@ from five08.redaction import redact_email_addresses
 
 SSO_ID_FIELD = "cSsoID"
 logger = logging.getLogger(__name__)
+
+
+def _web_url_contains_private_agent_identifier(url: str) -> bool:
+    """Check both encoded and canonical URL text before an external request."""
+
+    return contains_private_agent_identifier(url) or contains_private_agent_identifier(
+        unquote(url)
+    )
+
 
 _PLANNER_TOOL_ARGUMENTS: dict[str, frozenset[str]] = {
     "agent_schedule.create": frozenset(
@@ -942,7 +952,7 @@ class ToolRegistry:
             _validate_planner_web_search_arguments(arguments)
         if tool_name == "web_read.extract":
             url = str(arguments.get("url") or "").strip()
-            if contains_private_agent_identifier(url):
+            if _web_url_contains_private_agent_identifier(url):
                 raise PermissionError(
                     "Public web extraction URLs cannot contain internal record identifiers"
                 )
@@ -1707,7 +1717,7 @@ class ToolRegistry:
         url = str(arguments.get("url") or "").strip()
         if not url:
             raise ValueError("Public web URL is required")
-        if contains_private_agent_identifier(url):
+        if _web_url_contains_private_agent_identifier(url):
             raise PermissionError(
                 "Public web extraction URLs cannot contain internal record identifiers"
             )

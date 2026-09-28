@@ -355,10 +355,19 @@ def test_planner_url_validation_does_not_resolve_before_policy(monkeypatch) -> N
     )
 
 
+@pytest.mark.parametrize(
+    "private_url",
+    [
+        "https://example.com/reset/550e8400-e29b-41d4-a716-446655440000",
+        "https://example.com/users/alice%40corp.com",
+        "https://example.com/contacts/contact%2D123",
+    ],
+)
 def test_extract_rejects_private_identifier_before_validation_or_provider(
     monkeypatch,
+    private_url: str,
 ) -> None:
-    """An internal ID embedded in a public URL must never reach Firecrawl."""
+    """Encoded or raw private identifiers must never reach Firecrawl."""
 
     class FailingWebClient:
         def extract(self, _url: str) -> WebExtractResult:
@@ -369,7 +378,6 @@ def test_extract_rejects_private_identifier_before_validation_or_provider(
 
     monkeypatch.setattr("five08.agent.tools.validate_public_https_url", fail_validation)
     registry = ToolRegistry(web_client=FailingWebClient())
-    private_url = "https://example.com/reset/550e8400-e29b-41d4-a716-446655440000"
 
     with pytest.raises(PermissionError, match="internal record identifiers"):
         registry.validate_planner_action("web_read.extract", {"url": private_url})
