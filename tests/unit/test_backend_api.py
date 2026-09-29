@@ -324,6 +324,7 @@ def test_lifespan_starts_agent_state_cleanup_after_migrations(
 
     cleanup_scheduler = AsyncMock()
     run_retention_scheduler = AsyncMock()
+    pending_plan_cleanup_scheduler = AsyncMock()
     monkeypatch.setattr(api, "get_redis_connection", lambda _settings: _HealthyRedis())
     monkeypatch.setattr(api, "run_job_migrations", Mock())
     monkeypatch.setattr(
@@ -338,6 +339,11 @@ def test_lifespan_starts_agent_state_cleanup_after_migrations(
         "_agent_schedule_run_retention_scheduler",
         run_retention_scheduler,
     )
+    monkeypatch.setattr(
+        api,
+        "_pending_agent_plan_cleanup_scheduler",
+        pending_plan_cleanup_scheduler,
+    )
     monkeypatch.setattr(api.settings, "crm_sync_enabled", False)
     monkeypatch.setattr(api.settings, "newsletter_sync_enabled", False)
     monkeypatch.setattr(api.settings, "email_resume_intake_enabled", False)
@@ -347,6 +353,7 @@ def test_lifespan_starts_agent_state_cleanup_after_migrations(
     with TestClient(api.create_app(run_lifespan=True)):
         cleanup_scheduler.assert_called_once_with()
         run_retention_scheduler.assert_called_once_with()
+        pending_plan_cleanup_scheduler.assert_called_once_with()
 
 
 async def test_postgres_health_handles_missing_connection(

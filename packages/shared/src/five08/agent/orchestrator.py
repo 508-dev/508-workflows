@@ -110,7 +110,7 @@ _OPERATIONAL_DATA_SUBJECT_RE = re.compile(
     r"hiring(?:\s+pipeline)?|candidates?|applicants?|"
     r"balances?|owing|owed|owes?|receivables?|revenue|sales|profit|costs?|"
     r"onboarding|crm|contacts?|members?|"
-    r"tasks?|github|issues?|projects?|database|records?)\b",
+    r"tasks?|github|issues?|pull\s+requests?|prs?|projects?|database|records?)\b",
     re.IGNORECASE,
 )
 _DISCORD_UNTRUSTED_MARKDOWN_CHARS = frozenset("\\*_~|`[]()#>")

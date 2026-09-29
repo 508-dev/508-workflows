@@ -3032,6 +3032,8 @@ def test_model_only_answer_is_limited_to_safe_chat_and_never_impersonation() -> 
         "What are our current employee salaries?",
         "How much did we pay in wages?",
         "Summarize current employee compensation.",
+        "What PRs need review?",
+        "Which pull requests are waiting for review?",
     ],
 )
 def test_model_only_answer_cannot_claim_operational_status(message: str) -> None:

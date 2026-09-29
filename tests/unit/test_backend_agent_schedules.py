@@ -2528,6 +2528,80 @@ async def test_frozen_schedule_summary_uses_bounded_executor_and_falls_back(
 
 
 @pytest.mark.asyncio
+async def test_schedule_paused_during_execution_is_not_delivered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lifecycle change during read work prevents the Discord side effect."""
+
+    queued_run = _run()
+    running_run = replace(
+        queued_run,
+        status=AgentScheduleRunStatus.RUNNING,
+        started_at=queued_run.occurrence_at,
+    )
+    schedule = _schedule()
+    paused_schedule = replace(schedule, status=AgentScheduleStatus.PAUSED)
+    skipped_run = replace(
+        running_run,
+        status=AgentScheduleRunStatus.SKIPPED,
+        error="schedule_not_active",
+    )
+    context = AgentIdentityContext(
+        discord_user_id="1001",
+        organization_id="1000",
+        guild_id="1000",
+        roles=["Admin"],
+    )
+
+    async def refreshed_context(*_args: object, **_kwargs: object):
+        return context, None, 200
+
+    complete_run = Mock(return_value=skipped_run)
+    orchestrator = SimpleNamespace(
+        policy=SimpleNamespace(
+            scopes_for_context=Mock(return_value=set(schedule.allowed_scopes))
+        ),
+        execute_plan=Mock(
+            return_value=[
+                AgentExecutionResult(
+                    tool_name="github_issue.search_issues",
+                    status="succeeded",
+                    result={"issues": []},
+                )
+            ]
+        ),
+    )
+    claim_delivery = Mock()
+    post_report = AsyncMock()
+    monkeypatch.setattr(api, "get_agent_schedule_run", Mock(return_value=queued_run))
+    monkeypatch.setattr(api, "claim_agent_schedule_run", Mock(return_value=running_run))
+    monkeypatch.setattr(
+        api,
+        "get_agent_schedule",
+        Mock(side_effect=[schedule, paused_schedule]),
+    )
+    monkeypatch.setattr(api, "_fresh_agent_schedule_context", refreshed_context)
+    monkeypatch.setattr(api, "_get_agent_orchestrator", lambda: orchestrator)
+    monkeypatch.setattr(api, "_agent_schedule_plan", Mock(return_value=object()))
+    monkeypatch.setattr(api, "complete_agent_schedule_run", complete_run)
+    monkeypatch.setattr(api, "claim_agent_schedule_run_delivery", claim_delivery)
+    monkeypatch.setattr(api, "_post_agent_schedule_report_to_bot", post_report)
+
+    response, status_code = await api._execute_agent_schedule_run(
+        cast(Request, SimpleNamespace()),
+        run_id=queued_run.id,
+    )
+
+    assert status_code == 200
+    assert response["status"] == "skipped"
+    assert response["delivery_status"] == "not_posted"
+    assert complete_run.call_args.kwargs["status"] is AgentScheduleRunStatus.SKIPPED
+    assert complete_run.call_args.kwargs["error"] == "schedule_not_active"
+    claim_delivery.assert_not_called()
+    post_report.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_pre_send_bot_failure_releases_delivery_claim_for_worker_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

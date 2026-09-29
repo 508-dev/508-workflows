@@ -11624,6 +11624,33 @@ async def _execute_agent_schedule_run(
         results=results,
         model_summary=model_summary,
     )
+    # A schedule may have been paused or archived while its bounded read work
+    # was running. Check the persisted lifecycle state at the external side
+    # effect boundary so an already-generated report cannot be posted after an
+    # administrator disables the schedule.
+    current_schedule = await asyncio.to_thread(
+        get_agent_schedule,
+        settings,
+        schedule_id=schedule.id,
+    )
+    if (
+        current_schedule is None
+        or current_schedule.status is not AgentScheduleStatus.ACTIVE
+    ):
+        completed = await asyncio.to_thread(
+            complete_agent_schedule_run,
+            settings,
+            run_id=run.id,
+            execution_token=execution_token,
+            status=AgentScheduleRunStatus.SKIPPED,
+            error="schedule_not_active",
+        )
+        return {
+            "status": AgentScheduleRunStatus.SKIPPED.value,
+            "schedule_id": schedule.id,
+            "delivery_status": "not_posted",
+            "run": _agent_schedule_run_payload(completed or run),
+        }, 200
     delivery_claim = await asyncio.to_thread(
         claim_agent_schedule_run_delivery,
         settings,
@@ -14521,9 +14548,15 @@ async def _lifespan(app: FastAPI) -> Any:
         app.state.agent_schedule_retention_task = asyncio.create_task(
             _agent_schedule_run_retention_scheduler()
         )
+        app.state.pending_agent_plan_cleanup_task = asyncio.create_task(
+            _pending_agent_plan_cleanup_scheduler()
+        )
     else:
         logger.warning(
             "Agent schedule run retention disabled because Postgres migrations failed"
+        )
+        logger.warning(
+            "Pending agent plan cleanup disabled because Postgres migrations failed"
         )
 
     if settings.agent_memory_cleanup_enabled and app.state.postgres_migrations_ok:
@@ -14571,6 +14604,12 @@ async def _lifespan(app: FastAPI) -> Any:
 
         if hasattr(app.state, "agent_schedule_retention_task"):
             task = app.state.agent_schedule_retention_task
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        if hasattr(app.state, "pending_agent_plan_cleanup_task"):
+            task = app.state.pending_agent_plan_cleanup_task
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
