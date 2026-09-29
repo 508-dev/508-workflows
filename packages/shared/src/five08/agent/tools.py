@@ -198,7 +198,6 @@ class ToolRuntimeConfig:
 
     github_default_repo: str = "508-dev/todos"
     github_organization: str = "508-dev"
-    github_member_extra_repos: str = ""
     github_steering_all_installed_repos: bool = True
     github_steering_extra_repos: str = ""
     github_app_client_id: str | None = None
@@ -255,9 +254,6 @@ class ToolRuntimeConfig:
                 settings, "github_default_repo", "508-dev/todos"
             ),
             github_organization=getattr(settings, "github_organization", "508-dev"),
-            github_member_extra_repos=getattr(
-                settings, "github_member_extra_repos", ""
-            ),
             github_steering_all_installed_repos=bool(
                 getattr(settings, "github_steering_all_installed_repos", True)
             ),
@@ -1951,10 +1947,6 @@ class ToolRegistry:
 
         config = self.runtime_config
         normalized_key = normalized_repository.casefold()
-        member_repositories = _github_repository_set(
-            config.github_default_repo,
-            config.github_member_extra_repos,
-        )
         legacy_repositories = _github_repository_set(
             config.github_default_repo,
             config.github_allowed_repos,
@@ -1964,13 +1956,6 @@ class ToolRegistry:
             config.github_steering_extra_repos,
         )
         github_app_is_set = self._github_app_is_set(config)
-
-        if {
-            "github:repository:member:read",
-            "github:repository:member:write",
-        } & actor_scopes:
-            if normalized_key in member_repositories:
-                return normalized_repository
 
         if (
             not github_app_is_set

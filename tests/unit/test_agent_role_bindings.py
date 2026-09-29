@@ -127,6 +127,14 @@ def test_local_role_name_fallback_requires_explicit_opt_in_and_never_works_in_pr
     assert production_policy.scopes_for_context(context) == set()
 
 
+def test_member_role_grants_no_agent_scopes_even_with_local_name_fallback() -> None:
+    policy = PolicyEngine.from_settings(
+        SharedSettings(environment="test", agent_allow_role_name_fallback=True)
+    )
+
+    assert policy.scopes_for_context(_context(role_ids=[], roles=["Member"])) == set()
+
+
 def test_unapproved_guild_is_denied_before_any_planner_call() -> None:
     class PlannerMustNotRun:
         def plan(self, **_kwargs: object) -> object:

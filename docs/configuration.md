@@ -337,8 +337,6 @@ Agent gateway:
   in Dashboard → Configuration → Operations instead of environment variables;
   the private key is encrypted there with `CONFIG_SECRET_KEY`. `GITHUB_APP_ID`
   remains a compatibility alias for the Client ID.
-- `GITHUB_MEMBER_EXTRA_REPOS`: optional additional repository access for all
-  Discord Members.
 - `GITHUB_STEERING_ALL_INSTALLED_REPOS`: defaults to `true`; grants Steering
   Committee/Admin/Owner access to all repositories selected on the App
   installation.

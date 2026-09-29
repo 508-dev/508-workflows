@@ -125,7 +125,6 @@ class SharedSettings(BaseSettings):
     # redundant environment setting.
     github_default_repo: str = "508-dev/todos"
     github_organization: str = "508-dev"
-    github_member_extra_repos: str = ""
     github_steering_all_installed_repos: bool = True
     github_steering_extra_repos: str = ""
 
