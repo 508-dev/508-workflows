@@ -2537,6 +2537,15 @@ def test_non_web_role_cannot_trigger_extract_url_validation(
         ("sarah@example.com current grants", "email addresses"),
         ("CRM contact contact-123 current grants", "internal record identifiers"),
         ("Purchase Invoice PINV-123 current grants", "internal record identifiers"),
+        ("alice%40corp.com current grants", "internal record identifiers"),
+        (
+            "CRM contact contact%2D123 current grants",
+            "internal record identifiers",
+        ),
+        (
+            "Purchase%20Invoice%20PINV%2D123 current grants",
+            "internal record identifiers",
+        ),
     ],
 )
 def test_public_web_query_rejects_sensitive_identifiers_before_provider_call(
@@ -2563,7 +2572,10 @@ def test_public_web_query_rejects_sensitive_identifiers_before_provider_call(
     assert web_client.calls == 0
 
 
-def test_public_web_route_rejects_crm_record_identifier_before_provider_call() -> None:
+@pytest.mark.parametrize("contact_id", ["contact-123", "contact%2D123"])
+def test_public_web_route_rejects_crm_record_identifier_before_provider_call(
+    contact_id: str,
+) -> None:
     """Explicit web syntax cannot bypass the private-identifier boundary."""
 
     class FakeWebClient:
@@ -2578,7 +2590,7 @@ def test_public_web_route_rejects_crm_record_identifier_before_provider_call() -
     response = AgentOrchestrator(
         registry=ToolRegistry(web_client=web_client),
     ).plan(
-        "Search the web for CRM contact contact-123",
+        f"Search the web for CRM contact {contact_id}",
         _context(roles=["Steering Committee"]),
     )
 
@@ -3034,6 +3046,9 @@ def test_model_only_answer_is_limited_to_safe_chat_and_never_impersonation() -> 
         "Summarize current employee compensation.",
         "What PRs need review?",
         "Which pull requests are waiting for review?",
+        "How many schedules are active?",
+        "What recurring reports are configured?",
+        "What reports are scheduled?",
     ],
 )
 def test_model_only_answer_cannot_claim_operational_status(message: str) -> None:

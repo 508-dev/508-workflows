@@ -64,12 +64,12 @@ SSO_ID_FIELD = "cSsoID"
 logger = logging.getLogger(__name__)
 
 
-def _web_url_contains_private_agent_identifier(url: str) -> bool:
-    """Check both encoded and canonical URL text before an external request."""
+def _web_text_contains_private_agent_identifier(value: str) -> bool:
+    """Check literal and percent-decoded text before an external web request."""
 
-    return contains_private_agent_identifier(url) or contains_private_agent_identifier(
-        unquote(url)
-    )
+    return contains_private_agent_identifier(
+        value
+    ) or contains_private_agent_identifier(unquote(value))
 
 
 _PLANNER_TOOL_ARGUMENTS: dict[str, frozenset[str]] = {
@@ -948,7 +948,7 @@ class ToolRegistry:
             _validate_planner_web_search_arguments(arguments)
         if tool_name == "web_read.extract":
             url = str(arguments.get("url") or "").strip()
-            if _web_url_contains_private_agent_identifier(url):
+            if _web_text_contains_private_agent_identifier(url):
                 raise PermissionError(
                     "Public web extraction URLs cannot contain internal record identifiers"
                 )
@@ -1713,7 +1713,7 @@ class ToolRegistry:
         url = str(arguments.get("url") or "").strip()
         if not url:
             raise ValueError("Public web URL is required")
-        if _web_url_contains_private_agent_identifier(url):
+        if _web_text_contains_private_agent_identifier(url):
             raise PermissionError(
                 "Public web extraction URLs cannot contain internal record identifiers"
             )
@@ -3072,7 +3072,7 @@ def _validate_public_web_query(query: str) -> None:
         raise PermissionError("Public web search queries cannot contain payment cards")
     if _WEB_QUERY_UUID_RE.search(query):
         raise PermissionError("Public web search queries cannot contain internal IDs")
-    if contains_private_agent_identifier(query):
+    if _web_text_contains_private_agent_identifier(query):
         raise PermissionError(
             "Public web search queries cannot contain internal record identifiers"
         )
