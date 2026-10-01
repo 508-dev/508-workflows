@@ -401,6 +401,112 @@ def test_archiving_schedule_releases_its_creation_operation_key(
     assert params == ("archived", "00000000-0000-4000-8000-000000000010", "1000")
 
 
+def test_pausing_schedule_cancels_undelivered_queued_and_running_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later resume cannot revive work that an intervening pause fenced."""
+
+    now = datetime(2026, 7, 28, 9, 0, tzinfo=timezone.utc)
+    schedule_id = "00000000-0000-4000-8000-000000000010"
+    row = {
+        "id": schedule_id,
+        "organization_id": "1000",
+        "guild_id": "1000",
+        "owner_discord_user_id": "1001",
+        "name": "Daily GitHub report",
+        "cron_expression": "0 9 * * *",
+        "timezone": "UTC",
+        "definition": AgentScheduleDefinition(
+            prompt="Report open GitHub issues.",
+            actions=[_github_action()],
+            delivery=_delivery(),
+        ).model_dump(mode="json"),
+        "allowed_scopes": ["agent:schedule:manage", "github:issue:read"],
+        "status": "paused",
+        "next_run_at": None,
+        "last_run_at": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    cursor = MagicMock()
+    cursor.fetchone.return_value = row
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.cursor.return_value.__enter__.return_value = cursor
+    monkeypatch.setattr(
+        schedules,
+        "get_postgres_connection",
+        lambda _settings: connection,
+    )
+
+    paused = schedules.pause_agent_schedule(
+        SharedSettings(),
+        schedule_id=schedule_id,
+        guild_id="1000",
+    )
+
+    assert paused is not None
+    assert paused.status is schedules.AgentScheduleStatus.PAUSED
+    lifecycle_query, lifecycle_params = cursor.execute.call_args_list[0].args
+    cancellation_query, cancellation_params = cursor.execute.call_args_list[1].args
+    assert "UPDATE agent_schedules" in lifecycle_query
+    assert lifecycle_params == ("paused", schedule_id, "1000")
+    assert "UPDATE agent_schedule_runs" in cancellation_query
+    assert "status IN ('queued', 'running')" in cancellation_query
+    assert "delivery_status = %s" in cancellation_query
+    assert cancellation_params == (
+        "skipped",
+        "schedule_paused",
+        schedule_id,
+        "pending",
+    )
+
+
+def test_archiving_a_corrupt_schedule_returns_an_operator_visible_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An operator can retire a definition that current code will not execute."""
+
+    now = datetime(2026, 7, 28, 9, 0, tzinfo=timezone.utc)
+    schedule_id = "00000000-0000-4000-8000-000000000010"
+    row = {
+        "id": schedule_id,
+        "organization_id": "1000",
+        "guild_id": "1000",
+        "owner_discord_user_id": "1001",
+        "name": "Corrupt report",
+        "cron_expression": "0 9 * * *",
+        "timezone": "UTC",
+        "definition": None,
+        "allowed_scopes": ["agent:schedule:manage"],
+        "status": "archived",
+        "next_run_at": None,
+        "last_run_at": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    cursor = MagicMock()
+    cursor.fetchone.return_value = row
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.cursor.return_value.__enter__.return_value = cursor
+    monkeypatch.setattr(
+        schedules,
+        "get_postgres_connection",
+        lambda _settings: connection,
+    )
+
+    archived = schedules.archive_agent_schedule(
+        SharedSettings(),
+        schedule_id=schedule_id,
+        guild_id="1000",
+    )
+
+    assert isinstance(archived, schedules.InvalidAgentScheduleRecord)
+    assert archived.status is schedules.AgentScheduleStatus.ARCHIVED
+    assert archived.definition_error == "invalid_persisted_schedule_definition"
+
+
 def test_schedule_creation_rejects_operation_reuse_with_different_fields(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -704,6 +810,59 @@ def test_schedule_list_applies_stable_offset_pagination(
     assert "ORDER BY created_at DESC, id DESC" in query
     assert "OFFSET %s" in query
     assert params == ("1000", True, 25, 100)
+
+
+def test_schedule_list_keeps_a_corrupt_definition_visible_to_operators(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One invalid definition cannot hide healthy schedules or its own ID."""
+
+    now = datetime(2026, 7, 28, 9, 0, tzinfo=timezone.utc)
+    healthy_row = {
+        "id": "00000000-0000-0000-0000-000000000010",
+        "organization_id": "1000",
+        "guild_id": "1000",
+        "owner_discord_user_id": "1001",
+        "name": "Healthy report",
+        "cron_expression": "0 9 * * *",
+        "timezone": "UTC",
+        "definition": AgentScheduleDefinition(
+            prompt="Report open GitHub issues.",
+            actions=[_github_action()],
+            delivery=_delivery(),
+        ).model_dump(mode="json"),
+        "allowed_scopes": ["agent:schedule:manage", "github:issue:read"],
+        "status": "active",
+        "next_run_at": now,
+        "last_run_at": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    corrupt_row = {
+        **healthy_row,
+        "id": "00000000-0000-0000-0000-000000000011",
+        "name": "Corrupt report",
+        "definition": None,
+        "status": "paused",
+    }
+    cursor = _FakeScheduleCursor(
+        schedule_row=healthy_row,
+        schedule_rows=[corrupt_row, healthy_row],
+        run_row={},
+    )
+    monkeypatch.setattr(
+        schedules,
+        "get_postgres_connection",
+        lambda _settings: _FakeScheduleConnection(cursor),
+    )
+
+    records = list_agent_schedules(SharedSettings(), guild_id="1000")
+
+    assert isinstance(records[0], schedules.InvalidAgentScheduleRecord)
+    assert records[0].id == corrupt_row["id"]
+    assert records[0].definition_error == "invalid_persisted_schedule_definition"
+    assert isinstance(records[1], schedules.AgentScheduleRecord)
+    assert records[1].id == healthy_row["id"]
 
 
 def test_terminal_schedule_run_retention_bounds_rows_and_full_output(

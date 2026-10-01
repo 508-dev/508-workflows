@@ -39,7 +39,8 @@ export type AgentSchedule = {
       tool_name: string
       arguments: Record<string, unknown>
     }>
-  }
+  } | null
+  definition_error?: string | null
 }
 
 export type AgentScheduleRun = {
@@ -80,11 +81,13 @@ function statusVariant(status: string) {
 }
 
 function scheduleActionSummary(schedule: AgentSchedule) {
-  if (schedule.definition.execution_mode === "agent_loop") {
-    const toolCount = schedule.definition.tool_allowlist?.length || 0
+  const definition = schedule.definition
+  if (!definition) return "Invalid persisted definition"
+  if (definition.execution_mode === "agent_loop") {
+    const toolCount = definition.tool_allowlist?.length || 0
     return toolCount ? `Bounded agent loop · ${toolCount} read-only tools` : "Bounded agent loop"
   }
-  const action = schedule.definition.actions.find(
+  const action = definition.actions.find(
     (candidate) => candidate.tool_name === "github_issue.search_issues",
   )
   if (!action) return "Frozen read-only action"
@@ -353,6 +356,7 @@ export function AgentSchedulesView({
                 </TableHeader>
                 <TableBody>
                   {schedules.map((schedule) => {
+                    const definition = schedule.definition
                     const isActive = schedule.status === "active"
                     const isPaused = schedule.status === "paused"
                     const controlKey = `agentSchedule:${schedule.id}`
@@ -370,16 +374,18 @@ export function AgentSchedulesView({
                         <TableCell className="max-w-60 text-sm">
                           <div>{scheduleActionSummary(schedule)}</div>
                           <div className="mt-1 text-xs text-muted-foreground">
-                            {schedule.definition.execution_mode === "agent_loop"
-                              ? "Model-planned, bounded read-only loop"
-                              : schedule.definition.summary_mode === "model_for_public_data"
-                                ? "Model summary of public metadata"
-                                : "Deterministic report"}
+                            {!definition
+                              ? "Invalid persisted definition — archive this schedule."
+                              : definition.execution_mode === "agent_loop"
+                                ? "Model-planned, bounded read-only loop"
+                                : definition.summary_mode === "model_for_public_data"
+                                  ? "Model summary of public metadata"
+                                  : "Deterministic report"}
                           </div>
                         </TableCell>
                         <TableCell>
                           <code className="text-xs">
-                            #{schedule.definition.delivery.channel_id}
+                            {definition ? `#${definition.delivery.channel_id}` : "Unavailable"}
                           </code>
                         </TableCell>
                         <TableCell className="text-sm">{timestamp(schedule.next_run_at)}</TableCell>
@@ -419,6 +425,7 @@ export function AgentSchedulesView({
                               variant="outline"
                               disabled={
                                 !canCreate ||
+                                !definition ||
                                 !isActive ||
                                 loading[`agentScheduleRun:${schedule.id}`]
                               }

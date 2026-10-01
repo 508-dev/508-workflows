@@ -3049,6 +3049,8 @@ def test_model_only_answer_is_limited_to_safe_chat_and_never_impersonation() -> 
         "How many schedules are active?",
         "What recurring reports are configured?",
         "What reports are scheduled?",
+        "Which background jobs are currently failing?",
+        "Which worker jobs are failing?",
     ],
 )
 def test_model_only_answer_cannot_claim_operational_status(message: str) -> None:

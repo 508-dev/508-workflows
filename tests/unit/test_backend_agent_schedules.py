@@ -34,6 +34,7 @@ from five08.agent.schedules import (
     AgentScheduleDefinition,
     AgentScheduleDiscordDelivery,
     AgentScheduleExecutionMode,
+    InvalidAgentScheduleRecord,
     AgentScheduleRecord,
     AgentScheduleRunDeliveryStatus,
     AgentScheduleRunRecord,
@@ -2602,6 +2603,84 @@ async def test_schedule_paused_during_execution_is_not_delivered(
 
 
 @pytest.mark.asyncio
+async def test_schedule_pause_then_resume_does_not_revive_its_pending_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The persisted pause fence wins even when the schedule is active again."""
+
+    queued_run = _run()
+    running_run = replace(
+        queued_run,
+        status=AgentScheduleRunStatus.RUNNING,
+        started_at=queued_run.occurrence_at,
+    )
+    canceled_run = replace(
+        running_run,
+        status=AgentScheduleRunStatus.SKIPPED,
+        error="schedule_paused",
+        finished_at=queued_run.occurrence_at,
+    )
+    schedule = _schedule()
+    context = AgentIdentityContext(
+        discord_user_id="1001",
+        organization_id="1000",
+        guild_id="1000",
+        roles=["Admin"],
+    )
+
+    async def refreshed_context(*_args: object, **_kwargs: object):
+        return context, None, 200
+
+    orchestrator = SimpleNamespace(
+        policy=SimpleNamespace(
+            scopes_for_context=Mock(return_value=set(schedule.allowed_scopes))
+        ),
+        execute_plan=Mock(
+            return_value=[
+                AgentExecutionResult(
+                    tool_name="github_issue.search_issues",
+                    status="succeeded",
+                    result={"issues": []},
+                )
+            ]
+        ),
+    )
+    claim_delivery = Mock(return_value=None)
+    complete_run = Mock()
+    post_report = AsyncMock()
+    monkeypatch.setattr(
+        api,
+        "get_agent_schedule_run",
+        Mock(side_effect=[queued_run, canceled_run]),
+    )
+    monkeypatch.setattr(api, "claim_agent_schedule_run", Mock(return_value=running_run))
+    monkeypatch.setattr(
+        api,
+        "get_agent_schedule",
+        Mock(side_effect=[schedule, schedule]),
+    )
+    monkeypatch.setattr(api, "_fresh_agent_schedule_context", refreshed_context)
+    monkeypatch.setattr(api, "_get_agent_orchestrator", lambda: orchestrator)
+    monkeypatch.setattr(api, "_agent_schedule_plan", Mock(return_value=object()))
+    monkeypatch.setattr(api, "claim_agent_schedule_run_delivery", claim_delivery)
+    monkeypatch.setattr(api, "complete_agent_schedule_run", complete_run)
+    monkeypatch.setattr(api, "_post_agent_schedule_report_to_bot", post_report)
+
+    response, status_code = await api._execute_agent_schedule_run(
+        cast(Request, SimpleNamespace()),
+        run_id=queued_run.id,
+    )
+
+    assert status_code == 200
+    assert response["status"] == "skipped"
+    assert response["delivery_status"] == "not_posted"
+    assert response["error"] == "schedule_paused"
+    claim_delivery.assert_called_once()
+    complete_run.assert_not_called()
+    post_report.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_pre_send_bot_failure_releases_delivery_claim_for_worker_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2757,6 +2836,76 @@ async def test_dashboard_lists_stale_delivery_claims_for_operator_attention(
         "include_archived": True,
     }
     assert stale_claims.call_args.kwargs["guild_id"] == "1000"
+
+
+@pytest.mark.asyncio
+async def test_dashboard_keeps_invalid_schedule_definitions_visible_for_archival(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single corrupted definition cannot make the admin list return 503."""
+
+    valid_schedule = _schedule()
+    invalid_schedule = InvalidAgentScheduleRecord(
+        id="schedule-corrupt",
+        organization_id=valid_schedule.organization_id,
+        guild_id=valid_schedule.guild_id,
+        owner_discord_user_id=valid_schedule.owner_discord_user_id,
+        name="Corrupt report",
+        cron_expression=valid_schedule.cron_expression,
+        timezone=valid_schedule.timezone,
+        allowed_scopes=valid_schedule.allowed_scopes,
+        status=AgentScheduleStatus.PAUSED,
+        next_run_at=None,
+        last_run_at=valid_schedule.last_run_at,
+        created_at=valid_schedule.created_at,
+        updated_at=valid_schedule.updated_at,
+    )
+
+    async def dashboard_session(*_args: object, **_kwargs: object):
+        return None, None
+
+    async def run_sync(
+        function: Callable[..., object], *args: object, **kwargs: object
+    ):
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(api, "_dashboard_session_or_error", dashboard_session)
+    monkeypatch.setattr(api.asyncio, "to_thread", run_sync)
+    monkeypatch.setattr(api, "_configured_agent_schedule_guild_id", lambda: "1000")
+    monkeypatch.setattr(
+        api, "list_agent_schedules", Mock(return_value=[invalid_schedule])
+    )
+    monkeypatch.setattr(
+        api,
+        "list_stale_agent_schedule_run_delivery_claims",
+        Mock(return_value=[]),
+    )
+
+    response = await api.dashboard_agent_schedules_handler(
+        cast(Request, SimpleNamespace())
+    )
+
+    assert response.status_code == 200
+    payload = json.loads(response.body)
+    assert payload["schedules"] == [
+        {
+            "id": "schedule-corrupt",
+            "organization_id": "1000",
+            "guild_id": "1000",
+            "owner_discord_user_id": "1001",
+            "name": "Corrupt report",
+            "cron_expression": "0 9 * * 1",
+            "timezone": "UTC",
+            "status": "paused",
+            "next_run_at": None,
+            "last_run_at": None,
+            "definition": None,
+            "definition_error": "invalid_persisted_schedule_definition",
+            "allowed_scopes": ["agent:schedule:manage", "github:issue:read"],
+            "created_at": "2026-07-28T09:00:00+00:00",
+            "updated_at": "2026-07-28T09:00:00+00:00",
+        }
+    ]
 
 
 @pytest.mark.asyncio

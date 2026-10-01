@@ -322,6 +322,39 @@ class AgentScheduleRecord:
 
 
 @dataclass(frozen=True)
+class InvalidAgentScheduleRecord:
+    """Bounded operator view of a row with an invalid persisted definition.
+
+    Schedule definitions are deliberately revalidated when read so historical
+    rows cannot gain capabilities after a code change. An invalid definition
+    must not hide the schedule from the control surfaces that let an operator
+    archive it, though, and no unvalidated definition data is exposed here.
+    """
+
+    id: str
+    organization_id: str
+    guild_id: str
+    owner_discord_user_id: str
+    name: str
+    cron_expression: str
+    timezone: str
+    allowed_scopes: frozenset[str]
+    status: AgentScheduleStatus
+    next_run_at: datetime | None
+    last_run_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+    definition_error: str = "invalid_persisted_schedule_definition"
+
+
+type AgentScheduleListRecord = AgentScheduleRecord | InvalidAgentScheduleRecord
+
+
+class InvalidAgentScheduleDefinitionError(ValueError):
+    """A stored definition cannot be used under the current safety contract."""
+
+
+@dataclass(frozen=True)
 class AgentScheduleRunRecord:
     """Typed persisted execution attempt for one schedule occurrence."""
 
@@ -658,7 +691,16 @@ def get_agent_schedule(
                 "SELECT * FROM agent_schedules WHERE id = %s", (normalized_schedule_id,)
             )
             row = cursor.fetchone()
-    return _as_schedule_record(row) if row is not None else None
+    if row is None:
+        return None
+    try:
+        return _as_schedule_record(row)
+    except InvalidAgentScheduleDefinitionError:
+        # Execution paths must fail closed for a definition that can no longer
+        # be validated. The dispatcher separately pauses due corrupt rows, and
+        # list/control surfaces retain an operator-visible representation.
+        logger.warning("Ignoring invalid persisted agent schedule id=%s", schedule_id)
+        return None
 
 
 def list_agent_schedules(
@@ -668,7 +710,7 @@ def list_agent_schedules(
     limit: int = 100,
     offset: int = 0,
     include_archived: bool = False,
-) -> list[AgentScheduleRecord]:
+) -> list[AgentScheduleListRecord]:
     """List a guild's schedules newest first for an admin control surface."""
 
     normalized_guild_id = _normalize_discord_snowflake(guild_id)
@@ -695,7 +737,7 @@ def list_agent_schedules(
                 ),
             )
             rows = cursor.fetchall()
-    return [_as_schedule_record(row) for row in rows]
+    return [_as_schedule_list_record(row) for row in rows]
 
 
 def pause_agent_schedule(
@@ -703,7 +745,7 @@ def pause_agent_schedule(
     *,
     schedule_id: str,
     guild_id: str,
-) -> AgentScheduleRecord | None:
+) -> AgentScheduleListRecord | None:
     """Pause a schedule without deleting its frozen definition or history."""
 
     normalized_guild_id = _normalize_discord_snowflake(guild_id)
@@ -731,7 +773,31 @@ def pause_agent_schedule(
                 ),
             )
             row = cursor.fetchone()
-    return _as_schedule_record(row) if row is not None else None
+            if row is not None:
+                # A pause must fence any occurrence that has not reserved a
+                # Discord delivery. This happens in the same transaction as
+                # the lifecycle update, so a following resume cannot make an
+                # already-queued or in-flight read run deliver after the
+                # intervening pause.
+                cursor.execute(
+                    """
+                    UPDATE agent_schedule_runs
+                    SET status = %s,
+                        error = %s,
+                        finished_at = NOW(),
+                        updated_at = NOW()
+                    WHERE schedule_id = %s
+                      AND status IN ('queued', 'running')
+                      AND delivery_status = %s
+                    """,
+                    (
+                        AgentScheduleRunStatus.SKIPPED.value,
+                        "schedule_paused",
+                        normalized_schedule_id,
+                        AgentScheduleRunDeliveryStatus.PENDING.value,
+                    ),
+                )
+    return _as_schedule_list_record(row) if row is not None else None
 
 
 def resume_agent_schedule(
@@ -799,7 +865,7 @@ def archive_agent_schedule(
     *,
     schedule_id: str,
     guild_id: str,
-) -> AgentScheduleRecord | None:
+) -> AgentScheduleListRecord | None:
     """Retire a schedule while retaining an auditable immutable definition."""
 
     normalized_guild_id = _normalize_discord_snowflake(guild_id)
@@ -826,7 +892,7 @@ def archive_agent_schedule(
                 ),
             )
             row = cursor.fetchone()
-    return _as_schedule_record(row) if row is not None else None
+    return _as_schedule_list_record(row) if row is not None else None
 
 
 def create_manual_agent_schedule_run(
@@ -1755,7 +1821,18 @@ def prune_terminal_agent_schedule_runs(
 def _as_schedule_record(row: dict[str, Any]) -> AgentScheduleRecord:
     definition_payload = row.get("definition")
     if not isinstance(definition_payload, dict):
-        raise ValueError("agent schedule definition is corrupted")
+        raise InvalidAgentScheduleDefinitionError(
+            "agent schedule definition is corrupted"
+        )
+    try:
+        definition = AgentScheduleDefinition.model_validate(
+            definition_payload,
+            context={_PERSISTED_AGENT_SCHEDULE_DEFINITION_CONTEXT_KEY: True},
+        )
+    except ValidationError as exc:
+        raise InvalidAgentScheduleDefinitionError(
+            "agent schedule definition is corrupted"
+        ) from exc
     return AgentScheduleRecord(
         id=str(row["id"]),
         organization_id=str(row["organization_id"]),
@@ -1764,10 +1841,7 @@ def _as_schedule_record(row: dict[str, Any]) -> AgentScheduleRecord:
         name=str(row["name"]),
         cron_expression=str(row["cron_expression"]),
         timezone=str(row["timezone"]),
-        definition=AgentScheduleDefinition.model_validate(
-            definition_payload,
-            context={_PERSISTED_AGENT_SCHEDULE_DEFINITION_CONTEXT_KEY: True},
-        ),
+        definition=definition,
         allowed_scopes=frozenset(_normalize_scopes(row.get("allowed_scopes") or [])),
         status=AgentScheduleStatus(str(row["status"])),
         next_run_at=_nullable_utc_datetime(row.get("next_run_at")),
@@ -1775,6 +1849,32 @@ def _as_schedule_record(row: dict[str, Any]) -> AgentScheduleRecord:
         created_at=_utc_datetime(row["created_at"]),
         updated_at=_utc_datetime(row["updated_at"]),
     )
+
+
+def _as_schedule_list_record(row: dict[str, Any]) -> AgentScheduleListRecord:
+    """Keep corrupt definitions visible without making them executable."""
+
+    try:
+        return _as_schedule_record(row)
+    except InvalidAgentScheduleDefinitionError:
+        logger.warning("Listing invalid persisted agent schedule id=%s", row.get("id"))
+        return InvalidAgentScheduleRecord(
+            id=str(row["id"]),
+            organization_id=str(row["organization_id"]),
+            guild_id=str(row["guild_id"]),
+            owner_discord_user_id=str(row["owner_discord_user_id"]),
+            name=str(row["name"]),
+            cron_expression=str(row["cron_expression"]),
+            timezone=str(row["timezone"]),
+            allowed_scopes=frozenset(
+                _normalize_scopes(row.get("allowed_scopes") or [])
+            ),
+            status=AgentScheduleStatus(str(row["status"])),
+            next_run_at=_nullable_utc_datetime(row.get("next_run_at")),
+            last_run_at=_nullable_utc_datetime(row.get("last_run_at")),
+            created_at=_utc_datetime(row["created_at"]),
+            updated_at=_utc_datetime(row["updated_at"]),
+        )
 
 
 def _as_schedule_run_record(row: dict[str, Any]) -> AgentScheduleRunRecord:

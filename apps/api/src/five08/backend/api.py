@@ -76,6 +76,7 @@ from five08.agent.privacy import contains_private_agent_identifier
 from five08.agent.schedules import (
     AGENT_SCHEDULE_AGENT_LOOP_ALLOWED_TOOL_NAMES,
     AGENT_SCHEDULE_MODEL_ROUTED_IDENTIFIER_TOOL_NAMES,
+    InvalidAgentScheduleRecord,
     AgentScheduleRecord,
     AgentScheduleRunDeliveryStatus,
     AgentScheduleRunRecord,
@@ -9950,10 +9951,18 @@ def _validate_agent_schedule_envelope(
     return allowed_scopes, None
 
 
-def _agent_schedule_payload(schedule: AgentScheduleRecord) -> dict[str, Any]:
+def _agent_schedule_payload(
+    schedule: AgentScheduleRecord | InvalidAgentScheduleRecord,
+) -> dict[str, Any]:
     """Serialize a schedule without exposing credentials or role IDs as grants."""
 
-    return {
+    if isinstance(schedule, AgentScheduleRecord):
+        definition: dict[str, Any] | None = schedule.definition.model_dump(mode="json")
+        definition_error: str | None = None
+    else:
+        definition = None
+        definition_error = schedule.definition_error
+    payload: dict[str, Any] = {
         "id": schedule.id,
         "organization_id": schedule.organization_id,
         "guild_id": schedule.guild_id,
@@ -9972,11 +9981,14 @@ def _agent_schedule_payload(schedule: AgentScheduleRecord) -> dict[str, Any]:
             if schedule.last_run_at is not None
             else None
         ),
-        "definition": schedule.definition.model_dump(mode="json"),
+        "definition": definition,
         "allowed_scopes": sorted(schedule.allowed_scopes),
         "created_at": schedule.created_at.isoformat(),
         "updated_at": schedule.updated_at.isoformat(),
     }
+    if definition_error is not None:
+        payload["definition_error"] = definition_error
+    return payload
 
 
 def _agent_schedule_run_payload(run: AgentScheduleRunRecord) -> dict[str, Any]:
@@ -11663,6 +11675,18 @@ async def _execute_agent_schedule_run(
             settings,
             run_id=run.id,
         )
+        if current is not None and current.status is AgentScheduleRunStatus.SKIPPED:
+            # ``pause_agent_schedule`` atomically marks queued/running runs
+            # skipped before a quick resume can restore the schedule itself.
+            # A worker that finishes its reads afterward must not reinterpret
+            # that expected lifecycle fence as an ambiguous delivery failure.
+            return {
+                "status": AgentScheduleRunStatus.SKIPPED.value,
+                "schedule_id": schedule.id,
+                "delivery_status": "not_posted",
+                "error": current.error,
+                "run": _agent_schedule_run_payload(current),
+            }, 200
         if current is not None and current.execution_token != execution_token:
             return {
                 "error": "schedule_run_claim_replaced",

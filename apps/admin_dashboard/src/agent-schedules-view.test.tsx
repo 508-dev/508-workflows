@@ -92,6 +92,41 @@ describe("AgentSchedulesView", () => {
     expect(onResolveDelivery).toHaveBeenCalledWith(staleDelivery.id)
   })
 
+  it("keeps an invalid persisted definition visible and archivable", () => {
+    const onControl = vi.fn()
+    const invalidSchedule: AgentSchedule = {
+      ...schedule,
+      name: "Corrupt report",
+      status: "paused",
+      definition: null,
+      definition_error: "invalid_persisted_schedule_definition",
+    }
+    render(
+      <AgentSchedulesView
+        schedules={[invalidSchedule]}
+        deliveryAttention={[]}
+        schedulerEnabled
+        loading={{}}
+        canWrite
+        canCreate
+        onRefresh={vi.fn()}
+        onCreate={vi.fn().mockResolvedValue(true)}
+        onControl={onControl}
+        onRun={vi.fn()}
+        onResolveDelivery={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByText("Invalid persisted definition")).toBeVisible()
+    expect(screen.getByText(/archive this schedule/i)).toBeVisible()
+    expect(screen.getByText("Unavailable")).toBeVisible()
+    expect(screen.getByRole("button", { name: "Run now" })).toBeDisabled()
+
+    fireEvent.click(screen.getByRole("button", { name: "Archive Corrupt report" }))
+
+    expect(onControl).toHaveBeenCalledWith(invalidSchedule.id, "archive")
+  })
+
   it("reuses a creation operation ID after response loss", async () => {
     const onCreate = vi.fn().mockResolvedValue(false)
     render(

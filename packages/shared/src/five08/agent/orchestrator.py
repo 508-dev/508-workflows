@@ -111,6 +111,7 @@ _OPERATIONAL_DATA_SUBJECT_RE = re.compile(
     r"balances?|owing|owed|owes?|receivables?|revenue|sales|profit|costs?|"
     r"onboarding|crm|contacts?|members?|"
     r"tasks?|github|issues?|pull\s+requests?|prs?|schedules?|"
+    r"(?:background|worker)\s+(?:jobs?|tasks?)|"
     r"(?:recurring|scheduled)\s+reports?|reports?\s+(?:are\s+)?scheduled|"
     r"projects?|database|records?)\b",
     re.IGNORECASE,
