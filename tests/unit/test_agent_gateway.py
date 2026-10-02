@@ -2091,6 +2091,22 @@ def test_explicit_task_creation_does_not_depend_on_model_routing() -> None:
     }
 
 
+def test_direct_chat_without_chat_scope_never_reaches_the_planner() -> None:
+    """A role with other agent scopes cannot spend provider capacity on chat."""
+
+    class FailingPlanner:
+        def plan(self, **_kwargs: object) -> AgentPlannerResult:
+            raise AssertionError("unauthorized direct chat reached the planner")
+
+    response = AgentOrchestrator(planner=FailingPlanner()).plan(
+        "What is a cooperative?",
+        _context(roles=["Engineer"]),
+    )
+
+    assert response.status == "denied"
+    assert "agent:chat" in response.message
+
+
 def test_private_compound_workflows_do_not_use_the_model_or_partially_run() -> None:
     planner_calls: list[dict[str, object]] = []
 

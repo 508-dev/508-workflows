@@ -641,6 +641,13 @@ class AgentOrchestrator:
 
         if self.planner is None:
             return None
+        if self._is_direct_chat_request(text):
+            chat_decision = self.policy.authorize_chat(context=context)
+            if not chat_decision.allowed:
+                return AgentResponse(
+                    status="denied",
+                    message=chat_decision.reason,
+                )
         model_tier = self._choose_model_tier_for_request(text)
         try:
             result = self.planner.plan(

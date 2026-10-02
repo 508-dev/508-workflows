@@ -959,8 +959,25 @@ def test_scheduled_reports_escape_external_markdown_and_display_controls() -> No
             ),
         ],
     )
+    erp_report = api._deterministic_agent_schedule_report(
+        schedule=_agent_loop_schedule(
+            tool_allowlist=["erp_read.search_projects", "onboarding_read.get_summary"]
+        ),
+        results=[
+            AgentExecutionResult(
+                tool_name="erp_read.search_projects",
+                status="succeeded",
+                result={"projects": [{"status": unsafe_title}]},
+            ),
+            AgentExecutionResult(
+                tool_name="onboarding_read.get_summary",
+                status="succeeded",
+                result={"by_state": {unsafe_title: 1}, "total": 1, "stale_count": 0},
+            ),
+        ],
+    )
 
-    for report in (github_report, web_report):
+    for report in (github_report, web_report, erp_report):
         assert unsafe_title not in report
         assert (
             "\\# \\[Official\\]\\(https://evil.example\\) \\*\\*Update\\*\\*" in report

@@ -209,6 +209,24 @@ def test_run_job_requeues_duplicate_delivery_when_a_lease_is_still_fresh() -> No
     mock_send.assert_called_once_with(args=("job-lease",), delay=600_000)
 
 
+def test_run_job_reschedules_recovery_when_lease_inspection_fails() -> None:
+    """A transient lease read cannot consume the only recovery delivery."""
+
+    with (
+        patch("five08.worker.actors.claim_job_for_execution", return_value=None),
+        patch(
+            "five08.worker.actors.get_job",
+            side_effect=ConnectionError("temporary database outage"),
+        ),
+        patch("five08.worker.actors._schedule_job_lease_recovery") as mock_recovery,
+    ):
+        actors._run_job("job-lease")
+
+    mock_recovery.assert_called_once_with(
+        "job-lease", delay_seconds=actors._job_lease_seconds()
+    )
+
+
 def test_job_lease_heartbeat_renews_the_current_claim() -> None:
     """A long-running handler keeps its claim fresh until it exits."""
 

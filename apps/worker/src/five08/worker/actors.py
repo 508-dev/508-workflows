@@ -243,6 +243,10 @@ def _requeue_running_job_after_lease(job_id: str) -> None:
             "Unable to inspect active execution lease for duplicate job_id=%s",
             job_id,
         )
+        # This may be the recovery delivery left behind by an actor interrupted
+        # at its hard deadline. Keep a replacement pending when a transient
+        # database error prevents us from inspecting the durable lease.
+        _schedule_job_lease_recovery(job_id, delay_seconds=_job_lease_seconds())
         return
     if job is None or job.status is not JobStatus.RUNNING or job.locked_at is None:
         return

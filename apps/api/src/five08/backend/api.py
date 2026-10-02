@@ -11079,7 +11079,10 @@ def _deterministic_agent_loop_report(
         elif tool_name == "billing_read.get_invoice_summary":
             invoice = payload.get("invoice")
             if isinstance(invoice, Mapping):
-                status = _single_line(invoice.get("status"), limit=64) or "unknown"
+                status = (
+                    _discord_safe_external_text(invoice.get("status"), limit=64)
+                    or "unknown"
+                )
                 lines.append(f"\nRetrieved an invoice summary (status: {status}).")
             else:
                 lines.append("\nNo matching invoice was found.")
@@ -11095,7 +11098,10 @@ def _deterministic_agent_loop_report(
             for project in project_rows:
                 if not isinstance(project, Mapping):
                     continue
-                status = _single_line(project.get("status"), limit=64) or "unknown"
+                status = (
+                    _discord_safe_external_text(project.get("status"), limit=64)
+                    or "unknown"
+                )
                 status_counts[status] = status_counts.get(status, 0) + 1
             has_more = payload.get("has_more") is True
             status_suffix = (
@@ -11117,7 +11123,10 @@ def _deterministic_agent_loop_report(
         elif tool_name == "erp_read.get_project_summary":
             project = payload.get("project")
             if isinstance(project, Mapping):
-                status = _single_line(project.get("status"), limit=64) or "unknown"
+                status = (
+                    _discord_safe_external_text(project.get("status"), limit=64)
+                    or "unknown"
+                )
                 completion = project.get("percent_complete")
                 completion_suffix = (
                     f", {completion}% complete"
@@ -11134,7 +11143,7 @@ def _deterministic_agent_loop_report(
             states = payload.get("by_state")
             state_summary = (
                 ", ".join(
-                    f"{_single_line(state, limit=64) or 'unknown'}: "
+                    f"{_discord_safe_external_text(state, limit=64) or 'unknown'}: "
                     f"{_schedule_nonnegative_int(count)}"
                     for state, count in sorted(states.items())
                 )
