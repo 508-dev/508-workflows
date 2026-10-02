@@ -3,18 +3,33 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Iterable, Protocol
-from five08.agent.memory import MemoryStore
+from collections.abc import Callable, Iterable
+from typing import TYPE_CHECKING, Protocol
 
+from five08.agent.memory import MemoryStore, contains_sensitive_memory_text
 from five08.agent.models import (
     AgentContextSnippet,
     AgentContextSource,
     AgentIdentityContext,
 )
+from five08.agent.privacy import contains_private_agent_identifier
+
+if TYPE_CHECKING:
+    from five08.agent.policy import PolicyEngine
 
 logger = logging.getLogger(__name__)
+
+_CONTEXT_EMAIL_RE = re.compile(
+    r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
+    re.IGNORECASE,
+)
+_CONTEXT_UUID_RE = re.compile(
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -63,13 +78,29 @@ class RequestContextLoader:
 class PrivateMemoryContextLoader:
     """Add the actor's active private preferences to bounded planner context."""
 
-    def __init__(self, store: MemoryStore) -> None:
+    def __init__(
+        self,
+        store: MemoryStore,
+        *,
+        policy: PolicyEngine | None = None,
+        policy_factory: Callable[[], PolicyEngine] | None = None,
+    ) -> None:
+        if policy is not None and policy_factory is not None:
+            raise ValueError("Provide either policy or policy_factory, not both")
         self.store = store
+        self._policy = policy
+        self._policy_factory = policy_factory
 
     def load(
         self, *, context: AgentIdentityContext, bounds: ContextLoadBounds
     ) -> list[AgentContextSnippet]:
         from five08.agent.policy import PolicyEngine
+
+        policy = self._policy or (
+            self._policy_factory()
+            if self._policy_factory is not None
+            else PolicyEngine()
+        )
 
         # Client-supplied metadata cannot establish backend provenance.
         snippets = [
@@ -79,10 +110,12 @@ class PrivateMemoryContextLoader:
         if (
             context.response_destination_visibility == "private"
             and not context.impersonation
-            and "memory:read_self" in PolicyEngine().scopes_for_context(context)
+            and bool(context.organization_id)
+            and "memory:read_self" in policy.scopes_for_context(context)
         ):
             try:
                 facts = self.store.list_facts(
+                    organization_id=context.organization_id,
                     scope_type="user",
                     scope_id=context.discord_user_id,
                     visible_to_user_id=context.discord_user_id,
@@ -128,7 +161,26 @@ def bound_context_snippets(
             break
         if _is_too_old(snippet.created_at, bounds=bounds, now=comparison_time):
             continue
-        token_count = snippet.token_count or estimate_context_tokens(snippet.text)
+        redacted_text, redacted_uuid_count = _redact_context_uuids(snippet.text)
+        if redacted_uuid_count:
+            logger.info(
+                "Redacted UUID values from untrusted agent context count=%s",
+                redacted_uuid_count,
+            )
+        if _contains_private_context_text(
+            redacted_text
+        ) or contains_private_agent_identifier(redacted_text):
+            # Request-supplied thread context is untrusted and may contain a
+            # credential, email address, or internal record identifier that
+            # must never cross the model boundary. UUIDs above are safe to
+            # redact while preserving the rest of the operator-relevant
+            # context.
+            continue
+        # The request envelope is untrusted: a caller could claim a tiny token
+        # count for a very large snippet. Count the exact text that will be
+        # sent onward after its hard character cap instead.
+        truncated_text = redacted_text[:2048]
+        token_count = estimate_context_tokens(truncated_text)
         if token_count <= 0:
             continue
         if token_count > remaining_tokens:
@@ -136,7 +188,7 @@ def bound_context_snippets(
         loaded.append(
             snippet.model_copy(
                 update={
-                    "text": snippet.text[:2048],
+                    "text": truncated_text,
                     "token_count": token_count,
                     "trusted": False,
                     "backend_loaded": (
@@ -209,6 +261,18 @@ def estimate_context_tokens(text: str) -> int:
     """Cheap deterministic token estimate used only for bounding."""
 
     return max(1, (len(text) + 3) // 4)
+
+
+def _contains_private_context_text(text: str) -> bool:
+    """Return whether a request snippet is unsafe to send to a model."""
+
+    return bool(contains_sensitive_memory_text(text) or _CONTEXT_EMAIL_RE.search(text))
+
+
+def _redact_context_uuids(text: str) -> tuple[str, int]:
+    """Redact opaque UUIDs while retaining surrounding untrusted context."""
+
+    return _CONTEXT_UUID_RE.subn("[redacted UUID]", text)
 
 
 def _is_too_old(

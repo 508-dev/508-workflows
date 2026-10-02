@@ -16,6 +16,7 @@ class _FakeCursor:
     def __init__(self) -> None:
         self.calls: list[tuple[str, tuple[Any, ...] | None]] = []
         self.row: dict[str, Any] | None = None
+        self.rowcount = 0
 
     def __enter__(self) -> "_FakeCursor":
         return self
@@ -168,3 +169,26 @@ def test_postgres_semantic_fallback_honors_smaller_candidate_limit(
     assert fallback_params is not None
     assert fallback_params[-1] == 4
     assert evidence == []
+
+
+def test_postgres_memory_cleanup_targets_the_unified_memory_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = _FakeConnection()
+    connection.cursor_instance.rowcount = 3
+    monkeypatch.setattr(
+        knowledge_store,
+        "get_postgres_connection",
+        lambda _settings, **_kwargs: connection,
+    )
+    now = datetime(2026, 9, 20, 0, 0, tzinfo=timezone.utc)
+
+    purged = PostgresKnowledgeStore(SimpleNamespace()).purge_expired_all_organizations(
+        now=now
+    )
+
+    query, params = connection.cursor_instance.calls[-1]
+    assert "DELETE FROM memory_facts" in query
+    assert "status = 'deleted'" in query
+    assert params == (now,)
+    assert purged == 3

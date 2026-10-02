@@ -41,7 +41,7 @@
       {
         "tool_name": "github_issue.search_issues",
         "requires_confirmation": false,
-        "required_scopes": ["github:repository:member:read"],
+        "required_scopes": ["github:issue:read"],
         "arguments_contains": {
           "query": "onboarding",
           "state": "open"

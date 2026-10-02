@@ -2,6 +2,7 @@
 
 from ipaddress import ip_address
 from urllib.parse import urlparse
+from typing import Final
 
 from pydantic import AliasChoices, Field, PrivateAttr, field_validator, model_validator
 
@@ -10,6 +11,14 @@ from five08.openai_fallback import (
     build_openai_compatible_provider_attempts,
 )
 from five08.settings import SharedSettings
+
+
+# A schedule request refreshes the owner's roles, can make one bounded
+# public-data summary call, and delivers its report after the tool deadline.
+# Reserve a conservative minute for those endpoint steps around the configured
+# schedule execution window.
+AGENT_SCHEDULE_ENDPOINT_OVERHEAD_SECONDS: Final[float] = 60.0
+_JOB_LEASE_EXPIRY_MARGIN_SECONDS: Final[float] = 5.0
 
 
 class WorkerSettings(SharedSettings):
@@ -21,6 +30,10 @@ class WorkerSettings(SharedSettings):
     worker_queue_names: str = "jobs.default"
     worker_burst: bool = False
     discord_bot_internal_base_url: str = "http://127.0.0.1:3000"
+    # The worker delegates schedule execution to the API because that service
+    # owns agent model credentials and the bot-internal Discord client.
+    agent_schedule_api_base_url: str = "http://127.0.0.1:8090"
+    agent_schedule_api_timeout_seconds: float = Field(default=360.0, gt=0, le=360.0)
 
     espo_base_url: str = ""
     espo_api_key: str = ""
@@ -93,7 +106,27 @@ class WorkerSettings(SharedSettings):
     @property
     def resolved_discord_bot_internal_base_url(self) -> str | None:
         """Return only transport-safe internal Discord bot endpoints."""
-        candidate = self.discord_bot_internal_base_url.strip().rstrip("/")
+        return self._resolved_internal_base_url(
+            self.discord_bot_internal_base_url,
+            cleartext_service_names={"discord_bot"},
+        )
+
+    @property
+    def resolved_agent_schedule_api_base_url(self) -> str | None:
+        """Return only transport-safe API endpoints for schedule delegation."""
+        return self._resolved_internal_base_url(
+            self.agent_schedule_api_base_url,
+            cleartext_service_names={"web"},
+        )
+
+    @staticmethod
+    def _resolved_internal_base_url(
+        value: str,
+        *,
+        cleartext_service_names: set[str],
+    ) -> str | None:
+        """Allow HTTPS, loopback HTTP, or an explicit compose service name."""
+        candidate = value.strip().rstrip("/")
         if not candidate:
             return None
         try:
@@ -115,7 +148,7 @@ class WorkerSettings(SharedSettings):
         if parsed.scheme.casefold() != "http":
             return None
         hostname = hostname.casefold()
-        if hostname in {"localhost", "discord_bot"}:
+        if hostname == "localhost" or hostname in cleartext_service_names:
             return candidate
         try:
             return candidate if ip_address(hostname).is_loopback else None
@@ -164,7 +197,6 @@ class WorkerSettings(SharedSettings):
     dashboard_default_path: str = "/dashboard"
     dashboard_public_base_url: str | None = None
     discord_bot_token: str | None = None
-    discord_server_id: str | None = None
     discord_admin_roles: str = "Admin,Owner"
     discord_api_timeout_seconds: float = 8.0
     discord_link_ttl_seconds: int = 600
@@ -245,6 +277,34 @@ class WorkerSettings(SharedSettings):
             raise ValueError(
                 "INTAKE_RESUME_VIRUS_SCAN_COMMAND must be set when "
                 "INTAKE_RESUME_REQUIRE_VIRUS_SCAN=true"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_agent_schedule_timeout_settings(self) -> "WorkerSettings":
+        """Keep worker, API, and durable-job timeouts in one safe envelope."""
+
+        if not self.agent_schedule_enabled:
+            return self
+
+        minimum_api_timeout_seconds = (
+            self.agent_schedule_execution_timeout_seconds
+            + AGENT_SCHEDULE_ENDPOINT_OVERHEAD_SECONDS
+        )
+        if self.agent_schedule_api_timeout_seconds < minimum_api_timeout_seconds:
+            raise ValueError(
+                "AGENT_SCHEDULE_API_TIMEOUT_SECONDS must be at least "
+                "AGENT_SCHEDULE_EXECUTION_TIMEOUT_SECONDS plus 60 seconds "
+                "for role refresh, summary, and report delivery"
+            )
+        minimum_job_timeout_seconds = (
+            self.agent_schedule_api_timeout_seconds + _JOB_LEASE_EXPIRY_MARGIN_SECONDS
+        )
+        if self.job_timeout_seconds <= minimum_job_timeout_seconds:
+            raise ValueError(
+                "JOB_TIMEOUT_SECONDS must exceed "
+                "AGENT_SCHEDULE_API_TIMEOUT_SECONDS plus the five-second "
+                "lease expiry margin"
             )
         return self
 
