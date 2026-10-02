@@ -3061,6 +3061,9 @@ def test_model_only_answer_is_limited_to_safe_chat_and_never_impersonation() -> 
         "How much did we pay in wages?",
         "Summarize current employee compensation.",
         "What PRs need review?",
+        "What bugs need triage?",
+        "Which defects are open?",
+        "What tickets need triage?",
         "Which pull requests are waiting for review?",
         "How many schedules are active?",
         "What recurring reports are configured?",
@@ -3089,6 +3092,33 @@ def test_model_only_answer_cannot_claim_operational_status(message: str) -> None
 
     assert response.status == "needs_clarification"
     assert response.message != "A model-only operational answer."
+
+
+def test_bug_triage_is_not_rejected_as_unauthorized_direct_chat() -> None:
+    """An Engineer's issue question is routed as operational, not direct chat."""
+
+    planner_calls: list[dict[str, object]] = []
+
+    class FakePlanner:
+        def plan(self, **kwargs: object) -> AgentPlannerResult:
+            planner_calls.append(kwargs)
+            return AgentPlannerResult(
+                draft=PlannerDraft(
+                    status="answer",
+                    answer="A model-only bug-triage answer.",
+                ),
+                model=AgentModelConfig().resolve("fast"),
+                latency_ms=1,
+            )
+
+    response = AgentOrchestrator(planner=FakePlanner()).plan(
+        "What bugs need triage?",
+        _context(roles=["Engineer"]),
+    )
+
+    assert len(planner_calls) == 1
+    assert response.status == "needs_clarification"
+    assert response.message != "A model-only bug-triage answer."
 
 
 def test_live_planner_write_confirmation_renders_validated_arguments() -> None:

@@ -1092,6 +1092,56 @@ def test_agent_loop_rejects_a_follow_up_web_search_from_untrusted_results() -> N
     assert api._agent_schedule_loop_error_is_non_retryable(outcome.error)
 
 
+def test_agent_loop_rejects_web_search_after_internal_observation() -> None:
+    """Private read observations cannot influence a later public search query."""
+
+    planner = _LoopPlanner(
+        PlannerDraft(
+            status="planned",
+            actions=[
+                PlannerDraftAction(
+                    tool_name="crm_read.search_contacts",
+                    arguments={"query": "onboarding", "limit": 5},
+                    summary="Inspect CRM onboarding contacts",
+                )
+            ],
+        ),
+        PlannerDraft(
+            status="planned",
+            actions=[
+                PlannerDraftAction(
+                    tool_name="web_read.search",
+                    arguments={"query": "internal CRM result", "limit": 5},
+                    summary="Search a derived public query",
+                )
+            ],
+        ),
+    )
+    orchestrator = _LoopOrchestrator(planner)
+    schedule = _agent_loop_schedule(
+        tool_allowlist=["crm_read.search_contacts", "web_read.search"]
+    )
+    context = AgentIdentityContext(
+        discord_user_id="1001",
+        organization_id="1000",
+        guild_id="1000",
+        roles=["Admin"],
+    )
+
+    outcome = api._run_agent_schedule_loop(
+        orchestrator=cast(AgentOrchestrator, orchestrator),
+        schedule=schedule,
+        run=_run(),
+        context=context,
+        effective_scopes=orchestrator.policy.scopes_for_context(context),
+        deadline_monotonic=1_000_000_000_000.0,
+    )
+
+    assert outcome.error == "scheduled_planner_follow_up_search_not_allowed"
+    assert len(orchestrator.plans) == 1
+    assert api._agent_schedule_loop_error_is_non_retryable(outcome.error)
+
+
 def test_agent_loop_never_sends_a_legacy_private_objective_to_the_planner() -> None:
     """Runtime defense protects schedule rows that predate the creation gate."""
 
@@ -3002,10 +3052,10 @@ async def test_schedule_run_retention_runs_independently_of_dispatch(
 
 
 @pytest.mark.asyncio
-async def test_operator_can_mark_stale_delivery_claim_unknown_without_resend(
+async def test_operator_can_mark_stale_delivery_claim_unknown_without_parsing_schedule(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Manual claim resolution keeps the at-most-once contract intact."""
+    """Corrupt schedule definitions do not block operator-only recovery."""
 
     stale_run = replace(
         _run(),
@@ -3039,7 +3089,12 @@ async def test_operator_can_mark_stale_delivery_claim_unknown_without_resend(
     post_report = AsyncMock(side_effect=AssertionError("must not resend"))
     monkeypatch.setattr(api, "_agent_schedule_manager_context", manager_context)
     monkeypatch.setattr(api, "get_agent_schedule_run", Mock(return_value=stale_run))
-    monkeypatch.setattr(api, "get_agent_schedule", Mock(return_value=_schedule()))
+    parsed_schedule = Mock(
+        side_effect=AssertionError("recovery must not parse the definition")
+    )
+    schedule_guild_id = Mock(return_value="1000")
+    monkeypatch.setattr(api, "get_agent_schedule", parsed_schedule)
+    monkeypatch.setattr(api, "get_agent_schedule_guild_id", schedule_guild_id)
     monkeypatch.setattr(api, "mark_agent_schedule_run_delivery_unknown", mark_unknown)
     monkeypatch.setattr(api, "complete_agent_schedule_run", complete_run)
     monkeypatch.setattr(api, "_schedule_agent_audit_event", audit)
@@ -3058,6 +3113,11 @@ async def test_operator_can_mark_stale_delivery_claim_unknown_without_resend(
     assert response["status"] == "delivery_outcome_marked_unknown"
     assert response["run"]["delivery_status"] == "unknown"
     assert response["run"]["status"] == "failed"
+    assert response["schedule_id"] == stale_run.schedule_id
+    parsed_schedule.assert_not_called()
+    schedule_guild_id.assert_called_once_with(
+        api.settings, schedule_id=stale_run.schedule_id
+    )
     assert mark_unknown.call_args.kwargs["run_id"] == stale_run.id
     assert mark_unknown.call_args.kwargs["execution_token"] == stale_run.execution_token
     assert complete_run.call_args.kwargs["status"] is AgentScheduleRunStatus.FAILED

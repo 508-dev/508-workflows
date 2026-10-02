@@ -703,6 +703,31 @@ def get_agent_schedule(
         return None
 
 
+def get_agent_schedule_guild_id(
+    settings: SharedSettings,
+    *,
+    schedule_id: str,
+) -> str | None:
+    """Load a schedule guild for authorization without parsing its definition."""
+
+    normalized_schedule_id = _normalize_uuid(schedule_id)
+    if normalized_schedule_id is None:
+        return None
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                "SELECT guild_id FROM agent_schedules WHERE id = %s",
+                (normalized_schedule_id,),
+            )
+            row = cursor.fetchone()
+    if row is None:
+        return None
+    try:
+        return _normalize_discord_snowflake(row.get("guild_id"))
+    except ValueError:
+        return None
+
+
 def list_agent_schedules(
     settings: SharedSettings,
     *,

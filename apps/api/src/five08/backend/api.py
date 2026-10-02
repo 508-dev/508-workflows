@@ -91,6 +91,7 @@ from five08.agent.schedules import (
     create_manual_agent_schedule_run,
     fail_agent_schedule_run,
     get_agent_schedule,
+    get_agent_schedule_guild_id,
     get_agent_schedule_run,
     list_agent_schedules,
     list_stale_agent_schedule_run_delivery_claims,
@@ -10298,7 +10299,7 @@ def _agent_schedule_loop_actions(
         if not isinstance(arguments, dict) or not summary:
             return None, "scheduled_planner_action_invalid"
         if tool_name == "web_read.search":
-            if any(result.tool_name == "web_read.search" for result in prior_results):
+            if prior_results:
                 return None, "scheduled_planner_follow_up_search_not_allowed"
             if any(action.tool_name == "web_read.search" for action in actions):
                 return None, "scheduled_planner_multiple_searches_not_allowed"
@@ -12120,12 +12121,12 @@ async def _resolve_stale_agent_schedule_delivery_for_context(
     run = await asyncio.to_thread(get_agent_schedule_run, settings, run_id=run_id)
     if run is None:
         return {"error": "schedule_run_not_found"}, 404
-    schedule = await asyncio.to_thread(
-        get_agent_schedule,
+    schedule_guild_id = await asyncio.to_thread(
+        get_agent_schedule_guild_id,
         settings,
         schedule_id=run.schedule_id,
     )
-    if schedule is None or schedule.guild_id != fresh_context.guild_id:
+    if schedule_guild_id != fresh_context.guild_id:
         return {"error": "schedule_run_not_found"}, 404
 
     claimed_before = _agent_schedule_delivery_claim_stale_before()
@@ -12182,14 +12183,14 @@ async def _resolve_stale_agent_schedule_delivery_for_context(
         result=AuditResult.SUCCESS,
         plan=None,
         metadata={
-            "schedule_id": schedule.id,
+            "schedule_id": run.schedule_id,
             "run_id": resolved.id,
             "delivery_status": resolved.delivery_status.value,
         },
     )
     return {
         "status": "delivery_outcome_marked_unknown",
-        "schedule_id": schedule.id,
+        "schedule_id": run.schedule_id,
         "run": _agent_schedule_run_payload(resolved),
     }, 200
 

@@ -25,6 +25,7 @@ from five08.agent.schedules import (
     create_due_agent_schedule_runs,
     fail_agent_schedule_run,
     get_agent_schedule,
+    get_agent_schedule_guild_id,
     get_agent_schedule_run,
     list_agent_schedule_runs_needing_queue_reconciliation,
     list_agent_schedules,
@@ -298,6 +299,9 @@ def test_schedule_ids_are_rejected_before_opening_a_database_connection(
     )
 
     assert get_agent_schedule(SharedSettings(), schedule_id="not-a-uuid") is None
+    assert (
+        get_agent_schedule_guild_id(SharedSettings(), schedule_id="not-a-uuid") is None
+    )
     assert get_agent_schedule_run(SharedSettings(), run_id="not-a-uuid") is None
     assert (
         create_manual_agent_schedule_run(
@@ -306,6 +310,30 @@ def test_schedule_ids_are_rejected_before_opening_a_database_connection(
             guild_id="1000",
         )
         is None
+    )
+
+
+def test_schedule_guild_lookup_does_not_parse_the_definition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recovery authorization can read a corrupt schedule's owning guild."""
+
+    schedule_id = "00000000-0000-0000-0000-000000000010"
+    cursor = MagicMock()
+    cursor.fetchone.return_value = {"guild_id": "1000"}
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.cursor.return_value.__enter__.return_value = cursor
+    monkeypatch.setattr(
+        schedules, "get_postgres_connection", lambda _settings: connection
+    )
+
+    assert (
+        get_agent_schedule_guild_id(SharedSettings(), schedule_id=schedule_id) == "1000"
+    )
+    cursor.execute.assert_called_once_with(
+        "SELECT guild_id FROM agent_schedules WHERE id = %s",
+        (schedule_id,),
     )
 
 
