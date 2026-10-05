@@ -1286,7 +1286,9 @@ def claim_agent_schedule_run_delivery(
 
     The claim is intentionally durable and is never retried automatically once
     an outcome becomes ambiguous. That makes one schedule-run identifier an
-    at-most-once Discord delivery key across worker and API retries.
+    at-most-once Discord delivery key across worker and API retries. The
+    schedule lifecycle row is locked before the run claim so a pause or archive
+    cannot race an otherwise stale active-state check at the send boundary.
     """
 
     normalized_run_id = _normalize_uuid(run_id)
@@ -1295,6 +1297,31 @@ def claim_agent_schedule_run_delivery(
         return None
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
+            # Lifecycle transitions lock the same schedule row before fencing
+            # undelivered runs. Acquire it first so the active-state check and
+            # delivery reservation share one transaction boundary.
+            cursor.execute(
+                """
+                SELECT schedules.id
+                FROM agent_schedules AS schedules
+                INNER JOIN agent_schedule_runs AS runs
+                    ON runs.schedule_id = schedules.id
+                WHERE runs.id = %s
+                  AND runs.status = 'running'
+                  AND runs.execution_token = %s
+                  AND runs.delivery_status = %s
+                  AND schedules.status = %s
+                FOR UPDATE OF schedules
+                """,
+                (
+                    normalized_run_id,
+                    normalized_execution_token,
+                    AgentScheduleRunDeliveryStatus.PENDING.value,
+                    AgentScheduleStatus.ACTIVE.value,
+                ),
+            )
+            if cursor.fetchone() is None:
+                return None
             cursor.execute(
                 """
                 UPDATE agent_schedule_runs

@@ -2748,6 +2748,89 @@ async def test_schedule_pause_then_resume_does_not_revive_its_pending_run(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "inactive_status",
+    [AgentScheduleStatus.PAUSED, AgentScheduleStatus.ARCHIVED],
+)
+async def test_schedule_lifecycle_change_before_delivery_claim_is_not_delivered(
+    monkeypatch: pytest.MonkeyPatch,
+    inactive_status: AgentScheduleStatus,
+) -> None:
+    """The atomic claim fence treats a later lifecycle change as a safe skip."""
+
+    queued_run = _run()
+    running_run = replace(
+        queued_run,
+        status=AgentScheduleRunStatus.RUNNING,
+        started_at=queued_run.occurrence_at,
+    )
+    skipped_run = replace(
+        running_run,
+        status=AgentScheduleRunStatus.SKIPPED,
+        error="schedule_not_active",
+    )
+    schedule = _schedule()
+    inactive_schedule = replace(schedule, status=inactive_status)
+    context = AgentIdentityContext(
+        discord_user_id="1001",
+        organization_id="1000",
+        guild_id="1000",
+        roles=["Admin"],
+    )
+
+    async def refreshed_context(*_args: object, **_kwargs: object):
+        return context, None, 200
+
+    orchestrator = SimpleNamespace(
+        policy=SimpleNamespace(
+            scopes_for_context=Mock(return_value=set(schedule.allowed_scopes))
+        ),
+        execute_plan=Mock(
+            return_value=[
+                AgentExecutionResult(
+                    tool_name="github_issue.search_issues",
+                    status="succeeded",
+                    result={"issues": []},
+                )
+            ]
+        ),
+    )
+    complete_run = Mock(return_value=skipped_run)
+    claim_delivery = Mock(return_value=None)
+    post_report = AsyncMock()
+    monkeypatch.setattr(
+        api,
+        "get_agent_schedule_run",
+        Mock(side_effect=[queued_run, running_run]),
+    )
+    monkeypatch.setattr(api, "claim_agent_schedule_run", Mock(return_value=running_run))
+    monkeypatch.setattr(
+        api,
+        "get_agent_schedule",
+        Mock(side_effect=[schedule, schedule, inactive_schedule]),
+    )
+    monkeypatch.setattr(api, "_fresh_agent_schedule_context", refreshed_context)
+    monkeypatch.setattr(api, "_get_agent_orchestrator", lambda: orchestrator)
+    monkeypatch.setattr(api, "_agent_schedule_plan", Mock(return_value=object()))
+    monkeypatch.setattr(api, "claim_agent_schedule_run_delivery", claim_delivery)
+    monkeypatch.setattr(api, "complete_agent_schedule_run", complete_run)
+    monkeypatch.setattr(api, "_post_agent_schedule_report_to_bot", post_report)
+
+    response, status_code = await api._execute_agent_schedule_run(
+        cast(Request, SimpleNamespace()),
+        run_id=queued_run.id,
+    )
+
+    assert status_code == 200
+    assert response["status"] == "skipped"
+    assert response["delivery_status"] == "not_posted"
+    claim_delivery.assert_called_once()
+    assert complete_run.call_args.kwargs["status"] is AgentScheduleRunStatus.SKIPPED
+    assert complete_run.call_args.kwargs["error"] == "schedule_not_active"
+    post_report.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_pre_send_bot_failure_releases_delivery_claim_for_worker_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -1530,6 +1530,101 @@ def test_claim_does_not_reclaim_a_run_with_a_recorded_delivery(
     )
 
 
+def test_delivery_claim_locks_an_active_schedule_before_reserving_the_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lifecycle change cannot race the delivery reservation after a stale read."""
+
+    now = datetime(2026, 7, 28, 9, 0, tzinfo=timezone.utc)
+    run_id = "00000000-0000-0000-0000-000000000001"
+    execution_token = "00000000-0000-0000-0000-000000000002"
+    run_row = {
+        "id": run_id,
+        "schedule_id": "schedule-1",
+        "occurrence_at": now,
+        "trigger": "schedule",
+        "status": "running",
+        "job_id": "job-1",
+        "started_at": now,
+        "finished_at": None,
+        "output": None,
+        "error": None,
+        "delivery_status": "claimed",
+        "delivery_message_id": None,
+        "delivery_claimed_at": now,
+        "execution_token": execution_token,
+        "created_at": now,
+        "updated_at": now,
+    }
+    cursor = MagicMock()
+    cursor.fetchone.side_effect = [{"id": "schedule-1"}, run_row]
+    connection = MagicMock()
+    connection.__enter__.return_value.cursor.return_value.__enter__.return_value = (
+        cursor
+    )
+    monkeypatch.setattr(
+        schedules,
+        "get_postgres_connection",
+        lambda _settings: connection,
+    )
+
+    claimed = claim_agent_schedule_run_delivery(
+        SharedSettings(),
+        run_id=run_id,
+        execution_token=execution_token,
+    )
+
+    assert claimed is not None
+    assert claimed.delivery_status is AgentScheduleRunDeliveryStatus.CLAIMED
+    lifecycle_query, lifecycle_params = cursor.execute.call_args_list[0].args
+    delivery_query, delivery_params = cursor.execute.call_args_list[1].args
+    assert "FOR UPDATE OF schedules" in lifecycle_query
+    assert "schedules.status = %s" in lifecycle_query
+    assert lifecycle_params == (
+        run_id,
+        execution_token,
+        AgentScheduleRunDeliveryStatus.PENDING.value,
+        schedules.AgentScheduleStatus.ACTIVE.value,
+    )
+    assert "UPDATE agent_schedule_runs" in delivery_query
+    assert delivery_params == (
+        AgentScheduleRunDeliveryStatus.CLAIMED.value,
+        run_id,
+        execution_token,
+        AgentScheduleRunDeliveryStatus.PENDING.value,
+    )
+
+
+def test_delivery_claim_refuses_an_inactive_schedule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A paused or archived schedule cannot reserve a pending delivery."""
+
+    cursor = MagicMock()
+    cursor.fetchone.return_value = None
+    connection = MagicMock()
+    connection.__enter__.return_value.cursor.return_value.__enter__.return_value = (
+        cursor
+    )
+    monkeypatch.setattr(
+        schedules,
+        "get_postgres_connection",
+        lambda _settings: connection,
+    )
+
+    claimed = claim_agent_schedule_run_delivery(
+        SharedSettings(),
+        run_id="00000000-0000-0000-0000-000000000001",
+        execution_token="00000000-0000-0000-0000-000000000002",
+    )
+
+    assert claimed is None
+    cursor.execute.assert_called_once()
+    lifecycle_query, lifecycle_params = cursor.execute.call_args.args
+    assert "schedules.status = %s" in lifecycle_query
+    assert lifecycle_params[-1] == schedules.AgentScheduleStatus.ACTIVE.value
+
+
 def test_pre_send_delivery_failure_releases_only_the_claimed_running_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

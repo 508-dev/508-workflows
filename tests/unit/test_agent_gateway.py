@@ -3061,6 +3061,8 @@ def test_model_only_answer_is_limited_to_safe_chat_and_never_impersonation() -> 
         "How much did we pay in wages?",
         "Summarize current employee compensation.",
         "What PRs need review?",
+        "What repositories can I access?",
+        "What repos can I access?",
         "What bugs need triage?",
         "Which defects are open?",
         "What tickets need triage?",

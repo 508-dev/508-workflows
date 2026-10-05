@@ -11721,6 +11721,40 @@ async def _execute_agent_schedule_run(
                 "delivery_status": "already_posted",
                 "run": _agent_schedule_run_payload(completed or current),
             }, 200
+        if (
+            current is not None
+            and current.status is AgentScheduleRunStatus.RUNNING
+            and current.execution_token == execution_token
+            and current.delivery_status is AgentScheduleRunDeliveryStatus.PENDING
+        ):
+            # ``claim_agent_schedule_run_delivery`` locks and verifies the
+            # lifecycle row with its durable claim. If that fence rejected an
+            # active run because an administrator paused or archived the
+            # schedule between the earlier read and the claim, there was no
+            # external side effect to classify as ambiguous.
+            current_schedule = await asyncio.to_thread(
+                get_agent_schedule,
+                settings,
+                schedule_id=schedule.id,
+            )
+            if (
+                current_schedule is None
+                or current_schedule.status is not AgentScheduleStatus.ACTIVE
+            ):
+                completed = await asyncio.to_thread(
+                    complete_agent_schedule_run,
+                    settings,
+                    run_id=run.id,
+                    execution_token=execution_token,
+                    status=AgentScheduleRunStatus.SKIPPED,
+                    error="schedule_not_active",
+                )
+                return {
+                    "status": AgentScheduleRunStatus.SKIPPED.value,
+                    "schedule_id": schedule.id,
+                    "delivery_status": "not_posted",
+                    "run": _agent_schedule_run_payload(completed or current),
+                }, 200
         # A previous process may have sent the Discord request but failed before
         # it could durably record the response. Retrying that side effect could
         # post the report twice, so turn a stale claim into an explicit unknown
