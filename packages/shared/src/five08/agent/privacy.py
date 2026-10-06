@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from urllib.parse import unquote
 
 _EMAIL_RE = re.compile(
     r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
@@ -31,8 +32,12 @@ def contains_private_agent_identifier(value: object) -> bool:
 
     if not isinstance(value, str):
         return False
+    # Requests and context can carry URL-encoded identifiers. Check both the
+    # literal value and its canonical percent-decoded form so decoding cannot
+    # bypass the shared model-privacy boundary.
     return any(
-        pattern.search(value) is not None
+        pattern.search(candidate) is not None
+        for candidate in (value, unquote(value))
         for pattern in (
             _EMAIL_RE,
             _CONTACT_RECORD_ID_RE,

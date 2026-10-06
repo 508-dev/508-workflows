@@ -441,7 +441,7 @@ def test_format_agent_response_escapes_untrusted_public_web_text() -> None:
                         "results": [
                             {
                                 "title": "# [Admin notice](https://evil.test)",
-                                "url": "https://example.com/result",
+                                "url": "https://example.com/||spoofed||?audience=@everyone",
                                 "snippet": "||secret|| @everyone `command`",
                             }
                         ],
@@ -453,7 +453,7 @@ def test_format_agent_response_escapes_untrusted_public_web_text() -> None:
                     "result": {
                         "provider": "firecrawl",
                         "title": "# Fake heading",
-                        "url": "https://example.com/page",
+                        "url": "https://example.com/||extracted||?audience=@here",
                         "content": "[masked](https://evil.test) @here",
                     },
                 },
@@ -466,6 +466,8 @@ def test_format_agent_response_escapes_untrusted_public_web_text() -> None:
     assert "\\|\\|secret\\|\\| @\u200beveryone \\`command\\`" in message
     assert "\\# Fake heading" in message
     assert "\\[masked](https://evil.test) @\u200bhere" in message
+    assert "https://example.com/\\|\\|spoofed\\|\\|?audience=@\u200beveryone" in message
+    assert "https://example.com/\\|\\|extracted\\|\\|?audience=@\u200bhere" in message
 
 
 def test_format_agent_response_renders_public_web_extract() -> None:

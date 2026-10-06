@@ -1755,19 +1755,22 @@ def test_stale_delivery_claims_are_listed_and_manually_bounded(
 
 
 @pytest.mark.parametrize(
-    ("transition", "kwargs"),
+    ("transition", "kwargs", "uses_execution_token"),
     [
         (
             complete_agent_schedule_run,
             {"status": AgentScheduleRunStatus.SUCCEEDED, "output": "done"},
+            True,
         ),
-        (fail_agent_schedule_run, {"error": "dispatch failed"}),
+        (fail_agent_schedule_run, {"error": "dispatch failed"}, True),
+        (fail_agent_schedule_run, {"error": "queued dispatch failed"}, False),
     ],
 )
 def test_terminal_run_updates_keep_schedule_last_run_at_monotonic(
     monkeypatch: pytest.MonkeyPatch,
     transition: Any,
     kwargs: dict[str, Any],
+    uses_execution_token: bool,
 ) -> None:
     """An older overlapping completion cannot regress the schedule timestamp."""
 
@@ -1808,15 +1811,20 @@ def test_terminal_run_updates_keep_schedule_last_run_at_monotonic(
         lambda _settings: connection,
     )
 
-    changed = transition(
-        SharedSettings(),
-        run_id=run_id,
-        execution_token=execution_token,
-        **kwargs,
-    )
+    transition_kwargs = {"run_id": run_id, **kwargs}
+    if uses_execution_token:
+        transition_kwargs["execution_token"] = execution_token
+    changed = transition(SharedSettings(), **transition_kwargs)
 
     assert changed is not None
-    schedule_query, schedule_params = cursor.execute.call_args_list[1].args
+    lock_query, lock_params = cursor.execute.call_args_list[0].args
+    run_query, _run_params = cursor.execute.call_args_list[1].args
+    schedule_query, schedule_params = cursor.execute.call_args_list[2].args
+    assert "FOR UPDATE OF schedules" in lock_query
+    assert lock_params == (
+        (run_id, execution_token) if uses_execution_token else (run_id,)
+    )
+    assert "UPDATE agent_schedule_runs" in run_query
     assert "last_run_at = GREATEST(last_run_at, %s)" in schedule_query
     assert schedule_params == (finished_at, "schedule-1")
 

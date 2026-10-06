@@ -2682,6 +2682,9 @@ def test_sensitive_current_message_never_reaches_the_model(message: str) -> None
     "message",
     [
         "What is the status of customer@example.com?",
+        "What is the status of customer%40example.com?",
+        "Summarize CRM contact contact%2D123.",
+        "Summarize ERP project PROJ%2D123.",
         "Summarize CRM record 0e5e5302-8d36-4bc8-954d-68332b36949b.",
     ],
 )

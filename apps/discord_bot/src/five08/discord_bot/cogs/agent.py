@@ -2194,6 +2194,15 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
     def _safe_discord_text(value: str) -> str:
         return discord.utils.escape_markdown(discord.utils.escape_mentions(value))
 
+    @staticmethod
+    def _safe_discord_url(value: str) -> str:
+        """Render provider-controlled URLs as text, never as Markdown syntax."""
+
+        return discord.utils.escape_markdown(
+            discord.utils.escape_mentions(value),
+            ignore_links=False,
+        )
+
     def _format_agent_response(self, response: dict[str, Any]) -> str:
         http_status = response.get("http_status")
         status = str(
@@ -2403,7 +2412,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             title = AgentCog._safe_discord_text(
                 str(item.get("title") or "Untitled result").strip()
             )
-            url = str(item.get("url") or "").strip()
+            url = AgentCog._safe_discord_url(str(item.get("url") or "").strip())
             snippet = AgentCog._safe_discord_text(
                 " ".join(str(item.get("snippet") or "").split())
             )
@@ -2420,7 +2429,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         title = AgentCog._safe_discord_text(
             str(payload.get("title") or "Public web page").strip()
         )
-        url = str(payload.get("url") or "").strip()
+        url = AgentCog._safe_discord_url(str(payload.get("url") or "").strip())
         content = AgentCog._safe_discord_text(
             " ".join(str(payload.get("content") or "").split())
         )

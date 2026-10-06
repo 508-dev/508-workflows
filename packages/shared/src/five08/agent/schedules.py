@@ -1639,6 +1639,24 @@ def complete_agent_schedule_run(
     normalized_error = _bounded_text(error, MAX_AGENT_SCHEDULE_ERROR_CHARS)
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
+            # Lifecycle transitions lock the schedule before they fence pending
+            # runs. Keep terminal transitions in that same order so a pause
+            # cannot deadlock with a concurrently completing run.
+            cursor.execute(
+                """
+                SELECT schedules.id
+                FROM agent_schedules AS schedules
+                INNER JOIN agent_schedule_runs AS runs
+                    ON runs.schedule_id = schedules.id
+                WHERE runs.id = %s
+                  AND runs.status = 'running'
+                  AND runs.execution_token = %s
+                FOR UPDATE OF schedules
+                """,
+                (normalized_run_id, normalized_execution_token),
+            )
+            if cursor.fetchone() is None:
+                return None
             cursor.execute(
                 """
                 UPDATE agent_schedule_runs
@@ -1734,6 +1752,35 @@ def fail_agent_schedule_run(
         )
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
+            # See ``complete_agent_schedule_run``: schedule lifecycle changes
+            # acquire this lock before touching their runs, so failure paths
+            # must do the same to avoid a run-to-schedule deadlock.
+            if normalized_execution_token is None:
+                lock_query = """
+                    SELECT schedules.id
+                    FROM agent_schedules AS schedules
+                    INNER JOIN agent_schedule_runs AS runs
+                        ON runs.schedule_id = schedules.id
+                    WHERE runs.id = %s
+                      AND runs.status = 'queued'
+                    FOR UPDATE OF schedules
+                """
+                lock_params: tuple[object, ...] = (normalized_run_id,)
+            else:
+                lock_query = """
+                    SELECT schedules.id
+                    FROM agent_schedules AS schedules
+                    INNER JOIN agent_schedule_runs AS runs
+                        ON runs.schedule_id = schedules.id
+                    WHERE runs.id = %s
+                      AND runs.status = 'running'
+                      AND runs.execution_token = %s
+                    FOR UPDATE OF schedules
+                """
+                lock_params = (normalized_run_id, normalized_execution_token)
+            cursor.execute(lock_query, lock_params)
+            if cursor.fetchone() is None:
+                return None
             cursor.execute(query, params)
             row = cursor.fetchone()
             if row is None:
