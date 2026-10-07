@@ -25,6 +25,36 @@ _ERP_RECORD_ID_RE = re.compile(
     r"|\b(?:erp(?:next)?\s+)?project\s+[A-Za-z0-9_-]*\d[A-Za-z0-9_-]*\b",
     re.IGNORECASE,
 )
+_MAX_PERCENT_DECODE_INPUT_CHARS = 8_192
+_MAX_PERCENT_DECODE_PASSES = 4
+
+
+def percent_decoded_text_candidates(value: str) -> tuple[str, ...] | None:
+    """Return bounded, fully decoded text forms, or ``None`` to fail closed.
+
+    Inputs can cross model and external-service boundaries.  Check every
+    reversible percent-decoded representation, but keep the work bounded.  An
+    overlong or still-nested value is ambiguous, so callers that enforce a
+    privacy or sensitive-data boundary must treat ``None`` as unsafe.
+    """
+
+    if "%" not in value:
+        return (value,)
+    if len(value) > _MAX_PERCENT_DECODE_INPUT_CHARS:
+        return None
+
+    candidates = [value]
+    for _ in range(_MAX_PERCENT_DECODE_PASSES):
+        decoded = unquote(candidates[-1])
+        if decoded == candidates[-1]:
+            return tuple(candidates)
+        candidates.append(decoded)
+
+    # Do not allow an attacker to bury a private value under more nesting than
+    # this bounded checker permits us to inspect.
+    if unquote(candidates[-1]) != candidates[-1]:
+        return None
+    return tuple(candidates)
 
 
 def contains_private_agent_identifier(value: object) -> bool:
@@ -32,12 +62,15 @@ def contains_private_agent_identifier(value: object) -> bool:
 
     if not isinstance(value, str):
         return False
-    # Requests and context can carry URL-encoded identifiers. Check both the
-    # literal value and its canonical percent-decoded form so decoding cannot
-    # bypass the shared model-privacy boundary.
+    candidates = percent_decoded_text_candidates(value)
+    if candidates is None:
+        return True
+    # Requests and context can carry URL-encoded identifiers. Check every
+    # bounded canonical form so reversible encoding cannot bypass the shared
+    # model-privacy boundary.
     return any(
         pattern.search(candidate) is not None
-        for candidate in (value, unquote(value))
+        for candidate in candidates
         for pattern in (
             _EMAIL_RE,
             _CONTACT_RECORD_ID_RE,

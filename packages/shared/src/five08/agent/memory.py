@@ -15,6 +15,7 @@ from five08.agent.models import (
     MemoryVisibility,
     validate_memory_value_json,
 )
+from five08.agent.privacy import percent_decoded_text_candidates
 
 DEFAULT_MEMORY_RETENTION_DAYS = 365
 MAX_MEMORY_FACTS_PER_LIST = 50
@@ -587,6 +588,15 @@ def _contains_sensitive_value(value_json: dict[str, Any]) -> bool:
 
 
 def _contains_sensitive_text(value: str) -> bool:
+    candidates = percent_decoded_text_candidates(value)
+    if candidates is None:
+        return True
+    return any(
+        _contains_sensitive_text_candidate(candidate) for candidate in candidates
+    )
+
+
+def _contains_sensitive_text_candidate(value: str) -> bool:
     if any(
         pattern.search(value)
         for pattern in (

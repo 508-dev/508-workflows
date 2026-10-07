@@ -10,7 +10,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
-from urllib.parse import unquote
 
 from psycopg import connect
 from psycopg.rows import dict_row
@@ -65,11 +64,9 @@ logger = logging.getLogger(__name__)
 
 
 def _web_text_contains_private_agent_identifier(value: str) -> bool:
-    """Check literal and percent-decoded text before an external web request."""
+    """Check bounded canonical text before an external web request."""
 
-    return contains_private_agent_identifier(
-        value
-    ) or contains_private_agent_identifier(unquote(value))
+    return contains_private_agent_identifier(value)
 
 
 _PLANNER_TOOL_ARGUMENTS: dict[str, frozenset[str]] = {

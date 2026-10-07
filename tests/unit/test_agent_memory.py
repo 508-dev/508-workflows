@@ -102,6 +102,7 @@ def test_in_memory_list_and_admin_delete_cannot_cross_organizations() -> None:
         {"text": "secret: abcdefgh"},
         {"text": "api key abcdefghijklmnop"},
         {"text": "use token qwertyuiopasdfgh"},
+        {"text": "sk%252Dabcdefghijklmnop"},
         {"text": "SSN: 123-45-6789"},
         {"text": "4111 1111 1111 1111"},
         {"text": 4111111111111111},

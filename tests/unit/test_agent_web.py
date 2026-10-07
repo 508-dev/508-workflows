@@ -360,7 +360,9 @@ def test_planner_url_validation_does_not_resolve_before_policy(monkeypatch) -> N
     [
         "https://example.com/reset/550e8400-e29b-41d4-a716-446655440000",
         "https://example.com/users/alice%40corp.com",
+        "https://example.com/users/alice%2540corp.com",
         "https://example.com/contacts/contact%2D123",
+        "https://example.com/contacts/contact%252D123",
     ],
 )
 def test_extract_rejects_private_identifier_before_validation_or_provider(

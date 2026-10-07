@@ -99,7 +99,7 @@ LiteralPlanner = Literal["deterministic_regex", "live_model"]
 _WEB_READ_TOOL_PREFIX = "web_read."
 _MAX_PLANNER_OBSERVATION_CHARS = 12_000
 _OPERATIONAL_DATA_SUBJECT_RE = re.compile(
-    r"\b(?:invoices?|billing|erp(?:next)?|suppliers?|customers?|payments?|"
+    r"\b(?:invoices?|billing|erp(?:next)?|suppliers?|vendors?|customers?|payments?|"
     r"purchase\s+orders?|sales\s+orders?|quotations?|expense\s+claims?|"
     r"journal\s+entr(?:y|ies)|delivery\s+notes?|(?:credit|debit)\s+notes?|"
     r"payment\s+entr(?:y|ies)|material\s+requests?|stock\s+entr(?:y|ies)|"

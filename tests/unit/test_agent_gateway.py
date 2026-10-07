@@ -2664,6 +2664,7 @@ def test_private_identifier_disables_public_web_model_follow_up(
     [
         "My password hunter2 should be rotated.",
         "Use token qwertyuiopasdfgh to update the task.",
+        "Use sk%252Dabcdefghijklmnop to update the task.",
         "My SSN is 123-45-6789.",
     ],
 )
@@ -2683,7 +2684,9 @@ def test_sensitive_current_message_never_reaches_the_model(message: str) -> None
     [
         "What is the status of customer@example.com?",
         "What is the status of customer%40example.com?",
+        "What is the status of customer%2540example.com?",
         "Summarize CRM contact contact%2D123.",
+        "Summarize CRM contact contact%252D123.",
         "Summarize ERP project PROJ%2D123.",
         "Summarize CRM record 0e5e5302-8d36-4bc8-954d-68332b36949b.",
     ],
@@ -3039,6 +3042,7 @@ def test_model_only_answer_is_limited_to_safe_chat_and_never_impersonation() -> 
         "How many invoices are overdue?",
         "What is the current onboarding status?",
         "Who are our suppliers?",
+        "Who are our vendors?",
         "What invoices did Acme submit?",
         "What customers owe us money?",
         "What payments are outstanding?",

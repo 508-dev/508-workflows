@@ -170,6 +170,16 @@ def test_agent_loop_creation_persists_an_exact_default_tool_catalog(
     )
 
 
+def test_schedule_creation_rejects_nested_percent_encoded_credentials() -> None:
+    """A credential must not enter a persisted schedule through URL encoding."""
+
+    with pytest.raises(ValueError, match="schedule prompts cannot contain secrets"):
+        api._agent_schedule_definition_from_fields(
+            SimpleNamespace(prompt="Use sk%252Dabcdefghijklmnop."),
+            guild_id="1000",
+        )
+
+
 def test_agent_loop_creation_omits_github_but_includes_public_web_search(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
