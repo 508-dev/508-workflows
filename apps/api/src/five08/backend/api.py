@@ -2413,6 +2413,8 @@ def _sanitize_agent_audit_message(message: str) -> str:
         return "[memory write request redacted]"
     if contains_sensitive_memory_text(message):
         return "[sensitive agent request redacted]"
+    if contains_private_agent_identifier(message):
+        return "[private agent request redacted]"
     return _sanitize_agent_improvement_message(message)
 
 
@@ -11673,6 +11675,59 @@ async def _execute_agent_schedule_run(
             "delivery_status": "not_posted",
             "run": _agent_schedule_run_payload(completed or run),
         }, 200
+
+    # Tool execution can take the full schedule deadline. Refresh the owner
+    # immediately before the durable delivery claim so revoked roles cannot
+    # authorize a report after the earlier execution-time snapshot.
+    (
+        delivery_context,
+        delivery_context_error,
+        delivery_context_status,
+    ) = await _fresh_agent_schedule_context(
+        request,
+        context=context,
+        channel_id=schedule.definition.delivery.channel_id,
+    )
+    if delivery_context is None:
+        terminal_status = (
+            AgentScheduleRunStatus.SKIPPED
+            if delivery_context_status == 404
+            else AgentScheduleRunStatus.FAILED
+        )
+        completed = await asyncio.to_thread(
+            complete_agent_schedule_run,
+            settings,
+            run_id=run.id,
+            execution_token=execution_token,
+            status=terminal_status,
+            error=delivery_context_error,
+        )
+        return {
+            "status": terminal_status.value,
+            "schedule_id": schedule.id,
+            "delivery_status": "not_posted",
+            "error": delivery_context_error,
+            "run": _agent_schedule_run_payload(completed or run),
+        }, (200 if terminal_status is AgentScheduleRunStatus.SKIPPED else 503)
+
+    delivery_scopes = orchestrator.policy.scopes_for_context(delivery_context)
+    if not schedule.allowed_scopes.issubset(delivery_scopes):
+        completed = await asyncio.to_thread(
+            complete_agent_schedule_run,
+            settings,
+            run_id=run.id,
+            execution_token=execution_token,
+            status=AgentScheduleRunStatus.SKIPPED,
+            error="owner_scopes_no_longer_granted",
+        )
+        return {
+            "status": AgentScheduleRunStatus.SKIPPED.value,
+            "schedule_id": schedule.id,
+            "delivery_status": "not_posted",
+            "error": "owner_scopes_no_longer_granted",
+            "run": _agent_schedule_run_payload(completed or run),
+        }, 200
+
     delivery_claim = await asyncio.to_thread(
         claim_agent_schedule_run_delivery,
         settings,

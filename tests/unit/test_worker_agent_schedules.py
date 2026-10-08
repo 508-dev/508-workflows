@@ -39,6 +39,26 @@ def test_run_agent_schedule_job_delegates_with_the_existing_api_secret(
     }
     assert post.call_args.args[0] == "http://web/internal/agent-schedules/runs/run-1"
     assert post.call_args.kwargs["headers"] == {"X-API-Secret": "shared-secret"}
+    assert post.call_args.kwargs["allow_redirects"] is False
+
+
+def test_run_agent_schedule_job_rejects_redirects_without_replaying_the_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A redirect must not forward the shared API credential to another host."""
+
+    monkeypatch.setattr(jobs.settings, "agent_schedule_api_base_url", "http://web")
+    monkeypatch.setattr(jobs.settings, "api_shared_secret", "shared-secret")
+    response = SimpleNamespace(status_code=307, json=Mock(return_value={}))
+
+    with (
+        patch("five08.worker.jobs.requests.post", return_value=response) as post,
+        pytest.raises(RuntimeError, match="agent_schedule_api_failed:307"),
+    ):
+        jobs.run_agent_schedule_job("run-1")
+
+    assert post.call_args.kwargs["headers"] == {"X-API-Secret": "shared-secret"}
+    assert post.call_args.kwargs["allow_redirects"] is False
 
 
 def test_run_agent_schedule_job_marks_policy_rejections_non_retryable(

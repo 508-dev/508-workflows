@@ -281,6 +281,7 @@ def run_agent_schedule_job(run_id: str) -> dict[str, Any]:
             headers={"X-API-Secret": api_secret},
             timeout=settings.agent_schedule_api_timeout_seconds,
             verify=default_ca_bundle_path(),
+            allow_redirects=False,
         )
     except requests.RequestException as exc:
         raise RuntimeError(f"agent_schedule_api_request_failed: {exc}") from exc

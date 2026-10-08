@@ -1500,6 +1500,22 @@ def test_agent_audit_sanitizer_redacts_memory_write_intent_before_planning(
     )
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Summarize CRM record 0e5e5302-8d36-4bc8-954d-68332b36949b.",
+        "What is the status of customer%2540example.com?",
+        "Summarize CRM contact contact%252D123.",
+    ],
+)
+def test_agent_audit_sanitizer_redacts_canonical_private_identifiers(
+    message: str,
+) -> None:
+    assert api._sanitize_agent_audit_message(message) == (
+        "[private agent request redacted]"
+    )
+
+
 @pytest.mark.asyncio
 async def test_rate_limited_memory_request_redacts_preplanning_audit(
     monkeypatch: pytest.MonkeyPatch,

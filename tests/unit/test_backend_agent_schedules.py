@@ -2680,6 +2680,91 @@ async def test_schedule_paused_during_execution_is_not_delivered(
 
 
 @pytest.mark.asyncio
+async def test_schedule_execution_does_not_deliver_after_owner_scope_revocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The delivery boundary must not use the execution-time role snapshot."""
+
+    queued_run = _run()
+    running_run = replace(
+        queued_run,
+        status=AgentScheduleRunStatus.RUNNING,
+        started_at=queued_run.occurrence_at,
+    )
+    skipped_run = replace(
+        running_run,
+        status=AgentScheduleRunStatus.SKIPPED,
+        error="owner_scopes_no_longer_granted",
+    )
+    schedule = _schedule()
+    authorized_context = AgentIdentityContext(
+        discord_user_id="1001",
+        organization_id="1000",
+        guild_id="1000",
+        roles=["Admin"],
+    )
+    revoked_context = authorized_context.model_copy(update={"roles": ["Member"]})
+    refresh_count = 0
+
+    async def refreshed_context(*_args: object, **_kwargs: object):
+        nonlocal refresh_count
+        refresh_count += 1
+        return (
+            (authorized_context if refresh_count == 1 else revoked_context),
+            None,
+            200,
+        )
+
+    def scopes_for_context(context: AgentIdentityContext) -> set[str]:
+        return set(schedule.allowed_scopes) if "Admin" in context.roles else set()
+
+    complete_run = Mock(return_value=skipped_run)
+    claim_delivery = Mock()
+    post_report = AsyncMock()
+    orchestrator = SimpleNamespace(
+        policy=SimpleNamespace(scopes_for_context=Mock(side_effect=scopes_for_context)),
+        execute_plan=Mock(
+            return_value=[
+                AgentExecutionResult(
+                    tool_name="github_issue.search_issues",
+                    status="succeeded",
+                    result={"issues": []},
+                )
+            ]
+        ),
+    )
+    monkeypatch.setattr(api, "get_agent_schedule_run", Mock(return_value=queued_run))
+    monkeypatch.setattr(api, "claim_agent_schedule_run", Mock(return_value=running_run))
+    monkeypatch.setattr(
+        api,
+        "get_agent_schedule",
+        Mock(side_effect=[schedule, schedule]),
+    )
+    monkeypatch.setattr(api, "_fresh_agent_schedule_context", refreshed_context)
+    monkeypatch.setattr(api, "_get_agent_orchestrator", lambda: orchestrator)
+    monkeypatch.setattr(api, "_agent_schedule_plan", Mock(return_value=object()))
+    monkeypatch.setattr(api, "complete_agent_schedule_run", complete_run)
+    monkeypatch.setattr(api, "claim_agent_schedule_run_delivery", claim_delivery)
+    monkeypatch.setattr(api, "_post_agent_schedule_report_to_bot", post_report)
+
+    response, status_code = await api._execute_agent_schedule_run(
+        cast(Request, SimpleNamespace()),
+        run_id=queued_run.id,
+    )
+
+    assert status_code == 200
+    assert response["status"] == "skipped"
+    assert response["delivery_status"] == "not_posted"
+    assert response["error"] == "owner_scopes_no_longer_granted"
+    assert refresh_count == 2
+    assert orchestrator.policy.scopes_for_context.call_count == 2
+    assert complete_run.call_args.kwargs["status"] is AgentScheduleRunStatus.SKIPPED
+    assert complete_run.call_args.kwargs["error"] == "owner_scopes_no_longer_granted"
+    claim_delivery.assert_not_called()
+    post_report.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_schedule_pause_then_resume_does_not_revive_its_pending_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
