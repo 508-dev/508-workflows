@@ -1,7 +1,7 @@
 {
   "version": "discord-agent-trajectory.v1",
   "id": "github_issue_member_denied_001",
-  "description": "Member role cannot draft GitHub issue writes.",
+  "description": "Members have no privileged agent workflows, including GitHub issue writes.",
   "tags": ["canonical", "github", "policy", "denied"],
   "suite": {
     "canonical": true,
@@ -18,20 +18,6 @@
   },
   "expect": {
     "status": "denied",
-    "intent": "create_github_issue",
-    "model_tier": "strong",
-    "requires_confirmation": false,
-    "message_contains": "Missing required scopes",
-    "actions": [
-      {
-        "tool_name": "github_issue.create_issue",
-        "requires_confirmation": false,
-        "required_scopes": ["github:issue:create"],
-        "arguments_contains": {
-          "repository": "508-dev/508-workflows",
-          "title": "Fix onboarding sync"
-        }
-      }
-    ]
+    "message_contains": "do not grant access to agent workflows"
   }
 }

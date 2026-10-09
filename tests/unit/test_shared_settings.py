@@ -38,6 +38,33 @@ def test_non_local_settings_do_not_eagerly_reject_missing_runtime_dependencies()
     )
 
 
+def test_job_timeout_requires_room_for_the_worker_hard_deadline() -> None:
+    """A reclaimable lease must leave time for actor cancellation and cleanup."""
+
+    with pytest.raises(ValidationError, match="greater than or equal to 6"):
+        SharedSettings(job_timeout_seconds=5)
+
+
+def test_public_web_deadline_cannot_outlive_response_budget() -> None:
+    with pytest.raises(
+        ValidationError,
+        match="AGENT_PUBLIC_WEB_DEADLINE_SECONDS must not exceed",
+    ):
+        SharedSettings(
+            agent_request_response_budget_seconds=10.0,
+            agent_public_web_deadline_seconds=11.0,
+        )
+
+
+def test_public_web_deadline_may_equal_response_budget() -> None:
+    settings = SharedSettings(
+        agent_request_response_budget_seconds=10.0,
+        agent_public_web_deadline_seconds=10.0,
+    )
+
+    assert settings.agent_public_web_deadline_seconds == 10.0
+
+
 def test_sentry_environment_and_sampling_are_not_env_configurable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -104,7 +131,6 @@ def test_shared_settings_expose_agent_external_tool_credentials() -> None:
         github_app_client_id="Iv1.client-id",
         github_app_installation_id="456",
         github_app_private_key="private-key",
-        github_member_extra_repos="508-dev/member-work",
         github_steering_all_installed_repos=False,
         github_steering_extra_repos="508-dev/infra",
         github_allowed_repos="508-dev/508-workflows,508-dev/infra",
@@ -116,6 +142,16 @@ def test_shared_settings_expose_agent_external_tool_credentials() -> None:
         brevo_508_members_newsletter_list_name="508 members",
         keila_api_key="keila-key",
         keila_api_base_url="https://keila.example",
+        agent_web_search_provider_order="searxng,brave,firecrawl",
+        agent_web_search_timeout_seconds=12.0,
+        agent_web_default_result_limit=4,
+        agent_planning_max_steps=4,
+        erpnext_base_url="https://erp.example.test",
+        erpnext_api_key="erp-key",
+        agent_erp_organization_id="org-erp",
+        searxng_base_url="http://searxng:8080",
+        brave_search_api_key="brave-key",
+        firecrawl_api_key="firecrawl-key",
         postgres_url="postgresql://postgres:postgres@db.example/workflows",
     )
 
@@ -126,7 +162,6 @@ def test_shared_settings_expose_agent_external_tool_credentials() -> None:
     assert runtime_config.github_app_client_id == "Iv1.client-id"
     assert runtime_config.github_app_installation_id == "456"
     assert runtime_config.github_app_private_key == "private-key"
-    assert runtime_config.github_member_extra_repos == "508-dev/member-work"
     assert runtime_config.github_steering_all_installed_repos is False
     assert runtime_config.github_steering_extra_repos == "508-dev/infra"
     assert runtime_config.github_allowed_repos == "508-dev/508-workflows,508-dev/infra"
@@ -138,6 +173,15 @@ def test_shared_settings_expose_agent_external_tool_credentials() -> None:
     assert runtime_config.brevo_508_members_newsletter_list_name == "508 members"
     assert runtime_config.keila_api_key == "keila-key"
     assert runtime_config.keila_api_base_url == "https://keila.example"
+    assert runtime_config.agent_web_search_provider_order == "searxng,brave,firecrawl"
+    assert runtime_config.agent_web_search_timeout_seconds == 12.0
+    assert runtime_config.agent_web_default_result_limit == 4
+    assert runtime_config.erpnext_base_url == "https://erp.example.test"
+    assert runtime_config.erpnext_api_key == "erp-key"
+    assert runtime_config.agent_erp_organization_id == "org-erp"
+    assert runtime_config.searxng_base_url == "http://searxng:8080"
+    assert runtime_config.brave_search_api_key == "brave-key"
+    assert runtime_config.firecrawl_api_key == "firecrawl-key"
     assert (
         runtime_config.postgres_url
         == "postgresql://postgres:postgres@db.example/workflows"
@@ -148,6 +192,17 @@ def test_shared_settings_accepts_legacy_github_app_id_alias() -> None:
     settings = SharedSettings(**{"GITHUB_APP_ID": "123"})
 
     assert settings.github_app_client_id == "123"
+
+
+def test_schedule_output_retention_cannot_exceed_retained_run_history() -> None:
+    with pytest.raises(
+        ValueError,
+        match="AGENT_SCHEDULE_RUN_OUTPUT_RETENTION_PER_SCHEDULE",
+    ):
+        SharedSettings(
+            agent_schedule_run_retention_per_schedule=20,
+            agent_schedule_run_output_retention_per_schedule=21,
+        )
 
 
 def test_shared_settings_accept_newsletter_sync_env_aliases() -> None:
@@ -208,6 +263,16 @@ def test_shared_settings_newsletter_sync_defaults_disabled() -> None:
     settings = SharedSettings()
 
     assert settings.newsletter_sync_enabled is False
+
+
+def test_shared_settings_agent_memory_cleanup_requires_at_least_one_hour() -> None:
+    with pytest.raises(ValidationError):
+        SharedSettings(agent_memory_cleanup_interval_seconds=3_599)
+
+    settings = SharedSettings(agent_memory_cleanup_interval_seconds=3_600)
+
+    assert settings.agent_memory_cleanup_enabled is True
+    assert settings.agent_memory_cleanup_interval_seconds == 3_600
 
 
 def test_local_service_defaults_target_host_runtime(

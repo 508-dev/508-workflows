@@ -1,7 +1,7 @@
 {
   "version": "discord-agent-trajectory.v1",
   "id": "search_project_tasks_001",
-  "description": "Member searches within a project and receives matching seeded tasks without confirmation.",
+  "description": "Steering Committee searches within a project and receives matching seeded tasks without confirmation.",
   "tags": ["canonical", "task", "read"],
   "suite": {
     "canonical": true,
@@ -11,7 +11,7 @@
     "discord_user_id": "123",
     "organization_id": "org-1",
     "guild_id": "org-1",
-    "roles": ["Member"]
+    "roles": ["Steering Committee"]
   },
   "seed": {
     "tasks": [

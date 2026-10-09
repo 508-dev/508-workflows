@@ -41,7 +41,9 @@ Pydantic import errors.
 - `Optional`: `REDIS_KEY_PREFIX` (default: `jobs`)
 - `Optional`: `REDIS_HOST_BIND` (default: `127.0.0.1`)
 - `Optional`: `REDIS_HOST_PORT` (default when unset: `CONDUCTOR_PORT + 0` inside Conductor, otherwise computed per worktree as `12000 + WORKTREE_ENV_SLOT`; use `6379` only if explicitly pinned via env/.env; see `./scripts/docker-compose.sh print-ports`)
-- `Optional`: `JOB_TIMEOUT_SECONDS` (default: `600`)
+- `Optional`: `JOB_TIMEOUT_SECONDS` (default: `600`, minimum: `6`; the worker
+  reserves five seconds before the durable lease expires for cancellation and
+  recovery)
 - `Optional`: `JOB_RESULT_TTL_SECONDS` (default: `3600`)
 - `Optional`: `JOB_MAX_ATTEMPTS` (default: `8`)
 - `Optional`: `JOB_RETRY_BASE_SECONDS` (default: `5`)
