@@ -805,6 +805,59 @@ def test_agent_loop_uses_safe_aggregate_observations_for_private_tools() -> None
 
 
 @pytest.mark.parametrize(
+    "unsafe_label",
+    [
+        "Waiting for alice%2540corp.com",
+        "Blocked by PROJ-12345",
+        "token=sk%252Dabcdefghijklmnop",
+    ],
+)
+def test_agent_loop_omits_unsafe_internal_aggregate_labels(
+    unsafe_label: str,
+) -> None:
+    """Internal labels cannot cross a scheduled model-observation boundary."""
+
+    observations = api._schedule_model_observations(
+        [
+            AgentExecutionResult(
+                tool_name="erp_read.search_projects",
+                status="succeeded",
+                result={
+                    "projects": [
+                        {"status": unsafe_label, "percent_complete": 25},
+                        {"status": "Open", "percent_complete": 75},
+                    ]
+                },
+            ),
+            AgentExecutionResult(
+                tool_name="onboarding_read.get_summary",
+                status="succeeded",
+                result={
+                    "total": 2,
+                    "by_state": {unsafe_label: 1, "active": 1},
+                    "stale_count": 0,
+                },
+            ),
+        ]
+    )
+
+    project_observation = json.loads(observations[0]["data_json"])
+    onboarding_observation = json.loads(observations[1]["data_json"])
+    assert project_observation == {
+        "average_percent_complete": 50.0,
+        "matching_project_count": 2,
+        "status_counts": {"Open": 1},
+    }
+    assert onboarding_observation == {
+        "by_state": {"active": 1},
+        "stale_count": 0,
+        "total": 2,
+    }
+    assert unsafe_label not in observations[0]["data_json"]
+    assert unsafe_label not in observations[1]["data_json"]
+
+
+@pytest.mark.parametrize(
     ("tool_name", "payload", "expected"),
     [
         (

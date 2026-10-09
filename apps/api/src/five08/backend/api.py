@@ -10661,6 +10661,17 @@ def _schedule_model_observations(
     return observations
 
 
+def _schedule_safe_model_label(value: object, *, limit: int = 64) -> str | None:
+    """Return a bounded internal aggregate label that is safe for a model."""
+
+    raw_value = str(value or "")
+    if contains_private_agent_identifier(raw_value) or contains_sensitive_memory_text(
+        raw_value
+    ):
+        return None
+    return _single_line(raw_value, limit=limit) or "unknown"
+
+
 def _schedule_model_observation_payload(
     tool_name: str,
     payload: Mapping[str, Any],
@@ -10706,8 +10717,9 @@ def _schedule_model_observation_payload(
         for project in project_rows:
             if not isinstance(project, Mapping):
                 continue
-            status = _single_line(project.get("status"), limit=64) or "unknown"
-            status_counts[status] = status_counts.get(status, 0) + 1
+            status = _schedule_safe_model_label(project.get("status"))
+            if status is not None:
+                status_counts[status] = status_counts.get(status, 0) + 1
             completion = project.get("percent_complete")
             if isinstance(completion, int | float) and not isinstance(completion, bool):
                 completion_values.append(float(completion))
@@ -10744,16 +10756,12 @@ def _schedule_model_observation_payload(
         return observation
     if tool_name == "onboarding_read.get_summary":
         raw_states = payload.get("by_state")
-        states = (
-            {
-                _single_line(key, limit=64) or "unknown": _schedule_nonnegative_int(
-                    value
-                )
-                for key, value in raw_states.items()
-            }
-            if isinstance(raw_states, Mapping)
-            else {}
-        )
+        states: dict[str, int] = {}
+        if isinstance(raw_states, Mapping):
+            for key, value in raw_states.items():
+                state = _schedule_safe_model_label(key)
+                if state is not None:
+                    states[state] = _schedule_nonnegative_int(value)
         return {
             "total": _schedule_nonnegative_int(payload.get("total")),
             "by_state": states,
