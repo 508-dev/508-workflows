@@ -321,6 +321,58 @@ def redeliver_due_failed_job(
     return True
 
 
+def list_jobs_needing_queue_reconciliation(
+    settings: SharedSettings,
+    *,
+    limit: int = 100,
+    minimum_age_seconds: float = 60.0,
+) -> list[JobRecord]:
+    """List durable rows whose broker delivery can safely be retried.
+
+    Both conditions mirror the atomic reservation predicates in
+    ``redeliver_queued_job`` and ``redeliver_due_failed_job``. Callers must
+    still use those helpers to publish: another dispatcher can win the lease
+    between this observation and the publish attempt.
+    """
+
+    bounded_limit = max(1, min(int(limit), 500))
+    backoff_seconds = max(1.0, float(minimum_age_seconds))
+    query = """
+        SELECT *
+        FROM jobs
+        WHERE (
+            status = %s
+            AND updated_at <= NOW() - (%s * INTERVAL '1 second')
+        )
+        OR (
+            status = %s
+            AND attempts < max_attempts
+            AND run_after IS NOT NULL
+            AND run_after <= NOW()
+            AND updated_at <= GREATEST(
+                run_after,
+                NOW() - (%s * INTERVAL '1 second')
+            )
+        )
+        ORDER BY updated_at ASC, created_at ASC
+        LIMIT %s
+    """
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                query,
+                (
+                    JobStatus.QUEUED.value,
+                    backoff_seconds,
+                    JobStatus.FAILED.value,
+                    backoff_seconds,
+                    bounded_limit,
+                ),
+            )
+            rows = cursor.fetchall()
+    return [_as_record(row) for row in rows]
+
+
 def list_jobs(
     settings: SharedSettings,
     *,

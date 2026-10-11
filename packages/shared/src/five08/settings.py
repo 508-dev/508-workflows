@@ -41,6 +41,10 @@ class SharedSettings(BaseSettings):
     job_max_attempts: int = 8
     job_retry_base_seconds: int = 5
     job_retry_max_seconds: int = 300
+    # A durable job can be committed before its Redis delivery is published.
+    # Periodically recover those rows under an atomic database redelivery lease.
+    job_queue_reconciliation_interval_seconds: int = Field(default=30, ge=5, le=300)
+    job_queue_reconciliation_batch_size: int = Field(default=100, ge=1, le=500)
     # The worker reserves five seconds before this durable lease expires for
     # Dramatiq's hard actor deadline and cleanup.
     job_timeout_seconds: int = Field(default=600, ge=6)

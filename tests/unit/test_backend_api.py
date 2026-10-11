@@ -323,6 +323,7 @@ def test_lifespan_starts_agent_state_cleanup_after_migrations(
     """Idle agent cleanup starts independently of schedule dispatch."""
 
     cleanup_scheduler = AsyncMock()
+    worker_job_reconciliation_scheduler = AsyncMock()
     run_retention_scheduler = AsyncMock()
     pending_plan_cleanup_scheduler = AsyncMock()
     monkeypatch.setattr(api, "get_redis_connection", lambda _settings: _HealthyRedis())
@@ -334,6 +335,11 @@ def test_lifespan_starts_agent_state_cleanup_after_migrations(
     )
     monkeypatch.setattr(api, "build_queue_client", Mock(return_value=Mock()))
     monkeypatch.setattr(api, "_knowledge_capture_cleanup_scheduler", cleanup_scheduler)
+    monkeypatch.setattr(
+        api,
+        "_worker_job_queue_reconciliation_scheduler",
+        worker_job_reconciliation_scheduler,
+    )
     monkeypatch.setattr(
         api,
         "_agent_schedule_run_retention_scheduler",
@@ -352,8 +358,79 @@ def test_lifespan_starts_agent_state_cleanup_after_migrations(
 
     with TestClient(api.create_app(run_lifespan=True)):
         cleanup_scheduler.assert_called_once_with()
+        worker_job_reconciliation_scheduler.assert_called_once()
         run_retention_scheduler.assert_called_once_with()
         pending_plan_cleanup_scheduler.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_worker_job_reconciliation_redelivers_persisted_jobs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed broker publish remains recoverable beyond the actor attempt."""
+
+    now = datetime.now(tz=timezone.utc)
+    queued = api.JobRecord(
+        id="queued-job",
+        type="example_job",
+        status=api.JobStatus.QUEUED,
+        payload={},
+        idempotency_key=None,
+        attempts=0,
+        max_attempts=8,
+        run_after=None,
+        locked_at=None,
+        locked_by=None,
+        last_error=None,
+        created_at=now,
+        updated_at=now,
+    )
+    failed = api.JobRecord(
+        id="failed-job",
+        type="example_job",
+        status=api.JobStatus.FAILED,
+        payload={},
+        idempotency_key=None,
+        attempts=1,
+        max_attempts=8,
+        run_after=now,
+        locked_at=None,
+        locked_by=None,
+        last_error="broker unavailable",
+        created_at=now,
+        updated_at=now,
+    )
+    queued_redelivery = Mock(return_value=True)
+    failed_redelivery = Mock(return_value=True)
+    list_recoverable = Mock(return_value=[queued, failed])
+    monkeypatch.setattr(
+        api,
+        "list_jobs_needing_queue_reconciliation",
+        list_recoverable,
+    )
+    monkeypatch.setattr(api, "redeliver_queued_job", queued_redelivery)
+    monkeypatch.setattr(api, "redeliver_due_failed_job", failed_redelivery)
+
+    queue = Mock()
+    await api._reconcile_pending_worker_jobs(queue)
+
+    list_recoverable.assert_called_once_with(
+        api.settings,
+        limit=api.settings.job_queue_reconciliation_batch_size,
+        minimum_age_seconds=api._JOB_QUEUE_REDELIVERY_BACKOFF_SECONDS,
+    )
+    queued_redelivery.assert_called_once_with(
+        queue,
+        settings=api.settings,
+        job_id="queued-job",
+        minimum_age_seconds=api._JOB_QUEUE_REDELIVERY_BACKOFF_SECONDS,
+    )
+    failed_redelivery.assert_called_once_with(
+        queue,
+        settings=api.settings,
+        job_id="failed-job",
+        minimum_age_seconds=api._JOB_QUEUE_REDELIVERY_BACKOFF_SECONDS,
+    )
 
 
 async def test_postgres_health_handles_missing_connection(

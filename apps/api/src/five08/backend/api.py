@@ -138,6 +138,7 @@ from five08.queue import (
     JobRecord,
     QueueClient,
     JobStatus,
+    list_jobs_needing_queue_reconciliation,
     list_jobs,
     enqueue_job,
     get_job,
@@ -458,6 +459,7 @@ _AGENT_SCHEDULE_REPORT_MAX_CHARS = 1_900
 # killed API process.
 _AGENT_SCHEDULE_RUNNING_LEASE_SECONDS = 300
 _AGENT_SCHEDULE_QUEUED_JOB_REDELIVERY_BACKOFF_SECONDS = 60.0
+_JOB_QUEUE_REDELIVERY_BACKOFF_SECONDS = 60.0
 _AGENT_SCHEDULE_LOOP_MAX_ACTIONS_PER_STEP = 2
 _AGENT_SCHEDULE_LOOP_MAX_OBSERVATION_CHARS = 12_000
 _AGENT_SCHEDULE_CRM_TOOL_NAMES = frozenset({"crm_read.search_contacts"})
@@ -10054,6 +10056,63 @@ async def _enqueue_agent_schedule_run(
     return job
 
 
+async def _reconcile_pending_worker_jobs(queue: QueueClient) -> None:
+    """Republish durable generic jobs when a broker delivery was lost.
+
+    The database helpers reserve each redelivery before publishing, so API
+    replicas and the schedule dispatcher may safely race. A failed publish
+    leaves the row recoverable after the bounded backoff rather than making the
+    worker's immediate retry its only recovery mechanism.
+    """
+
+    jobs = await asyncio.to_thread(
+        list_jobs_needing_queue_reconciliation,
+        settings,
+        limit=settings.job_queue_reconciliation_batch_size,
+        minimum_age_seconds=_JOB_QUEUE_REDELIVERY_BACKOFF_SECONDS,
+    )
+    for job in jobs:
+        if job.status is JobStatus.QUEUED:
+            redelivered = await asyncio.to_thread(
+                redeliver_queued_job,
+                queue,
+                settings=settings,
+                job_id=job.id,
+                minimum_age_seconds=_JOB_QUEUE_REDELIVERY_BACKOFF_SECONDS,
+            )
+        elif job.status is JobStatus.FAILED:
+            redelivered = await asyncio.to_thread(
+                redeliver_due_failed_job,
+                queue,
+                settings=settings,
+                job_id=job.id,
+                minimum_age_seconds=_JOB_QUEUE_REDELIVERY_BACKOFF_SECONDS,
+            )
+        else:
+            continue
+        if redelivered:
+            logger.warning(
+                "Redelivered durable worker job job_id=%s job_status=%s",
+                job.id,
+                job.status.value,
+            )
+
+
+async def _worker_job_queue_reconciliation_scheduler(app: FastAPI) -> None:
+    """Continuously recover durable jobs independently of agent schedules."""
+
+    queue = app.state.queue
+    interval_seconds = settings.job_queue_reconciliation_interval_seconds
+    while True:
+        try:
+            await _reconcile_pending_worker_jobs(queue)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Failed durable worker-job queue reconciliation")
+        await asyncio.sleep(interval_seconds)
+
+
 async def _dispatch_pending_agent_schedule_runs(queue: QueueClient) -> None:
     """Deliver every persisted-but-unenqueued occurrence to the worker queue."""
 
@@ -14676,6 +14735,9 @@ async def _lifespan(app: FastAPI) -> Any:
         logger.info("Agent schedule dispatcher disabled by config")
 
     if app.state.postgres_migrations_ok:
+        app.state.worker_job_queue_reconciliation_task = asyncio.create_task(
+            _worker_job_queue_reconciliation_scheduler(app)
+        )
         app.state.agent_schedule_retention_task = asyncio.create_task(
             _agent_schedule_run_retention_scheduler()
         )
@@ -14729,6 +14791,12 @@ async def _lifespan(app: FastAPI) -> Any:
 
         if hasattr(app.state, "agent_schedule_task"):
             task = app.state.agent_schedule_task
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        if hasattr(app.state, "worker_job_queue_reconciliation_task"):
+            task = app.state.worker_job_queue_reconciliation_task
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task

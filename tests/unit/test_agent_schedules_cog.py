@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
+
 import pytest
 
+import five08.discord_bot.cogs.schedules as schedules_module
 from five08.discord_bot.cogs.schedules import AgentSchedulesCog
 
 
@@ -103,3 +107,75 @@ def test_schedule_creation_operation_id_changes_with_schedule_definition() -> No
     )
 
     assert first_id != changed_id
+
+
+def test_schedule_backend_request_does_not_follow_redirects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The API secret never follows an attacker-controlled redirect."""
+
+    monkeypatch.setattr(
+        schedules_module,
+        "settings",
+        SimpleNamespace(
+            backend_api_base_url="https://api.example",
+            api_shared_secret="schedule-secret",
+            agent_api_timeout_seconds=8.0,
+        ),
+    )
+    response = SimpleNamespace(status_code=307, json=Mock(return_value={}))
+
+    with patch.object(schedules_module.requests, "post", return_value=response) as post:
+        result = AgentSchedulesCog._post_backend_sync("/agent/schedules", {})
+
+    assert result["http_status"] == 307
+    assert post.call_args.kwargs["allow_redirects"] is False
+
+
+@pytest.mark.asyncio
+async def test_schedule_control_rejects_an_untrusted_path_identifier() -> None:
+    """Control actions never interpolate an unvalidated Discord command value."""
+
+    cog = AgentSchedulesCog.__new__(AgentSchedulesCog)
+    cog._context = Mock(return_value={"discord_user_id": "1001"})
+    cog._post_backend = AsyncMock()
+    interaction = SimpleNamespace(
+        response=SimpleNamespace(defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+
+    await AgentSchedulesCog.schedule_control_command.callback(
+        cog,
+        interaction,
+        "../../sync/people#",
+        SimpleNamespace(value="pause"),
+    )
+
+    cog._post_backend.assert_not_awaited()
+    interaction.followup.send.assert_awaited_once_with(
+        "The schedule ID must be a valid UUID.", ephemeral=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_schedule_run_rejects_an_untrusted_path_identifier() -> None:
+    """Manual runs use the same UUID boundary as lifecycle controls."""
+
+    cog = AgentSchedulesCog.__new__(AgentSchedulesCog)
+    cog._context = Mock(return_value={"discord_user_id": "1001"})
+    cog._post_backend = AsyncMock()
+    interaction = SimpleNamespace(
+        response=SimpleNamespace(defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+
+    await AgentSchedulesCog.schedule_run_command.callback(
+        cog,
+        interaction,
+        "../../sync/people#",
+    )
+
+    cog._post_backend.assert_not_awaited()
+    interaction.followup.send.assert_awaited_once_with(
+        "The schedule ID must be a valid UUID.", ephemeral=True
+    )

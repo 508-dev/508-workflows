@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 from typing import Any
+from uuid import UUID
 
 import discord
 import requests
@@ -242,8 +243,14 @@ class AgentSchedulesCog(commands.Cog):
                 ephemeral=True,
             )
             return
+        normalized_schedule_id = self._normalized_schedule_id(schedule_id)
+        if normalized_schedule_id is None:
+            await interaction.followup.send(
+                "The schedule ID must be a valid UUID.", ephemeral=True
+            )
+            return
         response = await self._post_backend(
-            f"/agent/schedules/{schedule_id}/control",
+            f"/agent/schedules/{normalized_schedule_id}/control",
             {"context": context, "action": action.value},
         )
         if response.get("http_status", 500) >= 400:
@@ -258,7 +265,8 @@ class AgentSchedulesCog(commands.Cog):
             else {}
         )
         await interaction.followup.send(
-            f"Schedule `{schedule_id}` is now {schedule.get('status') or action.value}.",
+            "Schedule "
+            f"`{normalized_schedule_id}` is now {schedule.get('status') or action.value}.",
             ephemeral=True,
         )
 
@@ -281,8 +289,14 @@ class AgentSchedulesCog(commands.Cog):
                 ephemeral=True,
             )
             return
+        normalized_schedule_id = self._normalized_schedule_id(schedule_id)
+        if normalized_schedule_id is None:
+            await interaction.followup.send(
+                "The schedule ID must be a valid UUID.", ephemeral=True
+            )
+            return
         response = await self._post_backend(
-            f"/agent/schedules/{schedule_id}/run",
+            f"/agent/schedules/{normalized_schedule_id}/run",
             {"context": context},
         )
         if response.get("http_status", 500) >= 400:
@@ -314,6 +328,15 @@ class AgentSchedulesCog(commands.Cog):
         return (
             f"Schedule run `{run_id}` request accepted ({status or 'unknown status'})."
         )
+
+    @staticmethod
+    def _normalized_schedule_id(value: object) -> str | None:
+        """Return a canonical schedule UUID before constructing a backend path."""
+
+        try:
+            return str(UUID(str(value).strip()))
+        except (AttributeError, TypeError, ValueError):
+            return None
 
     @staticmethod
     def _schedule_creation_operation_id(payload: dict[str, Any]) -> str:
@@ -392,6 +415,7 @@ class AgentSchedulesCog(commands.Cog):
                 json=payload,
                 timeout=settings.agent_api_timeout_seconds,
                 verify=default_ca_bundle_path(),
+                allow_redirects=False,
             )
         except requests.RequestException as exc:
             logger.warning("Schedule backend request failed: %s", exc)

@@ -11,6 +11,7 @@ from five08.queue import (
     mark_job_dead,
     mark_job_retry,
     mark_job_succeeded,
+    list_jobs_needing_queue_reconciliation,
     redeliver_due_failed_job,
     redeliver_queued_job,
     renew_job_execution_lease,
@@ -159,6 +160,47 @@ def test_redeliver_due_failed_job_recovers_a_lost_retry_delivery() -> None:
     assert "updated_at <= GREATEST" in query
     assert parameters == ("job-1", "failed", 60.0)
     queue.enqueue.assert_called_once_with("job-1", run_at=retry_at)
+
+
+def test_queue_reconciliation_lists_only_durably_recoverable_jobs() -> None:
+    """The generic dispatcher sees stale queued and due failed rows only."""
+
+    now = datetime.now(tz=timezone.utc)
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [
+        {
+            "id": "job-1",
+            "type": "example_job",
+            "status": "failed",
+            "payload": {},
+            "idempotency_key": None,
+            "attempts": 1,
+            "max_attempts": 8,
+            "run_after": now,
+            "locked_at": None,
+            "locked_by": None,
+            "last_error": "broker unavailable",
+            "created_at": now,
+            "updated_at": now,
+        }
+    ]
+    connection = MagicMock()
+    connection.__enter__.return_value.cursor.return_value.__enter__.return_value = (
+        cursor
+    )
+
+    with patch("five08.queue.get_postgres_connection", return_value=connection):
+        jobs = list_jobs_needing_queue_reconciliation(
+            SharedSettings(), limit=25, minimum_age_seconds=60
+        )
+
+    assert [job.id for job in jobs] == ["job-1"]
+    query, parameters = cursor.execute.call_args.args
+    assert "status = %s" in query
+    assert "AND attempts < max_attempts" in query
+    assert "AND run_after <= NOW()" in query
+    assert "updated_at <= GREATEST" in query
+    assert parameters == ("queued", 60.0, "failed", 60.0, 25)
 
 
 def test_claim_job_for_execution_uses_one_conditional_update() -> None:

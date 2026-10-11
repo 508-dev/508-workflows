@@ -106,6 +106,10 @@ dashboard field.
 - `JOB_MAX_ATTEMPTS`
 - `JOB_RETRY_BASE_SECONDS`
 - `JOB_RETRY_MAX_SECONDS`
+- `JOB_QUEUE_RECONCILIATION_INTERVAL_SECONDS`,
+  `JOB_QUEUE_RECONCILIATION_BATCH_SIZE`: API-side durable recovery for queued
+  and due retryable jobs whose Redis delivery was lost after the database
+  state transition.
 - `GIG_RECRUITING_STALE_DAYS`
 - `GIG_CONTACTED_REMINDER_DAYS`
 - `GIG_RECRUITING_REMINDER_MAX_AGE_DAYS`
