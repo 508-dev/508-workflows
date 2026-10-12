@@ -123,6 +123,11 @@ _AGENT_HELP_REQUESTS = frozenset(
         "what things can you do",
         "what can the agent do",
         "what can you help with",
+        "what permissions do i have",
+        "what are my permissions",
+        "what access do i have",
+        "what can my role access",
+        "what can my roles access",
     }
 )
 _AGENT_PRESENCE_CHECKS = frozenset(

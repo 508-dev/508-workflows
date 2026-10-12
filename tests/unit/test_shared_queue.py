@@ -104,6 +104,7 @@ def test_redeliver_queued_job_reserves_a_durable_backoff_window() -> None:
     assert redelivered is True
     query, parameters = cursor.execute.call_args.args
     assert "AND status = %s" in query
+    assert "AND (run_after IS NULL OR run_after <= NOW())" in query
     assert "updated_at <= NOW() - (%s * INTERVAL '1 second')" in query
     assert parameters == ("job-1", "queued", 60.0)
     queue.enqueue.assert_called_once_with("job-1", run_at=None)
@@ -197,6 +198,7 @@ def test_queue_reconciliation_lists_only_durably_recoverable_jobs() -> None:
     assert [job.id for job in jobs] == ["job-1"]
     query, parameters = cursor.execute.call_args.args
     assert "status = %s" in query
+    assert "AND (run_after IS NULL OR run_after <= NOW())" in query
     assert "AND attempts < max_attempts" in query
     assert "AND run_after <= NOW()" in query
     assert "updated_at <= GREATEST" in query

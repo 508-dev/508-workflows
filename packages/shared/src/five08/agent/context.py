@@ -15,17 +15,13 @@ from five08.agent.models import (
     AgentContextSource,
     AgentIdentityContext,
 )
-from five08.agent.privacy import contains_private_agent_identifier
+from five08.agent.privacy import EMAIL_ADDRESS_RE, contains_private_agent_identifier
 
 if TYPE_CHECKING:
     from five08.agent.policy import PolicyEngine
 
 logger = logging.getLogger(__name__)
 
-_CONTEXT_EMAIL_RE = re.compile(
-    r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
-    re.IGNORECASE,
-)
 _CONTEXT_UUID_RE = re.compile(
     r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
     re.IGNORECASE,
@@ -266,7 +262,7 @@ def estimate_context_tokens(text: str) -> int:
 def _contains_private_context_text(text: str) -> bool:
     """Return whether a request snippet is unsafe to send to a model."""
 
-    return bool(contains_sensitive_memory_text(text) or _CONTEXT_EMAIL_RE.search(text))
+    return bool(contains_sensitive_memory_text(text) or EMAIL_ADDRESS_RE.search(text))
 
 
 def _redact_context_uuids(text: str) -> tuple[str, int]:

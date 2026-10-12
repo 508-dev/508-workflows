@@ -13487,6 +13487,7 @@ async def agent_confirmation_handler(
         confirmation_context=payload.context,
     )
     retryable_confirmation = False
+    schedule_confirmation_replay_retained = False
     if _has_agent_schedule_creation_action(plan):
         if _is_agent_schedule_creation_plan(plan):
             creation_result = await _execute_confirmed_agent_schedule_creation_plan(
@@ -13495,7 +13496,28 @@ async def agent_confirmation_handler(
                 context=execution_context,
             )
             response = creation_result.response
-            if creation_result.retryable_preflight_failure:
+            if response.status == "executed":
+                # Discord can lose the successful HTTP response after the
+                # schedule row commits. Keep this frozen plan until expiry so
+                # its still-enabled confirmation button can safely replay the
+                # same idempotent schedule creation operation.
+                try:
+                    schedule_confirmation_replay_retained = (
+                        await _store_pending_agent_plan(plan, original_context)
+                    )
+                except Exception:
+                    logger.exception(
+                        "Unable to retain successful agent schedule confirmation "
+                        "plan_id=%s",
+                        plan.plan_id,
+                    )
+                if not schedule_confirmation_replay_retained:
+                    logger.error(
+                        "Successful agent schedule confirmation was not replayable "
+                        "plan_id=%s",
+                        plan.plan_id,
+                    )
+            elif creation_result.retryable_preflight_failure:
                 try:
                     retryable_confirmation = await _store_pending_agent_plan(
                         plan,
@@ -13582,6 +13604,7 @@ async def agent_confirmation_handler(
             "model_source_tier": plan.model.source_tier,
             "action_names": [action.tool_name for action in plan.actions],
             "retryable_confirmation": retryable_confirmation,
+            "schedule_confirmation_replay_retained": schedule_confirmation_replay_retained,
             # Results can contain CRM, account, ERP, or private-memory data.
             # Audit records retain outcomes for operational traceability, not
             # the returned payloads themselves.

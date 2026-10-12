@@ -41,7 +41,7 @@ from five08.agent.state import (
 from five08.agent.model_routing import AgentModelConfig
 from five08.agent.planner import AgentPlanner, AgentPlannerResult
 from five08.agent.policy import PolicyEngine
-from five08.agent.privacy import contains_private_agent_identifier
+from five08.agent.privacy import EMAIL_ADDRESS_RE, contains_private_agent_identifier
 from five08.agent.tools import ToolPartialSuccessError, ToolRegistry
 from five08.clients.migadu import normalize_migadu_mailbox_domain
 
@@ -65,7 +65,6 @@ _ELLIPTICAL_TASK_CLAUSE_RE = re.compile(
     r"^\s*(?:another(?:\s+task)?|(?:a\s+)?(?:second|third|fourth)|one\s+more|an\s+additional)\s+(?:task\b|to\b)",
     re.IGNORECASE,
 )
-_EMAIL_ADDRESS_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 _SHARED_WORKFLOW_VERB_RE = re.compile(
     r"^\s*(?:please\s+)?(?P<verb>"
     r"search|find|list|show|create|open|update|edit|close|assign|add|invite|send|provision"
@@ -113,10 +112,15 @@ _OPERATIONAL_DATA_SUBJECT_RE = re.compile(
     r"balances?|owing|owed|owes?|receivables?|revenue|sales|profit|costs?|"
     r"onboarding|crm|contacts?|members?|"
     r"tasks?|github|repositories?|repos?|issues?|bugs?|defects?|tickets?|"
+    r"todos?|"
     r"pull\s+requests?|prs?|schedules?|"
     r"(?:background|worker)\s+(?:jobs?|tasks?)|"
     r"(?:recurring|scheduled)\s+reports?|reports?\s+(?:are\s+)?scheduled|"
     r"projects?|database|records?)\b",
+    re.IGNORECASE,
+)
+_CAPABILITY_QUESTION_RE = re.compile(
+    r"\b(?:permissions?|roles?|scopes?|access)\b",
     re.IGNORECASE,
 )
 _DISCORD_UNTRUSTED_MARKDOWN_CHARS = frozenset("\\*_~|`[]()#>")
@@ -597,7 +601,7 @@ class AgentOrchestrator:
                 verb.casefold() == "invite"
                 and "outline" in clauses[0].casefold()
                 and any(
-                    _EMAIL_ADDRESS_RE.fullmatch(clause.strip()) is not None
+                    EMAIL_ADDRESS_RE.fullmatch(clause.strip()) is not None
                     for clause in clauses[1:]
                 )
             ):
@@ -890,7 +894,9 @@ class AgentOrchestrator:
             normalized,
         ):
             return False
-        if AgentOrchestrator._is_operational_status_request(normalized):
+        if AgentOrchestrator._is_operational_status_request(
+            normalized
+        ) or _CAPABILITY_QUESTION_RE.search(normalized):
             # A model must not invent an answer about mutable organization
             # data. Require a validated read-only tool plan instead.
             return False

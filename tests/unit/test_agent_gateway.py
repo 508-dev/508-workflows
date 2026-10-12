@@ -206,6 +206,8 @@ def test_context_loader_recounts_forged_small_token_metadata() -> None:
         "Bearer abcdefghijklmnopqrstuv",
         "SSN 123-45-6789",
         "Contact customer@example.com about the task.",
+        "Contact customer@corp about the task.",
+        "Contact customer@localhost about the task.",
         "Review CRM contact contact-123 before the next onboarding step.",
         "Follow up on TASK-123 before the next steering meeting.",
         "Inspect Purchase Invoice PINV-123 for the billing report.",
@@ -2551,6 +2553,8 @@ def test_non_web_role_cannot_trigger_extract_url_validation(
     ("query", "error"),
     [
         ("sarah@example.com current grants", "email addresses"),
+        ("sarah@corp current grants", "email addresses"),
+        ("sarah@localhost current grants", "email addresses"),
         ("CRM contact contact-123 current grants", "internal record identifiers"),
         ("Purchase Invoice PINV-123 current grants", "internal record identifiers"),
         ("alice%40corp.com current grants", "internal record identifiers"),
@@ -2683,6 +2687,8 @@ def test_sensitive_current_message_never_reaches_the_model(message: str) -> None
     "message",
     [
         "What is the status of customer@example.com?",
+        "What is the status of customer@corp?",
+        "What is the status of customer@localhost?",
         "What is the status of customer%40example.com?",
         "What is the status of customer%2540example.com?",
         "Summarize CRM contact contact%2D123.",
@@ -3078,6 +3084,7 @@ def test_model_only_answer_is_limited_to_safe_chat_and_never_impersonation() -> 
         "What bugs need triage?",
         "Which defects are open?",
         "What tickets need triage?",
+        "What todos are open?",
         "Which pull requests are waiting for review?",
         "How many schedules are active?",
         "What recurring reports are configured?",
@@ -3106,6 +3113,35 @@ def test_model_only_answer_cannot_claim_operational_status(message: str) -> None
 
     assert response.status == "needs_clarification"
     assert response.message != "A model-only operational answer."
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "What permissions do I have?",
+        "What can my role access?",
+    ],
+)
+def test_model_only_answer_cannot_claim_caller_capabilities(message: str) -> None:
+    class FakePlanner:
+        def plan(self, **_kwargs: object) -> AgentPlannerResult:
+            return AgentPlannerResult(
+                draft=PlannerDraft(
+                    status="answer",
+                    intent="caller_capabilities",
+                    answer="You can administer every organization workflow.",
+                ),
+                model=AgentModelConfig().resolve("fast"),
+                latency_ms=1,
+            )
+
+    response = AgentOrchestrator(planner=FakePlanner()).plan(
+        message,
+        _context(roles=["Steering Committee"]),
+    )
+
+    assert response.status == "needs_clarification"
+    assert response.message != "You can administer every organization workflow."
 
 
 def test_bug_triage_is_not_rejected_as_unauthorized_direct_chat() -> None:

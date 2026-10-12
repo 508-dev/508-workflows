@@ -26,7 +26,7 @@ from five08.agent.models import (
     RiskLevel,
     validate_memory_fact_key,
 )
-from five08.agent.privacy import contains_private_agent_identifier
+from five08.agent.privacy import EMAIL_ADDRESS_RE, contains_private_agent_identifier
 from five08.agent.schedules import AgentScheduleProposal
 from five08.agent.web import (
     BraveWebSearch,
@@ -2967,10 +2967,6 @@ class ToolRegistry:
         return f"{local_part}@{configured_domain}", local_part
 
 
-_WEB_QUERY_EMAIL_RE = re.compile(
-    r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
-    re.IGNORECASE,
-)
 _WEB_QUERY_ACCESS_TOKEN_RE = re.compile(
     r"\b(?:sk|pk|rk|ghp|github_pat|xox[baprs])-?[A-Za-z0-9_-]{16,}\b",
     re.IGNORECASE,
@@ -3059,7 +3055,7 @@ def _validate_public_web_query(query: str) -> None:
 
     if not query:
         raise ValueError("Public web search query is required")
-    if _WEB_QUERY_EMAIL_RE.search(query):
+    if EMAIL_ADDRESS_RE.search(query):
         raise PermissionError(
             "Public web search queries cannot contain email addresses"
         )

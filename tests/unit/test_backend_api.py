@@ -2205,6 +2205,89 @@ def test_agent_confirmation_routes_schedule_creation_through_schedule_gate(
     generic_executor.execute_plan.assert_not_called()
 
 
+def test_agent_confirmation_replays_successful_schedule_creation_after_lost_response(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lost Discord response can retry the same idempotent schedule creation."""
+
+    plan = AgentPlan(
+        plan_id="schedule-plan-replay",
+        intent="create_agent_schedule",
+        planner="live_model",
+        model_tier="fast",
+        model=AgentModelConfig().resolve("fast"),
+        actions=[
+            AgentToolAction(
+                tool_name="agent_schedule.create",
+                arguments={
+                    "name": "Weekly onboarding health",
+                    "cron_expression": "0 9 * * 1",
+                    "timezone": "Asia/Tokyo",
+                    "prompt": "Inspect onboarding health and report blockers.",
+                },
+                summary="Create recurring report",
+                requires_confirmation=True,
+            )
+        ],
+        human_summary="Create recurring report",
+        requires_confirmation=True,
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+    )
+    original_context = AgentIdentityContext(
+        discord_user_id="123",
+        organization_id="org-1",
+        guild_id="org-1",
+        channel_id="2000",
+        roles=["Admin"],
+    )
+    operation_ids: list[str] = []
+
+    async def create_schedule(
+        _request: api.Request,
+        *,
+        payload: object,
+        context: AgentIdentityContext,
+    ) -> tuple[dict[str, object], int]:
+        assert context.channel_id == "2000"
+        operation_ids.append(str(getattr(payload, "operation_id")))
+        return {
+            "status": "created",
+            "schedule": {"id": "schedule-2", "next_run_at": None},
+        }, 201
+
+    monkeypatch.setattr(api, "_AGENT_ORCHESTRATOR", Mock())
+    monkeypatch.setattr(api, "_create_agent_schedule_for_context", create_schedule)
+    api._AGENT_STATE_STORE.plans[plan.plan_id] = (plan, original_context)
+    confirmation = {
+        "confirm": True,
+        "context": {
+            "discord_user_id": "123",
+            "organization_id": "org-1",
+            "guild_id": "org-1",
+            "roles": ["Admin"],
+        },
+    }
+
+    with patch("five08.backend.api.insert_audit_event"):
+        first = client.post(
+            f"/agent/confirmations/{plan.plan_id}",
+            json=confirmation,
+            headers=auth_headers,
+        )
+        replay = client.post(
+            f"/agent/confirmations/{plan.plan_id}",
+            json=confirmation,
+            headers=auth_headers,
+        )
+
+    assert first.status_code == 200
+    assert replay.status_code == 200
+    assert operation_ids == [plan.plan_id, plan.plan_id]
+    assert api._AGENT_STATE_STORE.plans[plan.plan_id] == (plan, original_context)
+
+
 def test_agent_confirmation_restores_schedule_plan_after_preflight_outage(
     client: TestClient,
     auth_headers: dict[str, str],

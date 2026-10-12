@@ -263,6 +263,7 @@ def redeliver_queued_job(
                 SET updated_at = NOW()
                 WHERE id = %s
                   AND status = %s
+                  AND (run_after IS NULL OR run_after <= NOW())
                   AND updated_at <= NOW() - (%s * INTERVAL '1 second')
                 RETURNING id, run_after
                 """,
@@ -342,6 +343,7 @@ def list_jobs_needing_queue_reconciliation(
         FROM jobs
         WHERE (
             status = %s
+            AND (run_after IS NULL OR run_after <= NOW())
             AND updated_at <= NOW() - (%s * INTERVAL '1 second')
         )
         OR (

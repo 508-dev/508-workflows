@@ -174,6 +174,31 @@ def test_agent_capabilities_advertise_confirmed_recurring_reports_for_admins() -
     assert "before creating it" in message
 
 
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "What permissions do I have?",
+        "What can my role access?",
+    ],
+)
+def test_agent_permission_questions_use_the_deterministic_capability_message(
+    prompt: str,
+) -> None:
+    cog = AgentCog.__new__(AgentCog)
+
+    response = cog._local_agent_response(
+        request=prompt,
+        roles=["Engineer"],
+        role_ids=[],
+        guild_id="test-guild",
+        transport="slash",
+    )
+
+    assert response is not None
+    assert "GitHub issues:" in response
+    assert "Agent chat:" not in response
+
+
 def test_format_agent_response_renders_github_issue_results() -> None:
     cog = AgentCog.__new__(AgentCog)
 

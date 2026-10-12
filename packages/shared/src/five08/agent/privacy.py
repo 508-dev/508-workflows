@@ -5,8 +5,8 @@ from __future__ import annotations
 import re
 from urllib.parse import unquote
 
-_EMAIL_RE = re.compile(
-    r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
+EMAIL_ADDRESS_RE = re.compile(
+    r"\b[A-Z0-9._%+-]+@[A-Z0-9][A-Z0-9.-]*\b",
     re.IGNORECASE,
 )
 _CONTACT_RECORD_ID_RE = re.compile(
@@ -72,7 +72,7 @@ def contains_private_agent_identifier(value: object) -> bool:
         pattern.search(candidate) is not None
         for candidate in candidates
         for pattern in (
-            _EMAIL_RE,
+            EMAIL_ADDRESS_RE,
             _CONTACT_RECORD_ID_RE,
             _TASK_RECORD_ID_RE,
             _UUID_RE,
