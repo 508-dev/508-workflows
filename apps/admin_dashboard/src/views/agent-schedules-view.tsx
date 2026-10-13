@@ -56,6 +56,7 @@ export type AgentSchedulesResponse = {
   schedules: AgentSchedule[]
   next_offset?: number | null
   delivery_attention?: AgentScheduleRun[]
+  delivery_attention_next_offset?: number | null
 }
 
 export type AgentScheduleCreateValues = {

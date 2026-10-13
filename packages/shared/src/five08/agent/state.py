@@ -12,11 +12,13 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field
 
-from five08.agent.models import AgentIdentityContext, AgentPlan
+from five08.agent.models import AgentIdentityContext, AgentPlan, AgentResponse
 from five08.queue import get_postgres_connection
 from five08.settings import SharedSettings
 
 PendingPlan = tuple[AgentPlan, AgentIdentityContext]
+CompletedPlan = tuple[AgentPlan, AgentIdentityContext, AgentResponse]
+StoredPlan = PendingPlan | CompletedPlan
 
 
 class ClarificationState(BaseModel):
@@ -59,9 +61,18 @@ class AgentStateStore(Protocol):
         maximum: int,
         per_actor: int,
     ) -> bool: ...
+    def save_completed_plan(
+        self,
+        plan: AgentPlan,
+        context: AgentIdentityContext,
+        response: AgentResponse,
+        *,
+        maximum: int,
+        per_actor: int,
+    ) -> bool: ...
     def claim_plan(
         self, plan_id: str, actor_id: str
-    ) -> tuple[str, PendingPlan | None]: ...
+    ) -> tuple[str, StoredPlan | None]: ...
     def purge_expired(self, *, now: datetime | None = None) -> int: ...
 
 
@@ -69,7 +80,7 @@ class InMemoryAgentStateStore:
     """Test adapter with the same single-consumer behavior as Postgres."""
 
     def __init__(self) -> None:
-        self.plans: dict[str, PendingPlan] = {}
+        self.plans: dict[str, StoredPlan] = {}
         self.clarifications: dict[str, ClarificationState] = {}
         self._lock = threading.RLock()
 
@@ -115,6 +126,41 @@ class InMemoryAgentStateStore:
         maximum: int,
         per_actor: int,
     ) -> bool:
+        return self._save_plan(
+            plan,
+            context,
+            maximum=maximum,
+            per_actor=per_actor,
+        )
+
+    def save_completed_plan(
+        self,
+        plan: AgentPlan,
+        context: AgentIdentityContext,
+        response: AgentResponse,
+        *,
+        maximum: int,
+        per_actor: int,
+    ) -> bool:
+        if response.status != "executed" or response.plan != plan:
+            return False
+        return self._save_plan(
+            plan,
+            context,
+            completed_response=response,
+            maximum=maximum,
+            per_actor=per_actor,
+        )
+
+    def _save_plan(
+        self,
+        plan: AgentPlan,
+        context: AgentIdentityContext,
+        *,
+        maximum: int,
+        per_actor: int,
+        completed_response: AgentResponse | None = None,
+    ) -> bool:
         with self._lock:
             now = datetime.now(timezone.utc)
             self.plans = {
@@ -131,10 +177,14 @@ class InMemoryAgentStateStore:
                 >= per_actor
             ):
                 return False
-            self.plans[plan.plan_id] = (plan, context)
+            self.plans[plan.plan_id] = (
+                (plan, context, completed_response)
+                if completed_response is not None
+                else (plan, context)
+            )
             return True
 
-    def claim_plan(self, plan_id: str, actor_id: str) -> tuple[str, PendingPlan | None]:
+    def claim_plan(self, plan_id: str, actor_id: str) -> tuple[str, StoredPlan | None]:
         with self._lock:
             pending = self.plans.get(plan_id)
             if pending is None:
@@ -154,8 +204,9 @@ class InMemoryAgentStateStore:
         with self._lock:
             expired_plan_ids = [
                 plan_id
-                for plan_id, (plan, _context) in self.plans.items()
-                if plan.expires_at is not None and plan.expires_at <= comparison_time
+                for plan_id, pending in self.plans.items()
+                if pending[0].expires_at is not None
+                and pending[0].expires_at <= comparison_time
             ]
             expired_clarification_ids = {
                 state.id
@@ -250,6 +301,41 @@ class PostgresAgentStateStore:
         maximum: int,
         per_actor: int,
     ) -> bool:
+        return self._save_plan(
+            plan,
+            context,
+            maximum=maximum,
+            per_actor=per_actor,
+        )
+
+    def save_completed_plan(
+        self,
+        plan: AgentPlan,
+        context: AgentIdentityContext,
+        response: AgentResponse,
+        *,
+        maximum: int,
+        per_actor: int,
+    ) -> bool:
+        if response.status != "executed" or response.plan != plan:
+            return False
+        return self._save_plan(
+            plan,
+            context,
+            completed_response=response,
+            maximum=maximum,
+            per_actor=per_actor,
+        )
+
+    def _save_plan(
+        self,
+        plan: AgentPlan,
+        context: AgentIdentityContext,
+        *,
+        maximum: int,
+        per_actor: int,
+        completed_response: AgentResponse | None = None,
+    ) -> bool:
         with self._connection() as conn, conn.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended('agent-plan-capacity', 0))"
@@ -262,6 +348,16 @@ class PostgresAgentStateStore:
             counts = cursor.fetchone()
             if counts["total"] >= maximum or counts["actor_count"] >= per_actor:
                 return False
+            payload = {
+                "plan": plan.model_dump(mode="json"),
+                "context": context.model_copy(
+                    update={"context_snippets": []}
+                ).model_dump(mode="json"),
+            }
+            if completed_response is not None:
+                payload["completed_response"] = completed_response.model_dump(
+                    mode="json"
+                )
             cursor.execute(
                 """INSERT INTO agent_states (key, kind, actor_id, reference_id, payload, expires_at)
                    VALUES (%s, 'plan', %s, %s, %s, %s) ON CONFLICT (key) DO NOTHING""",
@@ -269,21 +365,14 @@ class PostgresAgentStateStore:
                     "plan:" + plan.plan_id,
                     context.discord_user_id,
                     plan.plan_id,
-                    Jsonb(
-                        {
-                            "plan": plan.model_dump(mode="json"),
-                            "context": context.model_copy(
-                                update={"context_snippets": []}
-                            ).model_dump(mode="json"),
-                        }
-                    ),
+                    Jsonb(payload),
                     plan.expires_at
                     or datetime.now(timezone.utc) + timedelta(minutes=10),
                 ),
             )
         return True
 
-    def claim_plan(self, plan_id: str, actor_id: str) -> tuple[str, PendingPlan | None]:
+    def claim_plan(self, plan_id: str, actor_id: str) -> tuple[str, StoredPlan | None]:
         with self._connection() as conn, conn.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
                 "SELECT * FROM agent_states WHERE kind = 'plan' AND key = %s FOR UPDATE",
@@ -292,10 +381,30 @@ class PostgresAgentStateStore:
             row = cursor.fetchone()
             if row is None:
                 return "not_found", None
-            pending = (
-                AgentPlan.model_validate(row["payload"]["plan"]),
-                AgentIdentityContext.model_validate(row["payload"]["context"]),
-            )
+            plan = AgentPlan.model_validate(row["payload"]["plan"])
+            context = AgentIdentityContext.model_validate(row["payload"]["context"])
+            completed_response_payload = row["payload"].get("completed_response")
+            if completed_response_payload is None:
+                pending: StoredPlan = (plan, context)
+            else:
+                try:
+                    completed_response = AgentResponse.model_validate(
+                        completed_response_payload
+                    )
+                except (TypeError, ValueError):
+                    cursor.execute(
+                        "DELETE FROM agent_states WHERE key = %s", (row["key"],)
+                    )
+                    return "not_found", None
+                if (
+                    completed_response.status != "executed"
+                    or completed_response.plan != plan
+                ):
+                    cursor.execute(
+                        "DELETE FROM agent_states WHERE key = %s", (row["key"],)
+                    )
+                    return "not_found", None
+                pending = (plan, context, completed_response)
             if row["actor_id"] != actor_id:
                 return "actor_mismatch", pending
             cursor.execute("DELETE FROM agent_states WHERE key = %s", (row["key"],))

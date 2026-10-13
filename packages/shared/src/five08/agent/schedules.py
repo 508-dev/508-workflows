@@ -1484,6 +1484,7 @@ def list_stale_agent_schedule_run_delivery_claims(
     guild_id: str,
     claimed_before: datetime,
     limit: int = 100,
+    offset: int = 0,
 ) -> list[AgentScheduleRunRecord]:
     """List aged, unconfirmed claims for an operator-only recovery surface.
 
@@ -1496,6 +1497,7 @@ def list_stale_agent_schedule_run_delivery_claims(
     if normalized_guild_id is None:
         return []
     bounded_limit = max(1, min(int(limit), 100))
+    bounded_offset = max(0, int(offset))
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
@@ -1507,14 +1509,16 @@ def list_stale_agent_schedule_run_delivery_claims(
                 WHERE schedules.guild_id = %s
                   AND runs.delivery_status = %s
                   AND runs.delivery_claimed_at <= %s
-                ORDER BY runs.delivery_claimed_at ASC
+                ORDER BY runs.delivery_claimed_at ASC, runs.id ASC
                 LIMIT %s
+                OFFSET %s
                 """,
                 (
                     normalized_guild_id,
                     AgentScheduleRunDeliveryStatus.CLAIMED.value,
                     _utc_datetime(claimed_before),
                     bounded_limit,
+                    bounded_offset,
                 ),
             )
             rows = cursor.fetchall()

@@ -2210,7 +2210,7 @@ def test_agent_confirmation_replays_successful_schedule_creation_after_lost_resp
     auth_headers: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A lost Discord response can retry the same idempotent schedule creation."""
+    """Lost responses replay a completed outcome without repeating schedule creation."""
 
     plan = AgentPlan(
         plan_id="schedule-plan-replay",
@@ -2281,11 +2281,22 @@ def test_agent_confirmation_replays_successful_schedule_creation_after_lost_resp
             json=confirmation,
             headers=auth_headers,
         )
+        canceled_replay = client.post(
+            f"/agent/confirmations/{plan.plan_id}",
+            json={**confirmation, "confirm": False},
+            headers=auth_headers,
+        )
 
     assert first.status_code == 200
     assert replay.status_code == 200
-    assert operation_ids == [plan.plan_id, plan.plan_id]
-    assert api._AGENT_STATE_STORE.plans[plan.plan_id] == (plan, original_context)
+    assert canceled_replay.status_code == 200
+    assert replay.json() == first.json()
+    assert canceled_replay.json() == first.json()
+    assert canceled_replay.json()["status"] == "executed"
+    assert operation_ids == [plan.plan_id]
+    retained = api._AGENT_STATE_STORE.plans[plan.plan_id]
+    assert retained[:2] == (plan, original_context)
+    assert retained[2].status == "executed"
 
 
 def test_agent_confirmation_restores_schedule_plan_after_preflight_outage(

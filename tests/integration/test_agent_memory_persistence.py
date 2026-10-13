@@ -14,7 +14,12 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.engine import make_url
 
-from five08.agent import AgentIdentityContext, AgentOrchestrator, ToolRegistry
+from five08.agent import (
+    AgentIdentityContext,
+    AgentOrchestrator,
+    AgentResponse,
+    ToolRegistry,
+)
 from five08.agent.state import PostgresAgentStateStore
 from five08.knowledge.store import PostgresKnowledgeStore
 from five08.settings import SharedSettings, normalize_sqlalchemy_postgres_url
@@ -169,6 +174,35 @@ def test_shared_confirmation_is_claimed_once_and_wrong_actor_does_not_consume(da
         )
     assert results.count("claimed") == 1
     assert results.count("not_found") == 7
+
+
+def test_completed_confirmation_replay_survives_state_store_rebuild(database):
+    draft = make_agent(database).plan("Remember that my timezone is UTC", actor())
+    assert draft.plan is not None
+    completed = AgentResponse(
+        status="executed",
+        plan=draft.plan,
+        message="Completed confirmed action.",
+    )
+    store = PostgresAgentStateStore(database)
+
+    assert store.save_completed_plan(
+        draft.plan,
+        actor(),
+        completed,
+        maximum=100,
+        per_actor=5,
+    )
+
+    status, replay = PostgresAgentStateStore(database).claim_plan(
+        draft.plan.plan_id,
+        "alice",
+    )
+
+    assert status == "claimed"
+    assert replay is not None
+    assert replay[:2] == (draft.plan, actor())
+    assert replay[2] == completed
 
 
 def test_clarification_survives_rebuild(database):

@@ -25,6 +25,7 @@ _ERP_RECORD_ID_RE = re.compile(
     r"|\b(?:erp(?:next)?\s+)?project\s+[A-Za-z0-9_-]*\d[A-Za-z0-9_-]*\b",
     re.IGNORECASE,
 )
+_PHONE_NUMBER_CANDIDATE_RE = re.compile(r"(?<!\w)(?:\+?\d[\d .()/-]{7,}\d)(?!\w)")
 _MAX_PERCENT_DECODE_INPUT_CHARS = 8_192
 _MAX_PERCENT_DECODE_PASSES = 4
 
@@ -68,14 +69,20 @@ def contains_private_agent_identifier(value: object) -> bool:
     # Requests and context can carry URL-encoded identifiers. Check every
     # bounded canonical form so reversible encoding cannot bypass the shared
     # model-privacy boundary.
-    return any(
-        pattern.search(candidate) is not None
-        for candidate in candidates
-        for pattern in (
-            EMAIL_ADDRESS_RE,
-            _CONTACT_RECORD_ID_RE,
-            _TASK_RECORD_ID_RE,
-            _UUID_RE,
-            _ERP_RECORD_ID_RE,
-        )
-    )
+    for candidate in candidates:
+        if any(
+            pattern.search(candidate) is not None
+            for pattern in (
+                EMAIL_ADDRESS_RE,
+                _CONTACT_RECORD_ID_RE,
+                _TASK_RECORD_ID_RE,
+                _UUID_RE,
+                _ERP_RECORD_ID_RE,
+            )
+        ):
+            return True
+        for match in _PHONE_NUMBER_CANDIDATE_RE.finditer(candidate):
+            digit_count = sum(character.isdecimal() for character in match.group())
+            if 10 <= digit_count <= 15:
+                return True
+    return False

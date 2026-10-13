@@ -2566,6 +2566,14 @@ def test_non_web_role_cannot_trigger_extract_url_validation(
             "Purchase%20Invoice%20PINV%2D123 current grants",
             "internal record identifiers",
         ),
+        (
+            "+1 (555) 123-4567 current grants",
+            "internal record identifiers",
+        ),
+        (
+            "%2B1%20%28555%29%20123-4567 current grants",
+            "internal record identifiers",
+        ),
     ],
 )
 def test_public_web_query_rejects_sensitive_identifiers_before_provider_call(
@@ -2695,6 +2703,8 @@ def test_sensitive_current_message_never_reaches_the_model(message: str) -> None
         "Summarize CRM contact contact%252D123.",
         "Summarize ERP project PROJ%2D123.",
         "Summarize CRM record 0e5e5302-8d36-4bc8-954d-68332b36949b.",
+        "What do you know about +1 (555) 123-4567?",
+        "What do you know about %2B1%20%28555%29%20123-4567?",
     ],
 )
 def test_generic_private_identifiers_never_reach_the_model(message: str) -> None:

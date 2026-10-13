@@ -2347,7 +2347,21 @@ function App() {
             : null
       }
       setAgentSchedules(schedules)
-      setAgentScheduleDeliveryAttention(firstPage?.delivery_attention || [])
+      const deliveryAttention: AgentScheduleRun[] = [...(firstPage?.delivery_attention || [])]
+      let deliveryAttentionNextOffset = firstPage?.delivery_attention_next_offset
+      while (typeof deliveryAttentionNextOffset === "number" && deliveryAttentionNextOffset >= 0) {
+        const currentDeliveryAttentionOffset = deliveryAttentionNextOffset
+        const payload: AgentSchedulesResponse = await requestJson<AgentSchedulesResponse>(
+          `/dashboard/api/agent-schedules?delivery_attention_offset=${currentDeliveryAttentionOffset}`,
+        )
+        deliveryAttention.push(...(payload.delivery_attention || []))
+        deliveryAttentionNextOffset =
+          typeof payload.delivery_attention_next_offset === "number" &&
+          payload.delivery_attention_next_offset > currentDeliveryAttentionOffset
+            ? payload.delivery_attention_next_offset
+            : null
+      }
+      setAgentScheduleDeliveryAttention(deliveryAttention)
       setAgentScheduleDispatcherEnabled(Boolean(firstPage?.scheduler_enabled))
     } catch (error) {
       showError(error, "Unable to load recurring agent schedules")

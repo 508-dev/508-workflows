@@ -1727,6 +1727,7 @@ def test_stale_delivery_claims_are_listed_and_manually_bounded(
         AgentScheduleRunDeliveryStatus.CLAIMED.value,
         claimed_before,
         25,
+        0,
     )
 
     cursor = _FakeScheduleCursor(schedule_row={}, run_row=run_row)

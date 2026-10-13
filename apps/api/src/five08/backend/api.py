@@ -46,7 +46,7 @@ from five08.audit import (
     AuditSource,
     insert_audit_event,
 )
-from five08.agent.state import PostgresAgentStateStore
+from five08.agent.state import PostgresAgentStateStore, StoredPlan
 from five08.agent.context import PrivateMemoryContextLoader
 
 from five08.agent import (
@@ -12585,9 +12585,28 @@ async def dashboard_agent_schedules_handler(request: Request) -> JSONResponse:
     try:
         page_offset = int(query_params.get("offset", "0"))
         page_limit = int(query_params.get("limit", "100"))
+        delivery_attention_offset_raw = query_params.get("delivery_attention_offset")
+        delivery_attention_offset = (
+            int(delivery_attention_offset_raw)
+            if delivery_attention_offset_raw is not None
+            else (0 if page_offset == 0 else None)
+        )
+        delivery_attention_limit = int(
+            query_params.get("delivery_attention_limit", "100")
+        )
     except (TypeError, ValueError):
         return JSONResponse({"error": "invalid_pagination"}, status_code=400)
-    if page_offset < 0 or page_limit < 1 or page_limit > 100:
+    invalid_delivery_attention_offset = (
+        delivery_attention_offset is not None and delivery_attention_offset < 0
+    )
+    if (
+        page_offset < 0
+        or page_limit < 1
+        or page_limit > 100
+        or invalid_delivery_attention_offset
+        or delivery_attention_limit < 1
+        or delivery_attention_limit > 100
+    ):
         return JSONResponse({"error": "invalid_pagination"}, status_code=400)
     try:
         schedule_page = await asyncio.to_thread(
@@ -12598,13 +12617,16 @@ async def dashboard_agent_schedules_handler(request: Request) -> JSONResponse:
             offset=page_offset,
             include_archived=True,
         )
-        delivery_attention = await asyncio.to_thread(
-            list_stale_agent_schedule_run_delivery_claims,
-            settings,
-            guild_id=guild_id,
-            claimed_before=_agent_schedule_delivery_claim_stale_before(),
-            limit=settings.agent_schedule_dispatch_batch_size,
-        )
+        delivery_attention = []
+        if delivery_attention_offset is not None:
+            delivery_attention = await asyncio.to_thread(
+                list_stale_agent_schedule_run_delivery_claims,
+                settings,
+                guild_id=guild_id,
+                claimed_before=_agent_schedule_delivery_claim_stale_before(),
+                limit=delivery_attention_limit,
+                offset=delivery_attention_offset,
+            )
     except Exception:
         logger.exception("Failed loading dashboard agent schedules")
         return JSONResponse({"error": "schedule_list_failed"}, status_code=503)
@@ -12621,6 +12643,15 @@ async def dashboard_agent_schedules_handler(request: Request) -> JSONResponse:
             "delivery_attention": [
                 _agent_schedule_run_payload(run) for run in delivery_attention
             ],
+            # An exact full page deliberately asks the dashboard to make one
+            # bounded follow-up request. That harmless empty-page probe avoids
+            # coupling recovery visibility to the dispatcher batch size.
+            "delivery_attention_next_offset": (
+                delivery_attention_offset + delivery_attention_limit
+                if delivery_attention_offset is not None
+                and len(delivery_attention) == delivery_attention_limit
+                else None
+            ),
         }
     )
 
@@ -13147,11 +13178,28 @@ async def _store_pending_agent_plan(
     )
 
 
+async def _store_completed_agent_plan(
+    plan: AgentPlan,
+    context: AgentIdentityContext,
+    response: AgentResponse,
+) -> bool:
+    """Retain a successful schedule result for a lost-response replay."""
+
+    return await asyncio.to_thread(
+        _AGENT_STATE_STORE.save_completed_plan,
+        plan,
+        context,
+        response,
+        maximum=_MAX_PENDING_AGENT_PLANS,
+        per_actor=_MAX_PENDING_AGENT_PLANS_PER_ACTOR,
+    )
+
+
 async def _claim_pending_agent_plan(
     plan_id: str,
     *,
     discord_user_id: str,
-) -> tuple[str, tuple[AgentPlan, AgentIdentityContext] | None]:
+) -> tuple[str, StoredPlan | None]:
     return await asyncio.to_thread(
         _AGENT_STATE_STORE.claim_plan, plan_id, discord_user_id
     )
@@ -13447,7 +13495,8 @@ async def agent_confirmation_handler(
         )
         return JSONResponse({"error": "plan_not_found"}, status_code=404)
 
-    plan, original_context = pending
+    plan, original_context = pending[:2]
+    completed_response = pending[2] if len(pending) == 3 else None
     if claim_status == "actor_mismatch":
         _schedule_agent_audit_event(
             context=payload.context,
@@ -13466,6 +13515,46 @@ async def agent_confirmation_handler(
             metadata={"reason": "plan_expired"},
         )
         return JSONResponse({"error": "plan_expired"}, status_code=410)
+
+    if completed_response is not None:
+        # The schedule row committed before a Discord response was lost. A
+        # later Confirm or Cancel interaction must report that completed
+        # outcome instead of presenting the original action as cancellable.
+        try:
+            replay_retained = await _store_completed_agent_plan(
+                plan,
+                original_context,
+                completed_response,
+            )
+        except Exception:
+            replay_retained = False
+            logger.exception(
+                "Unable to retain replayed agent schedule confirmation plan_id=%s",
+                plan.plan_id,
+            )
+        if not replay_retained:
+            logger.error(
+                "Replayed agent schedule confirmation result was not retained "
+                "plan_id=%s",
+                plan.plan_id,
+            )
+        _schedule_agent_audit_event(
+            context=original_context,
+            action="agent.confirmation",
+            result=AuditResult.SUCCESS,
+            plan=plan,
+            metadata={
+                "status": completed_response.status,
+                "replayed_completed_schedule_creation": True,
+                "schedule_confirmation_replay_retained": replay_retained,
+                "confirmation_requested": payload.confirm,
+                "tool_outcomes": [
+                    {"tool_name": result.tool_name, "status": result.status}
+                    for result in completed_response.results
+                ],
+            },
+        )
+        return JSONResponse(completed_response.model_dump(mode="json"), status_code=200)
 
     if not payload.confirm:
         _schedule_agent_audit_event(
@@ -13498,22 +13587,26 @@ async def agent_confirmation_handler(
             response = creation_result.response
             if response.status == "executed":
                 # Discord can lose the successful HTTP response after the
-                # schedule row commits. Keep this frozen plan until expiry so
-                # its still-enabled confirmation button can safely replay the
-                # same idempotent schedule creation operation.
+                # schedule row commits. Retain that completed response until
+                # expiry, so either confirmation button reports the durable
+                # outcome instead of falsely canceling an active schedule.
                 try:
                     schedule_confirmation_replay_retained = (
-                        await _store_pending_agent_plan(plan, original_context)
+                        await _store_completed_agent_plan(
+                            plan,
+                            original_context,
+                            response,
+                        )
                     )
                 except Exception:
                     logger.exception(
-                        "Unable to retain successful agent schedule confirmation "
+                        "Unable to retain completed agent schedule confirmation "
                         "plan_id=%s",
                         plan.plan_id,
                     )
                 if not schedule_confirmation_replay_retained:
                     logger.error(
-                        "Successful agent schedule confirmation was not replayable "
+                        "Successful agent schedule confirmation result was not replayable "
                         "plan_id=%s",
                         plan.plan_id,
                     )

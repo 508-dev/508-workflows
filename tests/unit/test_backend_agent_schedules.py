@@ -3134,6 +3134,54 @@ async def test_dashboard_lists_stale_delivery_claims_for_operator_attention(
         "include_archived": True,
     }
     assert stale_claims.call_args.kwargs["guild_id"] == "1000"
+    assert stale_claims.call_args.kwargs["limit"] == 100
+    assert stale_claims.call_args.kwargs["offset"] == 0
+
+
+@pytest.mark.asyncio
+async def test_dashboard_paginates_stale_delivery_claims_independently_of_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recovery claims use their own cursor, not the dispatcher throughput cap."""
+
+    stale_claims = Mock(return_value=[_run(), replace(_run(), id="run-2")])
+
+    async def dashboard_session(*_args: object, **_kwargs: object):
+        return None, None
+
+    async def run_sync(
+        function: Callable[..., object], *args: object, **kwargs: object
+    ):
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(api, "_dashboard_session_or_error", dashboard_session)
+    monkeypatch.setattr(api.asyncio, "to_thread", run_sync)
+    monkeypatch.setattr(api, "_configured_agent_schedule_guild_id", lambda: "1000")
+    monkeypatch.setattr(api, "list_agent_schedules", Mock(return_value=[]))
+    monkeypatch.setattr(
+        api,
+        "list_stale_agent_schedule_run_delivery_claims",
+        stale_claims,
+    )
+
+    response = await api.dashboard_agent_schedules_handler(
+        cast(
+            Request,
+            SimpleNamespace(
+                query_params={
+                    "delivery_attention_offset": "25",
+                    "delivery_attention_limit": "2",
+                }
+            ),
+        )
+    )
+
+    assert response.status_code == 200
+    payload = json.loads(response.body)
+    assert [run["id"] for run in payload["delivery_attention"]] == ["run-1", "run-2"]
+    assert payload["delivery_attention_next_offset"] == 27
+    assert stale_claims.call_args.kwargs["limit"] == 2
+    assert stale_claims.call_args.kwargs["offset"] == 25
 
 
 @pytest.mark.asyncio
