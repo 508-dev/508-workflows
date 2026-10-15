@@ -58,6 +58,16 @@ def percent_decoded_text_candidates(value: str) -> tuple[str, ...] | None:
     return tuple(candidates)
 
 
+def _is_ipv4_address(value: str) -> bool:
+    """Return whether a numeric candidate is an ordinary dotted IPv4 address."""
+
+    octets = value.split(".")
+    return len(octets) == 4 and all(
+        octet.isascii() and octet.isdecimal() and 0 <= int(octet) <= 255
+        for octet in octets
+    )
+
+
 def contains_private_agent_identifier(value: object) -> bool:
     """Return whether text contains a record identifier that must stay internal."""
 
@@ -82,6 +92,8 @@ def contains_private_agent_identifier(value: object) -> bool:
         ):
             return True
         for match in _PHONE_NUMBER_CANDIDATE_RE.finditer(candidate):
+            if _is_ipv4_address(match.group()):
+                continue
             digit_count = sum(character.isdecimal() for character in match.group())
             if 10 <= digit_count <= 15:
                 return True

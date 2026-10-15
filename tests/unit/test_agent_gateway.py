@@ -2718,6 +2718,24 @@ def test_generic_private_identifiers_never_reach_the_model(message: str) -> None
     assert "cannot send" in response.message
 
 
+@pytest.mark.parametrize("address", ["255.255.255.255", "255%2E255%2E255%2E255"])
+def test_ipv4_addresses_do_not_trigger_the_phone_privacy_boundary(address: str) -> None:
+    class FakePlanner:
+        def plan(self, **_kwargs: object) -> AgentPlannerResult:
+            return AgentPlannerResult(
+                draft=PlannerDraft(status="answer", answer="A public network address."),
+                model=AgentModelConfig().resolve("fast"),
+                latency_ms=1,
+            )
+
+    response = AgentOrchestrator(planner=FakePlanner()).plan(
+        f"What is {address}?", _context()
+    )
+
+    assert response.status == "executed"
+    assert response.message == "A public network address."
+
+
 def test_explicit_email_workflow_is_deterministic_without_model_disclosure() -> None:
     class FailingPlanner:
         def plan(self, **_kwargs: object) -> AgentPlannerResult:
@@ -3060,6 +3078,7 @@ def test_model_only_answer_is_limited_to_safe_chat_and_never_impersonation() -> 
         "Who are our suppliers?",
         "Who are our vendors?",
         "Who are our clients?",
+        "Who are our prospects?",
         "What invoices did Acme submit?",
         "What customers owe us money?",
         "What payments are outstanding?",

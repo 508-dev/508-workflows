@@ -19,6 +19,7 @@ from five08.settings import SharedSettings
 PendingPlan = tuple[AgentPlan, AgentIdentityContext]
 CompletedPlan = tuple[AgentPlan, AgentIdentityContext, AgentResponse]
 StoredPlan = PendingPlan | CompletedPlan
+_COMPLETED_PLAN_REPLAY_TTL = timedelta(minutes=10)
 
 
 class ClarificationState(BaseModel):
@@ -81,8 +82,14 @@ class InMemoryAgentStateStore:
 
     def __init__(self) -> None:
         self.plans: dict[str, StoredPlan] = {}
+        self._completed_plan_expirations: dict[str, datetime] = {}
         self.clarifications: dict[str, ClarificationState] = {}
         self._lock = threading.RLock()
+
+    def _plan_expires_at(self, plan_id: str, pending: StoredPlan) -> datetime | None:
+        if len(pending) == 3:
+            return self._completed_plan_expirations.get(plan_id, pending[0].expires_at)
+        return pending[0].expires_at
 
     def take_clarification(
         self, context: AgentIdentityContext
@@ -148,6 +155,8 @@ class InMemoryAgentStateStore:
             plan,
             context,
             completed_response=response,
+            completed_expires_at=datetime.now(timezone.utc)
+            + _COMPLETED_PLAN_REPLAY_TTL,
             maximum=maximum,
             per_actor=per_actor,
         )
@@ -160,13 +169,20 @@ class InMemoryAgentStateStore:
         maximum: int,
         per_actor: int,
         completed_response: AgentResponse | None = None,
+        completed_expires_at: datetime | None = None,
     ) -> bool:
         with self._lock:
             now = datetime.now(timezone.utc)
             self.plans = {
                 key: value
                 for key, value in self.plans.items()
-                if value[0].expires_at is None or value[0].expires_at > now
+                if (expires_at := self._plan_expires_at(key, value)) is None
+                or expires_at > now
+            }
+            self._completed_plan_expirations = {
+                key: expires_at
+                for key, expires_at in self._completed_plan_expirations.items()
+                if key in self.plans and len(self.plans[key]) == 3
             }
             if (
                 len(self.plans) >= maximum
@@ -182,6 +198,13 @@ class InMemoryAgentStateStore:
                 if completed_response is not None
                 else (plan, context)
             )
+            if completed_response is None:
+                self._completed_plan_expirations.pop(plan.plan_id, None)
+            else:
+                self._completed_plan_expirations[plan.plan_id] = (
+                    completed_expires_at
+                    or datetime.now(timezone.utc) + _COMPLETED_PLAN_REPLAY_TTL
+                )
             return True
 
     def claim_plan(self, plan_id: str, actor_id: str) -> tuple[str, StoredPlan | None]:
@@ -192,7 +215,8 @@ class InMemoryAgentStateStore:
             if pending[1].discord_user_id != actor_id:
                 return "actor_mismatch", pending
             del self.plans[plan_id]
-            expired = pending[0].expires_at
+            expired = self._plan_expires_at(plan_id, pending)
+            self._completed_plan_expirations.pop(plan_id, None)
             return (
                 "expired"
                 if expired and expired <= datetime.now(timezone.utc)
@@ -205,8 +229,8 @@ class InMemoryAgentStateStore:
             expired_plan_ids = [
                 plan_id
                 for plan_id, pending in self.plans.items()
-                if pending[0].expires_at is not None
-                and pending[0].expires_at <= comparison_time
+                if (expires_at := self._plan_expires_at(plan_id, pending)) is not None
+                and expires_at <= comparison_time
             ]
             expired_clarification_ids = {
                 state.id
@@ -215,6 +239,7 @@ class InMemoryAgentStateStore:
             }
             for plan_id in expired_plan_ids:
                 del self.plans[plan_id]
+                self._completed_plan_expirations.pop(plan_id, None)
             self.clarifications = {
                 key: state
                 for key, state in self.clarifications.items()
@@ -323,6 +348,8 @@ class PostgresAgentStateStore:
             plan,
             context,
             completed_response=response,
+            completed_expires_at=datetime.now(timezone.utc)
+            + _COMPLETED_PLAN_REPLAY_TTL,
             maximum=maximum,
             per_actor=per_actor,
         )
@@ -335,6 +362,7 @@ class PostgresAgentStateStore:
         maximum: int,
         per_actor: int,
         completed_response: AgentResponse | None = None,
+        completed_expires_at: datetime | None = None,
     ) -> bool:
         with self._connection() as conn, conn.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
@@ -366,7 +394,8 @@ class PostgresAgentStateStore:
                     context.discord_user_id,
                     plan.plan_id,
                     Jsonb(payload),
-                    plan.expires_at
+                    completed_expires_at
+                    or plan.expires_at
                     or datetime.now(timezone.utc) + timedelta(minutes=10),
                 ),
             )

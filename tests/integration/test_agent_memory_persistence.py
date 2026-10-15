@@ -1,6 +1,7 @@
 """Real Postgres tests; set AGENT_TEST_POSTGRES_URL to a disposable database."""
 
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 import importlib
 import os
 from uuid import uuid4
@@ -179,15 +180,18 @@ def test_shared_confirmation_is_claimed_once_and_wrong_actor_does_not_consume(da
 def test_completed_confirmation_replay_survives_state_store_rebuild(database):
     draft = make_agent(database).plan("Remember that my timezone is UTC", actor())
     assert draft.plan is not None
+    expired_plan = draft.plan.model_copy(
+        update={"expires_at": datetime.now(timezone.utc) - timedelta(seconds=1)}
+    )
     completed = AgentResponse(
         status="executed",
-        plan=draft.plan,
+        plan=expired_plan,
         message="Completed confirmed action.",
     )
     store = PostgresAgentStateStore(database)
 
     assert store.save_completed_plan(
-        draft.plan,
+        expired_plan,
         actor(),
         completed,
         maximum=100,
@@ -195,13 +199,13 @@ def test_completed_confirmation_replay_survives_state_store_rebuild(database):
     )
 
     status, replay = PostgresAgentStateStore(database).claim_plan(
-        draft.plan.plan_id,
+        expired_plan.plan_id,
         "alice",
     )
 
     assert status == "claimed"
     assert replay is not None
-    assert replay[:2] == (draft.plan, actor())
+    assert replay[:2] == (expired_plan, actor())
     assert replay[2] == completed
 
 

@@ -107,7 +107,7 @@ _OPERATIONAL_DATA_SUBJECT_RE = re.compile(
     r"employees?|personnel|people|staff|workforce|head\s*count|"
     r"team\s+(?:size|members?)|"
     r"(?:how\s+(?:large|big)(?:\s+is)?|size\s+of)\s+(?:our\s+)?team|"
-    r"job\s+leads?|gigs?|recruit(?:ing|ment)?(?:\s+(?:pipeline|leads?))?|"
+    r"job\s+leads?|gigs?|prospects?|recruit(?:ing|ment)?(?:\s+(?:pipeline|leads?))?|"
     r"hiring(?:\s+pipeline)?|candidates?|applicants?|"
     r"balances?|owing|owed|owes?|receivables?|revenue|sales|profit|costs?|"
     r"onboarding|crm|contacts?|members?|"

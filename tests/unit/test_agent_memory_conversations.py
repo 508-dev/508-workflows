@@ -9,6 +9,7 @@ from five08.agent import (
     AgentContextSnippet,
     AgentIdentityContext,
     AgentOrchestrator,
+    AgentResponse,
     InMemoryMemoryStore,
     ToolRegistry,
 )
@@ -209,6 +210,35 @@ def test_expired_clarification_state_can_be_purged_without_another_write():
 
     assert state.purge_expired() == 1
     assert state.clarifications == {}
+
+
+def test_completed_plan_replay_gets_a_fresh_ttl_after_execution() -> None:
+    state = InMemoryAgentStateStore()
+    actor = context()
+    draft = AgentOrchestrator(state_store=state).plan(
+        "Remember that my timezone is UTC", actor
+    )
+    assert draft.plan is not None
+    expired_plan = draft.plan.model_copy(
+        update={"expires_at": datetime.now(timezone.utc) - timedelta(seconds=1)}
+    )
+    completed = AgentResponse(
+        status="executed",
+        plan=expired_plan,
+        message="Completed confirmed action.",
+    )
+
+    assert state.save_completed_plan(
+        expired_plan,
+        actor,
+        completed,
+        maximum=100,
+        per_actor=5,
+    )
+    status, replay = state.claim_plan(expired_plan.plan_id, actor.discord_user_id)
+
+    assert status == "claimed"
+    assert replay == (expired_plan, actor, completed)
 
 
 def test_personal_preference_suggestions_never_save_without_confirmation():
