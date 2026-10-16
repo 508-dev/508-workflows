@@ -1,7 +1,7 @@
 {
   "version": "discord-agent-trajectory.v1",
   "id": "memory_read_self_001",
-  "description": "Member asks what private facts the agent remembers and should route to self memory lookup.",
+  "description": "Steering Committee asks what private facts the agent remembers and should route to self memory lookup.",
   "tags": ["memory", "read"],
   "suite": {
     "canonical": false,
@@ -11,7 +11,7 @@
     "discord_user_id": "123",
     "organization_id": "org-1",
     "guild_id": "org-1",
-    "roles": ["Member"],
+    "roles": ["Steering Committee"],
     "response_destination_visibility": "private"
   },
   "stub_results": {

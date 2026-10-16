@@ -312,7 +312,7 @@ async def test_dynamic_capture_button_rehydrates_after_restart() -> None:
     cog._build_agent_context = Mock(
         return_value={"discord_user_id": "123", "organization_id": None}
     )
-    cog._guild_role_names = AsyncMock(return_value=["Member"])
+    cog._guild_role_snapshot = AsyncMock(return_value=(["Member"], ["222"]))
     cog._post_knowledge_confirmation = AsyncMock(
         return_value={
             "status": "saved",
@@ -353,7 +353,13 @@ async def test_dynamic_capture_button_rehydrates_after_restart() -> None:
     assert confirmation["draft_id"] == "11111111-1111-1111-1111-111111111111"
     assert confirmation["context"]["guild_id"] == "456"
     assert confirmation["context"]["roles"] == ["Member"]
+    assert confirmation["context"]["role_ids"] == ["222"]
     assert confirmation["confirm"] is True
+    cog._guild_role_snapshot.assert_awaited_once_with(
+        guild_id="456",
+        user_id=123,
+        require_fresh=True,
+    )
     edited_view = interaction.message.edit.await_args.kwargs["view"]
     assert all(
         isinstance(item, KnowledgeCaptureDynamicButton) and item.item.disabled
@@ -623,7 +629,7 @@ async def test_knowledge_confirmation_keeps_controls_after_backend_outage() -> N
     cog._build_agent_context = Mock(
         return_value={"discord_user_id": "123", "organization_id": None}
     )
-    cog._guild_role_names = AsyncMock(return_value=["Project Manager"])
+    cog._guild_role_snapshot = AsyncMock(return_value=(["Project Manager"], ["333"]))
     cog._post_knowledge_confirmation = AsyncMock(
         return_value={
             "status": "failed",

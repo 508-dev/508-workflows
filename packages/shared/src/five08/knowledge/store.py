@@ -18,6 +18,8 @@ from five08.agent.memory import (
     DEFAULT_MEMORY_RETENTION_DAYS,
     authorize_memory_fact_deletion,
     memory_slot,
+    normalize_memory_time,
+    normalize_organization_id,
 )
 from five08.agent.models import (
     AgentContextSourceType,
@@ -425,12 +427,18 @@ class InMemoryKnowledgeStore:
         visible_to_org_id: str | None,
         include_deleted: bool = False,
         now: datetime | None = None,
+        organization_id: str | None = None,
     ) -> list[MemoryFact]:
         comparison_time = now or datetime.now(timezone.utc)
+        resolved_organization_id = organization_id or visible_to_org_id
+        if not resolved_organization_id:
+            return []
+        if organization_id is not None and visible_to_org_id != organization_id:
+            raise PermissionError("Memory visibility must match its organization")
         with self._lock:
             facts = []
             for fact in self._facts.values():
-                if fact.organization_id != visible_to_org_id:
+                if fact.organization_id != resolved_organization_id:
                     continue
                 if fact.scope_type != scope_type or fact.scope_id != scope_id:
                     continue
@@ -518,6 +526,35 @@ class InMemoryKnowledgeStore:
                     _source_excerpt_hash(source.excerpt) if source is not None else None
                 ),
             )
+
+    def purge_expired(
+        self,
+        *,
+        organization_id: str,
+        now: datetime | None = None,
+    ) -> int:
+        """Physically remove expired or deleted memory for one organization."""
+        normalized_organization_id = normalize_organization_id(organization_id)
+        comparison_time = normalize_memory_time(now)
+        with self._lock:
+            expired_ids = [
+                fact_id
+                for fact_id, fact in self._facts.items()
+                if fact.organization_id == normalized_organization_id
+                and (
+                    fact.status == "deleted"
+                    or fact.deleted_at is not None
+                    or (
+                        fact.expires_at is not None
+                        and fact.expires_at <= comparison_time
+                    )
+                )
+            ]
+            for fact_id in expired_ids:
+                self._facts.pop(fact_id, None)
+                self._memory_values.pop(fact_id, None)
+                self._sources.pop(fact_id, None)
+        return len(expired_ids)
 
     def _required_draft(
         self,
@@ -1121,8 +1158,14 @@ class PostgresKnowledgeStore:
         visible_to_org_id: str | None,
         include_deleted: bool = False,
         now: datetime | None = None,
+        organization_id: str | None = None,
     ) -> list[MemoryFact]:
         comparison_time = now or datetime.now(timezone.utc)
+        resolved_organization_id = organization_id or visible_to_org_id
+        if not resolved_organization_id:
+            return []
+        if organization_id is not None and visible_to_org_id != organization_id:
+            raise PermissionError("Memory visibility must match its organization")
         with self._connection() as conn:
             with conn.cursor(row_factory=dict_row) as cursor:
                 cursor.execute(
@@ -1156,7 +1199,7 @@ class PostgresKnowledgeStore:
                     ORDER BY mf.updated_at DESC
                     """,
                     (
-                        visible_to_org_id,
+                        resolved_organization_id,
                         scope_type,
                         scope_id,
                         include_deleted,
@@ -1238,6 +1281,53 @@ class PostgresKnowledgeStore:
             source_type="memory_fact",
             source_ref=fact_id,
         )
+
+    def purge_expired(
+        self,
+        *,
+        organization_id: str,
+        now: datetime | None = None,
+    ) -> int:
+        """Physically remove expired or deleted memory for one organization."""
+        normalized_organization_id = normalize_organization_id(organization_id)
+        comparison_time = normalize_memory_time(now)
+        with self._connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    DELETE FROM memory_facts
+                    WHERE organization_id = %s
+                      AND (
+                          status = 'deleted'
+                          OR deleted_at IS NOT NULL
+                          OR (expires_at IS NOT NULL AND expires_at <= %s)
+                      )
+                    """,
+                    (normalized_organization_id, comparison_time),
+                )
+                deleted = cursor.rowcount
+        return max(0, deleted)
+
+    def purge_expired_all_organizations(
+        self,
+        *,
+        now: datetime | None = None,
+    ) -> int:
+        """Physically remove expired or deleted memory across organizations."""
+        comparison_time = normalize_memory_time(now)
+        with self._connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    DELETE FROM memory_facts
+                    WHERE status = 'deleted'
+                       OR deleted_at IS NOT NULL
+                       OR (expires_at IS NOT NULL AND expires_at <= %s)
+                    """,
+                    (comparison_time,),
+                )
+                deleted = cursor.rowcount
+        return max(0, deleted)
 
     def _locked_draft(
         self,

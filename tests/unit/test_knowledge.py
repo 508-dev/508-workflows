@@ -169,7 +169,7 @@ def _context(
         organization_id="guild-1",
         guild_id="guild-1",
         channel_id="channel-1",
-        roles=["Member"] if roles is None else roles,
+        roles=["Steering Committee"] if roles is None else roles,
     )
 
 
