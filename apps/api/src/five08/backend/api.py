@@ -10720,8 +10720,8 @@ def _schedule_model_observations(
     return observations
 
 
-def _schedule_safe_model_label(value: object, *, limit: int = 64) -> str | None:
-    """Return a bounded internal aggregate label that is safe for a model."""
+def _schedule_safe_aggregate_label(value: object, *, limit: int = 64) -> str | None:
+    """Return a bounded internal aggregate label safe for downstream rendering."""
 
     raw_value = str(value or "")
     if contains_private_agent_identifier(raw_value) or contains_sensitive_memory_text(
@@ -10776,7 +10776,7 @@ def _schedule_model_observation_payload(
         for project in project_rows:
             if not isinstance(project, Mapping):
                 continue
-            status = _schedule_safe_model_label(project.get("status"))
+            status = _schedule_safe_aggregate_label(project.get("status"))
             if status is not None:
                 status_counts[status] = status_counts.get(status, 0) + 1
             completion = project.get("percent_complete")
@@ -10818,7 +10818,7 @@ def _schedule_model_observation_payload(
         states: dict[str, int] = {}
         if isinstance(raw_states, Mapping):
             for key, value in raw_states.items():
-                state = _schedule_safe_model_label(key)
+                state = _schedule_safe_aggregate_label(key)
                 if state is not None:
                     states[state] = _schedule_nonnegative_int(value)
         return {
@@ -11021,6 +11021,17 @@ def _discord_safe_external_text(value: object, *, limit: int) -> str:
     )
 
 
+def _schedule_safe_discord_aggregate_label(
+    value: object, *, limit: int = 64
+) -> str | None:
+    """Return a non-sensitive aggregate label that is safe to publish to Discord."""
+
+    label = _schedule_safe_aggregate_label(value, limit=limit)
+    return (
+        _discord_safe_external_text(label, limit=limit) if label is not None else None
+    )
+
+
 def _discord_safe_external_report_text(value: object, *, limit: int) -> str:
     """Preserve report line breaks while neutralizing model-produced Markdown."""
 
@@ -11141,16 +11152,24 @@ def _deterministic_agent_loop_report(
                 f"{_schedule_list_count_label(payload, rows_key='contacts')} contact(s)."
             )
         elif tool_name == "billing_read.search_invoices":
+            invoice_type = (
+                _schedule_safe_discord_aggregate_label(
+                    payload.get("invoice_type"), limit=32
+                )
+                or "ERP"
+            )
             lines.append(
                 "\nFound "
                 f"{_schedule_list_count_label(payload, rows_key='invoices')} "
-                f"{_single_line(payload.get('invoice_type'), limit=32) or 'ERP'} invoice(s)."
+                f"{invoice_type} invoice(s)."
             )
         elif tool_name == "billing_read.get_invoice_summary":
             invoice = payload.get("invoice")
             if isinstance(invoice, Mapping):
                 status = (
-                    _discord_safe_external_text(invoice.get("status"), limit=64)
+                    _schedule_safe_discord_aggregate_label(
+                        invoice.get("status"), limit=64
+                    )
                     or "unknown"
                 )
                 lines.append(f"\nRetrieved an invoice summary (status: {status}).")
@@ -11168,10 +11187,11 @@ def _deterministic_agent_loop_report(
             for project in project_rows:
                 if not isinstance(project, Mapping):
                     continue
-                status = (
-                    _discord_safe_external_text(project.get("status"), limit=64)
-                    or "unknown"
+                status = _schedule_safe_discord_aggregate_label(
+                    project.get("status"), limit=64
                 )
+                if status is None:
+                    continue
                 status_counts[status] = status_counts.get(status, 0) + 1
             has_more = payload.get("has_more") is True
             status_suffix = (
@@ -11194,7 +11214,9 @@ def _deterministic_agent_loop_report(
             project = payload.get("project")
             if isinstance(project, Mapping):
                 status = (
-                    _discord_safe_external_text(project.get("status"), limit=64)
+                    _schedule_safe_discord_aggregate_label(
+                        project.get("status"), limit=64
+                    )
                     or "unknown"
                 )
                 completion = project.get("percent_complete")
@@ -11211,15 +11233,15 @@ def _deterministic_agent_loop_report(
                 lines.append("\nNo matching ERP project was found.")
         elif tool_name == "onboarding_read.get_summary":
             states = payload.get("by_state")
-            state_summary = (
-                ", ".join(
-                    f"{_discord_safe_external_text(state, limit=64) or 'unknown'}: "
-                    f"{_schedule_nonnegative_int(count)}"
-                    for state, count in sorted(states.items())
-                )
-                if isinstance(states, Mapping)
-                else ""
-            )
+            state_labels: list[str] = []
+            if isinstance(states, Mapping):
+                for state, count in sorted(states.items()):
+                    label = _schedule_safe_discord_aggregate_label(state, limit=64)
+                    if label is not None:
+                        state_labels.append(
+                            f"{label}: {_schedule_nonnegative_int(count)}"
+                        )
+            state_summary = ", ".join(state_labels)
             lines.append(
                 "\nOnboarding queue: "
                 f"{_schedule_nonnegative_int(payload.get('total'))} total"

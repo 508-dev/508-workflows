@@ -815,31 +815,30 @@ def test_agent_loop_uses_safe_aggregate_observations_for_private_tools() -> None
 def test_agent_loop_omits_unsafe_internal_aggregate_labels(
     unsafe_label: str,
 ) -> None:
-    """Internal labels cannot cross a scheduled model-observation boundary."""
+    """Internal labels cannot cross model or Discord-report boundaries."""
 
-    observations = api._schedule_model_observations(
-        [
-            AgentExecutionResult(
-                tool_name="erp_read.search_projects",
-                status="succeeded",
-                result={
-                    "projects": [
-                        {"status": unsafe_label, "percent_complete": 25},
-                        {"status": "Open", "percent_complete": 75},
-                    ]
-                },
-            ),
-            AgentExecutionResult(
-                tool_name="onboarding_read.get_summary",
-                status="succeeded",
-                result={
-                    "total": 2,
-                    "by_state": {unsafe_label: 1, "active": 1},
-                    "stale_count": 0,
-                },
-            ),
-        ]
-    )
+    results = [
+        AgentExecutionResult(
+            tool_name="erp_read.search_projects",
+            status="succeeded",
+            result={
+                "projects": [
+                    {"status": unsafe_label, "percent_complete": 25},
+                    {"status": "Open", "percent_complete": 75},
+                ]
+            },
+        ),
+        AgentExecutionResult(
+            tool_name="onboarding_read.get_summary",
+            status="succeeded",
+            result={
+                "total": 2,
+                "by_state": {unsafe_label: 1, "active": 1},
+                "stale_count": 0,
+            },
+        ),
+    ]
+    observations = api._schedule_model_observations(results)
 
     project_observation = json.loads(observations[0]["data_json"])
     onboarding_observation = json.loads(observations[1]["data_json"])
@@ -855,6 +854,17 @@ def test_agent_loop_omits_unsafe_internal_aggregate_labels(
     }
     assert unsafe_label not in observations[0]["data_json"]
     assert unsafe_label not in observations[1]["data_json"]
+
+    report = api._deterministic_agent_schedule_report(
+        schedule=_agent_loop_schedule(
+            tool_allowlist=["erp_read.search_projects", "onboarding_read.get_summary"]
+        ),
+        results=results,
+    )
+
+    assert unsafe_label not in report
+    assert "Open: 1" in report
+    assert "active: 1" in report
 
 
 @pytest.mark.parametrize(
