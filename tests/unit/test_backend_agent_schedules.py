@@ -805,15 +805,18 @@ def test_agent_loop_uses_safe_aggregate_observations_for_private_tools() -> None
 
 
 @pytest.mark.parametrize(
-    "unsafe_label",
+    ("unsafe_label", "forbidden_display"),
     [
-        "Waiting for alice%2540corp.com",
-        "Blocked by PROJ-12345",
-        "token=sk%252Dabcdefghijklmnop",
+        ("Waiting for alice%2540corp.com", "alice@corp.com"),
+        ("Blocked by PROJ-12345", "PROJ-12345"),
+        ("token=sk%252Dabcdefghijklmnop", "sk-abcdefghijklmnop"),
+        ("Waiting for alice\u200b@corp.com", "alice@corp.com"),
+        ("Blocked by PROJ\x00-12345", "PROJ-12345"),
     ],
 )
 def test_agent_loop_omits_unsafe_internal_aggregate_labels(
     unsafe_label: str,
+    forbidden_display: str,
 ) -> None:
     """Internal labels cannot cross model or Discord-report boundaries."""
 
@@ -863,6 +866,7 @@ def test_agent_loop_omits_unsafe_internal_aggregate_labels(
     )
 
     assert unsafe_label not in report
+    assert forbidden_display not in report
     assert "Open: 1" in report
     assert "active: 1" in report
 

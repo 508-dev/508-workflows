@@ -3079,6 +3079,7 @@ def test_model_only_answer_is_limited_to_safe_chat_and_never_impersonation() -> 
         "Who are our vendors?",
         "Who are our clients?",
         "Who are our prospects?",
+        "Who are our leads?",
         "What invoices did Acme submit?",
         "What customers owe us money?",
         "What payments are outstanding?",

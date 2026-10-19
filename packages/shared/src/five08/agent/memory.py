@@ -24,7 +24,7 @@ _SENSITIVE_FIELD_NAME_RE = re.compile(
     r"(?:^|[_\s.-])(?:"
     r"api[_\s.-]?key|"
     r"secret|"
-    r"password|passwd|"
+    r"password|passwd|pwd|"
     r"credential(?:s)?|"
     r"private[_\s.-]?key|"
     r"(?:access|refresh|auth)[_\s.-]?token|"
@@ -43,7 +43,7 @@ _HIGH_SIGNAL_INLINE_SECRET_RE = re.compile(
     re.IGNORECASE,
 )
 _NAMED_INLINE_SECRET_RE = re.compile(
-    r"\b(?:secret|password|passwd|credential(?:s)?|passphrase|token)"
+    r"\b(?:secret|password|passwd|pwd|credential(?:s)?|passphrase|token)"
     # Generic words occur in ordinary requests (for example, "token bucket"
     # or "password reset"). Require an explicit value connector before
     # treating them as secret material.
@@ -53,10 +53,12 @@ _NAMED_INLINE_SECRET_RE = re.compile(
 _CONTEXTUAL_INLINE_SECRET_RE = re.compile(
     # Preserve the most common natural requests that actually carry a secret
     # without treating generic documentation terms as a credential.
-    r"\b(?:my|our)\s+(?:secret|password|passwd|credential(?:s)?|passphrase|token)"
+    r"\b(?:my|our)\s+(?:secret|password|passwd|pwd|credential(?:s)?|passphrase|token)"
     r"\s+['\"]?[^\s'\"]{4,}"
-    r"|\b(?:use|using|remember|store|set)\s+(?:api[_\s.-]?key|(?:access|refresh|auth)[_\s.-]?token|token)"
-    r"\s+['\"]?[^\s'\"]{12,}",
+    r"|\b(?:use|using|remember|store|set)\s+(?:"
+    r"api[_\s.-]?key|(?:access|refresh|auth)[_\s.-]?token|token|"
+    r"(?:password|passwd|pwd)(?!\s+reset\b)"
+    r")\s+['\"]?[^\s'\"]{4,}",
     re.IGNORECASE,
 )
 _BEARER_TOKEN_RE = re.compile(r"\bbearer\s+[A-Za-z0-9._~+/=-]{12,}\b", re.IGNORECASE)

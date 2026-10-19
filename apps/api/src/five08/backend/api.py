@@ -10720,10 +10720,20 @@ def _schedule_model_observations(
     return observations
 
 
+def _without_external_display_controls(value: object) -> str:
+    """Remove Unicode controls that can disguise sensitive display content."""
+
+    return "".join(
+        character
+        for character in str(value or "")
+        if unicodedata.category(character) not in {"Cc", "Cf", "Cs"}
+    )
+
+
 def _schedule_safe_aggregate_label(value: object, *, limit: int = 64) -> str | None:
     """Return a bounded internal aggregate label safe for downstream rendering."""
 
-    raw_value = str(value or "")
+    raw_value = _without_external_display_controls(value)
     if contains_private_agent_identifier(raw_value) or contains_sensitive_memory_text(
         raw_value
     ):
@@ -11009,11 +11019,7 @@ def _discord_safe_external_text(value: object, *, limit: int) -> str:
     """Collapse controls and escape externally controlled Discord display text."""
 
     normalized = _single_line(value, limit=limit)
-    without_controls = "".join(
-        character
-        for character in normalized
-        if unicodedata.category(character) not in {"Cc", "Cf", "Cs"}
-    )
+    without_controls = _without_external_display_controls(normalized)
     without_angle_syntax = without_controls.replace("<", "‹")
     return "".join(
         f"\\{character}" if character in _DISCORD_EXTERNAL_MARKDOWN_CHARS else character

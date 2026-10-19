@@ -99,6 +99,9 @@ def test_in_memory_list_and_admin_delete_cannot_cross_organizations() -> None:
         {"password": "plain-text-password"},
         {"text": "Bearer abcdefghijklmnopqrstuv"},
         {"text": "my password is hunter2"},
+        {"text": "remember password hunter2"},
+        {"text": "store passwd hunter2"},
+        {"text": "set pwd hunter2"},
         {"text": "secret: abcdefgh"},
         {"text": "api key abcdefghijklmnop"},
         {"text": "use token qwertyuiopasdfgh"},
@@ -136,6 +139,7 @@ def test_in_memory_rejects_sensitive_values_before_storing(
     "text",
     [
         "password reset instructions",
+        "remember password reset instructions",
         "token bucket limit",
         "the secret sauce doc",
     ],
