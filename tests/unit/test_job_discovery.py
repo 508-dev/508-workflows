@@ -96,6 +96,37 @@ def test_rank_job_posts_treats_alternative_employment_types_as_union() -> None:
     }
 
 
+def test_rank_job_posts_preserves_single_letter_programming_languages() -> None:
+    rows = [
+        _row("C systems developer", ""),
+        _row("R data analyst", ""),
+        _row("Python developer", ""),
+    ]
+
+    assert [row["title"] for row in discovery.rank_job_posts(rows, "Find C jobs")] == [
+        "C systems developer"
+    ]
+    assert [row["title"] for row in discovery.rank_job_posts(rows, "Find R jobs")] == [
+        "R data analyst"
+    ]
+
+
+def test_rank_job_posts_filters_contract_and_freelance_work() -> None:
+    rows = [
+        _row("React developer", "", posting_type="full_time"),
+        _row("React developer", "", posting_type="part_time"),
+    ]
+
+    assert [
+        row["posting_type"]
+        for row in discovery.rank_job_posts(rows, "Find contract React jobs")
+    ] == ["part_time"]
+    assert [
+        row["posting_type"]
+        for row in discovery.rank_job_posts(rows, "Find freelance React jobs")
+    ] == ["part_time"]
+
+
 def test_search_job_posts_returns_larger_bounded_candidate_pool(monkeypatch) -> None:
     rows = [_row(f"React job {index}", "") for index in range(60)]
 

@@ -52,6 +52,7 @@ _APAC_TERMS = (
     "sgt",
 )
 _REGION_WORDS = frozenset({"apac", "asia", "pacific", "asian"})
+_SINGLE_LETTER_SKILLS = frozenset({"c", "r"})
 
 
 def _search_terms(query: str) -> tuple[list[str], bool, bool]:
@@ -63,7 +64,9 @@ def _search_terms(query: str) -> tuple[list[str], bool, bool]:
         [
             word
             for word in words
-            if len(word) > 1 and word not in _STOP_WORDS and word not in _REGION_WORDS
+            if (len(word) > 1 or word in _SINGLE_LETTER_SKILLS)
+            and word not in _STOP_WORDS
+            and word not in _REGION_WORDS
         ],
         apac,
         remote,
@@ -79,7 +82,14 @@ def rank_job_posts(rows: list[dict[str, Any]], query: str) -> list[dict[str, Any
     """Rank bounded, already authorized rows by the member's prose request."""
     terms, apac, remote = _search_terms(query)
     full_time = re.search(r"\bfull[ -]?time\b", query, re.I) is not None
-    part_time = re.search(r"\bpart[ -]?time\b", query, re.I) is not None
+    part_time = (
+        re.search(
+            r"\b(?:part[ -]?time|contracts?|contractors?|freelanc(?:e|er|ers|ing))\b",
+            query,
+            re.I,
+        )
+        is not None
+    )
     ranked: list[tuple[int, datetime, dict[str, Any]]] = []
     for row in rows:
         title = str(row.get("title") or "")
