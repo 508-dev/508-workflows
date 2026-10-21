@@ -65,6 +65,87 @@ def test_format_agent_response_renders_tool_error() -> None:
     assert "- task_write.update_task: failed (Task TASK-999 was not found)" in message
 
 
+@pytest.mark.asyncio
+async def test_job_search_uses_visible_forums_and_skips_closed_threads() -> None:
+    cog = AgentCog.__new__(AgentCog)
+    cog.bot = Mock()
+    member = Mock(spec=discord.Member)
+    guild = Mock(spec=discord.Guild)
+    guild.id = 42
+    visible = Mock(spec=discord.ForumChannel)
+    visible.name = "gigs"
+    visible.id = 10
+    visible.permissions_for.return_value.view_channel = True
+    hidden = Mock(spec=discord.ForumChannel)
+    hidden.name = "unqualified-leads"
+    hidden.id = 20
+    hidden.permissions_for.return_value.view_channel = False
+    guild.channels = [visible, hidden]
+    thread = Mock(spec=discord.Thread)
+    thread.parent_id = 10
+    thread.archived = True
+    thread.locked = False
+    thread.name = "[RECRUITING] Old React gig"
+    filled_thread = Mock(spec=discord.Thread)
+    filled_thread.parent_id = 10
+    filled_thread.archived = False
+    filled_thread.locked = False
+    filled_thread.name = "[FILLED] React gig"
+    open_thread = Mock(spec=discord.Thread)
+    open_thread.parent_id = 10
+    open_thread.archived = False
+    open_thread.locked = False
+    open_thread.name = "[RECRUITING] React gig"
+    threads = {12: thread, 13: filled_thread, 14: open_thread}
+    guild.get_thread.side_effect = threads.get
+
+    async def run_search(function, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    with (
+        patch("five08.discord_bot.cogs.agent.asyncio.to_thread", run_search),
+        patch(
+            "five08.discord_bot.cogs.agent.search_job_posts",
+            return_value=[
+                {
+                    "title": "Old React gig",
+                    "kind": "gig",
+                    "thread_id": "12",
+                    "channel_id": "10",
+                },
+                {
+                    "title": "React gig",
+                    "kind": "gig",
+                    "thread_id": "13",
+                    "channel_id": "10",
+                },
+                {
+                    "title": "React gig",
+                    "kind": "gig",
+                    "thread_id": "14",
+                    "channel_id": "10",
+                },
+            ],
+        ) as search,
+    ):
+        result = await cog._search_jobs_for_member(
+            guild=guild, member=member, query="Find React jobs"
+        )
+
+    assert "https://discord.com/channels/42/14" in result
+    assert "channels/42/12" not in result
+    assert "channels/42/13" not in result
+    assert search.call_args.kwargs["active_channel_ids"] == ["10"]
+    assert search.call_args.kwargs["lead_channel_ids"] == []
+
+
+def test_job_search_route_does_not_swallow_write_requests() -> None:
+    assert AgentCog._is_job_search_request("Find React jobs in APAC hours")
+    assert not AgentCog._is_job_search_request(
+        "Find React jobs and create a task to follow up"
+    )
+
+
 def test_format_agent_response_renders_generic_clarification_as_guidance() -> None:
     cog = AgentCog.__new__(AgentCog)
 
