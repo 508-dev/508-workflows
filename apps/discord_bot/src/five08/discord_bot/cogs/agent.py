@@ -1413,7 +1413,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             )
             and re.search(
                 r"\b(?:find|search|looking|show|any|recommend|match|suitable|fit)\b"
-                r"|\b(?:close|near)\s+to\s+me\b",
+                r"|\b(?:close\s+to|near(?:\s+to)?)\s+me\b",
                 text,
             )
         )
@@ -1427,8 +1427,19 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
     ) -> str:
         if guild is None or not isinstance(member, discord.Member):
             return "Search for jobs inside the 508 server."
-        if re.search(r"\b(?:close|near)\s+to\s+me\b", query, re.I):
-            return "Please include a city or time zone so I can look for nearby jobs."
+        proximity = re.search(r"\b(?:close\s+to|near(?:\s+to)?)\s+me\b", query, re.I)
+        if proximity:
+            remaining = query[: proximity.start()] + query[proximity.end() :]
+            has_location = re.search(
+                r"\b(?:in|around)\s+(?!me\b|my\b)[\w+-]+"
+                r"|\b(?:apac|jst|aest|sgt|(?:utc|gmt)[+-]?\d{1,2})\b",
+                remaining,
+                re.I,
+            )
+            if not has_location:
+                return (
+                    "Please include a city or time zone so I can look for nearby jobs."
+                )
         active_ids: list[str] = []
         lead_ids: list[str] = []
         lead_target = str(
