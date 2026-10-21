@@ -141,6 +141,8 @@ def test_in_memory_rejects_sensitive_values_before_storing(
         "password reset instructions",
         "remember password reset instructions",
         "token bucket limit",
+        "use token from documentation",
+        "remember token bucket behavior",
         "the secret sauce doc",
     ],
 )
