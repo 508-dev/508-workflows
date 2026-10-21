@@ -17,7 +17,8 @@ _STOP_WORDS = frozenset(
     "of on or role roles show some that the there to want what with work gigs gig "
     "post posts send close near opening openings recommend match suitable "
     "opportunities opportunity find search fit fitting my hours timezone time zone "
-    "please remote full part fulltime parttime contract freelance position positions".split()
+    "please remote full part fulltime parttime contract contracts contractor "
+    "contractors freelance freelancer freelancers freelancing position positions".split()
 )
 _APAC_TERMS = (
     "apac",

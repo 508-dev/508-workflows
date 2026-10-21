@@ -147,6 +147,14 @@ def test_rank_job_posts_filters_contract_and_freelance_work() -> None:
         row["posting_type"]
         for row in discovery.rank_job_posts(rows, "Find freelance React jobs")
     ] == ["part_time"]
+    assert [
+        row["posting_type"]
+        for row in discovery.rank_job_posts(rows, "Find contracts jobs")
+    ] == ["part_time"]
+    assert [
+        row["posting_type"]
+        for row in discovery.rank_job_posts(rows, "Find freelancing jobs")
+    ] == ["part_time"]
 
 
 def test_search_job_posts_returns_larger_bounded_candidate_pool(monkeypatch) -> None:
