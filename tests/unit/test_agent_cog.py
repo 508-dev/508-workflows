@@ -147,6 +147,9 @@ async def test_job_search_uses_visible_forums_and_skips_closed_threads() -> None
 
 def test_job_search_route_does_not_swallow_write_requests() -> None:
     assert AgentCog._is_job_search_request("Find React jobs in APAC hours")
+    assert AgentCog._is_job_search_request("Find a job post")
+    assert AgentCog._is_job_search_request("Jobs close to me")
+    assert AgentCog._is_job_search_request("Send me any React jobs")
     assert not AgentCog._is_job_search_request(
         "Find React jobs and create a task to follow up"
     )
@@ -162,6 +165,24 @@ def test_job_search_route_does_not_swallow_write_requests() -> None:
     assert not AgentCog._is_job_search_request(
         "Open an issue: show roles page is broken"
     )
+    assert not AgentCog._is_job_search_request("Find jobs and post a job")
+    assert not AgentCog._is_job_search_request("Find jobs and close this job")
+    assert not AgentCog._is_job_search_request("Find jobs and send jobs to #gigs")
+
+
+@pytest.mark.asyncio
+async def test_job_search_asks_for_location_when_request_says_close_to_me() -> None:
+    cog = AgentCog.__new__(AgentCog)
+    guild = Mock(spec=discord.Guild)
+    member = Mock(spec=discord.Member)
+
+    with patch("five08.discord_bot.cogs.agent.search_job_posts") as search:
+        response = await cog._search_jobs_for_member(
+            guild=guild, member=member, query="Jobs close to me"
+        )
+
+    assert "city or time zone" in response
+    search.assert_not_called()
 
 
 def test_format_agent_response_renders_generic_clarification_as_guidance() -> None:

@@ -66,6 +66,13 @@ def test_rank_job_posts_handles_sentence_punctuation_and_skill_boundaries() -> N
     ] == ["Node.js developer"]
 
 
+def test_rank_job_posts_ignores_job_search_phrasing() -> None:
+    rows = [_row("React developer", "APAC hours")]
+
+    assert discovery.rank_job_posts(rows, "Find a job post") == rows
+    assert discovery.rank_job_posts(rows, "Send me any React jobs") == rows
+
+
 def test_rank_job_posts_avoids_accidental_apac_and_remote_matches() -> None:
     rows = [
         _row("Designer", "Aesthetic work in Indiana, non-remote"),

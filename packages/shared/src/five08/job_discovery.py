@@ -15,6 +15,7 @@ JOB_SEARCH_MAX_AGE_DAYS = 45
 _STOP_WORDS = frozenset(
     "a an and are any as at be could do for from have i in is job jobs looking me "
     "of on or role roles show some that the there to want what with work gigs gig "
+    "post posts send close near "
     "opportunities opportunity find search fit fitting my hours timezone time zone "
     "please remote full part fulltime parttime contract freelance position positions".split()
 )

@@ -1387,7 +1387,14 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         text = request.casefold()
         return bool(
             not re.search(
-                r"\b(?:create|update|delete|assign|close|send|post|publish|remember|forget)\b",
+                r"\b(?:create|update|delete|assign|publish|remember|forget)\b",
+                text,
+            )
+            and not re.search(
+                r"\b(?:post|close)\s+(?:(?:a|an|the|this)\s+)?"
+                r"(?:job|gig|role|position|opening)\b"
+                r"|\bsend\s+(?:(?:a|an|the|this)\s+)?"
+                r"(?:jobs?|gigs?|roles?|positions?|openings?)\s+to\b",
                 text,
             )
             and not re.search(
@@ -1405,7 +1412,8 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                 r"\b(?:jobs?|gigs?|roles?|positions?|openings?|opportunities)\b", text
             )
             and re.search(
-                r"\b(?:find|search|looking|show|any|recommend|match|suitable|fit)\b",
+                r"\b(?:find|search|looking|show|any|recommend|match|suitable|fit)\b"
+                r"|\b(?:close|near)\s+to\s+me\b",
                 text,
             )
         )
@@ -1419,6 +1427,8 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
     ) -> str:
         if guild is None or not isinstance(member, discord.Member):
             return "Search for jobs inside the 508 server."
+        if re.search(r"\b(?:close|near)\s+to\s+me\b", query, re.I):
+            return "Please include a city or time zone so I can look for nearby jobs."
         active_ids: list[str] = []
         lead_ids: list[str] = []
         lead_target = str(
