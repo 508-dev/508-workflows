@@ -67,10 +67,14 @@ def test_rank_job_posts_handles_sentence_punctuation_and_skill_boundaries() -> N
 
 
 def test_rank_job_posts_ignores_job_search_phrasing() -> None:
-    rows = [_row("React developer", "APAC hours")]
+    rows = [_row("React developer", "APAC hours, remote work")]
 
     assert discovery.rank_job_posts(rows, "Find a job post") == rows
     assert discovery.rank_job_posts(rows, "Send me any React jobs") == rows
+    assert discovery.rank_job_posts(rows, "Find remote openings") == rows
+    assert discovery.rank_job_posts(rows, "Recommend jobs") == rows
+    assert discovery.rank_job_posts(rows, "Show suitable jobs") == rows
+    assert discovery.rank_job_posts(rows, "Match me with roles") == rows
 
 
 def test_rank_job_posts_avoids_accidental_apac_and_remote_matches() -> None:
@@ -85,6 +89,17 @@ def test_rank_job_posts_avoids_accidental_apac_and_remote_matches() -> None:
     ] == ["Japan hours, remote"]
     assert discovery.rank_job_posts(rows[:1], "Find remote designer jobs") == []
     assert discovery.rank_job_posts(rows[:1], "Find designer jobs in APAC") == []
+
+
+def test_rank_job_posts_remote_metadata_does_not_override_explicit_negation() -> None:
+    onsite = _row("React developer", "Non-remote role in Tokyo")
+    onsite["remote"] = True
+    remote = _row("React developer", "Remote role in Tokyo")
+    remote["remote"] = True
+
+    assert discovery.rank_job_posts([onsite, remote], "Find remote React jobs") == [
+        remote
+    ]
 
 
 def test_rank_job_posts_treats_alternative_employment_types_as_union() -> None:

@@ -15,7 +15,7 @@ JOB_SEARCH_MAX_AGE_DAYS = 45
 _STOP_WORDS = frozenset(
     "a an and are any as at be could do for from have i in is job jobs looking me "
     "of on or role roles show some that the there to want what with work gigs gig "
-    "post posts send close near "
+    "post posts send close near opening openings recommend match suitable "
     "opportunities opportunity find search fit fitting my hours timezone time zone "
     "please remote full part fulltime parttime contract freelance position positions".split()
 )
@@ -128,9 +128,9 @@ def rank_job_posts(rows: list[dict[str, Any]], query: str) -> list[dict[str, Any
             )
             is not None
         )
-        if remote and not (
-            row.get("remote") is True
-            or (_contains_term(searchable, "remote") and not remote_negated)
+        if remote and (
+            remote_negated
+            or not (row.get("remote") is True or _contains_term(searchable, "remote"))
         ):
             continue
         title_folded = title.casefold()
