@@ -788,12 +788,16 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                 await message.author.send(
                     content, allowed_mentions=discord.AllowedMentions.none()
                 )
-                await message.reply("I sent job matches by DM.", mention_author=False)
             except discord.HTTPException:
                 await message.reply(
                     "I couldn't send a DM. Use `/find-jobs` for a private response.",
                     mention_author=False,
                 )
+                return
+            try:
+                await message.reply("I sent job matches by DM.", mention_author=False)
+            except discord.HTTPException:
+                logger.warning("Could not acknowledge job search DM", exc_info=True)
             return
 
         context = self._build_agent_context_from_message(message)
@@ -1383,7 +1387,18 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         text = request.casefold()
         return bool(
             not re.search(
-                r"\b(?:create|update|delete|assign|close|send|post|publish)\b",
+                r"\b(?:create|update|delete|assign|close|send|post|publish|remember|forget)\b",
+                text,
+            )
+            and not re.search(
+                r"\b(?:add|open)\s+(?:(?:a|an)\s+)?(?:todo|issue)\b",
+                text,
+            )
+            and not re.search(
+                r"\b(?:search|find|list|show)\s+"
+                r"(?:(?:\w+|#\w+)\s+){0,3}"
+                r"(?:github\s+issues?|gh\s+issues?|issues?|todos?|tasks?|"
+                r"crm\s+contacts?|contacts?)\b",
                 text,
             )
             and re.search(
@@ -1431,7 +1446,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                 active_channel_ids=active_ids,
                 lead_channel_ids=lead_ids,
                 query=query,
-                limit=10,
+                limit=50,
             )
         except Exception:
             logger.warning(

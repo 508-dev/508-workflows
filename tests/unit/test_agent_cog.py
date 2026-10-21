@@ -106,13 +106,18 @@ async def test_job_search_uses_visible_forums_and_skips_closed_threads() -> None
         patch("five08.discord_bot.cogs.agent.asyncio.to_thread", run_search),
         patch(
             "five08.discord_bot.cogs.agent.search_job_posts",
-            return_value=[
-                {
-                    "title": "Old React gig",
-                    "kind": "gig",
-                    "thread_id": "12",
-                    "channel_id": "10",
-                },
+            return_value=(
+                [
+                    {
+                        "title": "Old React gig",
+                        "kind": "gig",
+                        "thread_id": "12",
+                        "channel_id": "10",
+                    },
+                ]
+                * 9
+            )
+            + [
                 {
                     "title": "React gig",
                     "kind": "gig",
@@ -137,12 +142,25 @@ async def test_job_search_uses_visible_forums_and_skips_closed_threads() -> None
     assert "channels/42/13" not in result
     assert search.call_args.kwargs["active_channel_ids"] == ["10"]
     assert search.call_args.kwargs["lead_channel_ids"] == []
+    assert search.call_args.kwargs["limit"] == 50
 
 
 def test_job_search_route_does_not_swallow_write_requests() -> None:
     assert AgentCog._is_job_search_request("Find React jobs in APAC hours")
     assert not AgentCog._is_job_search_request(
         "Find React jobs and create a task to follow up"
+    )
+    assert not AgentCog._is_job_search_request(
+        "Search GitHub issues matching jobs in repo 508-dev/508-workflows"
+    )
+    assert not AgentCog._is_job_search_request(
+        "Remember that I'm looking for React roles in APAC"
+    )
+    assert not AgentCog._is_job_search_request(
+        "Add a todo to find candidates for the React role"
+    )
+    assert not AgentCog._is_job_search_request(
+        "Open an issue: show roles page is broken"
     )
 
 

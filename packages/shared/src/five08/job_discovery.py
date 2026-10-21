@@ -58,7 +58,7 @@ def _search_terms(query: str) -> tuple[list[str], bool, bool]:
     lowered = query.casefold()
     apac = bool(re.search(r"\b(?:apac|asia[ -]pacific|asian)\b", lowered))
     remote = bool(re.search(r"\bremote\b", lowered))
-    words = re.findall(r"[a-z0-9+#.]+", lowered)
+    words = [word.strip(".") for word in re.findall(r"[a-z0-9+#.]+", lowered)]
     return (
         [
             word
@@ -70,9 +70,16 @@ def _search_terms(query: str) -> tuple[list[str], bool, bool]:
     )
 
 
+def _contains_term(text: str, term: str) -> bool:
+    """Match a skill or region as a complete token, including internal symbols."""
+    return re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", text) is not None
+
+
 def rank_job_posts(rows: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:
     """Rank bounded, already authorized rows by the member's prose request."""
     terms, apac, remote = _search_terms(query)
+    full_time = re.search(r"\bfull[ -]?time\b", query, re.I) is not None
+    part_time = re.search(r"\bpart[ -]?time\b", query, re.I) is not None
     ranked: list[tuple[int, datetime, dict[str, Any]]] = []
     for row in rows:
         title = str(row.get("title") or "")
@@ -81,22 +88,45 @@ def rank_job_posts(rows: list[dict[str, Any]], query: str) -> list[dict[str, Any
         tags = " ".join(str(tag) for tag in row.get("tags") or [])
         searchable = f"{title} {body} {location} {tags}".casefold()
         posting_type = str(row.get("posting_type") or "")
-        if re.search(r"\bfull[ -]?time\b", query, re.I) and posting_type not in {
-            "full_time",
-            "part_time_or_full_time",
-        }:
+        if (
+            full_time
+            and not part_time
+            and posting_type
+            not in {
+                "full_time",
+                "part_time_or_full_time",
+            }
+        ):
             continue
-        if re.search(r"\bpart[ -]?time\b", query, re.I) and posting_type not in {
-            "part_time",
-            "part_time_or_full_time",
-        }:
+        if (
+            part_time
+            and not full_time
+            and posting_type
+            not in {
+                "part_time",
+                "part_time_or_full_time",
+            }
+        ):
             continue
-        if apac and not any(term in searchable for term in _APAC_TERMS):
+        if apac and not any(_contains_term(searchable, term) for term in _APAC_TERMS):
             continue
-        if remote and not (row.get("remote") is True or "remote" in searchable):
+        remote_negated = (
+            re.search(
+                r"\b(?:non[- ]remote|not remote|no remote|on[- ]site only)\b",
+                searchable,
+            )
+            is not None
+        )
+        if remote and not (
+            row.get("remote") is True
+            or (_contains_term(searchable, "remote") and not remote_negated)
+        ):
             continue
+        title_folded = title.casefold()
         score = sum(
-            3 if term in title.casefold() else 1 for term in terms if term in searchable
+            3 if _contains_term(title_folded, term) else 1
+            for term in terms
+            if _contains_term(searchable, term)
         )
         if terms and score == 0:
             continue
@@ -169,4 +199,4 @@ def search_job_posts(
                     (guild_id, lead_channel_ids, cutoff, cutoff),
                 )
                 rows.extend(dict(row) for row in cursor.fetchall())
-    return rank_job_posts(rows, query)[: max(1, min(limit, 10))]
+    return rank_job_posts(rows, query)[: max(1, min(limit, 50))]

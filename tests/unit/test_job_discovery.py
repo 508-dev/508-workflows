@@ -47,6 +47,97 @@ def test_rank_job_posts_uses_skills_apac_hours_and_posting_type() -> None:
     assert matches[0]["posting_type"] == "full_time"
 
 
+def test_rank_job_posts_handles_sentence_punctuation_and_skill_boundaries() -> None:
+    rows = [
+        _row("JavaScript developer", "US hours"),
+        _row("Java developer", "US hours"),
+        _row("React engineer", "US hours"),
+        _row("Node.js developer", "US hours"),
+    ]
+
+    assert [
+        row["title"] for row in discovery.rank_job_posts(rows, "Find Java jobs.")
+    ] == ["Java developer"]
+    assert [
+        row["title"] for row in discovery.rank_job_posts(rows, "Find React jobs.")
+    ] == ["React engineer"]
+    assert [
+        row["title"] for row in discovery.rank_job_posts(rows, "Find Node.js jobs.")
+    ] == ["Node.js developer"]
+
+
+def test_rank_job_posts_avoids_accidental_apac_and_remote_matches() -> None:
+    rows = [
+        _row("Designer", "Aesthetic work in Indiana, non-remote"),
+        _row("Designer", "Japan hours, remote"),
+    ]
+
+    assert [
+        row["body"]
+        for row in discovery.rank_job_posts(rows, "Find remote designer jobs in APAC")
+    ] == ["Japan hours, remote"]
+    assert discovery.rank_job_posts(rows[:1], "Find remote designer jobs") == []
+    assert discovery.rank_job_posts(rows[:1], "Find designer jobs in APAC") == []
+
+
+def test_rank_job_posts_treats_alternative_employment_types_as_union() -> None:
+    rows = [
+        _row("React gig", "", posting_type="part_time"),
+        _row("React role", "", posting_type="full_time"),
+        _row("React opening", "", posting_type="part_time_or_full_time"),
+    ]
+
+    matches = discovery.rank_job_posts(rows, "Find full-time or part-time React jobs")
+
+    assert {row["posting_type"] for row in matches} == {
+        "part_time",
+        "full_time",
+        "part_time_or_full_time",
+    }
+
+
+def test_search_job_posts_returns_larger_bounded_candidate_pool(monkeypatch) -> None:
+    rows = [_row(f"React job {index}", "") for index in range(60)]
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, *_args):
+            return None
+
+        def fetchall(self):
+            return rows
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self, **_kwargs):
+            return Cursor()
+
+    monkeypatch.setattr(
+        discovery, "get_postgres_connection", lambda _settings: Connection()
+    )
+
+    matches = discovery.search_job_posts(
+        SharedSettings(),
+        guild_id="guild-1",
+        active_channel_ids=["10"],
+        lead_channel_ids=[],
+        query="React jobs",
+        limit=50,
+    )
+
+    assert len(matches) == 50
+
+
 def test_search_job_posts_limits_guild_channels_status_and_freshness(
     monkeypatch,
 ) -> None:
