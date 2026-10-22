@@ -112,6 +112,9 @@ def test_rank_job_posts_requires_supplied_proximity_location_and_skill() -> None
     assert discovery.rank_job_posts(rows, "Find Python jobs near me in Tokyo") == [
         tokyo_python
     ]
+    assert discovery.rank_job_posts(rows, "Find Python jobs near me in Tokyo.") == [
+        tokyo_python
+    ]
     assert discovery.rank_job_posts(rows, "Find Python jobs near me") == []
 
 

@@ -75,7 +75,7 @@ def parse_proximity_location(query: str) -> tuple[bool, str | None]:
         return False, None
     remainder = query[: proximity.start()] + query[proximity.end() :]
     if location := _LOCATION_RE.search(remainder):
-        return True, location.group(1).casefold()
+        return True, location.group(1).rstrip(".").casefold()
     if time_zone := _TIME_ZONE_RE.search(remainder):
         return True, time_zone.group().casefold()
     return True, None
