@@ -58,7 +58,9 @@ _SINGLE_LETTER_SKILLS = frozenset({"c", "r"})
 _PROXIMITY_RE = re.compile(r"\b(?:close\s+to|near(?:\s+to)?)\s+me\b", re.I)
 _LOCATION_RE = re.compile(
     r"\b(?:in|around)\s+(?!(?:me|my)\b)"
-    r"([a-z][\w+.-]*(?:\s+(?!(?:for|with|and|jobs?|roles?|gigs?|hours?)\b)"
+    r"([a-z][\w+.-]*(?:\s+(?!(?:for|with|and|jobs?|roles?|gigs?|hours?|"
+    r"remote|on[- ]site|onsite|hybrid|contracts?|freelanc\w*|"
+    r"full[- ]time|part[- ]time)\b)"
     r"[a-z][\w+.-]*){0,2})",
     re.I,
 )
@@ -66,6 +68,7 @@ _TIME_ZONE_RE = re.compile(r"\b(?:apac|jst|aest|sgt|(?:utc|gmt)[+-]?\d{1,2})\b",
 _REMOTE_NEGATION_RE = re.compile(
     r"\b(?:non[- ]remote|not remote|no remote|on[- ]site only)\b", re.I
 )
+_ONSITE_REQUEST_RE = re.compile(r"\b(?:on[- ]site|onsite)\b", re.I)
 
 
 def parse_proximity_location(query: str) -> tuple[bool, str | None]:
@@ -85,11 +88,11 @@ def _search_terms(query: str) -> tuple[list[str], bool, bool | None]:
     lowered = query.casefold()
     apac = bool(re.search(r"\b(?:apac|asia[ -]pacific|asian)\b", lowered))
     remote: bool | None = None
-    if _REMOTE_NEGATION_RE.search(lowered):
+    if _REMOTE_NEGATION_RE.search(lowered) or _ONSITE_REQUEST_RE.search(lowered):
         remote = False
     elif re.search(r"\bremote\b", lowered):
         remote = True
-    lexical_query = _REMOTE_NEGATION_RE.sub(" ", lowered)
+    lexical_query = _ONSITE_REQUEST_RE.sub(" ", _REMOTE_NEGATION_RE.sub(" ", lowered))
     words = [word.strip(".") for word in re.findall(r"[a-z0-9+#.]+", lexical_query)]
     return (
         [

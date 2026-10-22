@@ -118,6 +118,16 @@ def test_rank_job_posts_requires_supplied_proximity_location_and_skill() -> None
     assert discovery.rank_job_posts(rows, "Find Python jobs near me") == []
 
 
+def test_rank_job_posts_stops_location_before_remote_modifier() -> None:
+    tokyo_remote = _row("React developer", "Remote work")
+    tokyo_remote["location"] = "Tokyo"
+    tokyo_remote["remote"] = True
+
+    assert discovery.rank_job_posts(
+        [tokyo_remote], "Find React jobs near me in Tokyo remote"
+    ) == [tokyo_remote]
+
+
 def test_rank_job_posts_honors_non_remote_member_queries() -> None:
     onsite = _row("Python engineer", "On-site role in Tokyo")
     remote = _row("Python engineer", "Remote role in Tokyo")
@@ -129,6 +139,8 @@ def test_rank_job_posts_honors_non_remote_member_queries() -> None:
         onsite
     ]
     assert discovery.rank_job_posts(rows, "Find remote Python jobs") == [remote]
+    assert discovery.rank_job_posts(rows, "Find on-site Python jobs") == [onsite]
+    assert discovery.rank_job_posts(rows, "Find onsite Python jobs") == [onsite]
 
 
 def test_rank_job_posts_treats_alternative_employment_types_as_union() -> None:
