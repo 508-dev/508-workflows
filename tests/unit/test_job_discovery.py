@@ -102,6 +102,32 @@ def test_rank_job_posts_remote_metadata_does_not_override_explicit_negation() ->
     ]
 
 
+def test_rank_job_posts_requires_supplied_proximity_location_and_skill() -> None:
+    london_python = _row("Python engineer", "On-site in London; Tokyo team")
+    london_python["location"] = "London"
+    tokyo_accountant = _row("Accountant", "On-site in Tokyo")
+    tokyo_python = _row("Python engineer", "On-site in Tokyo")
+    rows = [london_python, tokyo_accountant, tokyo_python]
+
+    assert discovery.rank_job_posts(rows, "Find Python jobs near me in Tokyo") == [
+        tokyo_python
+    ]
+    assert discovery.rank_job_posts(rows, "Find Python jobs near me") == []
+
+
+def test_rank_job_posts_honors_non_remote_member_queries() -> None:
+    onsite = _row("Python engineer", "On-site role in Tokyo")
+    remote = _row("Python engineer", "Remote role in Tokyo")
+    remote["remote"] = True
+    rows = [onsite, remote]
+
+    assert discovery.rank_job_posts(rows, "Find non-remote Python jobs") == [onsite]
+    assert discovery.rank_job_posts(rows, "Find Python jobs that are not remote") == [
+        onsite
+    ]
+    assert discovery.rank_job_posts(rows, "Find remote Python jobs") == [remote]
+
+
 def test_rank_job_posts_treats_alternative_employment_types_as_union() -> None:
     rows = [
         _row("React gig", "", posting_type="part_time"),

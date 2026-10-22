@@ -25,7 +25,11 @@ from five08.discord_bot.utils.knowledge_context import (
 )
 from five08.discord_bot.utils.memory_views import MemoryFactsView
 from five08.engagements import EngagementStatus, parse_status_from_title
-from five08.job_discovery import JOB_SEARCH_MAX_AGE_DAYS, search_job_posts
+from five08.job_discovery import (
+    JOB_SEARCH_MAX_AGE_DAYS,
+    parse_proximity_location,
+    search_job_posts,
+)
 from five08.tls import default_ca_bundle_path
 
 logger = logging.getLogger(__name__)
@@ -1411,10 +1415,12 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             and re.search(
                 r"\b(?:jobs?|gigs?|roles?|positions?|openings?|opportunities)\b", text
             )
-            and re.search(
-                r"\b(?:find|search|looking|show|any|recommend|match|suitable|fit)\b"
-                r"|\b(?:close\s+to|near(?:\s+to)?)\s+me\b",
-                text,
+            and (
+                re.search(
+                    r"\b(?:find|search|looking|show|any|recommend|match|suitable|fit)\b",
+                    text,
+                )
+                or parse_proximity_location(request)[0]
             )
         )
 
@@ -1427,19 +1433,9 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
     ) -> str:
         if guild is None or not isinstance(member, discord.Member):
             return "Search for jobs inside the 508 server."
-        proximity = re.search(r"\b(?:close\s+to|near(?:\s+to)?)\s+me\b", query, re.I)
-        if proximity:
-            remaining = query[: proximity.start()] + query[proximity.end() :]
-            has_location = re.search(
-                r"\b(?:in|around)\s+(?!me\b|my\b)[\w+-]+"
-                r"|\b(?:apac|jst|aest|sgt|(?:utc|gmt)[+-]?\d{1,2})\b",
-                remaining,
-                re.I,
-            )
-            if not has_location:
-                return (
-                    "Please include a city or time zone so I can look for nearby jobs."
-                )
+        proximity_requested, proximity_location = parse_proximity_location(query)
+        if proximity_requested and not proximity_location:
+            return "Please include a city or time zone so I can look for nearby jobs."
         active_ids: list[str] = []
         lead_ids: list[str] = []
         lead_target = str(

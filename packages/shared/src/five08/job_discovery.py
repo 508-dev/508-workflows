@@ -55,13 +55,42 @@ _APAC_TERMS = (
 )
 _REGION_WORDS = frozenset({"apac", "asia", "pacific", "asian"})
 _SINGLE_LETTER_SKILLS = frozenset({"c", "r"})
+_PROXIMITY_RE = re.compile(r"\b(?:close\s+to|near(?:\s+to)?)\s+me\b", re.I)
+_LOCATION_RE = re.compile(
+    r"\b(?:in|around)\s+(?!(?:me|my)\b)"
+    r"([a-z][\w+.-]*(?:\s+(?!(?:for|with|and|jobs?|roles?|gigs?|hours?)\b)"
+    r"[a-z][\w+.-]*){0,2})",
+    re.I,
+)
+_TIME_ZONE_RE = re.compile(r"\b(?:apac|jst|aest|sgt|(?:utc|gmt)[+-]?\d{1,2})\b", re.I)
+_REMOTE_NEGATION_RE = re.compile(
+    r"\b(?:non[- ]remote|not remote|no remote|on[- ]site only)\b", re.I
+)
 
 
-def _search_terms(query: str) -> tuple[list[str], bool, bool]:
+def parse_proximity_location(query: str) -> tuple[bool, str | None]:
+    """Return whether a nearby search has an explicit place or time zone."""
+    proximity = _PROXIMITY_RE.search(query)
+    if proximity is None:
+        return False, None
+    remainder = query[: proximity.start()] + query[proximity.end() :]
+    if location := _LOCATION_RE.search(remainder):
+        return True, location.group(1).casefold()
+    if time_zone := _TIME_ZONE_RE.search(remainder):
+        return True, time_zone.group().casefold()
+    return True, None
+
+
+def _search_terms(query: str) -> tuple[list[str], bool, bool | None]:
     lowered = query.casefold()
     apac = bool(re.search(r"\b(?:apac|asia[ -]pacific|asian)\b", lowered))
-    remote = bool(re.search(r"\bremote\b", lowered))
-    words = [word.strip(".") for word in re.findall(r"[a-z0-9+#.]+", lowered)]
+    remote: bool | None = None
+    if _REMOTE_NEGATION_RE.search(lowered):
+        remote = False
+    elif re.search(r"\bremote\b", lowered):
+        remote = True
+    lexical_query = _REMOTE_NEGATION_RE.sub(" ", lowered)
+    words = [word.strip(".") for word in re.findall(r"[a-z0-9+#.]+", lexical_query)]
     return (
         [
             word
@@ -83,6 +112,12 @@ def _contains_term(text: str, term: str) -> bool:
 def rank_job_posts(rows: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:
     """Rank bounded, already authorized rows by the member's prose request."""
     terms, apac, remote = _search_terms(query)
+    proximity_requested, proximity_location = parse_proximity_location(query)
+    if proximity_requested and proximity_location is None:
+        return []
+    if proximity_location:
+        location_terms = set(re.findall(r"[a-z0-9+#.]+", proximity_location))
+        terms = [term for term in terms if term not in location_terms]
     full_time = re.search(r"\bfull[ -]?time\b", query, re.I) is not None
     part_time = (
         re.search(
@@ -99,6 +134,15 @@ def rank_job_posts(rows: list[dict[str, Any]], query: str) -> list[dict[str, Any
         location = str(row.get("location") or "")
         tags = " ".join(str(tag) for tag in row.get("tags") or [])
         searchable = f"{title} {body} {location} {tags}".casefold()
+        if proximity_location:
+            location_text = (location or f"{title} {body}").casefold()
+            location_matches = (
+                any(_contains_term(location_text, term) for term in _APAC_TERMS)
+                if proximity_location in {"apac", "asia", "asia pacific"}
+                else _contains_term(location_text, proximity_location)
+            )
+            if not location_matches:
+                continue
         posting_type = str(row.get("posting_type") or "")
         if (
             full_time
@@ -122,17 +166,11 @@ def rank_job_posts(rows: list[dict[str, Any]], query: str) -> list[dict[str, Any
             continue
         if apac and not any(_contains_term(searchable, term) for term in _APAC_TERMS):
             continue
-        remote_negated = (
-            re.search(
-                r"\b(?:non[- ]remote|not remote|no remote|on[- ]site only)\b",
-                searchable,
-            )
-            is not None
+        remote_negated = _REMOTE_NEGATION_RE.search(searchable) is not None
+        is_remote = not remote_negated and (
+            row.get("remote") is True or _contains_term(searchable, "remote")
         )
-        if remote and (
-            remote_negated
-            or not (row.get("remote") is True or _contains_term(searchable, "remote"))
-        ):
+        if remote is not None and is_remote is not remote:
             continue
         title_folded = title.casefold()
         score = sum(
