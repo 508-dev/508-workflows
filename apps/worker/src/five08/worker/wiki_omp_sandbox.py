@@ -293,7 +293,7 @@ class SandboxedOmpWikiAuthoringRunner:
                 prefix="conversation",
             )
         snapshot = work_item.proposal.base_snapshot
-        if snapshot is not None:
+        if snapshot is not None and snapshot.content.strip():
             registry.add(
                 _SandboxMaterial(
                     source=WikiSourceReference(
@@ -566,15 +566,20 @@ class SandboxedOmpWikiAuthoringRunner:
         received = 0
         iterator = iter(response.iter_content(chunk_size=64 * 1024))
         while True:
+            # urllib3 may release the socket after receiving the full wire
+            # body. Advancing the iterator is still necessary: decompression
+            # can have buffered additional output after that final read.
+            wire_complete = getattr(response.raw, "length_remaining", None) == 0
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise WikiAuthoringTransientError(
                     "The isolated OMP sandbox exceeded its total response deadline."
                 )
-            SandboxedOmpWikiAuthoringRunner._set_response_read_timeout(
-                response,
-                timeout_seconds=remaining,
-            )
+            if not wire_complete:
+                SandboxedOmpWikiAuthoringRunner._set_response_read_timeout(
+                    response,
+                    timeout_seconds=remaining,
+                )
             try:
                 chunk = next(iterator)
             except StopIteration:
