@@ -133,6 +133,61 @@ def test_send_event_sync_logs_warning_on_request_error() -> None:
     mock_warning.assert_called_once()
 
 
+def test_send_audit_event_disables_redirects() -> None:
+    """Authenticated audit writes must not forward the shared secret on redirects."""
+    logger = DiscordAuditLogger(
+        base_url="https://backend-api.example.com",
+        shared_secret="secret",
+        timeout_seconds=1.0,
+    )
+    event_payload = {"action": "crm.update_member"}
+    response = Mock(status_code=202, text="")
+
+    with patch(
+        "five08.discord_bot.utils.audit.requests.post",
+        return_value=response,
+    ) as mock_post:
+        logger._send_audit_event_sync(event_payload)
+
+    mock_post.assert_called_once_with(
+        "https://backend-api.example.com/audit/events",
+        headers={
+            "X-API-Secret": "secret",
+            "Content-Type": "application/json",
+        },
+        json=event_payload,
+        timeout=1.0,
+        allow_redirects=False,
+    )
+
+
+def test_send_audit_event_logs_warning_on_redirect_response() -> None:
+    """Redirect responses are failed audit writes even though they are not followed."""
+    logger = DiscordAuditLogger(
+        base_url="https://backend-api.example.com",
+        shared_secret="secret",
+        timeout_seconds=1.0,
+    )
+    event_payload = {"action": "crm.update_member"}
+    response = Mock(status_code=307, text="temporary redirect")
+
+    with (
+        patch(
+            "five08.discord_bot.utils.audit.requests.post",
+            return_value=response,
+        ),
+        patch("five08.discord_bot.utils.audit.logger.warning") as mock_warning,
+    ):
+        logger._send_audit_event_sync(event_payload)
+
+    mock_warning.assert_called_once_with(
+        "Audit write failed status=%s action=%s body=%s",
+        307,
+        "crm.update_member",
+        "temporary redirect",
+    )
+
+
 def test_log_admin_sso_action_normalizes_actor_email() -> None:
     """Admin SSO audit should normalize actor email and queue the event."""
     logger = DiscordAuditLogger(

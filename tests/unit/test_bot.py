@@ -7,6 +7,7 @@ from unittest.mock import Mock, AsyncMock, patch
 from pathlib import Path
 from types import SimpleNamespace
 import discord
+from pydantic import ValidationError
 
 from five08.discord_bot.bot import (
     Bot508,
@@ -184,7 +185,121 @@ class TestBot508:
 
         assert config.backend_api_base_url == "http://127.0.0.1:8090"
 
-    def test_outline_admin_api_key_prefers_new_name_and_supports_legacy_alias(
+    def test_wiki_editing_request_timeout_covers_two_outline_calls(self) -> None:
+        config = Settings(discord_bot_token="token")
+
+        assert config.wiki_editing_request_timeout_seconds == 90.0
+
+        with pytest.raises(ValidationError):
+            Settings(
+                discord_bot_token="token",
+                wiki_editing_request_timeout_seconds=89.0,
+            )
+
+    @pytest.mark.parametrize(
+        "backend_api_base_url",
+        [
+            "http://127.0.0.1:8090",
+            "http://localhost:8090",
+            "http://[::1]:8090",
+            "http://web:8090",
+            "https://api.example.test",
+        ],
+    )
+    def test_backend_api_base_url_allows_secure_and_internal_endpoints(
+        self,
+        backend_api_base_url: str,
+    ) -> None:
+        config = Settings(
+            discord_bot_token="token",
+            backend_api_base_url=backend_api_base_url,
+        )
+
+        assert config.backend_api_base_url == backend_api_base_url
+
+    @pytest.mark.parametrize(
+        "backend_api_base_url",
+        [
+            "http://api.example.test",
+            "http://web.example.test:8090",
+            "http://127.0.0.1.example.test:8090",
+            "http://web:8080",
+        ],
+    )
+    def test_backend_api_base_url_rejects_insecure_remote_endpoints(
+        self,
+        backend_api_base_url: str,
+    ) -> None:
+        with pytest.raises(
+            ValidationError, match="BACKEND_API_BASE_URL must use HTTPS"
+        ):
+            Settings(
+                discord_bot_token="token",
+                backend_api_base_url=backend_api_base_url,
+            )
+
+    def test_backend_api_base_url_rejects_embedded_credentials(self) -> None:
+        with pytest.raises(
+            ValidationError,
+            match="BACKEND_API_BASE_URL must be a valid absolute HTTP\\(S\\) URL",
+        ):
+            Settings(
+                discord_bot_token="token",
+                backend_api_base_url="https://user@api.example.test",
+            )
+
+    @pytest.mark.parametrize(
+        "audit_api_base_url",
+        [
+            "http://127.0.0.1:8090",
+            "http://localhost:8090",
+            "http://[::1]:8090",
+            "http://web:8090",
+            "https://audit.example.test",
+        ],
+    )
+    def test_audit_api_base_url_allows_secure_and_internal_endpoints(
+        self,
+        audit_api_base_url: str,
+    ) -> None:
+        config = Settings(
+            discord_bot_token="token",
+            audit_api_base_url=audit_api_base_url,
+        )
+
+        assert config.audit_api_base_url == audit_api_base_url
+
+    @pytest.mark.parametrize(
+        "audit_api_base_url",
+        [
+            "http://audit.example.test",
+            "http://web.example.test:8090",
+            "http://web:8080",
+        ],
+    )
+    def test_audit_api_base_url_rejects_insecure_remote_endpoints(
+        self,
+        audit_api_base_url: str,
+    ) -> None:
+        with pytest.raises(ValidationError, match="AUDIT_API_BASE_URL must use HTTPS"):
+            Settings(
+                discord_bot_token="token",
+                audit_api_base_url=audit_api_base_url,
+            )
+
+    def test_audit_api_base_url_rejects_embedded_credentials(self) -> None:
+        with pytest.raises(ValidationError, match="AUDIT_API_BASE_URL must be a valid"):
+            Settings(
+                discord_bot_token="token",
+                audit_api_base_url="https://user@audit.example.test",
+            )
+
+    def test_blank_audit_api_base_url_is_unset(self) -> None:
+        config = Settings(discord_bot_token="token", audit_api_base_url="  ")
+
+        assert config.audit_api_base_url is None
+
+    def test_outline_admin_api_key_is_never_exposed_to_the_bot(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ):
@@ -193,20 +308,20 @@ class TestBot508:
 
         legacy_config = Settings()
 
-        assert legacy_config.outline_admin_api_key == "legacy-admin-key"
-        assert legacy_config.outline_api_key == "legacy-admin-key"
+        assert legacy_config.outline_admin_api_key is None
+        assert legacy_config.outline_api_key is None
 
         monkeypatch.setenv("OUTLINE_ADMIN_API_KEY", " ")
 
         blank_new_config = Settings()
 
-        assert blank_new_config.outline_admin_api_key == "legacy-admin-key"
+        assert blank_new_config.outline_admin_api_key is None
 
         monkeypatch.setenv("OUTLINE_ADMIN_API_KEY", "preferred-admin-key")
 
         config = Settings()
 
-        assert config.outline_admin_api_key == "preferred-admin-key"
+        assert config.outline_admin_api_key is None
 
     def test_outline_contents_api_key_is_shared_with_the_bot(
         self,
