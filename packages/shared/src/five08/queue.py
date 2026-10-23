@@ -234,6 +234,28 @@ def get_job(settings: SharedSettings, job_id: str) -> JobRecord | None:
             return _as_record(row)
 
 
+def list_due_retry_job_ids(
+    settings: SharedSettings, *, job_type: str, limit: int = 100
+) -> list[str]:
+    """Find retry rows whose durable delay elapsed, even if Redis lost delivery."""
+    if not 1 <= limit <= 1000:
+        raise ValueError("Retry scan limit must be between 1 and 1000.")
+    with get_postgres_connection(
+        settings, connect_timeout_seconds=3, statement_timeout_seconds=3
+    ) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                SELECT id FROM jobs
+                WHERE type = %s AND status = %s AND run_after <= NOW()
+                ORDER BY run_after, id
+                LIMIT %s
+                """,
+                (job_type, JobStatus.FAILED.value, limit),
+            )
+            return [str(row["id"]) for row in cursor.fetchall()]
+
+
 def redeliver_queued_job(
     queue: QueueClient,
     *,
@@ -412,6 +434,70 @@ def list_jobs(
             return [_as_record(row) for row in rows]
 
 
+def reserve_jobs_for_redelivery(
+    settings: SharedSettings,
+    *,
+    job_type: str,
+    running_lease_seconds: float,
+    redelivery_cooldown_seconds: float,
+    limit: int,
+) -> list[JobRecord]:
+    """Reserve due jobs for an at-least-once Redis handoff.
+
+    A reservation only refreshes ``updated_at``. If the caller exits before
+    Redis accepts a delivery, a later sweep can reserve the same durable row
+    after the cooldown. Row locks and the cooldown bound duplicate handoffs
+    across API replicas; the worker's claim fence decides actual execution.
+    """
+    if not job_type.strip():
+        raise ValueError("Redelivery requires a job type.")
+    if running_lease_seconds <= 0 or redelivery_cooldown_seconds <= 0:
+        raise ValueError("Redelivery lease and cooldown must be positive.")
+    if limit <= 0:
+        raise ValueError("Redelivery limit must be positive.")
+
+    query = """
+        WITH eligible AS (
+            SELECT id
+            FROM jobs
+            WHERE type = %s
+              AND updated_at <= NOW() - (%s * INTERVAL '1 second')
+              AND (
+                  (status IN (%s, %s)
+                   AND (run_after IS NULL OR run_after <= NOW()))
+                  OR (status = %s
+                      AND locked_at IS NOT NULL
+                      AND locked_at <= NOW() - (%s * INTERVAL '1 second'))
+              )
+            ORDER BY updated_at ASC, id ASC
+            LIMIT %s
+            FOR UPDATE SKIP LOCKED
+        )
+        UPDATE jobs AS target
+        SET updated_at = NOW()
+        FROM eligible
+        WHERE target.id = eligible.id
+        RETURNING target.*;
+    """
+    with get_postgres_connection(
+        settings, connect_timeout_seconds=3, statement_timeout_seconds=3
+    ) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                query,
+                (
+                    job_type,
+                    redelivery_cooldown_seconds,
+                    JobStatus.QUEUED.value,
+                    JobStatus.FAILED.value,
+                    JobStatus.RUNNING.value,
+                    running_lease_seconds,
+                    limit,
+                ),
+            )
+            return [_as_record(row) for row in cursor.fetchall()]
+
+
 def _mark_job(
     settings: SharedSettings,
     job_id: str,
@@ -576,6 +662,116 @@ def renew_job_execution_lease(
             return cursor.rowcount > 0
 
 
+def _claim_fence(claim: JobRecord) -> tuple[datetime, str]:
+    """Return the immutable identity of an active durable claim."""
+    if claim.status != JobStatus.RUNNING:
+        raise ValueError("Job claim must be running before it can be resolved.")
+    if claim.locked_at is None or claim.locked_by is None:
+        raise ValueError("Job claim is missing its lock identity.")
+    return claim.locked_at, claim.locked_by
+
+
+def claim_job(
+    settings: SharedSettings,
+    job_id: str,
+    *,
+    worker_name: str,
+    reclaim_running_job_type: str | None = None,
+    reclaim_running_after_seconds: float | None = None,
+) -> JobRecord | None:
+    """Atomically claim an eligible job for one worker.
+
+    Initial deliveries are ``queued``. Retry deliveries remain ``failed`` until
+    their durable ``run_after`` time, so both states can be claimed exactly
+    once. A caller may additionally reclaim one job type after its bounded
+    running lease expires. A missing row means another worker has already
+    claimed the job, it is terminal, or its retry delay or lease has not
+    elapsed yet. Reclaiming an expired lease consumes an attempt; an exhausted
+    reclaim is returned as ``dead`` so the caller can perform type-specific
+    terminal cleanup without executing the handler again.
+    """
+    if (reclaim_running_job_type is None) != (reclaim_running_after_seconds is None):
+        raise ValueError("Running-job reclaim requires both a job type and timeout.")
+    if reclaim_running_after_seconds is not None and reclaim_running_after_seconds <= 0:
+        raise ValueError("Running-job reclaim timeout must be positive.")
+    # Replicas commonly share ``worker_name``. Add a per-claim nonce so the
+    # persisted owner is also an unambiguous fencing token.
+    claim_owner = f"{worker_name}:{uuid4()}"
+
+    eligible_clause = """
+          status IN (%s, %s)
+          AND (run_after IS NULL OR run_after <= NOW())
+    """
+    eligibility_params: tuple[Any, ...] = (
+        JobStatus.QUEUED.value,
+        JobStatus.FAILED.value,
+    )
+    if reclaim_running_job_type is not None:
+        eligible_clause = f"""
+          (({eligible_clause})
+           OR (status = %s
+               AND type = %s
+               AND locked_at IS NOT NULL
+               AND locked_at <= NOW() - (%s * INTERVAL '1 second')))
+        """
+        eligibility_params += (
+            JobStatus.RUNNING.value,
+            reclaim_running_job_type,
+            reclaim_running_after_seconds,
+        )
+
+    query = f"""
+        WITH eligible AS (
+            SELECT
+                id,
+                status = %s AS reclaiming,
+                status = %s AND attempts + 1 >= max_attempts AS exhausted
+            FROM jobs
+            WHERE id = %s
+              AND ({eligible_clause})
+            FOR UPDATE
+        )
+        UPDATE jobs AS jobs
+        SET
+            status = CASE
+                WHEN eligible.exhausted THEN %s
+                ELSE %s
+            END,
+            attempts = CASE
+                WHEN eligible.reclaiming THEN jobs.attempts + 1
+                ELSE jobs.attempts
+            END,
+            locked_at = CASE WHEN eligible.exhausted THEN NULL ELSE NOW() END,
+            locked_by = CASE WHEN eligible.exhausted THEN NULL ELSE %s END,
+            run_after = NULL,
+            last_error = CASE
+                WHEN eligible.exhausted THEN %s
+                ELSE NULL
+            END,
+            updated_at = NOW()
+        FROM eligible
+        WHERE jobs.id = eligible.id
+        RETURNING jobs.*;
+    """
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                query,
+                (
+                    JobStatus.RUNNING.value,
+                    JobStatus.RUNNING.value,
+                    job_id,
+                    *eligibility_params,
+                    JobStatus.DEAD.value,
+                    JobStatus.RUNNING.value,
+                    claim_owner,
+                    "Worker lease expired before completion.",
+                ),
+            )
+            row = cursor.fetchone()
+    return _as_record(row) if row is not None else None
+
+
 def mark_job_succeeded(
     settings: SharedSettings,
     job_id: str,
@@ -664,8 +860,14 @@ def enqueue_job(
     idempotency_key: str | None = None,
     max_attempts: int | None = None,
     run_after: datetime | None = None,
+    redispatch_existing_queued: bool = False,
 ) -> EnqueuedJob:
-    """Create a job record and hand it to the configured queue adapter."""
+    """Create a job record and hand it to the configured queue adapter.
+
+    ``redispatch_existing_queued`` is an opt-in recovery path for callers
+    whose durable work is still queued after an interrupted handoff to Redis.
+    It deliberately does not redispatch running, retrying, or terminal jobs.
+    """
     payload = {"args": list(args), "kwargs": kwargs or {}}
     job_type = fn.__name__
     job_id, created = create_job_record(

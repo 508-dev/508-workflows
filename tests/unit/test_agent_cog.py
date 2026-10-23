@@ -76,6 +76,150 @@ def test_format_agent_response_renders_tool_error() -> None:
     assert "- task_write.update_task: failed (Task TASK-999 was not found)" in message
 
 
+@pytest.mark.asyncio
+async def test_job_search_uses_visible_forums_and_skips_closed_threads() -> None:
+    cog = AgentCog.__new__(AgentCog)
+    cog.bot = Mock()
+    member = Mock(spec=discord.Member)
+    guild = Mock(spec=discord.Guild)
+    guild.id = 42
+    visible = Mock(spec=discord.ForumChannel)
+    visible.name = "gigs"
+    visible.id = 10
+    visible.permissions_for.return_value.view_channel = True
+    hidden = Mock(spec=discord.ForumChannel)
+    hidden.name = "unqualified-leads"
+    hidden.id = 20
+    hidden.permissions_for.return_value.view_channel = False
+    guild.channels = [visible, hidden]
+    thread = Mock(spec=discord.Thread)
+    thread.parent_id = 10
+    thread.archived = True
+    thread.locked = False
+    thread.name = "[RECRUITING] Old React gig"
+    filled_thread = Mock(spec=discord.Thread)
+    filled_thread.parent_id = 10
+    filled_thread.archived = False
+    filled_thread.locked = False
+    filled_thread.name = "[FILLED] React gig"
+    open_thread = Mock(spec=discord.Thread)
+    open_thread.parent_id = 10
+    open_thread.archived = False
+    open_thread.locked = False
+    open_thread.name = "[RECRUITING] React gig"
+    threads = {12: thread, 13: filled_thread, 14: open_thread}
+    guild.get_thread.side_effect = threads.get
+
+    async def run_search(function, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    with (
+        patch("five08.discord_bot.cogs.agent.asyncio.to_thread", run_search),
+        patch(
+            "five08.discord_bot.cogs.agent.search_job_posts",
+            return_value=(
+                [
+                    {
+                        "title": "Old React gig",
+                        "kind": "gig",
+                        "thread_id": "12",
+                        "channel_id": "10",
+                    },
+                ]
+                * 9
+            )
+            + [
+                {
+                    "title": "React gig",
+                    "kind": "gig",
+                    "thread_id": "13",
+                    "channel_id": "10",
+                },
+                {
+                    "title": "React gig",
+                    "kind": "gig",
+                    "thread_id": "14",
+                    "channel_id": "10",
+                },
+            ],
+        ) as search,
+    ):
+        result = await cog._search_jobs_for_member(
+            guild=guild, member=member, query="Find React jobs"
+        )
+
+    assert "https://discord.com/channels/42/14" in result
+    assert "channels/42/12" not in result
+    assert "channels/42/13" not in result
+    assert search.call_args.kwargs["active_channel_ids"] == ["10"]
+    assert search.call_args.kwargs["lead_channel_ids"] == []
+    assert search.call_args.kwargs["limit"] == 50
+
+
+def test_job_search_route_does_not_swallow_write_requests() -> None:
+    assert AgentCog._is_job_search_request("Find React jobs in APAC hours")
+    assert AgentCog._is_job_search_request("Find a job post")
+    assert AgentCog._is_job_search_request("Jobs close to me")
+    assert AgentCog._is_job_search_request("Jobs near me")
+    assert AgentCog._is_job_search_request("Send me any React jobs")
+    assert not AgentCog._is_job_search_request(
+        "Find React jobs and create a task to follow up"
+    )
+    assert not AgentCog._is_job_search_request(
+        "Search GitHub issues matching jobs in repo 508-dev/508-workflows"
+    )
+    assert not AgentCog._is_job_search_request(
+        "Remember that I'm looking for React roles in APAC"
+    )
+    assert not AgentCog._is_job_search_request(
+        "Add a todo to find candidates for the React role"
+    )
+    assert not AgentCog._is_job_search_request(
+        "Open an issue: show roles page is broken"
+    )
+    assert not AgentCog._is_job_search_request("Find jobs and post a job")
+    assert not AgentCog._is_job_search_request("Find jobs and close this job")
+    assert not AgentCog._is_job_search_request("Find jobs and send jobs to #gigs")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("query", ["Jobs close to me", "Find jobs near me"])
+async def test_job_search_asks_for_location_when_request_is_proximity_only(
+    query: str,
+) -> None:
+    cog = AgentCog.__new__(AgentCog)
+    guild = Mock(spec=discord.Guild)
+    member = Mock(spec=discord.Member)
+
+    with patch("five08.discord_bot.cogs.agent.search_job_posts") as search:
+        response = await cog._search_jobs_for_member(
+            guild=guild, member=member, query=query
+        )
+
+    assert "city or time zone" in response
+    search.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_job_search_uses_location_given_with_near_me() -> None:
+    cog = AgentCog.__new__(AgentCog)
+    guild = Mock(spec=discord.Guild)
+    guild.id = 42
+    guild.channels = []
+    member = Mock(spec=discord.Member)
+
+    with patch(
+        "five08.discord_bot.cogs.agent.asyncio.to_thread", new_callable=AsyncMock
+    ) as search:
+        search.return_value = []
+        response = await cog._search_jobs_for_member(
+            guild=guild, member=member, query="Find React jobs near me in Tokyo"
+        )
+
+    assert "no recent open posts" in response
+    assert search.await_count == 1
+
+
 def test_format_agent_response_renders_generic_clarification_as_guidance() -> None:
     cog = AgentCog.__new__(AgentCog)
 
@@ -122,7 +266,7 @@ def test_agent_capabilities_explain_members_have_no_privileged_workflows() -> No
         transport="slash",
     )
 
-    assert "I do not see any agent workflows available" in message
+    assert "Jobs:" in message
     assert "Tasks:" not in message
     assert "Memory:" not in message
 
@@ -1988,7 +2132,7 @@ def test_post_backend_json_returns_structured_failed_response(
     monkeypatch.setattr(
         "five08.discord_bot.cogs.agent.settings",
         SimpleNamespace(
-            backend_api_base_url="http://api.test",
+            backend_api_base_url="https://api.test",
             api_shared_secret="secret",
             agent_api_timeout_seconds=8.0,
         ),
@@ -2014,7 +2158,7 @@ def test_post_backend_json_returns_detail_error_response(
     monkeypatch.setattr(
         "five08.discord_bot.cogs.agent.settings",
         SimpleNamespace(
-            backend_api_base_url="http://api.test",
+            backend_api_base_url="https://api.test",
             api_shared_secret="secret",
             agent_api_timeout_seconds=8.0,
         ),

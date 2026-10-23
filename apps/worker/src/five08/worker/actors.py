@@ -29,7 +29,12 @@ from five08.queue import (
 )
 from five08.worker.config import settings
 from five08.worker.crm.docuseal_processor import DocusealAgreementNonRetryableError
-from five08.worker.jobs import AgentScheduleRunNonRetryableError, JOB_FUNCTIONS
+from five08.worker.jobs import (
+    AgentScheduleRunNonRetryableError,
+    JOB_FUNCTIONS,
+    mark_wiki_authoring_retry_exhausted,
+)
+from five08.wiki_editing.models import WikiAuthoringLeaseHeldError
 
 from five08.logging import configure_observability
 
@@ -56,6 +61,7 @@ _JOB_WEBHOOK_LOGGER = DiscordWebhookLogger(
 _QUEUE_NAME = settings.worker_queue_name
 _HANDLERS = JOB_FUNCTIONS
 _SYNC_PEOPLE_JOB_NAME: Final[str] = "sync_people_from_crm_job"
+_WIKI_AUTHORING_JOB_NAME: Final[str] = "author_wiki_edit_proposal_job"
 _JOB_LEASE_EXPIRY_MARGIN_SECONDS: Final[int] = 5
 
 
@@ -248,6 +254,9 @@ def _requeue_running_job_after_lease(job_id: str) -> None:
         # database error prevents us from inspecting the durable lease.
         _schedule_job_lease_recovery(job_id, delay_seconds=_job_lease_seconds())
         return
+    if job is not None and job.status is JobStatus.DEAD:
+        _mark_exhausted_wiki_authoring(job)
+        return
     if job is None or job.status is not JobStatus.RUNNING or job.locked_at is None:
         return
 
@@ -347,7 +356,13 @@ def _renew_job_lease_while_running(
         raise JobLeaseLostError(f"Execution lease lost for job_id={job_id}")
 
 
-def _schedule_retry(job: JobRecord, attempts: int, *, error: str) -> None:
+def _schedule_retry(
+    job: JobRecord,
+    attempts: int,
+    *,
+    error: str,
+    delay_seconds: float | None = None,
+) -> None:
     job_id = job.id
     claim_token = job.locked_by
     if claim_token is None:
@@ -356,8 +371,12 @@ def _schedule_retry(job: JobRecord, attempts: int, *, error: str) -> None:
             job_id,
         )
         return
-    delay_seconds = _compute_retry_delay_seconds(attempts)
-    retry_at = datetime.now(tz=timezone.utc) + timedelta(seconds=delay_seconds)
+    bounded_delay_seconds = (
+        _compute_retry_delay_seconds(attempts)
+        if delay_seconds is None
+        else max(1, ceil(delay_seconds))
+    )
+    retry_at = datetime.now(tz=timezone.utc) + timedelta(seconds=bounded_delay_seconds)
     transitioned = mark_job_retry(
         settings,
         job_id,
@@ -382,7 +401,28 @@ def _schedule_retry(job: JobRecord, attempts: int, *, error: str) -> None:
             worker_name=settings.worker_name,
             error=error,
         )
-    execute_job.send_with_options(args=(job_id,), delay=delay_seconds * 1000)
+    execute_job.send_with_options(args=(job_id,), delay=bounded_delay_seconds * 1000)
+
+
+def _mark_exhausted_wiki_authoring(job: JobRecord) -> None:
+    """Best-effort bridge from generic queue exhaustion to proposal state."""
+    if job.type != _WIKI_AUTHORING_JOB_NAME:
+        return
+    try:
+        args, kwargs = _extract_call_args(job)
+        if kwargs or len(args) != 2:
+            raise ValueError("wiki authoring job payload must have two positional IDs")
+        proposal_id, organization_id = args
+        if not isinstance(proposal_id, str) or not isinstance(organization_id, str):
+            raise ValueError("wiki authoring job IDs must be strings")
+        mark_wiki_authoring_retry_exhausted(proposal_id, organization_id)
+    except Exception:
+        # The original worker job still becomes dead. This callback must not
+        # mask its error or make generic queue recovery less reliable.
+        logger.exception(
+            "Failed to mark exhausted wiki authoring proposal job_id=%s",
+            job.id,
+        )
 
 
 def _run_job(job_id: str) -> None:
@@ -469,6 +509,15 @@ def _run_job(job_id: str) -> None:
                 worker_name=settings.worker_name,
                 result=result,
             )
+    except WikiAuthoringLeaseHeldError as exc:
+        # A second proposal authoring lease is coordination, not a failed
+        # attempt. Keep the durable job retryable without consuming capacity.
+        _schedule_retry(
+            job,
+            job.attempts,
+            error=f"{type(exc).__name__}: {exc}",
+            delay_seconds=exc.retry_after_seconds,
+        )
     except (
         DocusealAgreementNonRetryableError,
         AgentScheduleRunNonRetryableError,
@@ -503,6 +552,7 @@ def _run_job(job_id: str) -> None:
             worker_name=settings.worker_name,
             error=error,
         )
+        _mark_exhausted_wiki_authoring(job)
     except Exception as exc:
         next_attempt = job.attempts + 1
         error = f"{type(exc).__name__}: {exc}"
@@ -533,6 +583,7 @@ def _run_job(job_id: str) -> None:
                 worker_name=settings.worker_name,
                 error=error,
             )
+            _mark_exhausted_wiki_authoring(job)
             return
         _schedule_retry(job, next_attempt, error=error)
         # _schedule_retry logs the retry event. Keep this exception path focused

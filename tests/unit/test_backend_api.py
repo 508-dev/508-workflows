@@ -35,6 +35,10 @@ from five08.backend import api
 from five08.job_channels import JobPostingType, RegisteredJobPostChannel
 from five08.settings import SharedSettings
 from five08.worker.masking import mask_email
+from five08.wiki_editing.assertions import (
+    WIKI_ASSERTION_HEADER,
+    create_wiki_action_assertion,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -512,6 +516,54 @@ def auth_headers(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     monkeypatch.setattr(api.settings, "api_shared_secret", "test-secret")
     monkeypatch.setattr(api.settings, "agent_allow_role_name_fallback", True)
     return {"X-API-Secret": "test-secret"}
+
+
+_OUTLINE_INVITATION_ASSERTION_SECRET = "test-outline-invitation-assertion-secret"
+
+
+def _outline_invitation_payload(
+    *,
+    roles: list[str] | None = None,
+    email: str = "jane@508.dev",
+    name: str | None = "Jane Doe",
+) -> dict[str, object]:
+    """Build the exact signed contract sent by the Discord CRM cog."""
+    payload: dict[str, object] = {
+        "email": email,
+        "actor": {
+            "discord_user_id": "123456789",
+            "discord_guild_id": "987654321",
+            "discord_roles": roles if roles is not None else ["Admin"],
+        },
+    }
+    if name is not None:
+        payload["name"] = name
+    return payload
+
+
+def _signed_outline_invitation_headers(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    auth_headers: dict[str, str],
+    payload: dict[str, object],
+    path: str = "/outline/invitations",
+) -> dict[str, str]:
+    """Return API + bot assertion headers for a fixed membership action."""
+    monkeypatch.setattr(
+        api.settings,
+        "wiki_editing_assertion_secret",
+        _OUTLINE_INVITATION_ASSERTION_SECRET,
+    )
+    monkeypatch.setattr(api.settings, "discord_server_id", "987654321")
+    return {
+        **auth_headers,
+        WIKI_ASSERTION_HEADER: create_wiki_action_assertion(
+            _OUTLINE_INVITATION_ASSERTION_SECRET,
+            method="POST",
+            path=path,
+            payload=payload,
+        ),
+    }
 
 
 @pytest.fixture

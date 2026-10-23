@@ -60,6 +60,8 @@ _ENGINEER_SCOPES = frozenset(
         "knowledge:read_org",
         "knowledge:capture_org",
         "knowledge:read_wiki",
+        "wiki:propose",
+        "wiki:publish",
     }
 )
 _STEERING_COMMITTEE_SCOPES = frozenset(
@@ -91,6 +93,8 @@ _STEERING_COMMITTEE_SCOPES = frozenset(
         "knowledge:read_org",
         "knowledge:capture_org",
         "knowledge:read_wiki",
+        "wiki:propose",
+        "wiki:publish",
         "knowledge:read_project",
         "knowledge:capture_project",
     }
