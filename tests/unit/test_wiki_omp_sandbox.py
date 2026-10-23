@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import gzip
 import json
+import random
 import time
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from threading import Thread
 from types import SimpleNamespace
 from typing import Any, Mapping, cast
 from unittest.mock import Mock
 
 import pytest
+import requests
 
 from five08.clients.outline import (
     OutlineClient,
@@ -207,6 +212,41 @@ def _maximal_revision_work_item() -> WikiAuthoringWorkItem:
         revision.id,
         organization_id="guild-1",
         omp_metadata=_metadata().model_copy(update={"run_id": "run-maximal"}),
+    )
+    assert work_item is not None
+    return work_item
+
+
+def _empty_stub_work_item() -> WikiAuthoringWorkItem:
+    store = InMemoryWikiEditingStore()
+    base = WikiBaseDocumentSnapshot(
+        document_id="stub-1",
+        title="Release guide stub",
+        document_url="https://outline.example/doc/stub-1",
+        document_version="1",
+        content_hash=wiki_content_hash(""),
+        content="",
+    )
+    request, _created = store.create_or_get_request(
+        WikiEditRequestInput(
+            organization_id="guild-1",
+            actor_id="writer-1",
+            instruction="Fill the release guide with the approved checklist.",
+            target_document_id="stub-1",
+            request_idempotency_key="stub-update-request",
+        )
+    )
+    proposal = store.create_proposal(
+        WikiProposalCreate(
+            request_id=request.id,
+            organization_id="guild-1",
+            target_action="update",
+            target_document_id="stub-1",
+            base_document=base,
+        )
+    )
+    work_item = store.claim_authoring(
+        proposal.id, organization_id="guild-1", omp_metadata=_metadata()
     )
     assert work_item is not None
     return work_item
@@ -415,6 +455,45 @@ def test_revision_primary_materials_fit_the_full_bounded_budget() -> None:
     ]
 
 
+def test_empty_outline_stub_update_omits_only_the_empty_base_material() -> None:
+    captured: dict[str, object] = {}
+
+    def transport(
+        _endpoint: str,
+        _headers: Mapping[str, str],
+        payload: Mapping[str, object],
+        _startup_timeout: float,
+        _authoring_timeout: float,
+    ) -> dict[str, object]:
+        captured.update(payload)
+        response = _draft_response(source_ids=["request:1"])
+        draft = response["draft"]
+        assert isinstance(draft, dict)
+        draft.update(action="update", target_document_id="stub-1")
+        return response
+
+    runner = SandboxedOmpWikiAuthoringRunner(
+        sandbox_url="http://wiki_omp_sandbox:8080",
+        sandbox_token="sandbox-token",
+        model="openrouter/test",
+        outline_client_factory=_empty_outline_client_factory,
+        allowed_collection_id="collection-1",
+        transport=transport,
+    )
+
+    draft = runner.author(_empty_stub_work_item(), metadata=_metadata())
+
+    assert draft.title == "Release guide"
+    assert captured["proposal"] == {
+        "action": "update",
+        "target_document_id": "stub-1",
+        "revision_instruction": None,
+    }
+    materials = captured["materials"]
+    assert isinstance(materials, list)
+    assert [material["id"] for material in materials] == ["request:1"]
+
+
 def test_remote_sandbox_cannot_cite_unapproved_material() -> None:
     runner = SandboxedOmpWikiAuthoringRunner(
         sandbox_url="http://wiki_omp_sandbox:8080",
@@ -453,6 +532,52 @@ def test_remote_sandbox_response_uses_a_monotonic_total_deadline() -> None:
             response,  # type: ignore[arg-type]
             deadline=time.monotonic() - 1.0,
         )
+
+
+@pytest.mark.parametrize("content_encoding", [None, "gzip"])
+def test_content_length_response_completes_after_socket_is_released(
+    content_encoding: str | None,
+) -> None:
+    body = (
+        b'{"protocol_version":"v1"}'
+        if content_encoding is None
+        else random.Random(17).randbytes(150_000)
+    )
+    wire_body = gzip.compress(body) if content_encoding == "gzip" else body
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(wire_body)))
+            if content_encoding is not None:
+                self.send_header("Content-Encoding", content_encoding)
+            self.end_headers()
+            self.wfile.write(wire_body)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with requests.get(
+            f"http://127.0.0.1:{server.server_port}/", stream=True, timeout=2
+        ) as response:
+            assert response.headers["Content-Length"] == str(len(wire_body))
+            assert (
+                SandboxedOmpWikiAuthoringRunner._bounded_response_body(
+                    response, deadline=time.monotonic() + 2
+                )
+                == body
+            )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 def test_remote_sandbox_excludes_untrusted_knowledge_material() -> None:
