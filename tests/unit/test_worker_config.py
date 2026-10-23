@@ -114,6 +114,22 @@ def test_wiki_authoring_accepts_a_separately_credentialed_sandbox() -> None:
     assert settings.wiki_authoring_configuration_error is None
 
 
+def test_wiki_authoring_rejects_sandbox_timeout_above_worker_deadline() -> None:
+    settings = WorkerSettings(
+        wiki_editing_enabled=True,
+        wiki_outline_collection_id="shared-wiki",
+        outline_admin_api_key="writer-key",
+        wiki_omp_sandbox_url="http://wiki_omp_sandbox:8080",
+        wiki_omp_sandbox_token="sandbox-token",
+        wiki_omp_sandbox_run_timeout_seconds=600,
+    )
+
+    assert settings.wiki_authoring_configured is False
+    assert "WIKI_OMP_AUTHORING_TIMEOUT_SECONDS" in str(
+        settings.wiki_authoring_configuration_error
+    )
+
+
 @pytest.mark.parametrize(
     ("overrides", "expected_error"),
     [

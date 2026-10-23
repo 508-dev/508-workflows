@@ -10,6 +10,7 @@ from five08.queue import (
     claim_job,
     enqueue_job,
     get_postgres_connection,
+    list_due_retry_job_ids,
     mark_job_succeeded,
 )
 from five08.settings import SharedSettings
@@ -117,6 +118,25 @@ def test_parse_status_handles_unknown_values() -> None:
     mock_warning.assert_called_once_with(
         "Unknown job status from DB: %s", "unexpected-status"
     )
+
+
+def test_due_retry_scan_selects_only_expired_failed_wiki_jobs() -> None:
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value.__enter__.return_value
+    cursor.fetchall.return_value = [{"id": "job-1"}, {"id": "job-2"}]
+    settings = SharedSettings()
+
+    with patch("five08.queue.get_postgres_connection", return_value=connection):
+        ids = list_due_retry_job_ids(
+            settings, job_type="author_wiki_edit_proposal_job", limit=2
+        )
+
+    assert ids == ["job-1", "job-2"]
+    query, params = cursor.execute.call_args.args
+    assert "status = %s AND run_after <= NOW()" in query
+    assert "ORDER BY run_after" in query
+    assert params == ("author_wiki_edit_proposal_job", "failed", 2)
 
 
 def test_postgres_connection_applies_bounded_operation_deadlines() -> None:

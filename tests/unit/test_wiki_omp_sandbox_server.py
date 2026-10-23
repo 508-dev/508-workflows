@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 import threading
 from typing import Any
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
 from five08.wiki_editing import omp_sandbox_server
 from five08.wiki_editing.omp_sandbox_server import (
+    OmpAuthoringHarness,
     OmpRpcSession,
     OmpRunError,
     OmpRunTimeout,
@@ -30,6 +31,7 @@ def _request_payload() -> dict[str, object]:
             "attempt": 1,
             "model": "openrouter/test-model",
             "thinking": "medium",
+            "max_run_seconds": 250.0,
         },
         "proposal": {
             "action": "create",
@@ -81,6 +83,7 @@ def test_http_body_limit_accepts_worst_case_valid_json_encoding() -> None:
         "attempt": 100,
         "model": "openrouter/" + ("m" * 240),
         "thinking": "xhigh",
+        "max_run_seconds": 600.0,
     }
     payload["proposal"] = {
         "action": "update",
@@ -122,6 +125,44 @@ def test_parse_sandbox_run_rejects_noncanonical_request_or_materials(
 
     with pytest.raises(SandboxRequestError):
         parse_sandbox_run(payload)
+
+
+def test_sandbox_run_deadline_is_required_and_bounded() -> None:
+    payload = _request_payload()
+    run = payload["run"]
+    assert isinstance(run, dict)
+    run["max_run_seconds"] = 601
+    with pytest.raises(SandboxRequestError, match="deadline"):
+        parse_sandbox_run(payload)
+
+    run["max_run_seconds"] = 40
+    assert parse_sandbox_run(payload).max_run_seconds == 40
+
+
+def test_harness_caps_omp_session_to_request_deadline() -> None:
+    settings = SandboxSettings(
+        token="sandbox-token",
+        openrouter_api_key="openrouter-key",
+        egress_proxy_url="http://wiki_omp_egress_proxy:3128",
+        run_timeout_seconds=600,
+    )
+    session = MagicMock()
+    session.__enter__.return_value = session
+    session.prompt_and_wait.side_effect = [
+        "research",
+        "draft",
+        "critique",
+        _draft_submission(source_ids=["request:1"]),
+    ]
+    factory = Mock(return_value=session)
+    harness = OmpAuthoringHarness(settings, session_factory=factory)
+    run = parse_sandbox_run(_request_payload())
+
+    harness.author(run)
+
+    bounded_settings = factory.call_args.args[0]
+    assert bounded_settings.run_timeout_seconds == 250
+    assert settings.run_timeout_seconds == 600
 
 
 def test_parse_draft_submission_allows_only_approved_unique_source_ids() -> None:

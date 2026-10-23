@@ -12,6 +12,7 @@ services:
       # than a caller-supplied HTTPS endpoint.
       WIKI_OMP_SANDBOX_URL: http://wiki_omp_sandbox:8080
       WIKI_OMP_SANDBOX_TOKEN: ${WIKI_OMP_SANDBOX_TOKEN:?Set WIKI_OMP_SANDBOX_TOKEN}
+      WIKI_OMP_SANDBOX_RUN_TIMEOUT_SECONDS: ${WIKI_OMP_SANDBOX_RUN_TIMEOUT_SECONDS:-270}
     depends_on:
       wiki_omp_sandbox:
         condition: service_healthy

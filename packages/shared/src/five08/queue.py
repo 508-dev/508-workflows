@@ -228,6 +228,32 @@ def get_job(settings: SharedSettings, job_id: str) -> JobRecord | None:
             return _as_record(row)
 
 
+def list_due_retry_job_ids(
+    settings: SharedSettings, *, job_type: str, limit: int = 100
+) -> list[str]:
+    """Find retry rows whose durable delay elapsed, even if Redis lost delivery.
+
+    Redis delivery is deliberately at-least-once; ``claim_job`` fences duplicate
+    deliveries, so a periodic scan can safely repair the DB-to-Redis gap.
+    """
+    if not 1 <= limit <= 1000:
+        raise ValueError("Retry scan limit must be between 1 and 1000.")
+    with get_postgres_connection(
+        settings, connect_timeout_seconds=3, statement_timeout_seconds=3
+    ) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                SELECT id FROM jobs
+                WHERE type = %s AND status = %s AND run_after <= NOW()
+                ORDER BY run_after, id
+                LIMIT %s
+                """,
+                (job_type, JobStatus.FAILED.value, limit),
+            )
+            return [str(row["id"]) for row in cursor.fetchall()]
+
+
 def list_jobs(
     settings: SharedSettings,
     *,

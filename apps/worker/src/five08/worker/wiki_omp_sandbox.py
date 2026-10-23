@@ -443,8 +443,9 @@ class SandboxedOmpWikiAuthoringRunner:
             "run": {
                 "run_id": metadata.run_id,
                 "attempt": metadata.attempt,
-                "model": self.model,
+                "model": metadata.model,
                 "thinking": self.thinking,
+                "max_run_seconds": max(1.0, self.authoring_timeout_seconds - 10.0),
             },
             "proposal": {
                 "action": proposal.target_action,

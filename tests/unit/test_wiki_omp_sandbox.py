@@ -285,11 +285,40 @@ def test_remote_sandbox_receives_only_bounded_materials_not_worker_secrets() -> 
     payload = captured["payload"]
     assert isinstance(payload, dict)
     assert payload["draft_contract"]["text_max_characters"] == 12_000
+    assert payload["run"]["model"] == "openrouter/test"
+    assert payload["run"]["max_run_seconds"] == 11.0
     serialized = json.dumps(captured["payload"])
     assert "OPENROUTER_API_KEY" not in serialized
     assert "openrouter-secret" not in serialized
     assert "WIKI_OMP_COMMAND" not in serialized
     assert "outline_admin" not in serialized
+
+
+def test_remote_sandbox_uses_persisted_model_after_configuration_changes() -> None:
+    captured: dict[str, object] = {}
+
+    def transport(
+        _endpoint: str,
+        _headers: Mapping[str, str],
+        payload: Mapping[str, object],
+        _startup_timeout: float,
+        _authoring_timeout: float,
+    ) -> dict[str, object]:
+        captured.update(payload)
+        return _draft_response(source_ids=["request:1"])
+
+    runner = SandboxedOmpWikiAuthoringRunner(
+        sandbox_url="http://wiki_omp_sandbox:8080",
+        sandbox_token="sandbox-token",
+        model="openrouter/new-default",
+        outline_client_factory=_empty_outline_client_factory,
+        allowed_collection_id="collection-1",
+        transport=transport,
+    )
+
+    runner.author(_work_item(), metadata=_metadata())
+
+    assert captured["run"]["model"] == "openrouter/test"
 
 
 def test_remote_sandbox_response_cannot_exceed_configured_document_limit() -> None:

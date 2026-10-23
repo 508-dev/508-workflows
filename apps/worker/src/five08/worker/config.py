@@ -80,6 +80,7 @@ class WorkerSettings(SharedSettings):
     wiki_omp_thinking: str = "medium"
     wiki_omp_authoring_timeout_seconds: float = Field(default=300.0, gt=0)
     wiki_omp_startup_timeout_seconds: float = Field(default=30.0, gt=0)
+    wiki_omp_sandbox_run_timeout_seconds: float = Field(default=270.0, ge=30, le=600)
     agent_planner_model: str = "accounts/fireworks/models/kimi-k2p6"
     agent_fallback_model: str = "gpt-4.1-mini"
     agent_structured_planner_enabled: bool = True
@@ -186,6 +187,14 @@ class WorkerSettings(SharedSettings):
             return "WIKI_OMP_MODEL must use the sandbox's openrouter/... format."
         if self.wiki_omp_thinking.strip().lower() not in _WIKI_OMP_THINKING_LEVELS:
             return "WIKI_OMP_THINKING is not supported by the sandbox."
+        if (
+            self.wiki_omp_authoring_timeout_seconds
+            < self.wiki_omp_sandbox_run_timeout_seconds + 10
+        ):
+            return (
+                "WIKI_OMP_AUTHORING_TIMEOUT_SECONDS must exceed "
+                "WIKI_OMP_SANDBOX_RUN_TIMEOUT_SECONDS by at least 10 seconds."
+            )
         if not (self.outline_admin_api_key or "").strip():
             return "OUTLINE_ADMIN_API_KEY is required for wiki editing."
         if not str(self.wiki_outline_collection_id or "").strip():

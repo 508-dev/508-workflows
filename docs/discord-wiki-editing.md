@@ -34,6 +34,11 @@ Outline credential, publishing tool, or enabled generic HTTP/shell/filesystem
 tool. The durable Postgres workflow is the source of truth for request/proposal
 state.
 
+Worker retries are durable too. The consumer periodically redelivers due
+failed wiki-authoring jobs from Postgres, closing the crash window between
+recording a retry and scheduling its Redis message. Duplicate deliveries are
+safe because the job claim is fenced in Postgres.
+
 The bundle has opaque source IDs. The sandbox may cite only IDs from that
 bundle, and the worker rejects any other citation. It has no dynamic Outline or
 knowledge tool: that avoids giving untrusted OMP an oracle against privileged
@@ -130,13 +135,19 @@ proxy URL in its otherwise minimal child environment, so a failed/misconfigured
 proxy stops authoring rather than silently granting the sandbox broad egress.
 
 The v1 request uses `Authorization: Bearer <sandbox token>` and includes the
-model/thinking selection, reserved action and target, opaque approved-material
+persisted run model, thinking selection, worker-bounded run deadline, reserved
+action and target, opaque approved-material
 IDs with their bounded content, and the draft size/citation contract. The
 sandbox must return exactly `{"protocol_version":"v1","draft":{...}}`,
 where `draft` contains the reserved action/target, title, text, summary, and
 only material IDs it used. The worker disables redirects, bounds the response,
 rejects extra response fields, and validates every cited ID before persisting a
 proposal. A sandbox error cannot publish or modify Outline.
+
+Keep `WIKI_OMP_AUTHORING_TIMEOUT_SECONDS` at least 10 seconds above
+`WIKI_OMP_SANDBOX_RUN_TIMEOUT_SECONDS`. The Compose overlay passes the same
+sandbox timeout to the worker and sidecar; the request deadline also caps each
+OMP session if an independently deployed sidecar has a longer timeout.
 
 Do not set `WIKI_EDITING_ENABLED=true` until all required configuration is
 present. See the [Configuration Reference](./configuration.md) for every

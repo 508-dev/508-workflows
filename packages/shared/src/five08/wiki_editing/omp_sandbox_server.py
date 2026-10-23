@@ -23,7 +23,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -86,6 +86,7 @@ class SandboxRun:
     run_id: str
     model: str
     thinking: str
+    max_run_seconds: float
     action: str
     target_document_id: str | None
     revision_instruction: str | None
@@ -175,7 +176,7 @@ def parse_sandbox_run(payload: object) -> SandboxRun:
         raise SandboxRequestError("unsupported sandbox protocol")
 
     run = _required_object(payload.get("run"), name="run")
-    if set(run) != {"run_id", "attempt", "model", "thinking"}:
+    if set(run) != {"run_id", "attempt", "model", "thinking", "max_run_seconds"}:
         raise SandboxRequestError("invalid sandbox run")
     run_id = _required_text(run.get("run_id"), name="run ID", maximum=512)
     attempt = run.get("attempt")
@@ -191,6 +192,13 @@ def parse_sandbox_run(payload: object) -> SandboxRun:
     thinking = _required_text(run.get("thinking"), name="thinking", maximum=16).lower()
     if thinking not in _THINKING_LEVELS:
         raise SandboxRequestError("invalid thinking level")
+    max_run_seconds = run.get("max_run_seconds")
+    if (
+        not isinstance(max_run_seconds, (int, float))
+        or isinstance(max_run_seconds, bool)
+        or not 1 <= max_run_seconds <= 600
+    ):
+        raise SandboxRequestError("invalid sandbox run deadline")
 
     proposal = _required_object(payload.get("proposal"), name="proposal")
     if set(proposal) != {"action", "target_document_id", "revision_instruction"}:
@@ -224,6 +232,7 @@ def parse_sandbox_run(payload: object) -> SandboxRun:
         run_id=run_id,
         model=model,
         thinking=thinking,
+        max_run_seconds=float(max_run_seconds),
         action=action,
         target_document_id=target_document_id,
         revision_instruction=revision_instruction,
@@ -707,7 +716,13 @@ class OmpAuthoringHarness:
             allow_nan=False,
             separators=(",", ":"),
         )
-        with self.session_factory(self.settings, run.model, run.thinking) as session:
+        bounded_settings = replace(
+            self.settings,
+            run_timeout_seconds=min(
+                self.settings.run_timeout_seconds, run.max_run_seconds
+            ),
+        )
+        with self.session_factory(bounded_settings, run.model, run.thinking) as session:
             session.prompt_and_wait(
                 _research_prompt(serialized_materials),
                 maximum_text=100_000,
