@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -15,12 +16,14 @@ from five08.clients.outline import (
     OutlineNoWriteError,
 )
 from five08.wiki_editing.models import (
+    WikiConflictDetails,
     WikiEditActionRequest,
     WikiEditCreateRequest,
     WikiEditPermissionError,
     WikiEditReviewAcknowledgementRequest,
     WikiEditRevisionRequest,
     WikiOmpRunMetadata,
+    wiki_content_hash,
 )
 from five08.wiki_editing.omp import WikiAuthoringTransientError, WikiOmpDraft
 from five08.wiki_editing.service import (
@@ -422,6 +425,70 @@ def test_publish_marks_a_changed_document_conflicted_without_writing() -> None:
     response = service.publish(_action(proposal_id))
 
     assert response.status == "conflict"
+    assert outline.update_calls == 0
+
+
+def test_stale_preflight_cannot_override_a_concurrent_write_claim() -> None:
+    outline = _Outline()
+    service = _service(outline, _Author())
+    proposal_id = _propose(service)
+    _acknowledge(service, proposal_id)
+
+    def conflict_after_other_publisher_claims(_proposal: object) -> WikiConflictDetails:
+        # The other publisher commits its claim between this request's
+        # Outline read and its attempt to record a preflight conflict.
+        claim = service.store.claim_publish_attempt(
+            proposal_id, organization_id="guild-1"
+        )
+        assert claim.should_execute is True
+        return WikiConflictDetails(
+            current_document_id="doc-1",
+            current_content_hash=wiki_content_hash("newer content"),
+            message="The Outline article changed after this draft was prepared.",
+        )
+
+    with patch.object(
+        service, "_current_conflict", side_effect=conflict_after_other_publisher_claims
+    ):
+        response = service.publish(_action(proposal_id))
+
+    assert response.status == "publishing"
+    assert response.operation_status == "write_started"
+    assert outline.update_calls == 0
+    stored = service.store.get_proposal(proposal_id, organization_id="guild-1")
+    assert stored is not None
+    assert stored.conflict is None
+
+
+def test_publish_returns_concurrent_preflight_conflict_before_claim() -> None:
+    outline = _Outline()
+    service = _service(outline, _Author())
+    proposal_id = _propose(service)
+    _acknowledge(service, proposal_id)
+    original_claim = service.store.claim_publish_attempt
+
+    def other_preflight_commits_first(*args: Any, **kwargs: Any) -> Any:
+        marked = service.store.mark_preflight_conflict(
+            proposal_id,
+            organization_id="guild-1",
+            conflict=WikiConflictDetails(
+                current_document_id="doc-1",
+                current_content_hash=wiki_content_hash("newer content"),
+                message="The Outline article changed after this draft was prepared.",
+            ),
+        )
+        assert marked is not None
+        return original_claim(*args, **kwargs)
+
+    with patch.object(
+        service.store,
+        "claim_publish_attempt",
+        side_effect=other_preflight_commits_first,
+    ):
+        response = service.publish(_action(proposal_id))
+
+    assert response.status == "conflict"
+    assert response.operation_status is None
     assert outline.update_calls == 0
 
 

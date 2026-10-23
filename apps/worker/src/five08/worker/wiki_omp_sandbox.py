@@ -39,6 +39,7 @@ from five08.wiki_editing.omp import (
 
 
 _SANDBOX_PROTOCOL_VERSION = "v1"
+_MAX_SANDBOX_RUN_SECONDS = 600.0
 _MAX_SOURCE_MATERIALS = 32
 # Request (4k) + reviewed predecessor (16k) + fresh update base (16k) +
 # explicitly selected conversation (12k). Supplemental materials are admitted
@@ -445,7 +446,10 @@ class SandboxedOmpWikiAuthoringRunner:
                 "attempt": metadata.attempt,
                 "model": metadata.model,
                 "thinking": self.thinking,
-                "max_run_seconds": max(1.0, self.authoring_timeout_seconds - 10.0),
+                "max_run_seconds": min(
+                    _MAX_SANDBOX_RUN_SECONDS,
+                    max(1.0, self.authoring_timeout_seconds - 10.0),
+                ),
             },
             "proposal": {
                 "action": proposal.target_action,

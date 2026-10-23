@@ -239,7 +239,14 @@ def _draft_response(
     }
 
 
-def test_remote_sandbox_receives_only_bounded_materials_not_worker_secrets() -> None:
+@pytest.mark.parametrize(
+    ("authoring_timeout", "expected_max_run"),
+    [(21.0, 11.0), (700.0, 600.0)],
+)
+def test_remote_sandbox_receives_only_bounded_materials_not_worker_secrets(
+    authoring_timeout: float,
+    expected_max_run: float,
+) -> None:
     captured: dict[str, Any] = {}
 
     def transport(
@@ -263,7 +270,7 @@ def test_remote_sandbox_receives_only_bounded_materials_not_worker_secrets() -> 
         sandbox_token="sandbox-token",
         model="openrouter/test",
         startup_timeout_seconds=7.0,
-        authoring_timeout_seconds=21.0,
+        authoring_timeout_seconds=authoring_timeout,
         max_document_characters=12_000,
         outline_client_factory=_empty_outline_client_factory,
         allowed_collection_id="collection-1",
@@ -281,12 +288,12 @@ def test_remote_sandbox_receives_only_bounded_materials_not_worker_secrets() -> 
         "X-Wiki-OMP-Protocol": "v1",
     }
     assert captured["startup_timeout"] == 7.0
-    assert captured["authoring_timeout"] == 21.0
+    assert captured["authoring_timeout"] == authoring_timeout
     payload = captured["payload"]
     assert isinstance(payload, dict)
     assert payload["draft_contract"]["text_max_characters"] == 12_000
     assert payload["run"]["model"] == "openrouter/test"
-    assert payload["run"]["max_run_seconds"] == 11.0
+    assert payload["run"]["max_run_seconds"] == expected_max_run
     serialized = json.dumps(captured["payload"])
     assert "OPENROUTER_API_KEY" not in serialized
     assert "openrouter-secret" not in serialized

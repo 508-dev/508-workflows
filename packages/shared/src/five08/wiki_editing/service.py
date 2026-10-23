@@ -307,20 +307,49 @@ class WikiEditingService:
         if proposal.target_action == "update":
             conflict = self._current_conflict(proposal)
             if conflict is not None:
-                updated = self.store.mark_conflict(
+                updated = self.store.mark_preflight_conflict(
                     proposal.id,
                     organization_id=organization_id,
                     conflict=conflict,
                 )
+                if updated is None:
+                    # Another request claimed the one-shot write while we
+                    # checked Outline. Its operation now owns the result.
+                    latest = self._owned_proposal(
+                        proposal.id,
+                        organization_id=organization_id,
+                        actor_id=request.context.discord_user_id,
+                    )
+                    operation = self.store.get_publish_operation(
+                        proposal.id,
+                        organization_id=organization_id,
+                    )
+                    return self._response_for(latest, operation=operation)
                 return self._response_for(updated)
 
         # This durable state transition happens immediately before the only
         # provider call. A duplicate click can observe it but can never issue a
         # second create/update request.
-        claim = self.store.claim_publish_attempt(
-            proposal.id,
-            organization_id=organization_id,
-        )
+        try:
+            claim = self.store.claim_publish_attempt(
+                proposal.id,
+                organization_id=organization_id,
+            )
+        except WikiEditStateError:
+            # A second preflight may have committed its conflict while this
+            # request was between the Outline read and the claim transaction.
+            latest = self._owned_proposal(
+                proposal.id,
+                organization_id=organization_id,
+                actor_id=request.context.discord_user_id,
+            )
+            if latest.status != "conflict":
+                raise
+            operation = self.store.get_publish_operation(
+                proposal.id,
+                organization_id=organization_id,
+            )
+            return self._response_for(latest, operation=operation)
         if not claim.should_execute:
             latest = self._owned_proposal(
                 proposal.id,

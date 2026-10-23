@@ -336,7 +336,9 @@ def reserve_jobs_for_redelivery(
         WHERE target.id = eligible.id
         RETURNING target.*;
     """
-    with get_postgres_connection(settings) as conn:
+    with get_postgres_connection(
+        settings, connect_timeout_seconds=3, statement_timeout_seconds=3
+    ) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
                 query,

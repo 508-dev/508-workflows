@@ -142,7 +142,17 @@ class WikiEditingStore(Protocol):
         conflict: WikiConflictDetails,
         now: datetime | None = None,
     ) -> WikiEditProposal:
-        """Record a safe stale-base conflict before an external write."""
+        """Record a known provider conflict, including after a write claim."""
+
+    def mark_preflight_conflict(
+        self,
+        proposal_id: str,
+        *,
+        organization_id: str,
+        conflict: WikiConflictDetails,
+        now: datetime | None = None,
+    ) -> WikiEditProposal | None:
+        """Record a stale-base conflict only if no external write has begun."""
 
     def fail_proposal(
         self,
@@ -968,11 +978,52 @@ class InMemoryWikiEditingStore:
         conflict: WikiConflictDetails,
         now: datetime | None = None,
     ) -> WikiEditProposal:
+        marked = self._mark_conflict(
+            proposal_id,
+            organization_id=organization_id,
+            conflict=conflict,
+            now=now,
+            preflight_only=False,
+        )
+        if marked is None:  # pragma: no cover - non-preflight invariant
+            raise RuntimeError("wiki provider conflict was not recorded")
+        return marked
+
+    def mark_preflight_conflict(
+        self,
+        proposal_id: str,
+        *,
+        organization_id: str,
+        conflict: WikiConflictDetails,
+        now: datetime | None = None,
+    ) -> WikiEditProposal | None:
+        return self._mark_conflict(
+            proposal_id,
+            organization_id=organization_id,
+            conflict=conflict,
+            now=now,
+            preflight_only=True,
+        )
+
+    def _mark_conflict(
+        self,
+        proposal_id: str,
+        *,
+        organization_id: str,
+        conflict: WikiConflictDetails,
+        now: datetime | None,
+        preflight_only: bool,
+    ) -> WikiEditProposal | None:
         comparison_time = _now(now)
         with self._lock:
             proposal = self._required_proposal(proposal_id, organization_id)
-            ensure_proposal_transition(proposal.status, "conflict")
             operation = self._operations.get(proposal_id)
+            if preflight_only and (
+                proposal.status != "proposed"
+                or (operation is not None and operation.status != "pending")
+            ):
+                return None
+            ensure_proposal_transition(proposal.status, "conflict")
             if operation is not None:
                 if operation.status not in {"pending", "write_started"}:
                     raise WikiEditStateError(
@@ -1900,13 +1951,57 @@ class PostgresWikiEditingStore:
         conflict: WikiConflictDetails,
         now: datetime | None = None,
     ) -> WikiEditProposal:
+        marked = self._mark_conflict(
+            proposal_id,
+            organization_id=organization_id,
+            conflict=conflict,
+            now=now,
+            preflight_only=False,
+        )
+        if marked is None:  # pragma: no cover - non-preflight invariant
+            raise RuntimeError("wiki provider conflict was not recorded")
+        return marked
+
+    def mark_preflight_conflict(
+        self,
+        proposal_id: str,
+        *,
+        organization_id: str,
+        conflict: WikiConflictDetails,
+        now: datetime | None = None,
+    ) -> WikiEditProposal | None:
+        return self._mark_conflict(
+            proposal_id,
+            organization_id=organization_id,
+            conflict=conflict,
+            now=now,
+            preflight_only=True,
+        )
+
+    def _mark_conflict(
+        self,
+        proposal_id: str,
+        *,
+        organization_id: str,
+        conflict: WikiConflictDetails,
+        now: datetime | None,
+        preflight_only: bool,
+    ) -> WikiEditProposal | None:
         comparison_time = _now(now)
         with self._connection() as conn:
             with conn.cursor(row_factory=dict_row) as cursor:
                 row = self._locked_proposal(cursor, proposal_id, organization_id)
                 proposal = _proposal_from_row(row)
-                ensure_proposal_transition(proposal.status, "conflict")
                 operation_row = self._locked_operation(cursor, proposal_id)
+                if preflight_only and (
+                    proposal.status != "proposed"
+                    or (
+                        operation_row is not None
+                        and _operation_from_row(operation_row).status != "pending"
+                    )
+                ):
+                    return None
+                ensure_proposal_transition(proposal.status, "conflict")
                 if operation_row is not None:
                     operation = _operation_from_row(operation_row)
                     if operation.status not in {"pending", "write_started"}:

@@ -84,7 +84,6 @@ class WorkerSettings(SharedSettings):
         default=270.0, ge=30.0, le=600.0
     )
     wiki_omp_startup_timeout_seconds: float = Field(default=30.0, gt=0)
-    wiki_omp_sandbox_run_timeout_seconds: float = Field(default=270.0, ge=30, le=600)
     agent_planner_model: str = "accounts/fireworks/models/kimi-k2p6"
     agent_fallback_model: str = "gpt-4.1-mini"
     agent_structured_planner_enabled: bool = True

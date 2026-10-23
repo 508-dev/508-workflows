@@ -159,6 +159,55 @@ def test_postgres_publish_reconciliation_preserves_unknown_resolution_time() -> 
     assert "resolved_at = COALESCE(resolved_at, %s)" in operation_update
 
 
+@pytest.mark.parametrize(
+    ("proposal_status", "operation_status"),
+    [("publishing", "write_started"), ("proposed", "write_started")],
+)
+def test_postgres_preflight_conflict_checks_locked_write_state_before_update(
+    proposal_status: str, operation_status: str
+) -> None:
+    store = PostgresWikiEditingStore(SharedSettings())
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value.__enter__.return_value
+    lock_order: list[str] = []
+
+    def lock_proposal(*_args: object) -> dict[str, object]:
+        lock_order.append("proposal")
+        return {}
+
+    def lock_operation(*_args: object) -> dict[str, object]:
+        lock_order.append("operation")
+        return {}
+
+    with (
+        patch.object(store, "_connection", return_value=connection),
+        patch.object(store, "_locked_proposal", side_effect=lock_proposal),
+        patch.object(store, "_locked_operation", side_effect=lock_operation),
+        patch(
+            "five08.wiki_editing.store._proposal_from_row",
+            return_value=SimpleNamespace(status=proposal_status),
+        ),
+        patch(
+            "five08.wiki_editing.store._operation_from_row",
+            return_value=SimpleNamespace(status=operation_status),
+        ),
+    ):
+        marked = store.mark_preflight_conflict(
+            "proposal-1",
+            organization_id="org-1",
+            conflict=WikiConflictDetails(
+                current_document_id="outline-doc-1",
+                current_content_hash=wiki_content_hash("newer content"),
+                message="The article changed.",
+            ),
+        )
+
+    assert marked is None
+    assert lock_order == ["proposal", "operation"]
+    cursor.execute.assert_not_called()
+
+
 def test_request_idempotency_and_public_reads_exclude_source_text() -> None:
     store = InMemoryWikiEditingStore()
     request = _request()
@@ -641,7 +690,26 @@ def test_known_provider_conflict_after_claim_does_not_become_unknown() -> None:
         actor_id="actor-1",
         review_content_hash=review.content_hash,
     )
-    store.claim_publish_attempt(proposal.id, organization_id="org-1")
+    claim = store.claim_publish_attempt(proposal.id, organization_id="org-1")
+
+    ignored_preflight = store.mark_preflight_conflict(
+        proposal.id,
+        organization_id="org-1",
+        conflict=WikiConflictDetails(
+            current_document_id="outline-doc-1",
+            current_content_hash=wiki_content_hash("newer content"),
+            message="The article changed during preflight.",
+        ),
+    )
+    assert ignored_preflight is None
+    still_publishing = store.get_proposal(proposal.id, organization_id="org-1")
+    assert still_publishing is not None
+    assert still_publishing.status == "publishing"
+    assert still_publishing.conflict is None
+    operation = store.get_publish_operation(proposal.id, organization_id="org-1")
+    assert operation is not None
+    assert operation.id == claim.operation.id
+    assert operation.status == "write_started"
 
     conflicted = store.mark_conflict(
         proposal.id,
