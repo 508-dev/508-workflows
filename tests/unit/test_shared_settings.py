@@ -39,6 +39,16 @@ def test_non_local_settings_do_not_eagerly_reject_missing_runtime_dependencies()
     )
 
 
+def test_outline_revision_confirmation_defaults_off_and_accepts_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("WIKI_OUTLINE_LAST_REVISION_CONFIRMED", raising=False)
+    assert SharedSettings(_env_file=None).wiki_outline_last_revision_confirmed is False
+
+    monkeypatch.setenv("WIKI_OUTLINE_LAST_REVISION_CONFIRMED", "true")
+    assert SharedSettings(_env_file=None).wiki_outline_last_revision_confirmed is True
+
+
 def test_sentry_environment_and_sampling_are_not_env_configurable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

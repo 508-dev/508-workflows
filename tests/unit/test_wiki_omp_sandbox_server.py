@@ -409,6 +409,7 @@ def test_rpc_write_honors_the_session_deadline() -> None:
     session.process = process
     session._deadline = omp_sandbox_server.time.monotonic() + 0.01
 
+    started_at = omp_sandbox_server.time.monotonic()
     try:
         with (
             patch.object(session, "close") as mock_close,
@@ -416,8 +417,10 @@ def test_rpc_write_honors_the_session_deadline() -> None:
         ):
             session._send({"type": "prompt", "message": "x" * 100_000})
     finally:
+        elapsed = omp_sandbox_server.time.monotonic() - started_at
         release_writer.set()
 
+    assert elapsed < 0.9
     mock_close.assert_called_once_with()
 
 

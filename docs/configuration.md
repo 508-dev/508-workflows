@@ -311,6 +311,12 @@ Agent gateway:
   backend instead.
 - `WIKI_OUTLINE_COLLECTION_ID`: required collection for approved new articles.
   Updates must already belong to this same shared collection.
+- `WIKI_OUTLINE_LAST_REVISION_CONFIRMED`: defaults to false. For a custom or
+  self-hosted Outline endpoint, verify Outline 1.10.0 or newer supports
+  `documents.update.lastRevision`, then set this to true in the API before
+  enabling wiki updates. Update proposal creation, revision, and publish fail
+  closed without it; new article creation remains available. Outline Cloud at
+  `https://app.getoutline.com` does not require this setting.
 - `WIKI_EDITING_ASSERTION_SECRET`: required high-entropy secret shared only by
   the Discord bot and API. It signs a 60-second, method/path/body-bound
   assertion before the API accepts the bot-supplied Discord identity and roles
@@ -351,8 +357,11 @@ Agent gateway:
   sources and 48,000 characters. The sandbox can only return one typed draft;
   it receives no backend-hosted write tools and cannot publish.
 - `WIKI_OMP_SANDBOX_RUN_TIMEOUT_SECONDS`: sandbox-wide run deadline (30–600
-  seconds, default: 270). Compose gives the fixed OpenRouter proxy tunnel 60
-  seconds of additional shutdown headroom over this same configured value.
+  seconds, default: 270). The worker requires
+  `WIKI_OMP_AUTHORING_TIMEOUT_SECONDS` to be at least 30 seconds longer so the
+  sandbox can finish and return its response before the worker times out.
+  Compose passes the same run limit to the worker and gives the fixed OpenRouter
+  proxy tunnel 60 seconds of additional shutdown headroom.
 
 For Compose deployments, inject wiki-related secrets by service rather than
 placing them in a globally inherited production `.env` file:

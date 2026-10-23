@@ -24,6 +24,7 @@ from five08.wiki_editing.models import (
 )
 from five08.wiki_editing.omp import WikiAuthoringTransientError, WikiOmpDraft
 from five08.wiki_editing.service import (
+    WikiEditingConfigurationError,
     WikiEditingService,
     WikiEditingValidationError,
 )
@@ -116,6 +117,7 @@ def _settings(**overrides: Any) -> SimpleNamespace:
         "wiki_editing_enabled": True,
         "wiki_authoring_configured": True,
         "wiki_outline_collection_id": "collection-1",
+        "wiki_outline_last_revision_confirmed": True,
         "wiki_editing_api_timeout_seconds": 5.0,
         "wiki_editing_max_instruction_characters": 4_000,
         "wiki_editing_max_document_characters": 16_000,
@@ -142,9 +144,10 @@ def _context(*, user_id: str = "writer") -> AgentIdentityContext:
 def _service(
     outline: _Outline,
     author: object | None = None,
+    **settings_overrides: Any,
 ) -> WikiEditingService:
     return WikiEditingService(
-        settings=_settings(),  # type: ignore[arg-type]
+        settings=_settings(**settings_overrides),  # type: ignore[arg-type]
         store=InMemoryWikiEditingStore(),
         outline_client_factory=lambda: outline,  # type: ignore[arg-type]
         authoring_runner=author,  # type: ignore[arg-type]
@@ -571,6 +574,94 @@ def test_update_requires_an_outline_revision_for_server_side_conflict_checks() -
         service.create(_create_request())
 
     assert outline.update_calls == 0
+
+
+def test_custom_outline_requires_confirmed_revision_guard_before_update() -> None:
+    outline = _Outline()
+    service = _service(
+        outline,
+        _Author(),
+        wiki_outline_last_revision_confirmed=False,
+    )
+
+    with pytest.raises(WikiEditingConfigurationError, match="Outline 1.10.0"):
+        service.create(_create_request())
+
+    assert outline.update_calls == 0
+    assert outline.create_calls == 0
+
+
+def test_outline_cloud_allows_update_without_operator_confirmation() -> None:
+    outline = _Outline()
+    service = _service(
+        outline,
+        _Author(),
+        outline_base_url="https://app.getoutline.com",
+        wiki_outline_last_revision_confirmed=False,
+    )
+
+    proposal_id = _propose(service)
+    _acknowledge(service, proposal_id)
+    assert service.publish(_action(proposal_id)).status == "published"
+    assert outline.update_calls == 1
+
+
+def test_custom_outline_create_remains_available_without_revision_guard() -> None:
+    outline = _Outline()
+    service = _service(
+        outline,
+        _Author(),
+        wiki_outline_last_revision_confirmed=False,
+    )
+
+    started = service.create(_create_request(target_document_id=None))
+    assert started.response.proposal_id is not None
+    drafted = service.author_proposal(
+        started.response.proposal_id,
+        organization_id="guild-1",
+    )
+    assert drafted.status == "proposed"
+    _acknowledge(service, started.response.proposal_id)
+
+    assert service.publish(_action(started.response.proposal_id)).status == "published"
+    assert outline.create_calls == 1
+
+
+def test_update_publish_rechecks_revision_guard_before_write() -> None:
+    outline = _Outline()
+    service = _service(outline, _Author())
+    proposal_id = _propose(service)
+    _acknowledge(service, proposal_id)
+    service.settings.wiki_outline_last_revision_confirmed = False
+
+    with pytest.raises(WikiEditingConfigurationError, match="Outline 1.10.0"):
+        service.publish(_action(proposal_id))
+
+    assert outline.update_calls == 0
+    assert (
+        service.store.get_publish_operation(proposal_id, organization_id="guild-1")
+        is None
+    )
+
+
+def test_update_revision_rechecks_revision_guard_before_queuing() -> None:
+    outline = _Outline()
+    service = _service(outline, _Author())
+    proposal_id = _propose(service)
+    service.settings.wiki_outline_last_revision_confirmed = False
+
+    with pytest.raises(WikiEditingConfigurationError, match="Outline 1.10.0"):
+        service.revise(
+            WikiEditRevisionRequest(
+                context=_context(),
+                proposal_id=proposal_id,
+                instruction="Clarify the deployment steps.",
+            )
+        )
+
+    proposal = service.store.get_proposal(proposal_id, organization_id="guild-1")
+    assert proposal is not None
+    assert proposal.status == "proposed"
 
 
 def test_revision_feedback_obeys_the_same_bounded_instruction_limit() -> None:

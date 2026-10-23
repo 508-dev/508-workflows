@@ -154,6 +154,37 @@ def test_wiki_authoring_rejects_sandbox_incompatible_runtime_settings(
     assert expected_error in str(settings.wiki_authoring_configuration_error)
 
 
+@pytest.mark.parametrize(
+    ("sandbox_timeout", "authoring_timeout", "configured"),
+    [
+        (270.0, 300.0, True),
+        (600.0, 630.0, True),
+        (270.0, 299.9, False),
+        (600.0, 300.0, False),
+    ],
+)
+def test_wiki_authoring_timeout_outlasts_sandbox_run(
+    sandbox_timeout: float,
+    authoring_timeout: float,
+    configured: bool,
+) -> None:
+    settings = WorkerSettings(
+        wiki_editing_enabled=True,
+        wiki_outline_collection_id="shared-wiki",
+        outline_admin_api_key="writer-key",
+        wiki_omp_sandbox_url="http://wiki_omp_sandbox:8080",
+        wiki_omp_sandbox_token="sandbox-token",
+        wiki_omp_sandbox_run_timeout_seconds=sandbox_timeout,
+        wiki_omp_authoring_timeout_seconds=authoring_timeout,
+    )
+
+    assert settings.wiki_authoring_configured is configured
+    if not configured:
+        assert "WIKI_OMP_AUTHORING_TIMEOUT_SECONDS" in str(
+            settings.wiki_authoring_configuration_error
+        )
+
+
 def test_email_intake_requires_mailbox_credentials() -> None:
     with pytest.raises(ValidationError, match="EMAIL_PASSWORD must be set"):
         WorkerSettings(

@@ -12,6 +12,7 @@ from five08.queue import (
     get_postgres_connection,
     list_due_retry_job_ids,
     mark_job_succeeded,
+    reserve_jobs_for_redelivery,
 )
 from five08.settings import SharedSettings
 
@@ -154,6 +155,59 @@ def test_postgres_connection_applies_bounded_operation_deadlines() -> None:
         settings.postgres_url,
         connect_timeout=1,
         options="-c statement_timeout=2500",
+    )
+
+
+def test_reserve_jobs_for_redelivery_selects_due_work_with_a_cooldown() -> None:
+    """Recovery must retry a lost handoff without dispatching future work."""
+    now = datetime(2026, 9, 18, tzinfo=timezone.utc)
+    row = {
+        "id": "job-1",
+        "type": "author_wiki_edit_proposal_job",
+        "status": "failed",
+        "payload": {"args": ["proposal-1", "guild-1"], "kwargs": {}},
+        "idempotency_key": "wiki-author:proposal-1",
+        "attempts": 1,
+        "max_attempts": 5,
+        "run_after": now,
+        "locked_at": None,
+        "locked_by": None,
+        "last_error": "provider unavailable",
+        "created_at": now,
+        "updated_at": now,
+    }
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value.__enter__.return_value
+    cursor.fetchall.return_value = [row]
+
+    with patch("five08.queue.get_postgres_connection", return_value=connection):
+        jobs = reserve_jobs_for_redelivery(
+            SharedSettings(),
+            job_type="author_wiki_edit_proposal_job",
+            running_lease_seconds=1800.0,
+            redelivery_cooldown_seconds=30.0,
+            limit=100,
+        )
+
+    assert [job.id for job in jobs] == ["job-1"]
+    assert jobs[0].status == JobStatus.FAILED
+    query, params = cursor.execute.call_args.args
+    assert "type = %s" in query
+    assert "updated_at <= NOW()" in query
+    assert "run_after IS NULL OR run_after <= NOW()" in query
+    assert "locked_at <= NOW()" in query
+    assert "FOR UPDATE SKIP LOCKED" in query
+    assert "SET updated_at = NOW()" in query
+    assert "status =" not in query.split("SET updated_at = NOW()", 1)[1]
+    assert params == (
+        "author_wiki_edit_proposal_job",
+        30.0,
+        "queued",
+        "failed",
+        "running",
+        1800.0,
+        100,
     )
 
 

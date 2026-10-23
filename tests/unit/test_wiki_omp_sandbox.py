@@ -294,7 +294,7 @@ def test_remote_sandbox_receives_only_bounded_materials_not_worker_secrets() -> 
     assert "outline_admin" not in serialized
 
 
-def test_remote_sandbox_uses_persisted_model_after_configuration_changes() -> None:
+def test_retry_uses_model_bound_to_durable_run_metadata() -> None:
     captured: dict[str, object] = {}
 
     def transport(
@@ -307,6 +307,10 @@ def test_remote_sandbox_uses_persisted_model_after_configuration_changes() -> No
         captured.update(payload)
         return _draft_response(source_ids=["request:1"])
 
+    # The queued run was claimed before this worker started with a new model.
+    work_item = _work_item()
+    metadata = work_item.proposal.omp_metadata
+    assert metadata is not None
     runner = SandboxedOmpWikiAuthoringRunner(
         sandbox_url="http://wiki_omp_sandbox:8080",
         sandbox_token="sandbox-token",
@@ -316,9 +320,13 @@ def test_remote_sandbox_uses_persisted_model_after_configuration_changes() -> No
         transport=transport,
     )
 
-    runner.author(_work_item(), metadata=_metadata())
+    draft = runner.author(work_item, metadata=metadata)
 
-    assert captured["run"]["model"] == "openrouter/test"
+    run = captured["run"]
+    assert isinstance(run, dict)
+    assert run["model"] == "openrouter/test"
+    assert run["run_id"] == metadata.run_id
+    assert draft.metadata == metadata
 
 
 def test_remote_sandbox_response_cannot_exceed_configured_document_limit() -> None:

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock, call
 
 import pytest
 from fastapi import Request
@@ -308,6 +309,51 @@ async def test_wiki_enqueue_failure_becomes_a_reviewable_failed_draft(
     assert response.status_code == 202
     assert _response_json(response)["status"] == "failed"
     assert getattr(service.action_payload, "proposal_id") == _PROPOSAL_ID
+
+
+async def test_wiki_job_recovery_retries_after_a_lost_redis_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed send leaves each reserved durable job for the next sweep."""
+    queue = Mock()
+    queue.enqueue.side_effect = [RuntimeError("redis unavailable"), None, None]
+    app = api.FastAPI()
+    app.state.queue = queue
+    reserve = Mock(
+        return_value=[SimpleNamespace(id="job-1"), SimpleNamespace(id="job-2")]
+    )
+    monkeypatch.setattr(api, "reserve_jobs_for_redelivery", reserve)
+
+    assert await api._redispatch_recoverable_wiki_jobs(app) == 0
+    assert await api._redispatch_recoverable_wiki_jobs(app) == 2
+
+    assert queue.enqueue.call_args_list == [
+        call("job-1"),
+        call("job-1"),
+        call("job-2"),
+    ]
+    assert reserve.call_count == 2
+    assert reserve.call_args.kwargs == {
+        "job_type": "author_wiki_edit_proposal_job",
+        "running_lease_seconds": api._WIKI_JOB_RECOVERY_RUNNING_AGE_SECONDS,
+        "redelivery_cooldown_seconds": api._WIKI_JOB_RECOVERY_INTERVAL_SECONDS,
+        "limit": api._WIKI_JOB_RECOVERY_BATCH_LIMIT,
+    }
+
+
+async def test_wiki_job_recovery_scheduler_survives_a_failed_sweep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sweep = AsyncMock(
+        side_effect=[RuntimeError("postgres unavailable"), asyncio.CancelledError]
+    )
+    monkeypatch.setattr(api, "_redispatch_recoverable_wiki_jobs", sweep)
+    monkeypatch.setattr(api, "_WIKI_JOB_RECOVERY_INTERVAL_SECONDS", 0.0)
+
+    with pytest.raises(asyncio.CancelledError):
+        await api._wiki_authoring_recovery_scheduler(api.FastAPI())
+
+    assert sweep.await_count == 2
 
 
 async def test_wiki_acknowledgement_binds_review_to_the_route_proposal(

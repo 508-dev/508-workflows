@@ -34,10 +34,14 @@ Outline credential, publishing tool, or enabled generic HTTP/shell/filesystem
 tool. The durable Postgres workflow is the source of truth for request/proposal
 state.
 
-Worker retries are durable too. The consumer periodically redelivers due
-failed wiki-authoring jobs from Postgres, closing the crash window between
-recording a retry and scheduling its Redis message. Duplicate deliveries are
-safe because the job claim is fenced in Postgres.
+The API periodically redelivers due queued or retryable authoring jobs and
+checks for stale running jobs. This recovers a process exit between the durable
+job update and Redis delivery. Each scan is bounded and has a cooldown; the
+worker's atomic claim decides whether a redelivery may run. This recovery only
+restarts draft authoring and never repeats an Outline publish.
+
+The standalone worker consumer also scans for due failed authoring jobs. Its
+duplicate deliveries are safe because the Postgres job claim is fenced.
 
 The bundle has opaque source IDs. The sandbox may cite only IDs from that
 bundle, and the worker rejects any other citation. It has no dynamic Outline or

@@ -120,6 +120,7 @@ from five08.queue import (
     get_postgres_connection,
     get_redis_connection,
     is_postgres_healthy,
+    reserve_jobs_for_redelivery,
     trusted_sql,
 )
 from five08.backend.auth import (
@@ -351,6 +352,11 @@ sync_person_from_crm_job = JOB_FUNCTIONS["sync_person_from_crm_job"]
 sync_projects_from_erpnext_job = JOB_FUNCTIONS["sync_projects_from_erpnext_job"]
 process_docuseal_agreement_job = JOB_FUNCTIONS["process_docuseal_agreement_job"]
 author_wiki_edit_proposal_job = JOB_FUNCTIONS["author_wiki_edit_proposal_job"]
+_WIKI_JOB_RECOVERY_INTERVAL_SECONDS = 30.0
+_WIKI_JOB_RECOVERY_BATCH_LIMIT = 100
+# This is intentionally conservative. The worker independently enforces its
+# configured claim lease, so an early redelivery cannot start a second run.
+_WIKI_JOB_RECOVERY_RUNNING_AGE_SECONDS = 30.0 * 60.0
 
 TALLY_INTAKE_FIELD_LABEL_MAP = {
     "full name": "name",
@@ -981,6 +987,43 @@ async def _email_resume_scheduler() -> None:
         except Exception:
             logger.exception("Failed mailbox resume poll iteration")
         await asyncio.sleep(interval_seconds)
+
+
+async def _redispatch_recoverable_wiki_jobs(app: FastAPI) -> int:
+    """Redeliver durable wiki jobs after a lost Redis handoff or worker exit."""
+    jobs = await asyncio.to_thread(
+        reserve_jobs_for_redelivery,
+        settings,
+        job_type=author_wiki_edit_proposal_job.__name__,
+        running_lease_seconds=_WIKI_JOB_RECOVERY_RUNNING_AGE_SECONDS,
+        redelivery_cooldown_seconds=_WIKI_JOB_RECOVERY_INTERVAL_SECONDS,
+        limit=_WIKI_JOB_RECOVERY_BATCH_LIMIT,
+    )
+    dispatched = 0
+    for job in jobs:
+        try:
+            await asyncio.to_thread(app.state.queue.enqueue, job.id)
+        except Exception:
+            # The DB reservation expires on the next sweep. Avoid flooding a
+            # failing Redis broker with the rest of this reserved batch.
+            logger.exception("Failed to redispatch wiki authoring job id=%s", job.id)
+            break
+        dispatched += 1
+    if dispatched:
+        logger.info("Redispatched %s recoverable wiki authoring jobs", dispatched)
+    return dispatched
+
+
+async def _wiki_authoring_recovery_scheduler(app: FastAPI) -> None:
+    """Repeatedly recover due wiki jobs using Postgres as source of truth."""
+    while True:
+        try:
+            await _redispatch_recoverable_wiki_jobs(app)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Wiki authoring job recovery sweep failed")
+        await asyncio.sleep(_WIKI_JOB_RECOVERY_INTERVAL_SECONDS)
 
 
 def _check_postgres_connection(connection: Connection | None) -> bool:
@@ -11147,6 +11190,10 @@ async def _lifespan(app: FastAPI) -> Any:
     app.state.knowledge_capture_cleanup_task = asyncio.create_task(
         _knowledge_capture_cleanup_scheduler()
     )
+    if settings.wiki_editing_enabled:
+        app.state.wiki_authoring_recovery_task = asyncio.create_task(
+            _wiki_authoring_recovery_scheduler(app)
+        )
     crm_sync_skip_reason = _crm_sync_scheduler_skip_reason()
     if crm_sync_skip_reason is None:
         app.state.crm_sync_task = asyncio.create_task(_crm_sync_scheduler(app))
@@ -11176,6 +11223,12 @@ async def _lifespan(app: FastAPI) -> Any:
         cleanup_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await cleanup_task
+
+        if hasattr(app.state, "wiki_authoring_recovery_task"):
+            task = app.state.wiki_authoring_recovery_task
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
         if hasattr(app.state, "crm_sync_task"):
             task = app.state.crm_sync_task

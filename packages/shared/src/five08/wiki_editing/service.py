@@ -13,6 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Literal
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from five08.agent.models import AgentIdentityContext
@@ -110,6 +111,8 @@ class WikiEditingService:
         organization_id = self._authorize(request.context, scope="wiki:propose")
         self._assert_wiki_editing_configured()
         self._validate_create_request(request, organization_id=organization_id)
+        if request.target_document_id is not None:
+            self._assert_update_revision_guard_configured()
         base_snapshot = self._snapshot_for_target(request.target_document_id)
         request_input = request.to_request_input()
         proposal, should_enqueue = self.store.create_or_get_initial_proposal(
@@ -137,6 +140,8 @@ class WikiEditingService:
             organization_id=organization_id,
             actor_id=request.context.discord_user_id,
         )
+        if proposal.target_action == "update":
+            self._assert_update_revision_guard_configured()
         if proposal.status == "canceled":
             # A process can die after atomically reserving this child but
             # before handing it to Redis. Retrying the original Discord card
@@ -291,6 +296,8 @@ class WikiEditingService:
                 organization_id=organization_id,
             )
             return self._response_for(proposal, operation=operation)
+        if proposal.target_action == "update":
+            self._assert_update_revision_guard_configured()
         if not proposal.review_acknowledged:
             raise WikiEditingValidationError(
                 "Review the complete wiki packet and acknowledge it before publishing."
@@ -586,6 +593,30 @@ class WikiEditingService:
         if configured is not True:
             raise WikiEditingConfigurationError(
                 "Wiki authoring is not fully configured in the worker."
+            )
+
+    def _assert_update_revision_guard_configured(self) -> None:
+        """Require a known-safe Outline API before full-body article updates."""
+        if bool(getattr(self.settings, "wiki_outline_last_revision_confirmed", False)):
+            return
+        try:
+            parsed = urlsplit(
+                str(getattr(self.settings, "outline_base_url", "") or "").strip()
+            )
+            is_outline_cloud = (
+                parsed.scheme == "https"
+                and parsed.hostname == "app.getoutline.com"
+                and parsed.port in {None, 443}
+                and parsed.username is None
+                and parsed.password is None
+            )
+        except ValueError:
+            is_outline_cloud = False
+        if not is_outline_cloud:
+            raise WikiEditingConfigurationError(
+                "Wiki updates require Outline 1.10.0 or newer with "
+                "documents.update.lastRevision support. Confirm the deployment "
+                "and set WIKI_OUTLINE_LAST_REVISION_CONFIRMED=true."
             )
 
     def _authorize(self, context: AgentIdentityContext, *, scope: str) -> str:

@@ -145,6 +145,34 @@ def test_lifespan_keeps_health_degraded_when_migrations_fail(
     assert payload["postgres_migrations_ok"] is False
 
 
+def test_lifespan_runs_wiki_job_recovery_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def idle_recovery(_app: api.FastAPI) -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(api, "get_redis_connection", lambda _settings: _HealthyRedis())
+    monkeypatch.setattr(api, "run_job_migrations", Mock())
+    monkeypatch.setattr(
+        api,
+        "get_postgres_connection",
+        lambda _settings: _FakePostgresConnection(),
+    )
+    monkeypatch.setattr(api, "build_queue_client", Mock(return_value=Mock()))
+    monkeypatch.setattr(api, "_wiki_authoring_recovery_scheduler", idle_recovery)
+    monkeypatch.setattr(api.settings, "wiki_editing_enabled", True)
+    monkeypatch.setattr(api.settings, "crm_sync_enabled", False)
+    monkeypatch.setattr(api.settings, "newsletter_sync_enabled", False)
+    monkeypatch.setattr(api.settings, "email_resume_intake_enabled", False)
+
+    app = api.create_app(run_lifespan=True)
+    with TestClient(app):
+        recovery_task = app.state.wiki_authoring_recovery_task
+        assert not recovery_task.done()
+
+    assert recovery_task.cancelled()
+
+
 async def test_postgres_health_handles_missing_connection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

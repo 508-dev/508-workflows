@@ -17,6 +17,7 @@ _WIKI_OMP_MODEL_PATTERN = re.compile(r"^openrouter/[A-Za-z0-9._:/-]{1,240}$")
 _WIKI_OMP_THINKING_LEVELS = frozenset(
     {"off", "minimal", "low", "medium", "high", "xhigh", "max"}
 )
+_WIKI_OMP_TRANSPORT_HEADROOM_SECONDS = 30.0
 
 
 class WorkerSettings(SharedSettings):
@@ -79,6 +80,9 @@ class WorkerSettings(SharedSettings):
     wiki_omp_model: str = "openrouter/openai/gpt-5-mini"
     wiki_omp_thinking: str = "medium"
     wiki_omp_authoring_timeout_seconds: float = Field(default=300.0, gt=0)
+    wiki_omp_sandbox_run_timeout_seconds: float = Field(
+        default=270.0, ge=30.0, le=600.0
+    )
     wiki_omp_startup_timeout_seconds: float = Field(default=30.0, gt=0)
     wiki_omp_sandbox_run_timeout_seconds: float = Field(default=270.0, ge=30, le=600)
     agent_planner_model: str = "accounts/fireworks/models/kimi-k2p6"
@@ -189,11 +193,12 @@ class WorkerSettings(SharedSettings):
             return "WIKI_OMP_THINKING is not supported by the sandbox."
         if (
             self.wiki_omp_authoring_timeout_seconds
-            < self.wiki_omp_sandbox_run_timeout_seconds + 10
+            < self.wiki_omp_sandbox_run_timeout_seconds
+            + _WIKI_OMP_TRANSPORT_HEADROOM_SECONDS
         ):
             return (
-                "WIKI_OMP_AUTHORING_TIMEOUT_SECONDS must exceed "
-                "WIKI_OMP_SANDBOX_RUN_TIMEOUT_SECONDS by at least 10 seconds."
+                "WIKI_OMP_AUTHORING_TIMEOUT_SECONDS must be at least 30 seconds "
+                "greater than WIKI_OMP_SANDBOX_RUN_TIMEOUT_SECONDS."
             )
         if not (self.outline_admin_api_key or "").strip():
             return "OUTLINE_ADMIN_API_KEY is required for wiki editing."

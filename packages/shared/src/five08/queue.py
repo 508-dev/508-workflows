@@ -291,6 +291,68 @@ def list_jobs(
             return [_as_record(row) for row in rows]
 
 
+def reserve_jobs_for_redelivery(
+    settings: SharedSettings,
+    *,
+    job_type: str,
+    running_lease_seconds: float,
+    redelivery_cooldown_seconds: float,
+    limit: int,
+) -> list[JobRecord]:
+    """Reserve due jobs for an at-least-once Redis handoff.
+
+    A reservation only refreshes ``updated_at``. If the caller exits before
+    Redis accepts a delivery, a later sweep can reserve the same durable row
+    after the cooldown. Row locks and the cooldown bound duplicate handoffs
+    across API replicas; the worker's claim fence decides actual execution.
+    """
+    if not job_type.strip():
+        raise ValueError("Redelivery requires a job type.")
+    if running_lease_seconds <= 0 or redelivery_cooldown_seconds <= 0:
+        raise ValueError("Redelivery lease and cooldown must be positive.")
+    if limit <= 0:
+        raise ValueError("Redelivery limit must be positive.")
+
+    query = """
+        WITH eligible AS (
+            SELECT id
+            FROM jobs
+            WHERE type = %s
+              AND updated_at <= NOW() - (%s * INTERVAL '1 second')
+              AND (
+                  (status IN (%s, %s)
+                   AND (run_after IS NULL OR run_after <= NOW()))
+                  OR (status = %s
+                      AND locked_at IS NOT NULL
+                      AND locked_at <= NOW() - (%s * INTERVAL '1 second'))
+              )
+            ORDER BY updated_at ASC, id ASC
+            LIMIT %s
+            FOR UPDATE SKIP LOCKED
+        )
+        UPDATE jobs AS target
+        SET updated_at = NOW()
+        FROM eligible
+        WHERE target.id = eligible.id
+        RETURNING target.*;
+    """
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                query,
+                (
+                    job_type,
+                    redelivery_cooldown_seconds,
+                    JobStatus.QUEUED.value,
+                    JobStatus.FAILED.value,
+                    JobStatus.RUNNING.value,
+                    running_lease_seconds,
+                    limit,
+                ),
+            )
+            return [_as_record(row) for row in cursor.fetchall()]
+
+
 def _mark_job(
     settings: SharedSettings,
     job_id: str,

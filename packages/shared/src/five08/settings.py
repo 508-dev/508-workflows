@@ -183,6 +183,10 @@ class SharedSettings(BaseSettings):
     # contents credential above for read-only /wiki commands.
     wiki_editing_enabled: bool = False
     wiki_outline_collection_id: str | None = None
+    # Self-hosted/custom Outline deployments must confirm support for the
+    # lastRevision conflict guard (introduced in Outline 1.10.0) before the
+    # wiki workflow may replace an existing article.
+    wiki_outline_last_revision_confirmed: bool = False
     # Separate from API_SHARED_SECRET. Only the Discord bot and API receive
     # this key, so a routine service credential cannot forge a role-bearing
     # request context for an approval-gated wiki action.
