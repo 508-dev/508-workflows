@@ -42,6 +42,17 @@ The `/agent` command and explicit bot mentions send natural-language requests to
 the backend agent gateway. The bot does not execute agent tool calls directly and
 does not hold extra service credentials for agent actions.
 
+Job discovery is a read-only shortcut handled by the bot before the agent
+gateway. Members can use `/find-jobs query:...`, `/agent request:...`, or ask in
+a bot mention, for example “find React roles with APAC hours.” It searches
+recent posts in visible `#gigs` and `#fulltime-roles` forums, plus staged posts
+in visible `#unqualified-leads`. Registered gigs must be marked recruiting;
+staged leads are labeled unverified. Results must have been posted within 45
+days and must still have an open Discord thread. This conservative window can
+miss older roles that remain open and does not independently verify the employer's
+application deadline. Slash command results are private; mention results go by
+DM so lead titles are not disclosed in another channel.
+
 Agent command flow:
 
 ```text
@@ -170,12 +181,19 @@ and result snippets are not audit logged.
     - Backend policy checks scopes and tenant context before every tool execution.
     - Agent write actions are audited and require confirmation.
 
+- `/find-jobs query:...`
+  - Description: Find recent job posts using a natural-language description of
+    skills, work type, location, or hours.
+  - Behavior: Returns up to five links in a private response, ranked by matching
+    terms. APAC and remote requests require supporting text in the post.
+
 - `@bot ...`
   - Description: Run the same agent gateway from a normal channel or thread message.
   - Behavior:
     - Strips the bot mention and sends the remaining text as the agent request.
     - Posts only fixed public-safe or organization-safe answers in the channel;
       other results and confirmation controls are sent by DM.
+    - Sends job-search results by DM and acknowledges in the channel.
     - Supports the same confirmation buttons for writes.
   - Example: `@508.dev Bot show tasks for project Atlas`
   - Knowledge examples:

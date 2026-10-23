@@ -24,6 +24,12 @@ from five08.discord_bot.utils.knowledge_context import (
     collect_thread_context,
 )
 from five08.discord_bot.utils.memory_views import MemoryFactsView
+from five08.engagements import EngagementStatus, parse_status_from_title
+from five08.job_discovery import (
+    JOB_SEARCH_MAX_AGE_DAYS,
+    parse_proximity_location,
+    search_job_posts,
+)
 from five08.tls import default_ca_bundle_path
 
 logger = logging.getLogger(__name__)
@@ -580,6 +586,19 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             await interaction.followup.send(local_response, ephemeral=True)
             return
 
+        if self._is_job_search_request(request):
+            content = await self._search_jobs_for_member(
+                guild=interaction.guild,
+                member=interaction.user,
+                query=request,
+            )
+            await interaction.followup.send(
+                content,
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+
         context = self._build_agent_context(interaction)
         try:
             response = await self._post_agent_request(
@@ -685,6 +704,26 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             ephemeral=True,
         )
 
+    @app_commands.command(
+        name="find-jobs",
+        description="Find recent gigs and job leads matching your description",
+    )
+    @app_commands.describe(
+        query="Describe the work, skills, location, or hours you want"
+    )
+    async def find_jobs(self, interaction: discord.Interaction, query: str) -> None:
+        await interaction.response.defer(ephemeral=True)
+        content = await self._search_jobs_for_member(
+            guild=interaction.guild,
+            member=interaction.user,
+            query=query,
+        )
+        await interaction.followup.send(
+            content,
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
     @commands.Cog.listener("on_message")
     async def agent_mention(self, message: discord.Message) -> None:
         """Handle natural-language agent requests when the bot is mentioned."""
@@ -740,6 +779,29 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                 request=request,
                 content=local_response,
             )
+            return
+
+        if self._is_job_search_request(request):
+            async with message.channel.typing():
+                content = await self._search_jobs_for_member(
+                    guild=message.guild,
+                    member=message.author,
+                    query=request,
+                )
+            try:
+                await message.author.send(
+                    content, allowed_mentions=discord.AllowedMentions.none()
+                )
+            except discord.HTTPException:
+                await message.reply(
+                    "I couldn't send a DM. Use `/find-jobs` for a private response.",
+                    mention_author=False,
+                )
+                return
+            try:
+                await message.reply("I sent job matches by DM.", mention_author=False)
+            except discord.HTTPException:
+                logger.warning("Could not acknowledge job search DM", exc_info=True)
             return
 
         context = self._build_agent_context_from_message(message)
@@ -1325,6 +1387,140 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         return AgentCog._matches_smalltalk(normalized, _AGENT_HELP_REQUESTS)
 
     @staticmethod
+    def _is_job_search_request(request: str) -> bool:
+        text = request.casefold()
+        return bool(
+            not re.search(
+                r"\b(?:create|update|delete|assign|publish|remember|forget)\b",
+                text,
+            )
+            and not re.search(
+                r"\b(?:post|close)\s+(?:(?:a|an|the|this)\s+)?"
+                r"(?:job|gig|role|position|opening)\b"
+                r"|\bsend\s+(?:(?:a|an|the|this)\s+)?"
+                r"(?:jobs?|gigs?|roles?|positions?|openings?)\s+to\b",
+                text,
+            )
+            and not re.search(
+                r"\b(?:add|open)\s+(?:(?:a|an)\s+)?(?:todo|issue)\b",
+                text,
+            )
+            and not re.search(
+                r"\b(?:search|find|list|show)\s+"
+                r"(?:(?:\w+|#\w+)\s+){0,3}"
+                r"(?:github\s+issues?|gh\s+issues?|issues?|todos?|tasks?|"
+                r"crm\s+contacts?|contacts?)\b",
+                text,
+            )
+            and re.search(
+                r"\b(?:jobs?|gigs?|roles?|positions?|openings?|opportunities)\b", text
+            )
+            and (
+                re.search(
+                    r"\b(?:find|search|looking|show|any|recommend|match|suitable|fit)\b",
+                    text,
+                )
+                or parse_proximity_location(request)[0]
+            )
+        )
+
+    async def _search_jobs_for_member(
+        self,
+        *,
+        guild: discord.Guild | None,
+        member: discord.abc.User,
+        query: str,
+    ) -> str:
+        if guild is None or not isinstance(member, discord.Member):
+            return "Search for jobs inside the 508 server."
+        proximity_requested, proximity_location = parse_proximity_location(query)
+        if proximity_requested and not proximity_location:
+            return "Please include a city or time zone so I can look for nearby jobs."
+        active_ids: list[str] = []
+        lead_ids: list[str] = []
+        lead_target = str(
+            settings.discord_unqualified_leads_forum_channel or ""
+        ).strip()
+        lead_name = re.sub(r"[-_]+", " ", lead_target.casefold())
+        for channel in guild.channels:
+            if not isinstance(channel, discord.ForumChannel):
+                continue
+            if not channel.permissions_for(member).view_channel:
+                continue
+            if channel.name in {"gigs", "fulltime-roles"}:
+                active_ids.append(str(channel.id))
+            elif lead_target and (
+                str(channel.id) == lead_target
+                if lead_target.isdecimal()
+                else re.sub(r"[-_]+", " ", channel.name.casefold()) == lead_name
+            ):
+                lead_ids.append(str(channel.id))
+        try:
+            candidates = await asyncio.to_thread(
+                search_job_posts,
+                settings,
+                guild_id=str(guild.id),
+                active_channel_ids=active_ids,
+                lead_channel_ids=lead_ids,
+                query=query,
+                limit=50,
+            )
+        except Exception:
+            logger.warning(
+                "Job discovery search failed guild=%s", guild.id, exc_info=True
+            )
+            return "I couldn't search the job listings right now. Please try again."
+
+        lines = [f"Recent job matches (posted within {JOB_SEARCH_MAX_AGE_DAYS} days):"]
+        found = 0
+        for candidate in candidates:
+            thread_id = str(candidate.get("thread_id") or "")
+            channel_id = str(candidate.get("channel_id") or "")
+            if not thread_id.isdecimal() or not channel_id.isdecimal():
+                continue
+            try:
+                thread = guild.get_thread(
+                    int(thread_id)
+                ) or await self.bot.fetch_channel(int(thread_id))
+            except discord.HTTPException:
+                continue
+            if (
+                not isinstance(thread, discord.Thread)
+                or thread.archived
+                or thread.locked
+            ):
+                continue
+            if thread.parent_id != int(channel_id):
+                continue
+            if parse_status_from_title(str(thread.name or "")) in {
+                EngagementStatus.FILLED,
+                EngagementStatus.LOST,
+                EngagementStatus.OUTDATED,
+                EngagementStatus.DUPLICATE,
+            }:
+                continue
+            title = discord.utils.escape_markdown(
+                discord.utils.escape_mentions(str(candidate.get("title") or "Job post"))
+            )[:110]
+            label = (
+                "Unverified lead"
+                if candidate.get("kind") == "unverified_lead"
+                else "Recruiting"
+            )
+            lines.append(
+                f"• **{title}** · {label} · https://discord.com/channels/{guild.id}/{thread_id}"
+            )
+            found += 1
+            if found == 5:
+                break
+        if not found:
+            return "I found no recent open posts matching that description in forums you can view. Try broader skills or hours."
+        lines.append(
+            "Unverified leads still need review; confirm availability in the post before applying."
+        )
+        return "\n".join(lines)[:1900]
+
+    @staticmethod
     def _is_agent_presence_check(request: str) -> bool:
         normalized = request.casefold().strip(" ?!.")
         return AgentCog._matches_smalltalk(normalized, _AGENT_PRESENCE_CHECKS)
@@ -1407,6 +1603,9 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             )
         )
         capabilities: list[str] = []
+        capabilities.append(
+            "- Jobs: ask for work by skill, location, or hours; or use `/find-jobs`."
+        )
         if "project:read" in scopes:
             capabilities.append("- Tasks: search a project.")
         task_writes: list[str] = []
