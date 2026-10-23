@@ -6,17 +6,13 @@ configuration or in ordinary Discord requests.
 
 ## Access model
 
-- A Discord user must hold at least the `Member` role to use GitHub todo tools.
-- Members can read, create, update, close/reopen, and comment on issues in
-  `508-dev/todos`.
+- The `Member` role intentionally grants no agent capabilities. GitHub todo
+  tools require a separately configured privileged agent role.
 - `Steering Committee`, `Admin`, and `Owner` can read and write every repository
   selected for the GitHub App installation. They can also read and update
   organization-owned GitHub Projects.
 - All writes require the existing Discord confirmation step. The bot does not
   need a linked GitHub user; GitHub records the action as the installed app.
-
-`GITHUB_MEMBER_EXTRA_REPOS` is available only when all Members should also use
-additional repositories. Keep it empty for the default todo-only setup.
 
 ## GitHub App setup
 

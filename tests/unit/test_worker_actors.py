@@ -1,12 +1,13 @@
 """Unit tests for worker actor job state transitions."""
 
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
+
+import pytest
 
 from five08.queue import JobRecord, JobStatus
 from five08.worker import actors
-from five08.worker import jobs
-from five08.worker.config import WorkerSettings
 from five08.worker.crm.docuseal_processor import (
     DocusealAgreementNonRetryableError,
     DocusealAgreementProcessingError,
@@ -16,18 +17,10 @@ from five08.wiki_editing.models import WikiAuthoringLeaseHeldError
 
 def test_run_job_reclaims_wiki_jobs_after_the_authoring_lease() -> None:
     with (
-        patch("five08.worker.actors.claim_job", return_value=None) as mock_claim,
+        patch(
+            "five08.worker.actors.claim_job_for_execution", return_value=None
+        ) as mock_claim,
         patch("five08.worker.actors.get_job", return_value=None),
-        patch.object(
-            actors.settings,
-            "wiki_omp_authoring_timeout_seconds",
-            120.0,
-        ),
-        patch.object(
-            actors.settings,
-            "wiki_omp_startup_timeout_seconds",
-            15.0,
-        ),
     ):
         actors._run_job("job-wiki-stale")
 
@@ -35,8 +28,6 @@ def test_run_job_reclaims_wiki_jobs_after_the_authoring_lease() -> None:
         actors.settings,
         "job-wiki-stale",
         worker_name=actors.settings.worker_name,
-        reclaim_running_job_type="author_wiki_edit_proposal_job",
-        reclaim_running_after_seconds=195.0,
     )
 
 
@@ -59,12 +50,9 @@ def test_run_job_redelivers_a_wiki_job_after_its_active_lease() -> None:
     )
 
     with (
-        patch("five08.worker.actors.claim_job", return_value=None),
+        patch("five08.worker.actors.claim_job_for_execution", return_value=None),
         patch("five08.worker.actors.get_job", return_value=running),
-        patch(
-            "five08.worker.actors._wiki_authoring_job_lease_seconds",
-            return_value=100.0,
-        ),
+        patch("five08.worker.actors._job_lease_seconds", return_value=100),
         patch.object(actors.execute_job, "send_with_options") as mock_send,
     ):
         actors._run_job(running.id)
@@ -94,7 +82,8 @@ def test_run_job_finishes_an_exhausted_expired_wiki_claim_without_executing() ->
     handler = Mock()
 
     with (
-        patch("five08.worker.actors.claim_job", return_value=exhausted),
+        patch("five08.worker.actors.claim_job_for_execution", return_value=None),
+        patch("five08.worker.actors.get_job", return_value=exhausted),
         patch(
             "five08.worker.actors.mark_wiki_authoring_retry_exhausted"
         ) as mock_mark_proposal,
@@ -110,13 +99,50 @@ def test_run_job_finishes_an_exhausted_expired_wiki_claim_without_executing() ->
     mock_mark_proposal.assert_called_once_with("proposal-1", "guild-1")
 
 
+def test_wiki_authoring_lease_contention_keeps_job_attempt_retryable() -> None:
+    now = datetime.now(timezone.utc)
+    job = JobRecord(
+        id="job-wiki-held",
+        type="author_wiki_edit_proposal_job",
+        status=JobStatus.RUNNING,
+        payload={"args": ["proposal-1", "guild-1"], "kwargs": {}},
+        idempotency_key=None,
+        attempts=1,
+        max_attempts=3,
+        run_after=None,
+        locked_at=now,
+        locked_by="worker:claim",
+        last_error=None,
+        created_at=now,
+        updated_at=now,
+    )
+    with (
+        patch("five08.worker.actors.claim_job_for_execution", return_value=job),
+        patch("five08.worker.actors._schedule_job_lease_recovery"),
+        patch(
+            "five08.worker.actors._renew_job_lease_while_running",
+            return_value=nullcontext(),
+        ),
+        patch("five08.worker.actors.mark_job_retry", return_value=True) as mark_retry,
+        patch.object(actors.execute_job, "send_with_options") as send,
+        patch.dict(
+            actors._HANDLERS,
+            {job.type: Mock(side_effect=WikiAuthoringLeaseHeldError(17.2))},
+        ),
+    ):
+        actors._run_job(job.id)
+
+    assert mark_retry.call_args.kwargs["attempts"] == 1
+    assert send.call_args.kwargs == {"args": (job.id,), "delay": 18_000}
+
+
 def test_run_job_schedules_retry_for_docuseal_processing_error() -> None:
     """Retryable Docuseal failures should be recorded as failed + retried."""
     now = datetime.now(timezone.utc)
     job = JobRecord(
         id="job-123",
         type="process_docuseal_agreement_job",
-        status=JobStatus.QUEUED,
+        status=JobStatus.RUNNING,
         payload={
             "args": ["member@508.dev", "2026-02-25 12:00:00", 42],
             "kwargs": {},
@@ -126,7 +152,7 @@ def test_run_job_schedules_retry_for_docuseal_processing_error() -> None:
         max_attempts=8,
         run_after=None,
         locked_at=None,
-        locked_by=None,
+        locked_by="worker-1:claim-123",
         last_error=None,
         created_at=now,
         updated_at=now,
@@ -136,10 +162,17 @@ def test_run_job_schedules_retry_for_docuseal_processing_error() -> None:
         raise DocusealAgreementProcessingError("CRM unavailable")
 
     with (
-        patch("five08.worker.actors.claim_job", return_value=job),
+        patch(
+            "five08.worker.actors.claim_job_for_execution", return_value=job
+        ) as mock_claim,
         patch("five08.worker.actors.mark_job_succeeded") as mock_mark_succeeded,
         patch("five08.worker.actors.mark_job_dead") as mock_mark_dead,
         patch("five08.worker.actors._schedule_retry") as mock_schedule_retry,
+        patch("five08.worker.actors._schedule_job_lease_recovery"),
+        patch(
+            "five08.worker.actors._renew_job_lease_while_running",
+            return_value=nullcontext(),
+        ) as mock_heartbeat,
         patch.dict(
             actors._HANDLERS,
             {"process_docuseal_agreement_job": _raise_docuseal_processing_error},
@@ -148,6 +181,7 @@ def test_run_job_schedules_retry_for_docuseal_processing_error() -> None:
     ):
         actors._run_job("job-123")
 
+    mock_claim.assert_called_once()
     mock_mark_succeeded.assert_not_called()
     mock_mark_dead.assert_not_called()
     mock_schedule_retry.assert_called_once()
@@ -158,6 +192,11 @@ def test_run_job_schedules_retry_for_docuseal_processing_error() -> None:
     assert (
         "DocusealAgreementProcessingError: CRM unavailable" == call_args.kwargs["error"]
     )
+    mock_heartbeat.assert_called_once_with(
+        "job-123",
+        "worker-1:claim-123",
+        deadline=ANY,
+    )
 
 
 def test_run_job_marks_dead_for_non_retryable_docuseal_error() -> None:
@@ -166,7 +205,7 @@ def test_run_job_marks_dead_for_non_retryable_docuseal_error() -> None:
     job = JobRecord(
         id="job-124",
         type="process_docuseal_agreement_job",
-        status=JobStatus.QUEUED,
+        status=JobStatus.RUNNING,
         payload={
             "args": ["member@508.dev", "not-a-date", 42],
             "kwargs": {},
@@ -176,7 +215,7 @@ def test_run_job_marks_dead_for_non_retryable_docuseal_error() -> None:
         max_attempts=8,
         run_after=None,
         locked_at=None,
-        locked_by=None,
+        locked_by="worker-1:claim-124",
         last_error=None,
         created_at=now,
         updated_at=now,
@@ -188,10 +227,13 @@ def test_run_job_marks_dead_for_non_retryable_docuseal_error() -> None:
         )
 
     with (
-        patch("five08.worker.actors.claim_job", return_value=job),
+        patch(
+            "five08.worker.actors.claim_job_for_execution", return_value=job
+        ) as mock_claim,
         patch("five08.worker.actors.mark_job_succeeded") as mock_mark_succeeded,
         patch("five08.worker.actors.mark_job_dead") as mock_mark_dead,
         patch("five08.worker.actors._schedule_retry") as mock_schedule_retry,
+        patch("five08.worker.actors._schedule_job_lease_recovery"),
         patch.dict(
             actors._HANDLERS,
             {"process_docuseal_agreement_job": _raise_docuseal_non_retryable_error},
@@ -200,11 +242,12 @@ def test_run_job_marks_dead_for_non_retryable_docuseal_error() -> None:
     ):
         actors._run_job("job-124")
 
+    mock_claim.assert_called_once()
     mock_mark_succeeded.assert_not_called()
     mock_schedule_retry.assert_not_called()
     mock_mark_dead.assert_called_once()
     call_args = mock_mark_dead.call_args
-    assert call_args.args[1].id == "job-124"
+    assert call_args.args[1] == "job-124"
     assert call_args.kwargs["attempts"] == 1
     assert (
         call_args.kwargs["last_error"]
@@ -212,175 +255,356 @@ def test_run_job_marks_dead_for_non_retryable_docuseal_error() -> None:
     )
 
 
-def test_exhausted_wiki_authoring_marks_the_proposal_revisable() -> None:
+def test_run_job_executes_only_one_duplicate_broker_delivery() -> None:
+    """A second message cannot bypass the persisted execution claim."""
+
     now = datetime.now(timezone.utc)
     job = JobRecord(
-        id="job-wiki-1",
-        type="author_wiki_edit_proposal_job",
-        status=JobStatus.QUEUED,
-        payload={
-            "args": ["proposal-1", "guild-1"],
-            "kwargs": {},
-        },
-        idempotency_key=None,
+        id="job-125",
+        type="process_docuseal_agreement_job",
+        status=JobStatus.RUNNING,
+        payload={"args": ["member@508.dev", "2026-02-25 12:00:00", 42], "kwargs": {}},
+        idempotency_key="docuseal:125",
         attempts=0,
-        max_attempts=1,
+        max_attempts=8,
         run_after=None,
-        locked_at=None,
-        locked_by=None,
+        locked_at=now,
+        locked_by="worker-1",
         last_error=None,
         created_at=now,
         updated_at=now,
     )
-
-    def _raise_transient(*_args: object, **_kwargs: object) -> None:
-        raise RuntimeError("sandbox unavailable")
+    handler = Mock(return_value={"ok": True})
 
     with (
-        patch("five08.worker.actors.claim_job", return_value=job),
-        patch("five08.worker.actors.mark_job_succeeded") as mock_mark_succeeded,
-        patch("five08.worker.actors.mark_job_dead") as mock_mark_dead,
         patch(
-            "five08.worker.actors.mark_wiki_authoring_retry_exhausted"
-        ) as mock_mark_proposal,
-        patch.dict(
-            actors._HANDLERS,
-            {"author_wiki_edit_proposal_job": _raise_transient},
-            clear=False,
-        ),
-    ):
-        actors._run_job("job-wiki-1")
-
-    mock_mark_succeeded.assert_not_called()
-    mock_mark_proposal.assert_called_once_with("proposal-1", "guild-1")
-    mock_mark_dead.assert_called_once()
-
-
-def test_live_wiki_authoring_lease_retries_without_consuming_an_attempt() -> None:
-    now = datetime.now(timezone.utc)
-    job = JobRecord(
-        id="job-wiki-lease-held",
-        type="author_wiki_edit_proposal_job",
-        status=JobStatus.QUEUED,
-        payload={"args": ["proposal-1", "guild-1"], "kwargs": {}},
-        idempotency_key=None,
-        attempts=2,
-        max_attempts=3,
-        run_after=None,
-        locked_at=None,
-        locked_by=None,
-        last_error=None,
-        created_at=now,
-        updated_at=now,
-    )
-
-    def _lease_held(*_args: object, **_kwargs: object) -> None:
-        raise WikiAuthoringLeaseHeldError(17.25)
-
-    with (
-        patch("five08.worker.actors.claim_job", return_value=job),
+            "five08.worker.actors.claim_job_for_execution",
+            side_effect=[job, None],
+        ) as mock_claim,
+        patch("five08.worker.actors._requeue_running_job_after_lease"),
+        patch("five08.worker.actors._schedule_job_lease_recovery") as mock_recovery,
         patch("five08.worker.actors.mark_job_succeeded") as mock_mark_succeeded,
-        patch("five08.worker.actors.mark_job_dead") as mock_mark_dead,
-        patch("five08.worker.actors._mark_exhausted_wiki_authoring") as mock_exhausted,
-        patch("five08.worker.actors._schedule_retry") as mock_schedule_retry,
         patch.dict(
             actors._HANDLERS,
-            {"author_wiki_edit_proposal_job": _lease_held},
+            {"process_docuseal_agreement_job": handler},
             clear=False,
         ),
     ):
-        actors._run_job(job.id)
+        actors._run_job("job-125")
+        actors._run_job("job-125")
 
-    mock_mark_succeeded.assert_not_called()
-    mock_mark_dead.assert_not_called()
-    mock_exhausted.assert_not_called()
-    mock_schedule_retry.assert_called_once()
-    call = mock_schedule_retry.call_args
-    assert call.args[0].id == job.id
-    assert call.args[1] == job.attempts
-    assert call.kwargs["delay_seconds"] == 17.25
+    assert mock_claim.call_count == 2
+    handler.assert_called_once_with("member@508.dev", "2026-02-25 12:00:00", 42)
+    mock_mark_succeeded.assert_called_once()
+    mock_recovery.assert_called_once_with("job-125", delay_seconds=600)
 
 
-def test_exhausted_wiki_authoring_with_missing_token_marks_proposal_revisable(
-    monkeypatch,
-) -> None:
-    """Configuration failure must not strand a queue-dead proposal as queued."""
-    now = datetime.now(timezone.utc)
+def test_run_job_requeues_duplicate_delivery_when_a_lease_is_still_fresh() -> None:
+    """An acknowledged duplicate leaves a recovery delivery at lease expiry."""
+
+    locked_at = datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc)
     job = JobRecord(
-        id="job-wiki-missing-token",
-        type="author_wiki_edit_proposal_job",
-        status=JobStatus.QUEUED,
-        payload={
-            "args": ["proposal-missing-token", "guild-1"],
-            "kwargs": {},
-        },
-        idempotency_key=None,
-        attempts=0,
-        max_attempts=1,
-        run_after=None,
-        locked_at=None,
-        locked_by=None,
-        last_error=None,
-        created_at=now,
-        updated_at=now,
-    )
-    worker_settings = WorkerSettings(
-        wiki_editing_enabled=True,
-        wiki_omp_sandbox_url="http://wiki_omp_sandbox:8080",
-        wiki_omp_sandbox_token=None,
-    )
-    store = Mock()
-    monkeypatch.setattr(jobs, "settings", worker_settings)
-    monkeypatch.setattr(jobs, "PostgresWikiEditingStore", lambda _settings: store)
-
-    with (
-        patch("five08.worker.actors.claim_job", return_value=job),
-        patch("five08.worker.actors.mark_job_succeeded") as mock_mark_succeeded,
-        patch("five08.worker.actors.mark_job_dead") as mock_mark_dead,
-        patch("five08.worker.actors._schedule_retry") as mock_schedule_retry,
-        patch.dict(
-            actors._HANDLERS,
-            {"author_wiki_edit_proposal_job": jobs.author_wiki_edit_proposal_job},
-            clear=False,
-        ),
-    ):
-        actors._run_job(job.id)
-
-    mock_mark_succeeded.assert_not_called()
-    mock_schedule_retry.assert_not_called()
-    store.fail_proposal_if_status.assert_called_once_with(
-        "proposal-missing-token",
-        organization_id="guild-1",
-        failure_code="authoring_retry_exhausted",
-        expected_statuses=frozenset({"queued", "authoring"}),
-    )
-    mock_mark_dead.assert_called_once()
-
-
-def test_run_job_does_not_invoke_handler_when_another_delivery_claimed_it() -> None:
-    """Duplicate deliveries must not execute a handler after a lost claim."""
-    handler = Mock()
-    running = JobRecord(
-        id="job-already-running",
-        type="claimable_job",
+        id="job-lease",
+        type="process_docuseal_agreement_job",
         status=JobStatus.RUNNING,
         payload={"args": [], "kwargs": {}},
         idempotency_key=None,
         attempts=0,
-        max_attempts=3,
+        max_attempts=8,
         run_after=None,
-        locked_at=datetime.now(timezone.utc),
-        locked_by="other-worker",
+        locked_at=locked_at,
+        locked_by="worker-1:claim-lease",
         last_error=None,
-        created_at=datetime.now(timezone.utc),
-        updated_at=datetime.now(timezone.utc),
+        created_at=locked_at,
+        updated_at=locked_at,
     )
 
     with (
-        patch("five08.worker.actors.claim_job", return_value=None),
-        patch("five08.worker.actors.get_job", return_value=running),
-        patch.dict(actors._HANDLERS, {"claimable_job": handler}, clear=False),
+        patch("five08.worker.actors.claim_job_for_execution", return_value=None),
+        patch("five08.worker.actors.get_job", return_value=job),
+        patch("five08.worker.actors.datetime") as mock_datetime,
+        patch.object(actors.execute_job, "send_with_options") as mock_send,
     ):
-        actors._run_job(running.id)
+        mock_datetime.now.return_value = locked_at
+        actors._run_job("job-lease")
 
-    handler.assert_not_called()
+    mock_send.assert_called_once_with(args=("job-lease",), delay=600_000)
+
+
+def test_run_job_reschedules_recovery_when_lease_inspection_fails() -> None:
+    """A transient lease read cannot consume the only recovery delivery."""
+
+    with (
+        patch("five08.worker.actors.claim_job_for_execution", return_value=None),
+        patch(
+            "five08.worker.actors.get_job",
+            side_effect=ConnectionError("temporary database outage"),
+        ),
+        patch("five08.worker.actors._schedule_job_lease_recovery") as mock_recovery,
+    ):
+        actors._run_job("job-lease")
+
+    mock_recovery.assert_called_once_with(
+        "job-lease", delay_seconds=actors._job_lease_seconds()
+    )
+
+
+def test_job_lease_heartbeat_renews_the_current_claim() -> None:
+    """A long-running handler keeps its claim fresh until it exits."""
+
+    stop_event = Mock()
+    stop_event.wait.side_effect = [False, True]
+    lease_lost = Mock()
+    lease_lost.is_set.return_value = False
+
+    class InlineThread:
+        def __init__(self, *, target: object, **_kwargs: object) -> None:
+            self._target = target
+
+        def start(self) -> None:
+            self._target()  # type: ignore[operator]
+
+        def join(self, *, timeout: float | None = None) -> None:
+            del timeout
+
+        def is_alive(self) -> bool:
+            return False
+
+    with (
+        patch("five08.worker.actors.Event", side_effect=[stop_event, lease_lost]),
+        patch("five08.worker.actors.Thread", InlineThread),
+        patch(
+            "five08.worker.actors.renew_job_execution_lease",
+            return_value=True,
+        ) as mock_renew,
+    ):
+        with actors._renew_job_lease_while_running("job-heartbeat", "worker-1:claim"):
+            pass
+
+    mock_renew.assert_called_once_with(
+        actors.settings,
+        "job-heartbeat",
+        claim_token="worker-1:claim",
+    )
+    stop_event.set.assert_called_once()
+    lease_lost.set.assert_not_called()
+
+
+def test_job_lease_heartbeat_fences_completion_after_a_renewal_failure() -> None:
+    """A failed renewal cannot let the claimed worker record a stale outcome."""
+
+    stop_event = Mock()
+    stop_event.wait.return_value = False
+    stop_event.is_set.return_value = False
+    lease_lost = Mock()
+    lease_lost.is_set.return_value = True
+
+    class InlineThread:
+        def __init__(self, *, target: object, **_kwargs: object) -> None:
+            self._target = target
+
+        def start(self) -> None:
+            self._target()  # type: ignore[operator]
+
+        def join(self, *, timeout: float | None = None) -> None:
+            del timeout
+
+        def is_alive(self) -> bool:
+            return False
+
+    with (
+        patch("five08.worker.actors.Event", side_effect=[stop_event, lease_lost]),
+        patch("five08.worker.actors.Thread", InlineThread),
+        patch("five08.worker.actors.get_ident", return_value=1234),
+        patch("five08.worker.actors.renew_job_execution_lease", return_value=False),
+        patch("five08.worker.actors.raise_thread_exception") as mock_interrupt,
+        pytest.raises(actors.JobLeaseLostError),
+    ):
+        with actors._renew_job_lease_while_running("job-heartbeat", "worker-1:claim"):
+            pass
+
+    lease_lost.set.assert_called_once()
+    stop_event.set.assert_called_once()
+    mock_interrupt.assert_called_once_with(1234, actors.JobLeaseLostError)
+
+
+def test_job_lease_heartbeat_retries_a_transient_renewal_error() -> None:
+    """A temporary database error does not discard a still-valid lease early."""
+
+    stop_event = Mock()
+    stop_event.wait.side_effect = [False, False, True]
+    lease_lost = Mock()
+    lease_lost.is_set.return_value = False
+
+    class InlineThread:
+        def __init__(self, *, target: object, **_kwargs: object) -> None:
+            self._target = target
+
+        def start(self) -> None:
+            self._target()  # type: ignore[operator]
+
+        def join(self, *, timeout: float | None = None) -> None:
+            del timeout
+
+        def is_alive(self) -> bool:
+            return False
+
+    with (
+        patch("five08.worker.actors.Event", side_effect=[stop_event, lease_lost]),
+        patch("five08.worker.actors.Thread", InlineThread),
+        patch(
+            "five08.worker.actors.renew_job_execution_lease",
+            side_effect=[RuntimeError("temporary outage"), True],
+        ) as mock_renew,
+        patch("five08.worker.actors.raise_thread_exception") as mock_interrupt,
+    ):
+        with actors._renew_job_lease_while_running("job-heartbeat", "worker-1:claim"):
+            pass
+
+    assert mock_renew.call_count == 2
+    lease_lost.set.assert_not_called()
+    mock_interrupt.assert_not_called()
+
+
+def test_job_lease_heartbeat_stops_renewing_at_the_actor_deadline() -> None:
+    """A blocked actor cannot keep its durable execution lease alive forever."""
+
+    stop_event = Mock()
+    stop_event.wait.return_value = False
+    stop_event.is_set.return_value = False
+    lease_lost = Mock()
+    lease_lost.is_set.return_value = True
+
+    class InlineThread:
+        def __init__(self, *, target: object, **_kwargs: object) -> None:
+            self._target = target
+
+        def start(self) -> None:
+            self._target()  # type: ignore[operator]
+
+        def join(self, *, timeout: float | None = None) -> None:
+            del timeout
+
+        def is_alive(self) -> bool:
+            return False
+
+    with (
+        patch("five08.worker.actors.Event", side_effect=[stop_event, lease_lost]),
+        patch("five08.worker.actors.Thread", InlineThread),
+        patch("five08.worker.actors.get_ident", return_value=1234),
+        patch(
+            "five08.worker.actors._job_actor_time_limit_milliseconds",
+            return_value=1_000,
+        ),
+        patch("five08.worker.actors.monotonic", side_effect=[100.0, 100.0, 101.0]),
+        patch("five08.worker.actors.renew_job_execution_lease") as mock_renew,
+        patch("five08.worker.actors.raise_thread_exception") as mock_interrupt,
+        pytest.raises(actors.JobLeaseLostError),
+    ):
+        with actors._renew_job_lease_while_running("job-heartbeat", "worker-1:claim"):
+            pass
+
+    mock_renew.assert_not_called()
+    lease_lost.set.assert_called_once()
+    stop_event.set.assert_called_once()
+    mock_interrupt.assert_called_once_with(1234, actors.JobLeaseLostError)
+
+
+def test_execute_job_does_not_persist_success_after_a_lost_lease() -> None:
+    """The lease guard stops the stale actor before it can finish the job row."""
+
+    now = datetime.now(timezone.utc)
+    job = JobRecord(
+        id="job-lost-lease",
+        type="process_docuseal_agreement_job",
+        status=JobStatus.RUNNING,
+        payload={"args": [], "kwargs": {}},
+        idempotency_key=None,
+        attempts=0,
+        max_attempts=8,
+        run_after=None,
+        locked_at=now,
+        locked_by="worker-1:claim-lost",
+        last_error=None,
+        created_at=now,
+        updated_at=now,
+    )
+
+    class LostLeaseContext:
+        def __enter__(self) -> None:
+            return None
+
+        def __exit__(self, *_args: object) -> bool:
+            raise actors.JobLeaseLostError("lease lost")
+
+    with (
+        patch("five08.worker.actors.claim_job_for_execution", return_value=job),
+        patch(
+            "five08.worker.actors._renew_job_lease_while_running",
+            return_value=LostLeaseContext(),
+        ),
+        patch("five08.worker.actors._schedule_job_lease_recovery") as mock_recovery,
+        patch("five08.worker.actors.mark_job_succeeded") as mock_mark_succeeded,
+        patch("five08.worker.actors._schedule_retry") as mock_schedule_retry,
+        patch.dict(
+            actors._HANDLERS,
+            {"process_docuseal_agreement_job": Mock(return_value={"ok": True})},
+            clear=False,
+        ),
+    ):
+        actors.execute_job("job-lost-lease")
+
+    mock_recovery.assert_called_once_with("job-lost-lease", delay_seconds=600)
+    mock_mark_succeeded.assert_not_called()
+    mock_schedule_retry.assert_not_called()
+
+
+def test_execute_job_time_limit_reserves_margin_for_a_non_default_lease() -> None:
+    """The actor deadline cannot inherit Dramatiq's unrelated 600-second default."""
+
+    non_default_options = actors._execute_job_actor_options(lease_seconds=30)
+    default_options = actors._execute_job_actor_options()
+
+    assert non_default_options["time_limit"] == 25_000
+    assert non_default_options["time_limit"] < 30_000
+    assert actors.execute_job.queue_name == default_options.pop("queue_name")
+    assert actors.execute_job.options == default_options
+
+
+def test_execute_job_time_limit_rejects_a_lease_without_cleanup_room() -> None:
+    """The deadline must stay positive and strictly before a reclaimable lease."""
+
+    assert actors._job_actor_time_limit_milliseconds(lease_seconds=6) == 1_000
+    with pytest.raises(ValueError, match="must exceed the five-second"):
+        actors._job_actor_time_limit_milliseconds(lease_seconds=5)
+
+
+def test_schedule_retry_does_not_redeliver_after_lease_is_replaced() -> None:
+    """A stale worker must not schedule another delivery after losing its lease."""
+
+    now = datetime.now(timezone.utc)
+    job = JobRecord(
+        id="job-126",
+        type="process_docuseal_agreement_job",
+        status=JobStatus.RUNNING,
+        payload={"args": [], "kwargs": {}},
+        idempotency_key=None,
+        attempts=1,
+        max_attempts=8,
+        run_after=None,
+        locked_at=now,
+        locked_by="worker-1:expired-claim",
+        last_error=None,
+        created_at=now,
+        updated_at=now,
+    )
+
+    with (
+        patch("five08.worker.actors.mark_job_retry", return_value=False) as mock_retry,
+        patch.object(actors.execute_job, "send_with_options") as mock_send,
+    ):
+        actors._schedule_retry(job, 2, error="transient failure")
+
+    mock_retry.assert_called_once()
+    assert mock_retry.call_args.kwargs["claim_token"] == "worker-1:expired-claim"
+    mock_send.assert_not_called()

@@ -39,6 +39,48 @@ def test_structured_planner_timeout_leaves_gateway_fallback_headroom() -> None:
     assert settings.agent_structured_planner_timeout_seconds == 6.0
 
 
+def test_agent_schedule_api_timeout_covers_the_entire_schedule_request() -> None:
+    settings = WorkerSettings(
+        agent_schedule_execution_timeout_seconds=300.0,
+        agent_schedule_api_timeout_seconds=360.0,
+        job_timeout_seconds=366,
+    )
+
+    assert settings.agent_schedule_api_timeout_seconds == 360.0
+
+
+def test_agent_schedule_api_timeout_requires_endpoint_headroom() -> None:
+    with pytest.raises(
+        ValidationError,
+        match="AGENT_SCHEDULE_API_TIMEOUT_SECONDS must be at least",
+    ):
+        WorkerSettings(
+            agent_schedule_execution_timeout_seconds=300.0,
+            agent_schedule_api_timeout_seconds=359.0,
+        )
+
+
+def test_agent_schedule_api_timeout_fits_inside_the_worker_lease() -> None:
+    with pytest.raises(ValidationError, match="JOB_TIMEOUT_SECONDS must exceed"):
+        WorkerSettings(
+            agent_schedule_execution_timeout_seconds=120.0,
+            agent_schedule_api_timeout_seconds=180.0,
+            job_timeout_seconds=185,
+        )
+
+
+def test_disabled_agent_schedules_skip_unused_timeout_relationships() -> None:
+    settings = WorkerSettings(
+        agent_schedule_enabled=False,
+        agent_schedule_execution_timeout_seconds=300.0,
+        agent_schedule_api_timeout_seconds=360.0,
+        job_timeout_seconds=300,
+    )
+
+    assert settings.agent_schedule_enabled is False
+    assert settings.job_timeout_seconds == 300
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
@@ -65,124 +107,23 @@ def test_discord_bot_internal_url_requires_safe_transport(
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
-        ("http://wiki_omp_sandbox:8080", "http://wiki_omp_sandbox:8080"),
-        ("https://wiki-omp.example.com", "https://wiki-omp.example.com"),
-        ("https://127.0.0.1:8443", None),
-        ("https://10.0.0.5:8443", None),
-        ("https://localhost:8443", None),
-        ("http://127.0.0.1:8080", None),
-        ("http://sandbox.example.com", None),
-        ("https://sandbox", None),
-        ("http://wiki_omp_sandbox/run", None),
-        ("https://user@wiki-omp.example.com", None),
+        ("https://api.example/", "https://api.example"),
+        ("http://127.0.0.1:8090", "http://127.0.0.1:8090"),
+        ("http://[::1]:8090", "http://[::1]:8090"),
+        ("http://localhost:8090", "http://localhost:8090"),
+        ("http://web:8090", "http://web:8090"),
+        ("http://api.example", None),
+        ("http://discord_bot:8090", None),
+        ("https://user@api.example", None),
     ],
 )
-def test_wiki_omp_sandbox_url_requires_an_isolated_transport(
+def test_agent_schedule_api_url_requires_safe_transport(
     value: str,
     expected: str | None,
 ) -> None:
-    settings = WorkerSettings(wiki_omp_sandbox_url=value)
+    settings = WorkerSettings(agent_schedule_api_base_url=value)
 
-    assert settings.resolved_wiki_omp_sandbox_url == expected
-
-
-def test_wiki_authoring_refuses_the_legacy_local_omp_launcher() -> None:
-    settings = WorkerSettings(
-        wiki_editing_enabled=True,
-        wiki_outline_collection_id="shared-wiki",
-        outline_admin_api_key="writer-key",
-        wiki_omp_sandbox_url="http://wiki_omp_sandbox:8080",
-        wiki_omp_sandbox_token="sandbox-token",
-        wiki_omp_command="/usr/local/bin/omp",
-    )
-
-    assert settings.wiki_authoring_configured is False
-    assert settings.wiki_authoring_configuration_error is not None
-    assert "Local WIKI_OMP_COMMAND" in settings.wiki_authoring_configuration_error
-
-
-def test_wiki_authoring_accepts_a_separately_credentialed_sandbox() -> None:
-    settings = WorkerSettings(
-        wiki_editing_enabled=True,
-        wiki_outline_collection_id="shared-wiki",
-        outline_admin_api_key="writer-key",
-        wiki_omp_sandbox_url="http://wiki_omp_sandbox:8080",
-        wiki_omp_sandbox_token="sandbox-token",
-    )
-
-    assert settings.wiki_authoring_configured is True
-    assert settings.wiki_authoring_configuration_error is None
-
-
-def test_wiki_authoring_rejects_sandbox_timeout_above_worker_deadline() -> None:
-    settings = WorkerSettings(
-        wiki_editing_enabled=True,
-        wiki_outline_collection_id="shared-wiki",
-        outline_admin_api_key="writer-key",
-        wiki_omp_sandbox_url="http://wiki_omp_sandbox:8080",
-        wiki_omp_sandbox_token="sandbox-token",
-        wiki_omp_sandbox_run_timeout_seconds=600,
-    )
-
-    assert settings.wiki_authoring_configured is False
-    assert "WIKI_OMP_AUTHORING_TIMEOUT_SECONDS" in str(
-        settings.wiki_authoring_configuration_error
-    )
-
-
-@pytest.mark.parametrize(
-    ("overrides", "expected_error"),
-    [
-        ({"wiki_omp_model": "openai/gpt-5"}, "WIKI_OMP_MODEL"),
-        ({"wiki_omp_thinking": "turbo"}, "WIKI_OMP_THINKING"),
-    ],
-)
-def test_wiki_authoring_rejects_sandbox_incompatible_runtime_settings(
-    overrides: dict[str, str],
-    expected_error: str,
-) -> None:
-    settings = WorkerSettings(
-        wiki_editing_enabled=True,
-        wiki_outline_collection_id="shared-wiki",
-        outline_admin_api_key="writer-key",
-        wiki_omp_sandbox_url="http://wiki_omp_sandbox:8080",
-        wiki_omp_sandbox_token="sandbox-token",
-        **overrides,
-    )
-
-    assert settings.wiki_authoring_configured is False
-    assert expected_error in str(settings.wiki_authoring_configuration_error)
-
-
-@pytest.mark.parametrize(
-    ("sandbox_timeout", "authoring_timeout", "configured"),
-    [
-        (270.0, 300.0, True),
-        (600.0, 630.0, True),
-        (270.0, 299.9, False),
-        (600.0, 300.0, False),
-    ],
-)
-def test_wiki_authoring_timeout_outlasts_sandbox_run(
-    sandbox_timeout: float,
-    authoring_timeout: float,
-    configured: bool,
-) -> None:
-    settings = WorkerSettings(
-        wiki_editing_enabled=True,
-        wiki_outline_collection_id="shared-wiki",
-        outline_admin_api_key="writer-key",
-        wiki_omp_sandbox_url="http://wiki_omp_sandbox:8080",
-        wiki_omp_sandbox_token="sandbox-token",
-        wiki_omp_sandbox_run_timeout_seconds=sandbox_timeout,
-        wiki_omp_authoring_timeout_seconds=authoring_timeout,
-    )
-
-    assert settings.wiki_authoring_configured is configured
-    if not configured:
-        assert "WIKI_OMP_AUTHORING_TIMEOUT_SECONDS" in str(
-            settings.wiki_authoring_configuration_error
-        )
+    assert settings.resolved_agent_schedule_api_base_url == expected
 
 
 def test_email_intake_requires_mailbox_credentials() -> None:

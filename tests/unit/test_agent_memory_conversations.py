@@ -9,6 +9,7 @@ from five08.agent import (
     AgentContextSnippet,
     AgentIdentityContext,
     AgentOrchestrator,
+    AgentResponse,
     InMemoryMemoryStore,
     ToolRegistry,
 )
@@ -17,6 +18,7 @@ from five08.agent.context import (
     PrivateMemoryContextLoader,
     context_sources_for_snippets,
 )
+from five08.agent.policy import PolicyEngine
 from five08.agent.state import InMemoryAgentStateStore
 from five08.knowledge.store import InMemoryKnowledgeStore
 
@@ -27,7 +29,7 @@ def context(user="alice", channel="100"):
         organization_id="guild",
         guild_id="guild",
         channel_id=channel,
-        roles=["Member"],
+        roles=["Steering Committee"],
     )
 
 
@@ -210,6 +212,35 @@ def test_expired_clarification_state_can_be_purged_without_another_write():
     assert state.clarifications == {}
 
 
+def test_completed_plan_replay_gets_a_fresh_ttl_after_execution() -> None:
+    state = InMemoryAgentStateStore()
+    actor = context()
+    draft = AgentOrchestrator(state_store=state).plan(
+        "Remember that my timezone is UTC", actor
+    )
+    assert draft.plan is not None
+    expired_plan = draft.plan.model_copy(
+        update={"expires_at": datetime.now(timezone.utc) - timedelta(seconds=1)}
+    )
+    completed = AgentResponse(
+        status="executed",
+        plan=expired_plan,
+        message="Completed confirmed action.",
+    )
+
+    assert state.save_completed_plan(
+        expired_plan,
+        actor,
+        completed,
+        maximum=100,
+        per_actor=5,
+    )
+    status, replay = state.claim_plan(expired_plan.plan_id, actor.discord_user_id)
+
+    assert status == "claimed"
+    assert replay == (expired_plan, actor, completed)
+
+
 def test_personal_preference_suggestions_never_save_without_confirmation():
     agent = AgentOrchestrator(memory_suggestions_enabled=True)
     response = agent.plan("My timezone is Asia/Tokyo", context())
@@ -285,6 +316,49 @@ def test_saved_preferences_are_context_only_for_owner_and_private_destination():
     )
 
 
+def test_saved_preferences_use_configured_role_ids_instead_of_role_names():
+    store = InMemoryKnowledgeStore()
+    store.remember_fact(
+        scope_type="user",
+        scope_id="alice",
+        key="timezone",
+        value_json={"text": "Asia/Tokyo"},
+        visibility="private",
+        source_type="request",
+        source_ref="agent_request",
+        source_excerpt=None,
+        created_by="alice",
+        verification_status="user_confirmed",
+        organization_id="guild",
+    )
+    policy = PolicyEngine(
+        role_id_bindings={"engineer": {"engineer-role-id"}},
+        allowed_guild_ids={"guild"},
+        require_guild_binding=True,
+        allow_role_name_fallback=False,
+    )
+    actor = context().model_copy(
+        update={"roles": ["Backend"], "role_ids": ["engineer-role-id"]}
+    )
+
+    snippets = PrivateMemoryContextLoader(store, policy=policy).load(
+        context=actor,
+        bounds=ContextLoadBounds(),
+    )
+
+    assert [snippet.source_ref for snippet in snippets] == [
+        store.list_facts(
+            organization_id="guild",
+            scope_type="user",
+            scope_id="alice",
+            visible_to_user_id="alice",
+            visible_to_project_id=None,
+            visible_to_org_id="guild",
+        )[0].id
+    ]
+    assert "Asia/Tokyo" in snippets[0].text
+
+
 def test_memory_lookup_outage_does_not_block_unrelated_agent_workflows() -> None:
     store = Mock()
     store.list_facts.side_effect = RuntimeError("memory unavailable")
@@ -313,7 +387,7 @@ def test_current_conversation_precedes_saved_memory_in_bounded_context() -> None
         scope_type="user",
         scope_id="alice",
         key="long_note",
-        value_json={"text": "memory " * 1000},
+        value_json={"text": "memory " * 250},
         visibility="private",
         source_type="request",
         source_ref="agent_request",
@@ -335,7 +409,7 @@ def test_current_conversation_precedes_saved_memory_in_bounded_context() -> None
 
     snippets = PrivateMemoryContextLoader(store).load(
         context=actor,
-        bounds=ContextLoadBounds(max_messages=1, max_tokens=6),
+        bounds=ContextLoadBounds(max_messages=1, max_tokens=8),
     )
 
     assert [snippet.source_ref for snippet in snippets] == ["current-thread"]
