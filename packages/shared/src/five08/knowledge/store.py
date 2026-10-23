@@ -382,8 +382,10 @@ class InMemoryKnowledgeStore:
                 or replaced.organization_id != fact.organization_id
                 or replaced.scope_type != scope_type
                 or replaced.scope_id != scope_id
+                or replaced.kind != "fact"
                 or replaced.created_by != created_by
                 or replaced.status != "active"
+                or replaced.deleted_at is not None
             ):
                 raise PermissionError(
                     "Memory to edit is unavailable or not owned by you"
@@ -1008,10 +1010,9 @@ class PostgresKnowledgeStore:
                     """
                     SELECT * FROM memory_facts
                     WHERE organization_id = %s AND scope_type = %s AND scope_id = %s
-                      AND status = 'active' AND deleted_at IS NULL
+                      AND kind = 'fact' AND status = 'active' AND deleted_at IS NULL
                       AND ((%s::uuid IS NOT NULL AND id = %s::uuid)
-                           OR (kind = 'fact'
-                               AND (dedupe_key = %s OR (dedupe_key IS NULL AND key = %s AND key <> 'note'))))
+                           OR (dedupe_key = %s OR (dedupe_key IS NULL AND key = %s AND key <> 'note')))
                     ORDER BY updated_at DESC FOR UPDATE
                     """,
                     (
@@ -1036,7 +1037,9 @@ class PostgresKnowledgeStore:
                     None,
                 )
                 if replaces_id and (
-                    replaced is None or str(replaced["created_by"]) != created_by
+                    replaced is None
+                    or replaced["kind"] != "fact"
+                    or str(replaced["created_by"]) != created_by
                 ):
                     raise PermissionError(
                         "Memory to edit is unavailable or not owned by you"

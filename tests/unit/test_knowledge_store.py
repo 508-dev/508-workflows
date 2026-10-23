@@ -320,8 +320,8 @@ def test_postgres_edit_selects_replaced_and_destination_rows(
     destination_id = "22222222-2222-2222-2222-222222222222"
     cursor = _FakeCursor(
         selected_rows=[
-            {"id": replaced_id, "created_by": "user-1"},
-            {"id": destination_id, "created_by": "user-1"},
+            {"id": replaced_id, "kind": "fact", "created_by": "user-1"},
+            {"id": destination_id, "kind": "fact", "created_by": "user-1"},
         ]
     )
     connection = _FakeConnection(cursor)
@@ -362,6 +362,91 @@ def test_postgres_edit_selects_replaced_and_destination_rows(
     assert update_params is not None
     assert update_params[1] == [replaced_id, destination_id]
     assert fact.supersedes_id == replaced_id
+
+
+def test_in_memory_edit_cannot_replace_captured_knowledge() -> None:
+    now = datetime.now(timezone.utc)
+    captured = KnowledgeFact(
+        id="captured-answer",
+        organization_id="org-1",
+        scope_type="user",
+        scope_id="user-1",
+        kind="qa",
+        key="location",
+        question="Where is the meetup?",
+        answer="Tokyo",
+        visibility="private",
+        created_by="user-1",
+        created_at=now,
+        updated_at=now,
+    )
+    store = InMemoryKnowledgeStore(facts=[captured])
+
+    with pytest.raises(PermissionError, match="unavailable or not owned"):
+        store.remember_fact(
+            scope_type="user",
+            scope_id="user-1",
+            key="location",
+            value_json={"text": "Osaka"},
+            visibility="private",
+            source_type="request",
+            source_ref="edit",
+            source_excerpt=None,
+            created_by="user-1",
+            verification_status="user_confirmed",
+            organization_id="org-1",
+            replaces_id=captured.id,
+        )
+
+    active = store.list_facts(
+        scope_type="user",
+        scope_id="user-1",
+        visible_to_user_id="user-1",
+        visible_to_project_id=None,
+        visible_to_org_id="org-1",
+    )
+    assert [fact.id for fact in active] == [captured.id]
+
+
+def test_postgres_edit_cannot_replace_captured_knowledge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_id = "11111111-1111-1111-1111-111111111111"
+    cursor = _FakeCursor(
+        selected_rows=[
+            {"id": captured_id, "kind": "qa", "created_by": "user-1"},
+        ]
+    )
+    monkeypatch.setattr(
+        knowledge_store,
+        "get_postgres_connection",
+        lambda _settings, **_kwargs: _FakeConnection(cursor),
+    )
+
+    with pytest.raises(PermissionError, match="unavailable or not owned"):
+        PostgresKnowledgeStore(SimpleNamespace()).remember_fact(
+            scope_type="user",
+            scope_id="user-1",
+            key="location",
+            value_json={"text": "Osaka"},
+            visibility="private",
+            source_type="request",
+            source_ref="edit",
+            source_excerpt=None,
+            created_by="user-1",
+            verification_status="user_confirmed",
+            organization_id="org-1",
+            replaces_id=captured_id,
+        )
+
+    select_query = next(
+        query for query, _ in cursor.calls if "SELECT * FROM memory_facts" in query
+    )
+    assert "AND kind = 'fact' AND status = 'active'" in select_query
+    assert not any(
+        "UPDATE memory_facts" in query or "INSERT INTO memory_facts" in query
+        for query, _ in cursor.calls
+    )
 
 
 def test_postgres_semantic_fallback_honors_smaller_candidate_limit(
