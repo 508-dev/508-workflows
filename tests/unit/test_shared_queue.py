@@ -1,8 +1,26 @@
 """Unit tests for shared queue helpers."""
 
-from unittest.mock import Mock, patch
+from datetime import datetime, timezone
+from unittest.mock import MagicMock, Mock, patch
 
-from five08.queue import JobStatus, _parse_status, enqueue_job, get_postgres_connection
+from five08.queue import (
+    JobRecord,
+    JobStatus,
+    _parse_status,
+    claim_job_for_execution,
+    claim_job,
+    enqueue_job,
+    mark_job_dead,
+    mark_job_retry,
+    mark_job_succeeded,
+    list_jobs_needing_queue_reconciliation,
+    list_due_retry_job_ids,
+    reserve_jobs_for_redelivery,
+    redeliver_due_failed_job,
+    redeliver_queued_job,
+    renew_job_execution_lease,
+    get_postgres_connection,
+)
 from five08.settings import SharedSettings
 
 
@@ -21,6 +39,388 @@ def test_enqueue_job_persists_and_dispatches_to_queue_client() -> None:
     assert result.created is True
 
 
+def test_enqueue_job_reserves_a_redelivery_lease_for_existing_work() -> None:
+    """Duplicate request-path delivery uses the durable broker retry lease."""
+
+    queue = Mock()
+    settings = SharedSettings(job_max_attempts=5)
+
+    with (
+        patch("five08.queue.create_job_record", return_value=("job-1", False)),
+        patch("five08.queue.redeliver_queued_job", return_value=True) as redeliver,
+    ):
+        result = enqueue_job(
+            queue=queue, fn=lambda value: value, args=("payload",), settings=settings
+        )
+
+    redeliver.assert_called_once_with(
+        queue,
+        settings=settings,
+        job_id="job-1",
+        minimum_age_seconds=60.0,
+    )
+    queue.enqueue.assert_not_called()
+    assert result.id == "job-1"
+    assert result.created is False
+
+
+def test_enqueue_job_does_not_publish_when_duplicate_redelivery_is_unreserved() -> None:
+    """A fresh queued row must not publish another broker message immediately."""
+
+    queue = Mock()
+
+    with (
+        patch("five08.queue.create_job_record", return_value=("job-1", False)),
+        patch("five08.queue.redeliver_queued_job", return_value=False) as redeliver,
+    ):
+        result = enqueue_job(
+            queue=queue,
+            fn=lambda value: value,
+            args=("payload",),
+            settings=SharedSettings(),
+        )
+
+    redeliver.assert_called_once()
+    queue.enqueue.assert_not_called()
+    assert result.id == "job-1"
+    assert result.created is False
+
+
+def test_redeliver_queued_job_reserves_a_durable_backoff_window() -> None:
+    """Only one dispatcher may republish a queued row during the backoff."""
+
+    cursor = MagicMock()
+    cursor.fetchone.return_value = {"id": "job-1", "run_after": None}
+    connection = MagicMock()
+    connection.__enter__.return_value.cursor.return_value.__enter__.return_value = (
+        cursor
+    )
+    queue = Mock()
+
+    with patch("five08.queue.get_postgres_connection", return_value=connection):
+        redelivered = redeliver_queued_job(
+            queue,
+            settings=SharedSettings(),
+            job_id="job-1",
+            minimum_age_seconds=60,
+        )
+
+    assert redelivered is True
+    query, parameters = cursor.execute.call_args.args
+    assert "AND status = %s" in query
+    assert "AND (run_after IS NULL OR run_after <= NOW())" in query
+    assert "updated_at <= NOW() - (%s * INTERVAL '1 second')" in query
+    assert parameters == ("job-1", "queued", 60.0)
+    queue.enqueue.assert_called_once_with("job-1", run_at=None)
+
+
+def test_redeliver_queued_job_does_not_enqueue_without_the_delivery_lease() -> None:
+    """A fresh queued row remains owned by the prior dispatcher attempt."""
+
+    cursor = MagicMock()
+    cursor.fetchone.return_value = None
+    connection = MagicMock()
+    connection.__enter__.return_value.cursor.return_value.__enter__.return_value = (
+        cursor
+    )
+    queue = Mock()
+
+    with patch("five08.queue.get_postgres_connection", return_value=connection):
+        redelivered = redeliver_queued_job(
+            queue,
+            settings=SharedSettings(),
+            job_id="job-1",
+            minimum_age_seconds=60,
+        )
+
+    assert redelivered is False
+    queue.enqueue.assert_not_called()
+
+
+def test_redeliver_due_failed_job_recovers_a_lost_retry_delivery() -> None:
+    """A due durable retry can be leased and republished after a worker exit."""
+
+    retry_at = datetime(2026, 8, 27, 9, 0, tzinfo=timezone.utc)
+    cursor = MagicMock()
+    cursor.fetchone.return_value = {"id": "job-1", "run_after": retry_at}
+    connection = MagicMock()
+    connection.__enter__.return_value.cursor.return_value.__enter__.return_value = (
+        cursor
+    )
+    queue = Mock()
+
+    with patch("five08.queue.get_postgres_connection", return_value=connection):
+        redelivered = redeliver_due_failed_job(
+            queue,
+            settings=SharedSettings(),
+            job_id="job-1",
+            minimum_age_seconds=60,
+        )
+
+    assert redelivered is True
+    query, parameters = cursor.execute.call_args.args
+    assert "AND status = %s" in query
+    assert "AND attempts < max_attempts" in query
+    assert "AND run_after <= NOW()" in query
+    assert "updated_at <= GREATEST" in query
+    assert parameters == ("job-1", "failed", 60.0)
+    queue.enqueue.assert_called_once_with("job-1", run_at=retry_at)
+
+
+def test_queue_reconciliation_lists_only_durably_recoverable_jobs() -> None:
+    """The generic dispatcher sees stale queued and due failed rows only."""
+
+    now = datetime.now(tz=timezone.utc)
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [
+        {
+            "id": "job-1",
+            "type": "example_job",
+            "status": "failed",
+            "payload": {},
+            "idempotency_key": None,
+            "attempts": 1,
+            "max_attempts": 8,
+            "run_after": now,
+            "locked_at": None,
+            "locked_by": None,
+            "last_error": "broker unavailable",
+            "created_at": now,
+            "updated_at": now,
+        }
+    ]
+    connection = MagicMock()
+    connection.__enter__.return_value.cursor.return_value.__enter__.return_value = (
+        cursor
+    )
+
+    with patch("five08.queue.get_postgres_connection", return_value=connection):
+        jobs = list_jobs_needing_queue_reconciliation(
+            SharedSettings(), limit=25, minimum_age_seconds=60
+        )
+
+    assert [job.id for job in jobs] == ["job-1"]
+    query, parameters = cursor.execute.call_args.args
+    assert "status = %s" in query
+    assert "AND (run_after IS NULL OR run_after <= NOW())" in query
+    assert "AND attempts < max_attempts" in query
+    assert "AND run_after <= NOW()" in query
+    assert "updated_at <= GREATEST" in query
+    assert parameters == ("queued", 60.0, "failed", 60.0, 25)
+
+
+def test_claim_job_for_execution_uses_one_conditional_update() -> None:
+    """Duplicate deliveries race on one SQL state transition, not a read."""
+
+    cursor = MagicMock()
+    cursor.fetchone.return_value = None
+    connection = MagicMock()
+    connection.__enter__.return_value.cursor.return_value.__enter__.return_value = (
+        cursor
+    )
+    settings = SharedSettings(job_max_attempts=5)
+
+    with (
+        patch("five08.queue.get_postgres_connection", return_value=connection),
+        patch("five08.queue.uuid4", return_value="claim-1"),
+    ):
+        claimed = claim_job_for_execution(
+            settings,
+            "job-1",
+            worker_name="worker-1",
+        )
+
+    assert claimed is None
+    query, parameters = cursor.execute.call_args.args
+    assert "WITH claimed AS" in query
+    assert "UPDATE jobs" in query
+    assert "status IN" in query
+    assert "locked_at <= NOW() - (%s * INTERVAL '1 second')" in query
+    assert "RETURNING *" in query
+    assert "attempts = CASE" in query
+    assert "WHERE status = 'running'" in query
+    assert parameters == (
+        "worker-1:claim-1",
+        "job-1",
+        "queued",
+        "failed",
+        600,
+    )
+
+
+def test_claim_job_for_execution_reclaims_an_expired_running_lease() -> None:
+    """A redelivery may replace an expired lease with a fresh owner token."""
+
+    now = datetime.now(tz=timezone.utc)
+    cursor = MagicMock()
+    cursor.fetchone.return_value = {
+        "id": "job-1",
+        "type": "example",
+        "status": "running",
+        "payload": {},
+        "idempotency_key": None,
+        "attempts": 1,
+        "max_attempts": 5,
+        "run_after": None,
+        "locked_at": now,
+        "locked_by": "worker-2:fresh-claim",
+        "last_error": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    connection = MagicMock()
+    connection.__enter__.return_value.cursor.return_value.__enter__.return_value = (
+        cursor
+    )
+    settings = SharedSettings(job_max_attempts=5, job_timeout_seconds=30)
+
+    with (
+        patch("five08.queue.get_postgres_connection", return_value=connection),
+        patch("five08.queue.uuid4", return_value="fresh-claim"),
+    ):
+        claimed = claim_job_for_execution(
+            settings,
+            "job-1",
+            worker_name="worker-2",
+        )
+
+    assert claimed is not None
+    assert claimed.status is JobStatus.RUNNING
+    assert claimed.locked_by == "worker-2:fresh-claim"
+    query, parameters = cursor.execute.call_args.args
+    assert "status = 'running'" in query
+    assert "attempts + 1 >= max_attempts" in query
+    assert "locked_at IS NULL" in query
+    assert "locked_at <= NOW() - (%s * INTERVAL '1 second')" in query
+    assert parameters[-1] == 30
+
+
+def test_claim_job_for_execution_terminally_records_final_expired_lease() -> None:
+    """A final expired lease is dead, not another unbounded execution claim."""
+
+    cursor = MagicMock()
+    cursor.fetchone.return_value = None
+    connection = MagicMock()
+    connection.__enter__.return_value.cursor.return_value.__enter__.return_value = (
+        cursor
+    )
+
+    with (
+        patch("five08.queue.get_postgres_connection", return_value=connection),
+        patch("five08.queue.uuid4", return_value="expired-claim"),
+    ):
+        claimed = claim_job_for_execution(
+            SharedSettings(job_max_attempts=5),
+            "job-expired",
+            worker_name="worker-3",
+        )
+
+    assert claimed is None
+    query, parameters = cursor.execute.call_args.args
+    assert "WHEN status = 'running' AND attempts + 1 >= max_attempts" in query
+    assert "THEN 'dead'" in query
+    assert "'execution_lease_expired'" in query
+    assert "SELECT * FROM claimed" in query
+    assert "WHERE status = 'running'" in query
+    assert parameters == (
+        "worker-3:expired-claim",
+        "job-expired",
+        "queued",
+        "failed",
+        600,
+    )
+
+
+def test_renew_job_execution_lease_fences_updates_to_the_current_worker() -> None:
+    """A heartbeat may only extend the lease it originally claimed."""
+
+    cursor = MagicMock()
+    cursor.rowcount = 1
+    connection = MagicMock()
+    connection.__enter__.return_value.cursor.return_value.__enter__.return_value = (
+        cursor
+    )
+
+    with patch("five08.queue.get_postgres_connection", return_value=connection):
+        renewed = renew_job_execution_lease(
+            SharedSettings(),
+            "job-1",
+            claim_token="worker-1:claim-1",
+        )
+
+    assert renewed is True
+    query, parameters = cursor.execute.call_args.args
+    assert "SET locked_at = NOW()" in query
+    assert "AND status = 'running'" in query
+    assert "AND locked_by = %s" in query
+    assert parameters == ("job-1", "worker-1:claim-1")
+
+
+def test_stale_owner_cannot_mark_job_succeeded() -> None:
+    """A completed old execution cannot overwrite a newer claim."""
+
+    cursor = MagicMock()
+    cursor.rowcount = 0
+    connection = MagicMock()
+    connection.__enter__.return_value.cursor.return_value.__enter__.return_value = (
+        cursor
+    )
+
+    with patch("five08.queue.get_postgres_connection", return_value=connection):
+        transitioned = mark_job_succeeded(
+            SharedSettings(),
+            "job-1",
+            result={"ok": True},
+            base_payload={},
+            claim_token="worker-1:expired-claim",
+        )
+
+    assert transitioned is False
+    query, parameters = cursor.execute.call_args.args
+    assert "AND status = 'running'" in query
+    assert "AND locked_by = %s" in query
+    assert parameters[-2:] == ["job-1", "worker-1:expired-claim"]
+
+
+def test_stale_owner_cannot_schedule_a_retry_or_mark_a_job_dead() -> None:
+    """A replaced lease cannot overwrite newer state with retry or dead."""
+
+    cursor = MagicMock()
+    cursor.rowcount = 0
+    connection = MagicMock()
+    connection.__enter__.return_value.cursor.return_value.__enter__.return_value = (
+        cursor
+    )
+    settings = SharedSettings()
+    token = "worker-1:expired-claim"
+
+    with patch("five08.queue.get_postgres_connection", return_value=connection):
+        retried = mark_job_retry(
+            settings,
+            "job-1",
+            attempts=2,
+            run_after=datetime.now(tz=timezone.utc),
+            last_error="transient failure",
+            claim_token=token,
+        )
+        dead = mark_job_dead(
+            settings,
+            "job-1",
+            attempts=2,
+            last_error="terminal failure",
+            claim_token=token,
+        )
+
+    assert retried is False
+    assert dead is False
+    assert cursor.execute.call_count == 2
+    for call in cursor.execute.call_args_list:
+        query, parameters = call.args
+        assert "AND status = 'running'" in query
+        assert "AND locked_by = %s" in query
+        assert parameters[-2:] == ["job-1", token]
+
+
 def test_parse_status_handles_unknown_values() -> None:
     """Unknown DB status should fallback to FAILED and emit a warning."""
     assert _parse_status("queued") == JobStatus.QUEUED
@@ -32,6 +432,25 @@ def test_parse_status_handles_unknown_values() -> None:
     mock_warning.assert_called_once_with(
         "Unknown job status from DB: %s", "unexpected-status"
     )
+
+
+def test_due_retry_scan_selects_only_expired_failed_wiki_jobs() -> None:
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value.__enter__.return_value
+    cursor.fetchall.return_value = [{"id": "job-1"}, {"id": "job-2"}]
+    settings = SharedSettings()
+
+    with patch("five08.queue.get_postgres_connection", return_value=connection):
+        ids = list_due_retry_job_ids(
+            settings, job_type="author_wiki_edit_proposal_job", limit=2
+        )
+
+    assert ids == ["job-1", "job-2"]
+    query, params = cursor.execute.call_args.args
+    assert "status = %s AND run_after <= NOW()" in query
+    assert "ORDER BY run_after" in query
+    assert params == ("author_wiki_edit_proposal_job", "failed", 2)
 
 
 def test_postgres_connection_applies_bounded_operation_deadlines() -> None:
@@ -50,3 +469,248 @@ def test_postgres_connection_applies_bounded_operation_deadlines() -> None:
         connect_timeout=1,
         options="-c statement_timeout=2500",
     )
+
+
+def test_reserve_jobs_for_redelivery_selects_due_work_with_a_cooldown() -> None:
+    """Recovery must retry a lost handoff without dispatching future work."""
+    now = datetime(2026, 9, 18, tzinfo=timezone.utc)
+    row = {
+        "id": "job-1",
+        "type": "author_wiki_edit_proposal_job",
+        "status": "failed",
+        "payload": {"args": ["proposal-1", "guild-1"], "kwargs": {}},
+        "idempotency_key": "wiki-author:proposal-1",
+        "attempts": 1,
+        "max_attempts": 5,
+        "run_after": now,
+        "locked_at": None,
+        "locked_by": None,
+        "last_error": "provider unavailable",
+        "created_at": now,
+        "updated_at": now,
+    }
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value.__enter__.return_value
+    cursor.fetchall.return_value = [row]
+
+    with patch("five08.queue.get_postgres_connection", return_value=connection):
+        jobs = reserve_jobs_for_redelivery(
+            SharedSettings(),
+            job_type="author_wiki_edit_proposal_job",
+            running_lease_seconds=1800.0,
+            redelivery_cooldown_seconds=30.0,
+            limit=100,
+        )
+
+    assert [job.id for job in jobs] == ["job-1"]
+    assert jobs[0].status == JobStatus.FAILED
+    query, params = cursor.execute.call_args.args
+    assert "type = %s" in query
+    assert "updated_at <= NOW()" in query
+    assert "run_after IS NULL OR run_after <= NOW()" in query
+    assert "locked_at <= NOW()" in query
+    assert "FOR UPDATE SKIP LOCKED" in query
+    assert "SET updated_at = NOW()" in query
+    assert "status =" not in query.split("SET updated_at = NOW()", 1)[1]
+    assert params == (
+        "author_wiki_edit_proposal_job",
+        30.0,
+        "queued",
+        "failed",
+        "running",
+        1800.0,
+        100,
+    )
+
+
+def test_claim_job_requires_an_eligible_status_and_returns_the_claimed_row() -> None:
+    """A worker can execute only the row returned by its conditional claim."""
+    now = datetime(2026, 9, 18, tzinfo=timezone.utc)
+    row = {
+        "id": "job-1",
+        "type": "author_wiki_edit_proposal_job",
+        "status": "running",
+        "payload": {"args": [], "kwargs": {}},
+        "idempotency_key": None,
+        "attempts": 0,
+        "max_attempts": 5,
+        "run_after": None,
+        "locked_at": now,
+        "locked_by": "worker-1:claim-1",
+        "last_error": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value.__enter__.return_value
+    cursor.fetchone.return_value = row
+    settings = SharedSettings()
+
+    with (
+        patch("five08.queue.get_postgres_connection", return_value=connection),
+        patch("five08.queue.uuid4", return_value="claim-1"),
+    ):
+        claimed = claim_job(settings, "job-1", worker_name="worker-1")
+
+    assert claimed is not None
+    assert claimed.status == JobStatus.RUNNING
+    query, params = cursor.execute.call_args.args
+    assert "UPDATE jobs" in query
+    assert "status IN (%s, %s)" in query
+    assert "run_after IS NULL OR run_after <= NOW()" in query
+    assert params == (
+        "running",
+        "running",
+        "job-1",
+        "queued",
+        "failed",
+        "dead",
+        "running",
+        "worker-1:claim-1",
+        "Worker lease expired before completion.",
+    )
+
+
+def test_claim_job_returns_none_when_a_concurrent_delivery_already_claimed_it() -> None:
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value.__enter__.return_value
+    cursor.fetchone.return_value = None
+
+    with patch("five08.queue.get_postgres_connection", return_value=connection):
+        claimed = claim_job(SharedSettings(), "job-1", worker_name="worker-1")
+
+    assert claimed is None
+
+
+def test_claim_job_can_reclaim_only_an_expired_running_job_type() -> None:
+    """A bounded worker flow can atomically recover its own stale lock."""
+    now = datetime(2026, 9, 18, tzinfo=timezone.utc)
+    row = {
+        "id": "job-1",
+        "type": "author_wiki_edit_proposal_job",
+        "status": "running",
+        "payload": {"args": [], "kwargs": {}},
+        "idempotency_key": None,
+        "attempts": 0,
+        "max_attempts": 5,
+        "run_after": None,
+        "locked_at": now,
+        "locked_by": "worker-2:claim-2",
+        "last_error": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value.__enter__.return_value
+    cursor.fetchone.return_value = row
+
+    with (
+        patch("five08.queue.get_postgres_connection", return_value=connection),
+        patch("five08.queue.uuid4", return_value="claim-2"),
+    ):
+        claimed = claim_job(
+            SharedSettings(),
+            "job-1",
+            worker_name="worker-2",
+            reclaim_running_job_type="author_wiki_edit_proposal_job",
+            reclaim_running_after_seconds=390.0,
+        )
+
+    assert claimed is not None
+    query, params = cursor.execute.call_args.args
+    assert "type = %s" in query
+    assert "locked_at <= NOW() - (%s * INTERVAL '1 second')" in query
+    assert params == (
+        "running",
+        "running",
+        "job-1",
+        "queued",
+        "failed",
+        "running",
+        "author_wiki_edit_proposal_job",
+        390.0,
+        "dead",
+        "running",
+        "worker-2:claim-2",
+        "Worker lease expired before completion.",
+    )
+
+
+def test_claim_job_dead_letters_an_exhausted_expired_lease() -> None:
+    now = datetime(2026, 9, 18, tzinfo=timezone.utc)
+    row = {
+        "id": "job-1",
+        "type": "author_wiki_edit_proposal_job",
+        "status": "dead",
+        "payload": {"args": [], "kwargs": {}},
+        "idempotency_key": None,
+        "attempts": 3,
+        "max_attempts": 3,
+        "run_after": None,
+        "locked_at": None,
+        "locked_by": None,
+        "last_error": "Worker lease expired before completion.",
+        "created_at": now,
+        "updated_at": now,
+    }
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value.__enter__.return_value
+    cursor.fetchone.return_value = row
+
+    with (
+        patch("five08.queue.get_postgres_connection", return_value=connection),
+        patch("five08.queue.uuid4", return_value="claim-3"),
+    ):
+        claimed = claim_job(
+            SharedSettings(),
+            "job-1",
+            worker_name="worker-3",
+            reclaim_running_job_type="author_wiki_edit_proposal_job",
+            reclaim_running_after_seconds=390.0,
+        )
+
+    assert claimed is not None
+    assert claimed.status == JobStatus.DEAD
+    assert claimed.attempts == claimed.max_attempts
+    query = cursor.execute.call_args.args[0]
+    assert "attempts + 1 >= max_attempts" in query
+    assert "WHEN eligible.reclaiming THEN jobs.attempts + 1" in query
+
+
+def test_terminal_job_update_is_fenced_to_the_active_claim() -> None:
+    now = datetime(2026, 9, 18, tzinfo=timezone.utc)
+    claim = JobRecord(
+        id="job-1",
+        type="job",
+        status=JobStatus.RUNNING,
+        payload={"args": [], "kwargs": {}},
+        idempotency_key=None,
+        attempts=0,
+        max_attempts=3,
+        run_after=None,
+        locked_at=now,
+        locked_by="worker-1",
+        last_error=None,
+        created_at=now,
+        updated_at=now,
+    )
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value.__enter__.return_value
+    cursor.rowcount = 0
+
+    with patch("five08.queue.get_postgres_connection", return_value=connection):
+        updated = mark_job_succeeded(
+            SharedSettings(), claim.id, claim_token=claim.locked_by or ""
+        )
+
+    assert updated is False
+    query, params = cursor.execute.call_args.args
+    assert "AND status = 'running'" in query
+    assert "AND locked_by = %s" in query
+    assert params[-2:] == ["job-1", "worker-1"]

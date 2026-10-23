@@ -74,7 +74,7 @@ def _context() -> dict[str, object]:
         "organization_id": "guild-1",
         "guild_id": "guild-1",
         "channel_id": "channel-1",
-        "roles": ["Member"],
+        "roles": ["Steering Committee"],
     }
 
 
@@ -83,7 +83,6 @@ def _configure(monkeypatch: pytest.MonkeyPatch) -> Mock:
         return function(*args, **kwargs)
 
     monkeypatch.setattr(api.settings, "api_shared_secret", "test-secret")
-    monkeypatch.setattr(api, "_AGENT_REQUEST_TIMESTAMPS", {})
     monkeypatch.setattr(api, "_KNOWLEDGE_SERVICE", _KnowledgeServiceStub())
     monkeypatch.setattr(api.asyncio, "to_thread", run_inline)
     audit = Mock()

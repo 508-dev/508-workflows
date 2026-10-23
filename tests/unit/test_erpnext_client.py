@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+from five08 import deadlines
 from five08.clients.erpnext import ERPNextAPIError, ERPNextClient
 
 
@@ -46,6 +47,35 @@ class CaptureERPNextClient(FakeERPNextClient):
             }
         )
         return self.response
+
+
+def test_request_clamps_timeout_to_execution_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Response:
+        status_code = 200
+        content = b"{}"
+
+        @staticmethod
+        def json() -> dict[str, object]:
+            return {}
+
+    captured: dict[str, object] = {}
+
+    def request(*_args: object, **kwargs: object) -> Response:
+        captured.update(kwargs)
+        return Response()
+
+    monkeypatch.setattr(deadlines, "monotonic", lambda: 100.0)
+    client = ERPNextClient(
+        "https://erp.example.test",
+        "key:secret",
+        deadline_monotonic=105.0,
+    )
+    monkeypatch.setattr(client._session, "request", request)
+
+    assert client.request("GET", "/api/resource/Project") == {}
+    assert captured["timeout"] == 5.0
 
 
 def test_list_projects_rejects_missing_data_rows() -> None:

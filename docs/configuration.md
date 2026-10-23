@@ -11,8 +11,26 @@ that most often matter in local development and deployment.
   Missing runtime dependencies are reported through health/runtime failures
   where possible instead of eager settings-construction errors.
 - `LOG_LEVEL`: defaults to `INFO`.
-- `API_SHARED_SECRET`: required for protected non-dashboard API routes and for
-  `./scripts/dev.sh login`.
+- `API_SHARED_SECRET`: required for protected non-dashboard API routes,
+  including `/agent/*`, and for `./scripts/dev.sh login`.
+- `DISCORD_SERVER_ID`: the single Discord guild allowlist used before agent
+  planning or execution.
+- `AGENT_DISCORD_ADMIN_ROLE_IDS`, `AGENT_DISCORD_STEERING_COMMITTEE_ROLE_IDS`,
+  `AGENT_DISCORD_BILLING_ROLE_IDS`, `AGENT_DISCORD_ERP_DEVELOPER_ROLE_IDS`,
+  `AGENT_DISCORD_PROJECT_MANAGER_ROLE_IDS`, and
+  `AGENT_DISCORD_ENGINEER_ROLE_IDS`: comma-separated immutable Discord role
+  IDs for each capability bundle. Role names are display metadata only in
+  deployed environments. Put a combined Billing/ERP role ID in both bundles.
+  Never use an allowed guild ID as a role ID: Discord assigns that value to its
+  `@everyone` role, which would otherwise grant every member the bundle.
+- `AGENT_ALLOW_ROLE_NAME_FALLBACK`: defaults to `false`; it can take effect
+  only after explicit opt-in in local/dev/test, never in a deployed environment.
+- Use the read-only Discord `/diagnostics` panel or the dashboard's **Discord
+  diagnostics** page to discover role names and immutable IDs. These surfaces
+  only produce copyable configuration text; they never infer or apply role
+  grants. The Discord panel requires the configured server plus native Manage
+  Server permission, avoiding a circular dependency on the role-ID mapping it
+  helps configure.
 - `CONFIG_SECRET_KEY`: environment or `.env` key used to encrypt secret values
   saved from the admin dashboard configuration page. This key is not
   dashboard-managed, and dashboard-managed secret saves are rejected when it is
@@ -82,11 +100,16 @@ dashboard field.
 - `REDIS_URL`
 - `REDIS_QUEUE_NAME`
 - `REDIS_KEY_PREFIX`
-- `JOB_TIMEOUT_SECONDS`
+- `JOB_TIMEOUT_SECONDS` (minimum `6`; the worker reserves five seconds before
+  the durable lease expires for cancellation and recovery)
 - `JOB_RESULT_TTL_SECONDS`
 - `JOB_MAX_ATTEMPTS`
 - `JOB_RETRY_BASE_SECONDS`
 - `JOB_RETRY_MAX_SECONDS`
+- `JOB_QUEUE_RECONCILIATION_INTERVAL_SECONDS`,
+  `JOB_QUEUE_RECONCILIATION_BATCH_SIZE`: API-side durable recovery for queued
+  and due retryable jobs whose Redis delivery was lost after the database
+  state transition.
 - `GIG_RECRUITING_STALE_DAYS`
 - `GIG_CONTACTED_REMINDER_DAYS`
 - `GIG_RECRUITING_REMINDER_MAX_AGE_DAYS`
@@ -249,6 +272,11 @@ Discord bot:
 - `DISCORD_LOGS_WEBHOOK_URL`
 - `DISCORD_LOGS_WEBHOOK_WAIT`
 
+`BACKEND_API_BASE_URL` carries the bot's protected backend requests, and an
+optional `AUDIT_API_BASE_URL` override carries the same API secret. Both must
+use HTTPS outside local development; plaintext is allowed only for loopback
+hosts or Compose's fixed internal `http://web:8090` endpoint.
+
 Agent gateway:
 
 - `AGENT_API_TIMEOUT_SECONDS`
@@ -260,6 +288,19 @@ Agent gateway:
 - `AGENT_STRUCTURED_PLANNER_TIMEOUT_SECONDS`
 - `AGENT_INTENT_NORMALIZER_ENABLED`
 - `AGENT_INTENT_NORMALIZER_TIMEOUT_SECONDS`
+- `DISCORD_SERVER_ID` and the `AGENT_DISCORD_*_ROLE_IDS` bundle
+  mappings: production authorization is ID-bound and fails closed if the guild
+  or a matching role-ID mapping is absent.
+- `AGENT_PLANNING_MAX_STEPS`: maximum public-web research/tool turns in one
+  request; defaults to `3` and is capped at `5`.
+- `AGENT_REQUEST_RESPONSE_BUDGET_SECONDS`: caller-visible timeout for a
+  synchronous planning/read request; defaults to `55` seconds and is capped at
+  `55` so it stays inside the bot's default 60-second transport timeout.
+- `AGENT_PUBLIC_WEB_DEADLINE_SECONDS`: best-effort per-request budget for the
+  public-web loop; defaults to `50` and must not exceed the response budget.
+  DNS
+  and third-party HTTP behavior cannot be force-canceled by the sync adapters,
+  but the API will return once the response budget expires.
 - `KNOWLEDGE_ENABLED`: enables `/ask`, knowledge questions in mentions, and
   confirmed Discord captures.
 - `KNOWLEDGE_DISCORD_CHANNEL_IDS`: selected from **Configuration → Knowledge
@@ -298,6 +339,86 @@ Agent gateway:
 - `KNOWLEDGE_SEMANTIC_CANDIDATE_LIMIT`: maximum authorization-filtered remembered
   facts offered to the model for paraphrase and synonym matching (default: 24,
   maximum: 64).
+- `WIKI_EDITING_ENABLED`: opt-in switch for the approval-gated `/wiki-update`
+  Discord workflow (default: false). It requires `DISCORD_SERVER_ID`, an
+  `OUTLINE_ADMIN_API_KEY` scoped to document read/create/update operations, and
+  an isolated OMP sandbox. The Discord bot never receives the admin Outline
+  credential; its existing Outline invitation command is proxied through the
+  backend instead.
+- `WIKI_OUTLINE_COLLECTION_ID`: required collection for approved new articles.
+  Updates must already belong to this same shared collection.
+- `WIKI_OUTLINE_LAST_REVISION_CONFIRMED`: defaults to false. For a custom or
+  self-hosted Outline endpoint, verify Outline 1.10.0 or newer supports
+  `documents.update.lastRevision`, then set this to true in the API before
+  enabling wiki updates. Update proposal creation, revision, and publish fail
+  closed without it; new article creation remains available. Outline Cloud at
+  `https://app.getoutline.com` does not require this setting.
+- `WIKI_EDITING_ASSERTION_SECRET`: required high-entropy secret shared only by
+  the Discord bot and API. It signs a 60-second, method/path/body-bound
+  assertion before the API accepts the bot-supplied Discord identity and roles
+  for a wiki action or fixed Outline membership action. Membership assertions
+  also bind the configured `DISCORD_SERVER_ID` and require the Admin/Owner
+  hierarchy. Keep it distinct from `API_SHARED_SECRET`.
+- `WIKI_EDITING_API_TIMEOUT_SECONDS`: Postgres connection/statement timeout for
+  durable workflow state. Outline calls use `OUTLINE_API_TIMEOUT_SECONDS`.
+- `WIKI_EDITING_REQUEST_TIMEOUT_SECONDS`: Discord bot-to-backend wiki request
+  timeout (default and minimum: 90 seconds). This covers four default
+  `OUTLINE_API_TIMEOUT_SECONDS` windows plus 10 seconds because a confirmed
+  publish's conflict read and write can each consume separate connect and read
+  windows. Increase it too when increasing the provider timeout.
+- `WIKI_EDITING_MAX_INSTRUCTION_CHARACTERS`: maximum explicit request or
+  revision feedback length (fixed maximum and default: 4000).
+- `WIKI_EDITING_MAX_DOCUMENT_CHARACTERS`: maximum full target article sent to
+  the authoring harness (default and maximum: 16000). Larger articles are
+  rejected instead of being silently truncated or partially authored.
+- `WIKI_OMP_SANDBOX_URL`: required isolated authoring endpoint. It must be an
+  HTTPS endpoint, or Compose's fixed `http://wiki_omp_sandbox` name on the
+  internal control network. Loopback, arbitrary HTTP, credentialed URLs, and
+  paths/query strings are rejected.
+- `WIKI_OMP_SANDBOX_TOKEN`: required narrow RPC credential shared only by the
+  worker and the sandbox. It is not an Outline, database, Redis, API, or
+  provider credential.
+- `WIKI_OMP_SANDBOX_PROTOCOL_VERSION`: fixed sandbox protocol version (`v1`).
+  A mismatch fails closed.
+- `WIKI_OMP_COMMAND` and `WIKI_OMP_LAUNCHER_PATH`: retired and prohibited. The
+  worker will reject configuration that sets either value; clearing a child
+  environment does not isolate a same-UID process from worker mounts, network,
+  or credentials.
+- `WIKI_OMP_MODEL`, `WIKI_OMP_THINKING`,
+  `WIKI_OMP_STARTUP_TIMEOUT_SECONDS`, `WIKI_OMP_AUTHORING_TIMEOUT_SECONDS`:
+  bounded remote authoring runtime configuration. The worker sends a fixed
+  bundle of explicitly selected organization-visible sources, full related
+  documents verified in the shared collection, and current, high-authority
+  organization knowledge (never private/project knowledge), capped at 32
+  sources and 48,000 characters. The sandbox can only return one typed draft;
+  it receives no backend-hosted write tools and cannot publish.
+- `WIKI_OMP_SANDBOX_RUN_TIMEOUT_SECONDS`: sandbox-wide run deadline (30–600
+  seconds, default: 270). The worker requires
+  `WIKI_OMP_AUTHORING_TIMEOUT_SECONDS` to be at least 30 seconds longer so the
+  sandbox can finish and return its response before the worker times out.
+  Compose passes the same run limit to the worker and gives the fixed OpenRouter
+  proxy tunnel 60 seconds of additional shutdown headroom.
+
+For Compose deployments, inject wiki-related secrets by service rather than
+placing them in a globally inherited production `.env` file:
+
+| Secret | Services allowed |
+| --- | --- |
+| `WIKI_EDITING_ASSERTION_SECRET` | `discord_bot`, `web` |
+| `OUTLINE_ADMIN_API_KEY` | `web`, `worker` |
+| `WIKI_OMP_SANDBOX_TOKEN` | `worker`, `wiki_omp_sandbox` |
+| OpenRouter provider key file | `wiki_omp_sandbox` only |
+
+`compose.yaml` clears these feature secrets from services that do not need
+them; `compose.wiki-omp.yaml` supplies the worker/sandbox token and mounts the
+provider key only in the sidecar. The overlay also gives the sandbox no direct
+external Docker route: an uncredentialed internal proxy is the only egress
+path and permits only `openrouter.ai:443`. For host-run development, use
+separate service environments or a disposable development credential;
+`SharedSettings` otherwise reads `.env` by default. The Discord settings class
+also hard-denies both direct and database-runtime `OUTLINE_ADMIN_API_KEY`
+values, so its invitation path remains backend-owned even if an inherited
+environment is misconfigured.
 - `GITHUB_DEFAULT_REPO`: defaults to `508-dev/todos`.
 - `GITHUB_ORGANIZATION`: defaults to `508-dev` and scopes GitHub Projects.
 - `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_INSTALLATION_ID`,
@@ -305,8 +426,6 @@ Agent gateway:
   in Dashboard → Configuration → Operations instead of environment variables;
   the private key is encrypted there with `CONFIG_SECRET_KEY`. `GITHUB_APP_ID`
   remains a compatibility alias for the Client ID.
-- `GITHUB_MEMBER_EXTRA_REPOS`: optional additional repository access for all
-  Discord Members.
 - `GITHUB_STEERING_ALL_INSTALLED_REPOS`: defaults to `true`; grants Steering
   Committee/Admin/Owner access to all repositories selected on the App
   installation.
@@ -314,15 +433,94 @@ Agent gateway:
   access is disabled.
 - `GITHUB_API_TOKEN`, `GITHUB_ALLOWED_REPOS`: temporary legacy fallback while
   migrating to the GitHub App.
+- `AGENT_WEB_SEARCH_PROVIDER_ORDER`: comma-separated configured fallback order
+  using `searxng`, `brave`, and/or `firecrawl`.
+- `AGENT_WEB_SEARCH_TIMEOUT_SECONDS`, `AGENT_WEB_DEFAULT_RESULT_LIMIT`
+- `SEARXNG_BASE_URL`, `SEARXNG_SEARCH_LANGUAGE`: an explicitly configured
+  SearXNG endpoint may use private in-cluster HTTP. Enable its JSON result
+  format in the SearXNG `search.formats` setting or it will reject agent
+  searches.
+- `BRAVE_SEARCH_API_KEY`, `BRAVE_SEARCH_BASE_URL`, `BRAVE_SEARCH_COUNTRY`,
+  `BRAVE_SEARCH_LANGUAGE`
+- `FIRECRAWL_API_KEY`, `FIRECRAWL_BASE_URL`: Firecrawl also supplies bounded
+  public-page extraction.
+- `ERPNEXT_BASE_URL`, `ERPNEXT_API_KEY`, `ERPNEXT_API_TIMEOUT_SECONDS`: ERPNext
+  credentials for the bounded Billing/ERP read tools.
+- `AGENT_ERP_ORGANIZATION_ID`: required exact Discord organization/guild ID for
+  those ERP credentials. The agent fails closed when it is unset or the request
+  comes from another organization; configure a separate deployment/credential
+  boundary before supporting more than one ERP tenant.
+- `AGENT_SCHEDULE_ENABLED`: enables the API dispatcher for durable recurring
+  agent reports. It defaults to `true`, but does not create work until an Admin
+  creates a schedule.
+- `AGENT_SCHEDULE_DISPATCH_INTERVAL_SECONDS`,
+  `AGENT_SCHEDULE_DISPATCH_BATCH_SIZE`,
+  `AGENT_SCHEDULE_MIN_INTERVAL_SECONDS`, and
+  `AGENT_SCHEDULE_EXECUTION_TIMEOUT_SECONDS`: dispatcher/runtime bounds. The
+  minimum supported cadence defaults to five minutes.
+- `AGENT_SCHEDULE_API_BASE_URL`, `AGENT_SCHEDULE_API_TIMEOUT_SECONDS`: worker
+  handoff to the API-owned agent runtime. The worker uses `API_SHARED_SECRET`
+  for this internal call and intentionally does not need model-provider keys.
+  Its timeout must cover the schedule execution window plus 60 seconds for
+  role refresh, summary, and report delivery, while fitting inside the worker
+  job lease.
+- `AGENT_MEMORY_CLEANUP_ENABLED`, `AGENT_MEMORY_CLEANUP_INTERVAL_SECONDS`:
+  enqueue a daily-by-default worker sweep of expired durable memory facts. The
+  job deletes only expired/deleted rows and reports a count; it never reads or
+  exposes memory content through a user-facing endpoint.
+
+### Recurring Agent Reports
+
+Only the configured **Admin / Owner** role receives `agent:schedule:manage`.
+New schedules created through `/schedule-agent`, a confirmed natural-language
+`/agent` request, or the **Agent schedules** dashboard page store a
+natural-language objective and an exact catalog of
+schedule-safe read-only tools. Today that catalog covers GitHub issues, CRM
+contact search, Billing/ERP reads, onboarding queue health, and public-web
+research. Adding a new source means registering one bounded tool; it does not
+require another scheduler feature. `/schedule-github-issues` remains available
+for the older fixed GitHub-report envelope.
+
+For `/agent`, ask for a recurring report with a clear recurrence and IANA
+timezone (for example, "every Monday at 9 AM Asia/Tokyo"). The confirmation
+view shows the proposed objective and generated five-field cron timing, then
+binds delivery to the channel where `/agent` was invoked. Use `/schedule-agent`
+when the destination channel needs to be chosen explicitly.
+
+The runtime lets the configured planner make at most three short planning steps
+and two read-only calls per step. Every proposal is validated against the
+saved tool catalog and the owner's freshly fetched Discord roles before it
+runs. It cannot write, request confirmation, add a tool, change a destination,
+or inherit a later-added capability. Removing the Admin role or any saved read
+scope skips later runs.
+
+Raw CRM, ERP, billing, and onboarding rows are never sent back to the model.
+The loop receives only bounded aggregate observations (counts/statuses), and
+generic reports post the same safe aggregate form to Discord. Legacy GitHub
+reports retain their explicit public-data summary option and deterministic
+fallback behavior.
 
 See [Discord GitHub Todos and Projects](./discord-github-todos.md) for the
 role model, required App permissions, and installation procedure.
 See [Discord Knowledge Memory](./discord-knowledge-memory.md) for capture,
 retrieval, visibility, and provenance behavior.
+See [Discord Wiki Editing](./discord-wiki-editing.md) for the separate,
+approval-gated shared-wiki workflow.
 
 Agent model base URLs must be HTTPS endpoints on allowed provider hosts, except
 the internal Docker-network Bifrost URL `http://bifrost:8080/openai` is allowed
 for same-host deployments.
+
+Web search uses only the providers whose endpoint/key is configured, trying the
+configured order when a provider fails. Search queries containing obvious
+private identifiers (email addresses, access tokens, payment-card numbers, or
+UUIDs) are rejected before either the planner or an outbound provider. Firecrawl
+extraction accepts only public HTTPS URLs without query strings and returns
+bounded main-page markdown. The loop carries a best-effort operation deadline;
+when too little time remains for a planner retry, it returns the completed
+public result instead of starting another model call. A separate API response
+budget guarantees Discord receives a bounded response even if an upstream DNS
+or HTTP operation fails to stop promptly.
 
 ## Migadu Mailbox And Newsletter Sync
 

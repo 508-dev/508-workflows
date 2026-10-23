@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from five08.agent import AgentIdentityContext
 
@@ -36,11 +36,90 @@ class DiscordLinkCreateRequest(BaseModel):
     discord_roles: list[str] = Field(default_factory=list)
 
 
+class OutlineInvitationActor(BaseModel):
+    """Fresh Discord actor context signed by the bot for one invite action."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    discord_user_id: str = Field(min_length=1, max_length=32)
+    discord_guild_id: str = Field(min_length=1, max_length=32)
+    discord_roles: list[str] = Field(default_factory=list, max_length=100)
+
+
+class OutlineInvitationReadinessRequest(BaseModel):
+    """A signed preflight for one forthcoming Outline invitation workflow."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    actor: OutlineInvitationActor
+
+
+class OutlineInvitationRequest(BaseModel):
+    """A signed fixed-purpose request to send one member invitation through Outline."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    email: str = Field(min_length=1, max_length=320)
+    name: str | None = Field(default=None, max_length=256)
+    actor: OutlineInvitationActor
+
+
 class AgentConfirmationRequest(BaseModel):
     """Payload for confirming or canceling a frozen agent plan."""
 
     context: AgentIdentityContext
     confirm: bool = True
+
+
+class AgentScheduleCreateFields(BaseModel):
+    """Human-facing fields for a bounded recurring agent schedule."""
+
+    operation_id: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=140)
+    cron_expression: str = Field(min_length=1, max_length=128)
+    timezone: str = Field(default="UTC", min_length=1, max_length=128)
+    prompt: str = Field(min_length=1, max_length=4_000)
+    # Frozen GitHub actions remain supported for schedules created by the
+    # original slash command. New callers should use ``agent_loop`` with a
+    # saved read-only catalog instead of a feature-specific request schema.
+    execution_mode: Literal["frozen_actions", "agent_loop"] = "frozen_actions"
+    tool_allowlist: list[str] = Field(default_factory=list, max_length=16)
+    repository: str | None = Field(default=None, min_length=3, max_length=256)
+    query: str = Field(default="", max_length=512)
+    state: Literal["open", "closed"] = "open"
+    limit: int = Field(default=10, ge=1, le=20)
+    channel_id: str = Field(min_length=1, max_length=32)
+    summary_mode: Literal["deterministic", "model_for_public_data"] = "deterministic"
+    sources_are_public: bool = False
+
+
+class AgentScheduleCreateRequest(AgentScheduleCreateFields):
+    """Bot-authenticated schedule creation request with an actor context."""
+
+    context: AgentIdentityContext
+
+
+class DashboardAgentScheduleCreateRequest(AgentScheduleCreateFields):
+    """Dashboard creation request; the server resolves the actor identity."""
+
+
+class DashboardAgentScheduleControlRequest(BaseModel):
+    """Dashboard lifecycle control for an immutable schedule definition."""
+
+    action: Literal["pause", "resume", "archive"]
+
+
+class AgentScheduleControlRequest(BaseModel):
+    """Pause or resume a retained immutable schedule definition."""
+
+    context: AgentIdentityContext
+    action: Literal["pause", "resume", "archive"]
+
+
+class AgentScheduleContextRequest(BaseModel):
+    """Authenticated schedule list/run request carrying the invoking actor."""
+
+    context: AgentIdentityContext
 
 
 class DashboardAssignOnboarderRequest(BaseModel):

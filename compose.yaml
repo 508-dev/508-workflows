@@ -88,6 +88,20 @@ services:
       POSTGRES_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-workflows}
       BACKEND_API_BASE_URL: http://web:8090
       AUDIT_API_BASE_URL: ""
+      # Agent planning and public-web provider credentials belong only to the
+      # backend. The bot forwards role-bearing requests but never calls those
+      # providers directly.
+      AGENT_FAST_API_KEY: ""
+      AGENT_STRONG_API_KEY: ""
+      AGENT_REASONING_API_KEY: ""
+      BRAVE_SEARCH_API_KEY: ""
+      FIRECRAWL_API_KEY: ""
+      # The bot uses a short-lived assertion and holds no document-write keys.
+      WIKI_EDITING_ASSERTION_SECRET: ${WIKI_EDITING_ASSERTION_SECRET:-}
+      OUTLINE_ADMIN_API_KEY: ""
+      OUTLINE_API_KEY: ""
+      WIKI_OMP_SANDBOX_URL: ""
+      WIKI_OMP_SANDBOX_TOKEN: ""
     restart: unless-stopped
     networks:
       - default
@@ -127,6 +141,13 @@ services:
       # host port for tunnels/local multi-worktree runs.
       WEB_HOST: 0.0.0.0
       WEB_PORT: 8090
+      # The API publishes approved writes and verifies bot assertions, but it
+      # never invokes the OMP sandbox itself.
+      WIKI_EDITING_ASSERTION_SECRET: ${WIKI_EDITING_ASSERTION_SECRET:-}
+      OUTLINE_ADMIN_API_KEY: ${OUTLINE_ADMIN_API_KEY:-}
+      OUTLINE_API_KEY: ${OUTLINE_API_KEY:-}
+      WIKI_OMP_SANDBOX_URL: ""
+      WIKI_OMP_SANDBOX_TOKEN: ""
     ports:
       - "${WEB_HOST_BIND:-${WEBHOOK_INGEST_HOST_BIND:-127.0.0.1}}:${WEB_HOST_PORT:-${WEBHOOK_INGEST_HOST_PORT:-8090}}:8090"
     restart: unless-stopped
@@ -173,10 +194,24 @@ services:
       # allowing startup while /health reports degraded in non-local runtimes.
       INTAKE_RESUME_VIRUS_SCAN_COMMAND: ${INTAKE_RESUME_VIRUS_SCAN_COMMAND-clamdscan --stream --no-summary --config-file=/etc/clamav/clamdscan.conf}
       DISCORD_BOT_INTERNAL_BASE_URL: http://discord_bot:3000
+      AGENT_SCHEDULE_API_BASE_URL: http://web:8090
+      # The worker alone owns authoring and document-write credentials.
+      WIKI_OMP_SANDBOX_URL: ${WIKI_OMP_SANDBOX_URL:-http://wiki_omp_sandbox:8080}
+      WIKI_EDITING_ASSERTION_SECRET: ""
+      OUTLINE_ADMIN_API_KEY: ${OUTLINE_ADMIN_API_KEY:-}
+      OUTLINE_API_KEY: ${OUTLINE_API_KEY:-}
+      WIKI_OMP_SANDBOX_TOKEN: ${WIKI_OMP_SANDBOX_TOKEN:-}
+      # The worker does not plan agent requests or call public-web providers.
+      AGENT_FAST_API_KEY: ""
+      AGENT_STRONG_API_KEY: ""
+      AGENT_REASONING_API_KEY: ""
+      BRAVE_SEARCH_API_KEY: ""
+      FIRECRAWL_API_KEY: ""
     restart: unless-stopped
     networks:
       - default
       - infra
+      - wiki_omp_control
     depends_on:
       web:
         condition: service_started
@@ -197,3 +232,7 @@ networks:
   infra:
     name: ${INFRA_DOCKER_NETWORK:-508-infra}
     external: true
+  # Only the worker and sandbox share this network. It has no route outside
+  # Docker and no connection to Postgres, Redis, MinIO, API, or Discord.
+  wiki_omp_control:
+    internal: true

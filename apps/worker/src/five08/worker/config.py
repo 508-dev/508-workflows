@@ -1,7 +1,9 @@
 """Configuration for webhook ingest and worker services."""
 
+import re
 from ipaddress import ip_address
 from urllib.parse import urlparse
+from typing import Final
 
 from pydantic import AliasChoices, Field, PrivateAttr, field_validator, model_validator
 
@@ -10,6 +12,21 @@ from five08.openai_fallback import (
     build_openai_compatible_provider_attempts,
 )
 from five08.settings import SharedSettings
+
+
+_WIKI_OMP_MODEL_PATTERN = re.compile(r"^openrouter/[A-Za-z0-9._:/-]{1,240}$")
+_WIKI_OMP_THINKING_LEVELS = frozenset(
+    {"off", "minimal", "low", "medium", "high", "xhigh", "max"}
+)
+_WIKI_OMP_TRANSPORT_HEADROOM_SECONDS = 30.0
+
+
+# A schedule request refreshes the owner's roles, can make one bounded
+# public-data summary call, and delivers its report after the tool deadline.
+# Reserve a conservative minute for those endpoint steps around the configured
+# schedule execution window.
+AGENT_SCHEDULE_ENDPOINT_OVERHEAD_SECONDS: Final[float] = 60.0
+_JOB_LEASE_EXPIRY_MARGIN_SECONDS: Final[float] = 5.0
 
 
 class WorkerSettings(SharedSettings):
@@ -21,6 +38,10 @@ class WorkerSettings(SharedSettings):
     worker_queue_names: str = "jobs.default"
     worker_burst: bool = False
     discord_bot_internal_base_url: str = "http://127.0.0.1:3000"
+    # The worker delegates schedule execution to the API because that service
+    # owns agent model credentials and the bot-internal Discord client.
+    agent_schedule_api_base_url: str = "http://127.0.0.1:8090"
+    agent_schedule_api_timeout_seconds: float = Field(default=360.0, gt=0, le=360.0)
 
     espo_base_url: str = ""
     espo_api_key: str = ""
@@ -60,6 +81,22 @@ class WorkerSettings(SharedSettings):
     openai_direct_model: str | None = None
     fireworks_api_key: str | None = None
     openrouter_api_key: str | None = None
+    # OMP authoring is intentionally remote-only. The worker must never exec
+    # an untrusted OMP binary in its own credentialed/container namespace.
+    # These legacy values remain recognized only so an unsafe deployment fails
+    # closed with a useful configuration error rather than silently launching.
+    wiki_omp_command: str = ""
+    wiki_omp_launcher_path: str = ""
+    wiki_omp_sandbox_url: str = ""
+    wiki_omp_sandbox_token: str | None = None
+    wiki_omp_sandbox_protocol_version: str = "v1"
+    wiki_omp_model: str = "openrouter/openai/gpt-5-mini"
+    wiki_omp_thinking: str = "medium"
+    wiki_omp_authoring_timeout_seconds: float = Field(default=300.0, gt=0)
+    wiki_omp_sandbox_run_timeout_seconds: float = Field(
+        default=270.0, ge=30.0, le=600.0
+    )
+    wiki_omp_startup_timeout_seconds: float = Field(default=30.0, gt=0)
     agent_planner_model: str = "accounts/fireworks/models/kimi-k2p6"
     agent_fallback_model: str = "gpt-4.1-mini"
     agent_structured_planner_enabled: bool = True
@@ -93,7 +130,27 @@ class WorkerSettings(SharedSettings):
     @property
     def resolved_discord_bot_internal_base_url(self) -> str | None:
         """Return only transport-safe internal Discord bot endpoints."""
-        candidate = self.discord_bot_internal_base_url.strip().rstrip("/")
+        return self._resolved_internal_base_url(
+            self.discord_bot_internal_base_url,
+            cleartext_service_names={"discord_bot"},
+        )
+
+    @property
+    def resolved_agent_schedule_api_base_url(self) -> str | None:
+        """Return only transport-safe API endpoints for schedule delegation."""
+        return self._resolved_internal_base_url(
+            self.agent_schedule_api_base_url,
+            cleartext_service_names={"web"},
+        )
+
+    @staticmethod
+    def _resolved_internal_base_url(
+        value: str,
+        *,
+        cleartext_service_names: set[str],
+    ) -> str | None:
+        """Allow HTTPS, loopback HTTP, or an explicit compose service name."""
+        candidate = value.strip().rstrip("/")
         if not candidate:
             return None
         try:
@@ -115,7 +172,7 @@ class WorkerSettings(SharedSettings):
         if parsed.scheme.casefold() != "http":
             return None
         hostname = hostname.casefold()
-        if hostname in {"localhost", "discord_bot"}:
+        if hostname == "localhost" or hostname in cleartext_service_names:
             return candidate
         try:
             return candidate if ip_address(hostname).is_loopback else None
@@ -135,6 +192,100 @@ class WorkerSettings(SharedSettings):
         if queue_names:
             return queue_names[0]
         return self.redis_queue_name
+
+    @property
+    def wiki_authoring_configured(self) -> bool:
+        """Whether the authoring worker has an isolated sandbox boundary."""
+        return self.wiki_authoring_configuration_error is None
+
+    @property
+    def wiki_authoring_configuration_error(self) -> str | None:
+        """Return the fail-closed reason without exposing a credential value."""
+        if not self.wiki_editing_enabled:
+            return "Wiki editing is disabled."
+        if (self.wiki_omp_command or "").strip() or (
+            self.wiki_omp_launcher_path or ""
+        ).strip():
+            return (
+                "Local WIKI_OMP_COMMAND and WIKI_OMP_LAUNCHER_PATH are prohibited; "
+                "configure an isolated WIKI_OMP_SANDBOX_URL instead."
+            )
+        if self.resolved_wiki_omp_sandbox_url is None:
+            return (
+                "WIKI_OMP_SANDBOX_URL must be an HTTPS sandbox endpoint or the "
+                "internal http://wiki_omp_sandbox endpoint."
+            )
+        if not (self.wiki_omp_sandbox_token or "").strip():
+            return "WIKI_OMP_SANDBOX_TOKEN is required for isolated wiki authoring."
+        if self.wiki_omp_sandbox_protocol_version.strip() != "v1":
+            return "WIKI_OMP_SANDBOX_PROTOCOL_VERSION must be v1."
+        if not _WIKI_OMP_MODEL_PATTERN.fullmatch(self.wiki_omp_model.strip()):
+            return "WIKI_OMP_MODEL must use the sandbox's openrouter/... format."
+        if self.wiki_omp_thinking.strip().lower() not in _WIKI_OMP_THINKING_LEVELS:
+            return "WIKI_OMP_THINKING is not supported by the sandbox."
+        if (
+            self.wiki_omp_authoring_timeout_seconds
+            < self.wiki_omp_sandbox_run_timeout_seconds
+            + _WIKI_OMP_TRANSPORT_HEADROOM_SECONDS
+        ):
+            return (
+                "WIKI_OMP_AUTHORING_TIMEOUT_SECONDS must be at least 30 seconds "
+                "greater than WIKI_OMP_SANDBOX_RUN_TIMEOUT_SECONDS."
+            )
+        if not (self.outline_admin_api_key or "").strip():
+            return "OUTLINE_ADMIN_API_KEY is required for wiki editing."
+        if not str(self.wiki_outline_collection_id or "").strip():
+            return "WIKI_OUTLINE_COLLECTION_ID is required for wiki editing."
+        return None
+
+    @property
+    def resolved_wiki_omp_sandbox_url(self) -> str | None:
+        """Return only a transport-safe, separately hosted sandbox endpoint.
+
+        The sole plaintext exception is the fixed Compose service name on the
+        internal ``wiki_omp_control`` network. Arbitrary HTTP, loopback, and
+        private-address endpoints are rejected so configuration cannot quietly
+        turn the sidecar boundary back into a local process boundary.
+        """
+        candidate = (self.wiki_omp_sandbox_url or "").strip().rstrip("/")
+        if not candidate:
+            return None
+        try:
+            parsed = urlparse(candidate)
+            hostname = parsed.hostname
+            # Accessing ``port`` validates malformed values such as :abc.
+            port = parsed.port
+            del port
+        except ValueError:
+            return None
+        if (
+            not hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.params
+            or parsed.query
+            or parsed.fragment
+            or parsed.path not in {"", "/"}
+        ):
+            return None
+
+        scheme = parsed.scheme.casefold()
+        normalized_hostname = hostname.casefold()
+        if normalized_hostname in {"localhost", "localhost.localdomain"}:
+            return None
+        if scheme == "http":
+            return candidate if normalized_hostname == "wiki_omp_sandbox" else None
+        if scheme != "https":
+            return None
+        if "." not in normalized_hostname:
+            return None
+        try:
+            address = ip_address(normalized_hostname)
+        except ValueError:
+            # A DNS hostname is allowed only over TLS. Certificate validation
+            # remains enabled in the remote sandbox client.
+            return candidate
+        return candidate if address.is_global else None
 
     email_resume_intake_enabled: bool = False
     check_email_wait: int = 2
@@ -164,7 +315,6 @@ class WorkerSettings(SharedSettings):
     dashboard_default_path: str = "/dashboard"
     dashboard_public_base_url: str | None = None
     discord_bot_token: str | None = None
-    discord_server_id: str | None = None
     discord_admin_roles: str = "Admin,Owner"
     discord_api_timeout_seconds: float = 8.0
     discord_link_ttl_seconds: int = 600
@@ -245,6 +395,34 @@ class WorkerSettings(SharedSettings):
             raise ValueError(
                 "INTAKE_RESUME_VIRUS_SCAN_COMMAND must be set when "
                 "INTAKE_RESUME_REQUIRE_VIRUS_SCAN=true"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_agent_schedule_timeout_settings(self) -> "WorkerSettings":
+        """Keep worker, API, and durable-job timeouts in one safe envelope."""
+
+        if not self.agent_schedule_enabled:
+            return self
+
+        minimum_api_timeout_seconds = (
+            self.agent_schedule_execution_timeout_seconds
+            + AGENT_SCHEDULE_ENDPOINT_OVERHEAD_SECONDS
+        )
+        if self.agent_schedule_api_timeout_seconds < minimum_api_timeout_seconds:
+            raise ValueError(
+                "AGENT_SCHEDULE_API_TIMEOUT_SECONDS must be at least "
+                "AGENT_SCHEDULE_EXECUTION_TIMEOUT_SECONDS plus 60 seconds "
+                "for role refresh, summary, and report delivery"
+            )
+        minimum_job_timeout_seconds = (
+            self.agent_schedule_api_timeout_seconds + _JOB_LEASE_EXPIRY_MARGIN_SECONDS
+        )
+        if self.job_timeout_seconds <= minimum_job_timeout_seconds:
+            raise ValueError(
+                "JOB_TIMEOUT_SECONDS must exceed "
+                "AGENT_SCHEDULE_API_TIMEOUT_SECONDS plus the five-second "
+                "lease expiry margin"
             )
         return self
 

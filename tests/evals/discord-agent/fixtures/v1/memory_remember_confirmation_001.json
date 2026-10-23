@@ -1,7 +1,7 @@
 {
   "version": "discord-agent-trajectory.v1",
   "id": "memory_remember_confirmation_001",
-  "description": "Member asks the agent to remember a private preference and should receive a confirmation-gated memory write.",
+  "description": "Steering Committee asks the agent to remember a private preference and should receive a confirmation-gated memory write.",
   "tags": ["memory", "write", "confirmation"],
   "suite": {
     "canonical": false,
@@ -11,7 +11,7 @@
     "discord_user_id": "123",
     "organization_id": "org-1",
     "guild_id": "org-1",
-    "roles": ["Member"],
+    "roles": ["Steering Committee"],
     "response_destination_visibility": "private"
   },
   "request": {

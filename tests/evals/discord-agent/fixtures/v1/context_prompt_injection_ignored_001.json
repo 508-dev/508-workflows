@@ -13,7 +13,7 @@
     "organization_id": "org-1",
     "guild_id": "org-1",
     "channel_id": "agent-eval",
-    "roles": ["Member"],
+    "roles": ["Steering Committee"],
     "response_destination_visibility": "private",
     "context_snippets": [
       {

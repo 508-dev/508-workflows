@@ -9,13 +9,16 @@ from typing import Any
 import pytest
 
 from five08.knowledge import store as knowledge_store
-from five08.knowledge.store import PostgresKnowledgeStore
+from five08.knowledge.models import KnowledgeFact
+from five08.knowledge.store import InMemoryKnowledgeStore, PostgresKnowledgeStore
 
 
 class _FakeCursor:
-    def __init__(self) -> None:
+    def __init__(self, selected_rows: list[dict[str, Any]] | None = None) -> None:
         self.calls: list[tuple[str, tuple[Any, ...] | None]] = []
+        self.selected_rows = selected_rows or []
         self.row: dict[str, Any] | None = None
+        self.rowcount = 0
 
     def __enter__(self) -> "_FakeCursor":
         return self
@@ -44,21 +47,21 @@ class _FakeCursor:
             "review_after": None,
             "expires_at": params[11],
             "deleted_at": None,
-            "supersedes_id": None,
+            "supersedes_id": params[15],
             "created_at": params[13],
             "updated_at": params[14],
         }
 
     def fetchall(self) -> list[dict[str, Any]]:
-        return []
+        return self.selected_rows
 
     def fetchone(self) -> dict[str, Any] | None:
         return self.row
 
 
 class _FakeConnection:
-    def __init__(self) -> None:
-        self.cursor_instance = _FakeCursor()
+    def __init__(self, cursor: _FakeCursor | None = None) -> None:
+        self.cursor_instance = cursor or _FakeCursor()
 
     def __enter__(self) -> "_FakeConnection":
         return self
@@ -138,6 +141,315 @@ def test_postgres_memory_adapter_rejects_oversized_key_before_writing(
     assert connection.cursor_instance.calls == []
 
 
+def test_in_memory_edit_merges_an_occupied_destination_slot() -> None:
+    store = InMemoryKnowledgeStore()
+    first = store.remember_fact(
+        scope_type="user",
+        scope_id="user-1",
+        key="timezone",
+        value_json={"text": "Asia/Tokyo"},
+        visibility="private",
+        source_type="request",
+        source_ref="first",
+        source_excerpt=None,
+        created_by="user-1",
+        verification_status="user_confirmed",
+        organization_id="org-1",
+    )
+    destination = store.remember_fact(
+        scope_type="user",
+        scope_id="user-1",
+        key="location",
+        value_json={"text": "Tokyo"},
+        visibility="private",
+        source_type="request",
+        source_ref="destination",
+        source_excerpt=None,
+        created_by="user-1",
+        verification_status="user_confirmed",
+        organization_id="org-1",
+    )
+
+    edited = store.remember_fact(
+        scope_type="user",
+        scope_id="user-1",
+        key="location",
+        value_json={"text": "Tokyo"},
+        visibility="private",
+        source_type="request",
+        source_ref="edit",
+        source_excerpt=None,
+        created_by="user-1",
+        verification_status="user_confirmed",
+        organization_id="org-1",
+        replaces_id=first.id,
+    )
+
+    active = store.list_facts(
+        scope_type="user",
+        scope_id="user-1",
+        visible_to_user_id="user-1",
+        visible_to_project_id=None,
+        visible_to_org_id="org-1",
+    )
+    assert edited.supersedes_id == first.id
+    assert [fact.id for fact in active] == [edited.id]
+    assert destination.id != edited.id
+
+
+def test_in_memory_edit_does_not_supersede_non_memory_knowledge() -> None:
+    now = datetime.now(timezone.utc)
+    captured_knowledge = KnowledgeFact(
+        id="captured-location",
+        organization_id="org-1",
+        scope_type="user",
+        scope_id="user-1",
+        kind="qa",
+        key="location",
+        question="Where is the meetup?",
+        answer="Tokyo",
+        visibility="private",
+        created_by="user-1",
+        created_at=now,
+        updated_at=now,
+    )
+    store = InMemoryKnowledgeStore(facts=[captured_knowledge])
+    original = store.remember_fact(
+        scope_type="user",
+        scope_id="user-1",
+        key="timezone",
+        value_json={"text": "Asia/Tokyo"},
+        visibility="private",
+        source_type="request",
+        source_ref="original",
+        source_excerpt=None,
+        created_by="user-1",
+        verification_status="user_confirmed",
+        organization_id="org-1",
+    )
+
+    edited = store.remember_fact(
+        scope_type="user",
+        scope_id="user-1",
+        key="location",
+        value_json={"text": "Tokyo"},
+        visibility="private",
+        source_type="request",
+        source_ref="edit",
+        source_excerpt=None,
+        created_by="user-1",
+        verification_status="user_confirmed",
+        organization_id="org-1",
+        replaces_id=original.id,
+    )
+
+    active = store.list_facts(
+        scope_type="user",
+        scope_id="user-1",
+        visible_to_user_id="user-1",
+        visible_to_project_id=None,
+        visible_to_org_id="org-1",
+    )
+    assert {fact.id for fact in active} == {captured_knowledge.id, edited.id}
+    assert edited.supersedes_id == original.id
+
+
+def test_in_memory_edit_supersedes_every_destination_fact() -> None:
+    now = datetime.now(timezone.utc)
+    destinations = [
+        KnowledgeFact(
+            id=f"destination-{index}",
+            organization_id="org-1",
+            scope_type="user",
+            scope_id="user-1",
+            kind="fact",
+            key="location",
+            answer=value,
+            visibility="private",
+            created_by="user-1",
+            created_at=now,
+            updated_at=now,
+        )
+        for index, value in enumerate(("Tokyo", "Kyoto"), start=1)
+    ]
+    store = InMemoryKnowledgeStore(facts=destinations)
+    original = store.remember_fact(
+        scope_type="user",
+        scope_id="user-1",
+        key="timezone",
+        value_json={"text": "Asia/Tokyo"},
+        visibility="private",
+        source_type="request",
+        source_ref="original",
+        source_excerpt=None,
+        created_by="user-1",
+        verification_status="user_confirmed",
+        organization_id="org-1",
+    )
+
+    edited = store.remember_fact(
+        scope_type="user",
+        scope_id="user-1",
+        key="location",
+        value_json={"text": "Osaka"},
+        visibility="private",
+        source_type="request",
+        source_ref="edit",
+        source_excerpt=None,
+        created_by="user-1",
+        verification_status="user_confirmed",
+        organization_id="org-1",
+        replaces_id=original.id,
+    )
+
+    active = store.list_facts(
+        scope_type="user",
+        scope_id="user-1",
+        visible_to_user_id="user-1",
+        visible_to_project_id=None,
+        visible_to_org_id="org-1",
+    )
+    assert [fact.id for fact in active] == [edited.id]
+    assert edited.supersedes_id == original.id
+
+
+def test_postgres_edit_selects_replaced_and_destination_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    replaced_id = "11111111-1111-1111-1111-111111111111"
+    noncanonical_replaced_id = "11111111111111111111111111111111"
+    destination_id = "22222222-2222-2222-2222-222222222222"
+    cursor = _FakeCursor(
+        selected_rows=[
+            {"id": replaced_id, "kind": "fact", "created_by": "user-1"},
+            {"id": destination_id, "kind": "fact", "created_by": "user-1"},
+        ]
+    )
+    connection = _FakeConnection(cursor)
+    monkeypatch.setattr(
+        knowledge_store,
+        "get_postgres_connection",
+        lambda _settings, **_kwargs: connection,
+    )
+    fact = PostgresKnowledgeStore(SimpleNamespace()).remember_fact(
+        scope_type="user",
+        scope_id="user-1",
+        key="location",
+        value_json={"text": "Tokyo"},
+        visibility="private",
+        source_type="request",
+        source_ref="edit",
+        source_excerpt=None,
+        created_by="user-1",
+        verification_status="user_confirmed",
+        organization_id="org-1",
+        replaces_id=noncanonical_replaced_id,
+    )
+
+    select_query, select_params = next(
+        call for call in cursor.calls if "SELECT * FROM memory_facts" in call[0]
+    )
+    assert "%s::uuid IS NULL AND kind = 'fact'" not in select_query
+    assert select_params is not None
+    assert select_params[3:5] == (
+        noncanonical_replaced_id,
+        noncanonical_replaced_id,
+    )
+    update_params = next(
+        params
+        for query, params in cursor.calls
+        if "UPDATE memory_facts SET status = 'superseded'" in query
+    )
+    assert update_params is not None
+    assert update_params[1] == [replaced_id, destination_id]
+    assert fact.supersedes_id == replaced_id
+
+
+def test_in_memory_edit_cannot_replace_captured_knowledge() -> None:
+    now = datetime.now(timezone.utc)
+    captured = KnowledgeFact(
+        id="captured-answer",
+        organization_id="org-1",
+        scope_type="user",
+        scope_id="user-1",
+        kind="qa",
+        key="location",
+        question="Where is the meetup?",
+        answer="Tokyo",
+        visibility="private",
+        created_by="user-1",
+        created_at=now,
+        updated_at=now,
+    )
+    store = InMemoryKnowledgeStore(facts=[captured])
+
+    with pytest.raises(PermissionError, match="unavailable or not owned"):
+        store.remember_fact(
+            scope_type="user",
+            scope_id="user-1",
+            key="location",
+            value_json={"text": "Osaka"},
+            visibility="private",
+            source_type="request",
+            source_ref="edit",
+            source_excerpt=None,
+            created_by="user-1",
+            verification_status="user_confirmed",
+            organization_id="org-1",
+            replaces_id=captured.id,
+        )
+
+    active = store.list_facts(
+        scope_type="user",
+        scope_id="user-1",
+        visible_to_user_id="user-1",
+        visible_to_project_id=None,
+        visible_to_org_id="org-1",
+    )
+    assert [fact.id for fact in active] == [captured.id]
+
+
+def test_postgres_edit_cannot_replace_captured_knowledge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_id = "11111111-1111-1111-1111-111111111111"
+    cursor = _FakeCursor(
+        selected_rows=[
+            {"id": captured_id, "kind": "qa", "created_by": "user-1"},
+        ]
+    )
+    monkeypatch.setattr(
+        knowledge_store,
+        "get_postgres_connection",
+        lambda _settings, **_kwargs: _FakeConnection(cursor),
+    )
+
+    with pytest.raises(PermissionError, match="unavailable or not owned"):
+        PostgresKnowledgeStore(SimpleNamespace()).remember_fact(
+            scope_type="user",
+            scope_id="user-1",
+            key="location",
+            value_json={"text": "Osaka"},
+            visibility="private",
+            source_type="request",
+            source_ref="edit",
+            source_excerpt=None,
+            created_by="user-1",
+            verification_status="user_confirmed",
+            organization_id="org-1",
+            replaces_id=captured_id,
+        )
+
+    select_query = next(
+        query for query, _ in cursor.calls if "SELECT * FROM memory_facts" in query
+    )
+    assert "AND kind = 'fact' AND status = 'active'" in select_query
+    assert not any(
+        "UPDATE memory_facts" in query or "INSERT INTO memory_facts" in query
+        for query, _ in cursor.calls
+    )
+
+
 def test_postgres_semantic_fallback_honors_smaller_candidate_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -168,3 +480,26 @@ def test_postgres_semantic_fallback_honors_smaller_candidate_limit(
     assert fallback_params is not None
     assert fallback_params[-1] == 4
     assert evidence == []
+
+
+def test_postgres_memory_cleanup_targets_the_unified_memory_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = _FakeConnection()
+    connection.cursor_instance.rowcount = 3
+    monkeypatch.setattr(
+        knowledge_store,
+        "get_postgres_connection",
+        lambda _settings, **_kwargs: connection,
+    )
+    now = datetime(2026, 9, 20, 0, 0, tzinfo=timezone.utc)
+
+    purged = PostgresKnowledgeStore(SimpleNamespace()).purge_expired_all_organizations(
+        now=now
+    )
+
+    query, params = connection.cursor_instance.calls[-1]
+    assert "DELETE FROM memory_facts" in query
+    assert "status = 'deleted'" in query
+    assert params == (now,)
+    assert purged == 3
