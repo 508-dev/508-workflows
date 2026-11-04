@@ -802,8 +802,8 @@ def pause_agent_schedule(
                 # A pause must fence any occurrence that has not reserved a
                 # Discord delivery. This happens in the same transaction as
                 # the lifecycle update, so a following resume cannot make an
-                # already-queued or in-flight read run deliver after the
-                # intervening pause.
+                # already-queued, in-flight, or retryable failed run deliver
+                # after the intervening pause.
                 cursor.execute(
                     """
                     UPDATE agent_schedule_runs
@@ -812,7 +812,7 @@ def pause_agent_schedule(
                         finished_at = NOW(),
                         updated_at = NOW()
                     WHERE schedule_id = %s
-                      AND status IN ('queued', 'running')
+                      AND status IN ('queued', 'running', 'failed')
                       AND delivery_status = %s
                     """,
                     (

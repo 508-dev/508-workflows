@@ -429,7 +429,7 @@ def test_archiving_schedule_releases_its_creation_operation_key(
     assert params == ("archived", "00000000-0000-4000-8000-000000000010", "1000")
 
 
-def test_pausing_schedule_cancels_undelivered_queued_and_running_runs(
+def test_pausing_schedule_fences_undelivered_queued_running_and_failed_runs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A later resume cannot revive work that an intervening pause fenced."""
@@ -480,7 +480,7 @@ def test_pausing_schedule_cancels_undelivered_queued_and_running_runs(
     assert "UPDATE agent_schedules" in lifecycle_query
     assert lifecycle_params == ("paused", schedule_id, "1000")
     assert "UPDATE agent_schedule_runs" in cancellation_query
-    assert "status IN ('queued', 'running')" in cancellation_query
+    assert "status IN ('queued', 'running', 'failed')" in cancellation_query
     assert "delivery_status = %s" in cancellation_query
     assert cancellation_params == (
         "skipped",
