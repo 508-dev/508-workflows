@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from io import BytesIO
 from types import SimpleNamespace
 
 import five08.job_lead_sources as job_lead_sources
@@ -678,6 +679,93 @@ def test_hacker_news_source_rejects_seeking_work_before_classifier() -> None:
     )
 
     assert source.collect() == []
+
+
+def test_himalayas_source_pages_and_preserves_application_link(monkeypatch) -> None:
+    class Response(BytesIO):
+        status = 200
+
+    calls: list[str] = []
+
+    def fake_urlopen(request, *, timeout):  # noqa: ANN001, ANN202
+        import json
+
+        assert timeout == 15.0
+        calls.append(request.full_url)
+        job = {
+            "guid": "https://himalayas.app/companies/acme/jobs/contract-engineer",
+            "applicationLink": "https://himalayas.app/companies/acme/jobs/contract-engineer?utm_source=api",
+            "title": "Contract Engineer",
+            "companyName": "Acme",
+            "employmentType": "Contractor",
+            "description": "<p>Build APIs</p>",
+            "pubDate": 1793970010,
+            "expiryDate": 1893970010,
+            "locationRestrictions": [],
+        }
+        jobs = [job] * 20 if len(calls) == 1 else [job]
+        return Response(json.dumps({"jobs": jobs}).encode())
+
+    monkeypatch.setattr(job_lead_sources, "urlopen", fake_urlopen)
+    source = job_lead_sources.HimalayasRemoteJobsLeadSource()
+    leads = source.collect()
+
+    assert len(calls) == 2
+    assert len(leads) == 1
+    assert leads[0].apply_url.endswith("?utm_source=api")
+    assert leads[0].source_url == leads[0].external_id
+    assert leads[0].posting_type is JobPostingType.PART_TIME
+    assert source.collection_report()["included"] == 1
+
+
+def test_himalayas_job_check_uses_api_and_recognizes_closed(monkeypatch) -> None:
+    from urllib.error import HTTPError
+
+    def closed(request, *, timeout):  # noqa: ANN001, ANN202
+        assert (
+            request.full_url
+            == "https://himalayas.app/jobs/api/companies/acme/jobs/role"
+        )
+        raise HTTPError(request.full_url, 410, "closed", {}, None)
+
+    monkeypatch.setattr(job_lead_sources, "urlopen", closed)
+    assert (
+        job_lead_sources.himalayas_job_is_open(
+            "https://himalayas.app/companies/acme/jobs/role"
+        )
+        is False
+    )
+
+
+def test_himalayas_source_does_not_queue_expired_job(monkeypatch) -> None:
+    import json
+
+    class Response(BytesIO):
+        status = 200
+
+    def fake_urlopen(_request, *, timeout):  # noqa: ANN001, ANN202
+        assert timeout == 15.0
+        return Response(
+            json.dumps(
+                {
+                    "jobs": [
+                        {
+                            "guid": "https://himalayas.app/companies/acme/jobs/old-role",
+                            "applicationLink": "https://himalayas.app/companies/acme/jobs/old-role?utm_source=api",
+                            "title": "Old role",
+                            "employmentType": "Contractor",
+                            "expiryDate": 1700000000,
+                        }
+                    ]
+                }
+            ).encode()
+        )
+
+    monkeypatch.setattr(job_lead_sources, "urlopen", fake_urlopen)
+    source = job_lead_sources.HimalayasRemoteJobsLeadSource()
+
+    assert source.collect() == []
+    assert source.collection_report()["filter_reasons"]["expired"] == 1
 
 
 def test_classifier_falls_back_without_second_llm_call_after_provider_failure() -> None:

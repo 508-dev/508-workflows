@@ -5614,6 +5614,56 @@ def test_dashboard_sync_job_leads_rejects_unsupported_source(
     mock_enqueue.assert_not_called()
 
 
+def test_dashboard_sync_job_leads_accepts_himalayas_without_story_id(
+    client: TestClient,
+) -> None:
+    session = _dashboard_write_session()
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api.enqueue_job",
+            return_value=Mock(id="job-himalayas-1", created=True),
+        ) as mock_enqueue,
+        patch("five08.backend.api.insert_audit_event"),
+    ):
+        response = client.post(
+            "/dashboard/api/gig-leads/sync",
+            json={"source": "himalayas_remote_jobs"},
+        )
+
+    assert response.status_code == 202
+    assert response.json()["source"] == "himalayas_remote_jobs"
+    assert mock_enqueue.call_args.kwargs["kwargs"] == {
+        "source": "himalayas_remote_jobs",
+        "story_id": None,
+    }
+
+
+def test_dashboard_sync_job_leads_rejects_himalayas_story_id(
+    client: TestClient,
+) -> None:
+    session = _dashboard_write_session()
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.enqueue_job") as mock_enqueue,
+    ):
+        response = client.post(
+            "/dashboard/api/gig-leads/sync",
+            json={"source": "himalayas_remote_jobs", "story_id": 123},
+        )
+
+    assert response.status_code == 400
+    assert mock_enqueue.call_count == 0
+
+
 def test_dashboard_stage_job_lead_posts_to_holding_forum(
     client: TestClient,
 ) -> None:

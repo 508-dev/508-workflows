@@ -65,6 +65,7 @@ from five08.job_channels import (
     register_job_post_channel,
     unregister_job_post_channel,
 )
+from five08.job_lead_sources import HIMALAYAS_SOURCE_KEY, himalayas_job_is_open
 from five08.job_leads import (
     format_job_lead_review_summary,
     get_job_lead,
@@ -4135,6 +4136,16 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             }, 409
         if lead.status is not JobLeadStatus.PENDING:
             return {"error": "job_lead_not_pending", "lead_id": lead.id}, 409
+        if lead.source_key == HIMALAYAS_SOURCE_KEY:
+            try:
+                is_open = await asyncio.to_thread(
+                    himalayas_job_is_open, lead.source_url
+                )
+            except Exception as exc:
+                logger.warning("Failed checking Himalayas lead %s: %s", lead.id, exc)
+                return {"error": "job_lead_source_check_failed"}, 502
+            if not is_open:
+                return {"error": "job_lead_expired", "lead_id": lead.id}, 409
 
         (
             target_channel,
@@ -4313,6 +4324,17 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
             return {"error": "job_lead_rejected", "lead_id": current.id}, 409
         if current.status is not JobLeadStatus.APPROVED:
             return {"error": "job_lead_not_approved", "lead_id": current.id}, 409
+
+        if current.source_key == HIMALAYAS_SOURCE_KEY:
+            try:
+                is_open = await asyncio.to_thread(
+                    himalayas_job_is_open, current.source_url
+                )
+            except Exception as exc:
+                logger.warning("Failed checking Himalayas lead %s: %s", current.id, exc)
+                return {"error": "job_lead_source_check_failed"}, 502
+            if not is_open:
+                return {"error": "job_lead_expired", "lead_id": current.id}, 409
 
         lead = current
 
@@ -4567,6 +4589,8 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
                 message = "⚠️ This lead was rejected and cannot be posted."
             elif error == "job_lead_not_approved":
                 message = "⚠️ This lead must be qualified in the dashboard first."
+            elif error == "job_lead_expired":
+                message = "⚠️ This job is no longer open on Himalayas."
             else:
                 message = "❌ Failed to promote this job lead."
             await interaction.followup.send(

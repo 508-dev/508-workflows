@@ -5534,8 +5534,17 @@ async def dashboard_sync_job_leads_handler(request: Request) -> JSONResponse:
         "hn",
         "hackernews",
         "hackernews_who_is_hiring",
+        "himalayas",
+        "himalayas_remote_jobs",
     }:
         return JSONResponse({"error": "unsupported_job_lead_source"}, status_code=400)
+    if payload.story_id is not None and normalized_source.casefold() in {
+        "himalayas",
+        "himalayas_remote_jobs",
+    }:
+        return JSONResponse(
+            {"error": "story_id_only_supported_for_hackernews"}, status_code=400
+        )
     now = datetime.now(tz=timezone.utc)
     job = await asyncio.to_thread(
         enqueue_job,

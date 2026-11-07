@@ -339,6 +339,8 @@ type JobLeadScrapeThread = {
     empty?: number
     seeking_work?: number
     not_contractor_friendly?: number
+    expired?: number
+    invalid_or_duplicate?: number
   }
 }
 
@@ -1797,9 +1799,10 @@ function App() {
     if (selectedGigId) await loadGigDetail(selectedGigId)
   }
 
-  async function syncGigLeads() {
+  async function syncGigLeads(source: "hackernews_who_is_hiring" | "himalayas_remote_jobs") {
+    const sourceLabel = source === "himalayas_remote_jobs" ? "Himalayas" : "HN"
     setBusy("gigLeadsSync", true)
-    showToast("Queueing HN lead scrape")
+    showToast(`Queueing ${sourceLabel} lead sync`)
     try {
       const payload = await requestJson<{
         job_id?: string
@@ -1809,30 +1812,32 @@ function App() {
       }>("/dashboard/api/gig-leads/sync", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ source: "hackernews_who_is_hiring" }),
+        body: JSON.stringify({ source }),
       })
       showToast(
-        payload.created === false ? "HN lead scrape already queued" : "HN lead scrape queued",
+        payload.created === false
+          ? `${sourceLabel} sync already queued`
+          : `${sourceLabel} sync queued`,
         "ok",
       )
       if (payload.job_id) {
         setGigLeadScrapeStatus({
           status: "queued",
           job_id: payload.job_id,
-          source: payload.source || "hackernews_who_is_hiring",
+          source: payload.source || source,
           story_id: payload.story_id || null,
           result: null,
         })
         try {
           await pollGigLeadSyncJob(payload.job_id)
         } catch (error) {
-          showError(error, "Unable to monitor HN lead scrape")
+          showError(error, `Unable to monitor ${sourceLabel} lead sync`)
         }
       } else {
         await loadGigLeads()
       }
     } catch (error) {
-      showError(error, "Unable to queue HN lead scrape")
+      showError(error, `Unable to queue ${sourceLabel} lead sync`)
     } finally {
       setBusy("gigLeadsSync", false)
     }
@@ -5688,14 +5693,17 @@ function JobLeadScrapeStatusPanel({
   loading: boolean
 }) {
   const result = status?.result
+  const isHimalayas = status?.source === "himalayas_remote_jobs" || status?.source === "himalayas"
   const threads = Array.isArray(result?.threads) ? result.threads : []
   const firstThread = threads[0]
-  const hasDiscoveryCounts = typeof result?.thread_found === "boolean"
+  const hasDiscoveryCounts = typeof result?.potential_gigs_scraped === "number"
   const filterReasons = result?.filter_reasons
   const filterDetails = [
     ["empty", filterReasons?.empty],
     ["seeking work", filterReasons?.seeking_work],
     ["not contractor-friendly", filterReasons?.not_contractor_friendly],
+    ["expired", filterReasons?.expired],
+    ["invalid or duplicate", filterReasons?.invalid_or_duplicate],
   ].filter(([, count]) => typeof count === "number" && count > 0) as Array<[string, number]>
   const normalizedStatus = String(status?.status || "")
     .trim()
@@ -5707,7 +5715,7 @@ function JobLeadScrapeStatusPanel({
     <Card id="gigLeadScrapeStatus">
       <CardHeader>
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <CardTitle>Hacker News scrape</CardTitle>
+          <CardTitle>{isHimalayas ? "Himalayas sync" : "Hacker News scrape"}</CardTitle>
           <Badge variant={jobLeadScrapeStatusTone(status?.status)}>{statusLabel}</Badge>
         </div>
         <span className="text-sm text-muted-foreground">
@@ -5724,9 +5732,7 @@ function JobLeadScrapeStatusPanel({
       </CardHeader>
       <CardContent className="grid gap-3 text-sm">
         {normalizedStatus === "not_run" ? (
-          <p className="text-muted-foreground">
-            Run “Scrape HN” to discover the current monthly Who is Hiring thread.
-          </p>
+          <p className="text-muted-foreground">Run a source sync to discover new job leads.</p>
         ) : null}
         {status?.last_error ? (
           <p className="rounded-md border border-red-400/40 bg-red-500/10 p-3 text-red-200">
@@ -5744,7 +5750,11 @@ function JobLeadScrapeStatusPanel({
         ) : null}
         {hasDiscoveryCounts ? (
           <>
-            {result?.thread_found && firstThread ? (
+            {isHimalayas ? (
+              <p className="text-muted-foreground">
+                Recent remote contractor and part-time jobs from Himalayas.
+              </p>
+            ) : result?.thread_found && firstThread ? (
               <div className="grid gap-1">
                 {firstThread.url ? (
                   <a
@@ -5773,9 +5783,11 @@ function JobLeadScrapeStatusPanel({
 
             <dl className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
               <div className="rounded-md border bg-background p-3">
-                <dt className="text-xs font-bold text-muted-foreground">HN comments</dt>
+                <dt className="text-xs font-bold text-muted-foreground">
+                  {isHimalayas ? "Source" : "HN comments"}
+                </dt>
                 <dd id="gigLeadScrapeComments" className="text-lg font-extrabold">
-                  {scrapeCount(firstThread?.comments_reported)}
+                  {isHimalayas ? "Himalayas" : scrapeCount(firstThread?.comments_reported)}
                 </dd>
               </div>
               <div className="rounded-md border bg-background p-3">
@@ -5808,7 +5820,7 @@ function JobLeadScrapeStatusPanel({
                 Filtered: {filterDetails.map(([label, count]) => `${count} ${label}`).join(", ")}.
               </p>
             ) : null}
-            {result?.thread_found && result.potential_gigs_scraped === 0 ? (
+            {!isHimalayas && result?.thread_found && result.potential_gigs_scraped === 0 ? (
               <p className="text-muted-foreground">
                 The monthly thread was found, but it has no top-level employer posts yet. Re-run the
                 scrape as posts arrive.
@@ -5868,7 +5880,7 @@ function GigsView(props: {
   onUpdateStatus: (gigId: string, status: string) => void
   onAddApplication: (gigId: string, crmProfile: string) => Promise<boolean>
   onUpdateApplicationStatus: (gigId: string, applicationId: string, status: string) => void
-  onSyncLeads: () => void
+  onSyncLeads: (source: "hackernews_who_is_hiring" | "himalayas_remote_jobs") => void
   onReviewLead: (leadId: string, status: JobLeadReviewStatus) => void
   onStageLead: (leadId: string) => void
   onClearStagingRecovery: (leadId: string) => void
@@ -5963,15 +5975,26 @@ function GigsView(props: {
             Refresh
           </Button>
           {props.canManageLeads ? (
-            <Button
-              id="syncGigLeads"
-              type="button"
-              onClick={props.onSyncLeads}
-              disabled={props.loading.gigLeadsSync}
-            >
-              <RefreshCw />
-              Scrape HN
-            </Button>
+            <div className="flex gap-2">
+              <Button
+                id="syncGigLeads"
+                type="button"
+                onClick={() => props.onSyncLeads("hackernews_who_is_hiring")}
+                disabled={props.loading.gigLeadsSync}
+              >
+                <RefreshCw />
+                Scrape HN
+              </Button>
+              <Button
+                id="syncHimalayasLeads"
+                type="button"
+                onClick={() => props.onSyncLeads("himalayas_remote_jobs")}
+                disabled={props.loading.gigLeadsSync}
+              >
+                <RefreshCw />
+                Sync Himalayas
+              </Button>
+            </div>
           ) : null}
         </div>
       ) : (

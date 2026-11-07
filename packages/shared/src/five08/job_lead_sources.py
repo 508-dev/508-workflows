@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from typing import Any, Literal, Protocol
+from urllib.error import HTTPError
 from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
@@ -39,6 +40,33 @@ HN_FIREBASE_BASE_URL = "https://hacker-news.firebaseio.com/v0"
 HN_ALGOLIA_BASE_URL = "https://hn.algolia.com/api/v1"
 HN_WHO_IS_HIRING_SOURCE_KEY = "hackernews_who_is_hiring"
 HN_WHO_IS_HIRING_SOURCE_TYPE = "hackernews"
+HIMALAYAS_SOURCE_KEY = "himalayas_remote_jobs"
+HIMALAYAS_API_URL = "https://himalayas.app/jobs/api/search"
+HIMALAYAS_MAX_PAGES = 5
+
+
+def himalayas_job_is_open(source_url: str, *, timeout_seconds: float = 15.0) -> bool:
+    """Use Himalayas' documented single-job endpoint before publishing a lead."""
+    parsed = urlsplit(source_url)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != "himalayas.app"
+        or not parsed.path.startswith("/companies/")
+    ):
+        raise ValueError("Invalid Himalayas job URL")
+    request = Request(
+        f"https://himalayas.app/jobs/api{parsed.path}",
+        headers={"User-Agent": "508-workflows-job-leads/1.0"},
+    )
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:
+            return response.status == 200
+    except HTTPError as exc:
+        if exc.code in {404, 410}:
+            return False
+        raise
+
+
 DEFAULT_JOB_LEAD_CLASSIFIER_MODEL = "gpt-4.1-mini"
 
 _WHO_IS_HIRING_TITLE_RE = re.compile(
@@ -969,6 +997,140 @@ class HackerNewsWhoIsHiringLeadSource:
         }
 
 
+class HimalayasRemoteJobsLeadSource:
+    """Collect recent contractor and part-time roles from the public jobs API."""
+
+    source_key = HIMALAYAS_SOURCE_KEY
+
+    def __init__(
+        self, *, timeout_seconds: float = 15.0, max_pages: int = HIMALAYAS_MAX_PAGES
+    ) -> None:
+        self.timeout_seconds = timeout_seconds
+        self.max_pages = max_pages
+        self.scanned = 0
+        self.expired = 0
+        self.pages = 0
+        self.included = 0
+
+    def collect(self) -> list[JobLeadInput]:
+        leads: list[JobLeadInput] = []
+        seen: set[str] = set()
+        self.scanned = self.expired = self.pages = self.included = 0
+        now = datetime.now(timezone.utc)
+        for page in range(1, self.max_pages + 1):
+            params = urlencode(
+                {
+                    "employment_type": "Contractor,Part Time",
+                    "sort": "recent",
+                    "page": page,
+                }
+            )
+            request = Request(
+                f"{HIMALAYAS_API_URL}?{params}",
+                headers={"User-Agent": "508-workflows-job-leads/1.0"},
+            )
+            with urlopen(request, timeout=self.timeout_seconds) as response:
+                payload = json.load(response)
+            jobs = payload.get("jobs")
+            if not isinstance(jobs, list):
+                raise ValueError("Himalayas jobs API returned an invalid jobs list")
+            self.pages += 1
+            if not jobs:
+                break
+            for job in jobs:
+                self.scanned += 1
+                if not isinstance(job, dict):
+                    continue
+                guid = job.get("guid")
+                apply_url = job.get("applicationLink")
+                title = job.get("title")
+                employment_type = job.get("employmentType")
+                expiry = _parse_datetime(job.get("expiryDate"))
+                if expiry is not None and expiry <= now:
+                    self.expired += 1
+                    continue
+                if (
+                    not isinstance(guid, str)
+                    or not isinstance(apply_url, str)
+                    or not isinstance(title, str)
+                    or employment_type not in {"Contractor", "Part Time"}
+                    or urlsplit(guid).scheme != "https"
+                    or urlsplit(guid).hostname != "himalayas.app"
+                    or urlsplit(apply_url).scheme != "https"
+                    or urlsplit(apply_url).hostname != "himalayas.app"
+                    or guid in seen
+                ):
+                    continue
+                seen.add(guid)
+                body_raw = str(job.get("description") or job.get("excerpt") or "")
+                body = html_to_text(body_raw)
+                posting_type = JobPostingType.PART_TIME
+                locations = job.get("locationRestrictions")
+                location = (
+                    ", ".join(str(value) for value in locations)
+                    if isinstance(locations, list) and locations
+                    else "Worldwide"
+                )
+                leads.append(
+                    JobLeadInput(
+                        source_key=self.source_key,
+                        source_type="himalayas",
+                        external_id=guid,
+                        source_url=guid,
+                        source_posted_at=_parse_datetime(job.get("pubDate")),
+                        title=title,
+                        organization=str(job.get("companyName") or "") or None,
+                        body_raw=body_raw,
+                        body_normalized=body,
+                        posting_type=posting_type,
+                        location=location,
+                        remote=True,
+                        apply_url=apply_url,
+                        tags=[
+                            "remote",
+                            "contract"
+                            if employment_type == "Contractor"
+                            else "part-time",
+                        ],
+                        confidence=1.0,
+                        metadata={
+                            "himalayas_expiry_date": expiry.isoformat()
+                            if expiry
+                            else None,
+                            "contractor_classification": {
+                                "is_contractor_friendly": True,
+                                "posting_type": posting_type.value,
+                                "tags": [
+                                    "contract"
+                                    if employment_type == "Contractor"
+                                    else "part-time"
+                                ],
+                                "confidence": 1.0,
+                                "confidence_label": "high",
+                                "rationale": f"Himalayas employmentType is {employment_type}.",
+                                "method": "heuristic",
+                            },
+                        },
+                    )
+                )
+                self.included += 1
+            if len(jobs) < 20:
+                break
+        return leads
+
+    def collection_report(self) -> dict[str, Any]:
+        return {
+            "potential_gigs_scraped": self.scanned,
+            "included": self.included,
+            "filtered_out": self.scanned - self.included,
+            "filter_reasons": {
+                "expired": self.expired,
+                "invalid_or_duplicate": self.scanned - self.included - self.expired,
+            },
+            "pages_scanned": self.pages,
+        }
+
+
 def build_job_lead_source(
     source: str,
     *,
@@ -984,6 +1146,10 @@ def build_job_lead_source(
             story_id=story_id,
             include_non_contractor=include_non_contractor,
         )
+    if normalized in {"himalayas", HIMALAYAS_SOURCE_KEY}:
+        if story_id is not None:
+            raise ValueError("story_id is only supported for Hacker News")
+        return HimalayasRemoteJobsLeadSource()
     raise ValueError(f"Unsupported job lead source: {source}")
 
 
