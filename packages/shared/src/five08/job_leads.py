@@ -671,6 +671,7 @@ def list_job_leads(
     *,
     status: JobLeadStatus | str | None = JobLeadStatus.PENDING,
     limit: int = 10,
+    source_key: str | None = None,
 ) -> list[JobLead]:
     """List recent job leads for review."""
     conditions: list[str] = []
@@ -678,6 +679,9 @@ def list_job_leads(
     if status is not None:
         conditions.append("status = %s")
         params.append(_normalize_status(status).value)
+    if source_key is not None:
+        conditions.append("job_leads.source_key = %s")
+        params.append(source_key)
     where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     query = f"""
         SELECT job_leads.*, linked_engagement.id::text AS engagement_id

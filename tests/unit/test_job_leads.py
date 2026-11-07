@@ -446,6 +446,24 @@ def test_list_job_leads_filters_pending(monkeypatch) -> None:
     assert cursor.executed[0][1] == ("pending", 5)
 
 
+def test_list_job_leads_filters_source_before_limit(monkeypatch) -> None:
+    cursor = _CursorStub(rows=[_lead_row(source_key="a16z_talent_network")])
+    _install_connection_stub(monkeypatch, cursor)
+
+    result = job_leads.list_job_leads(
+        job_leads.SharedSettings(),
+        status=JobLeadStatus.PENDING,
+        source_key="a16z_talent_network",
+        limit=5,
+    )
+
+    assert len(result) == 1
+    query, params = cursor.executed[0]
+    assert "job_leads.source_key = %s" in query
+    assert query.index("job_leads.source_key = %s") < query.index("LIMIT %s")
+    assert params == ("pending", "a16z_talent_network", 5)
+
+
 def test_display_payload_explains_employment_type_and_contact() -> None:
     row = _lead_row(
         posting_type="part_time",

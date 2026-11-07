@@ -351,6 +351,17 @@ _PROJECT_ROSTER_USER_CANDIDATE_CACHE_LOCK = threading.RLock()
 _PROJECT_ROSTER_USER_CANDIDATE_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _JOB_LEAD_SCRAPE_JOB_TYPE = "scrape_job_leads_job"
 _JOB_LEAD_SCRAPE_STATUS_LOOKBACK_DAYS = 366
+_JOB_LEAD_SOURCE_ALIASES = {
+    "hn": "hackernews_who_is_hiring",
+    "hackernews": "hackernews_who_is_hiring",
+    "hackernews_who_is_hiring": "hackernews_who_is_hiring",
+    "himalayas": "himalayas_remote_jobs",
+    "himalayas_remote_jobs": "himalayas_remote_jobs",
+    "a16z": "a16z_talent_network",
+    "a16z_talent_network": "a16z_talent_network",
+    "sequoia": "sequoia_portfolio_ats",
+    "sequoia_portfolio_ats": "sequoia_portfolio_ats",
+}
 
 
 @dataclass(frozen=True)
@@ -1517,7 +1528,7 @@ async def _post_job_lead_to_discord(
                 "tags": tags,
                 "engagement_status": engagement_status.value,
             },
-            timeout=15.0,
+            timeout=30.0,
         )
     except httpx.HTTPError as exc:
         logger.warning("Failed posting job lead %s to Discord: %s", lead_id, exc)
@@ -1559,7 +1570,7 @@ async def _stage_job_lead_to_discord(
                 "lead_id": lead_id,
                 "reviewer_discord_user_id": reviewer_discord_user_id,
             },
-            timeout=15.0,
+            timeout=30.0,
         )
     except httpx.HTTPError as exc:
         logger.warning("Failed staging job lead %s in Discord: %s", lead_id, exc)
@@ -2687,13 +2698,15 @@ def _dashboard_job_payload(job: Any) -> dict[str, Any]:
 
 def _dashboard_job_lead_scrape_status_payload(
     job: JobRecord | None,
+    *,
+    source: str = "hackernews_who_is_hiring",
 ) -> dict[str, Any]:
-    """Return a Gigs-scoped view of the latest HN scrape background job."""
+    """Return a Gigs-scoped view of one job lead sync."""
     if job is None:
         return {
             "status": "not_run",
             "job_id": None,
-            "source": "hackernews_who_is_hiring",
+            "source": source,
             "story_id": None,
             "created_at": None,
             "updated_at": None,
@@ -5206,6 +5219,7 @@ async def dashboard_job_leads_handler(
     request: Request,
     status: str | None = Query(default="pending"),
     limit: int = Query(default=50, ge=1, le=50),
+    source: str | None = Query(default=None),
 ) -> JSONResponse:
     """Return sourced job leads for dashboard review."""
     session, error_response = await _dashboard_session_or_error(
@@ -5220,6 +5234,16 @@ async def dashboard_job_leads_handler(
         return steering_error
 
     normalized_status: JobLeadStatus | None
+    normalized_source = source.strip() if source is not None else None
+    if normalized_source == "":
+        normalized_source = None
+    if normalized_source is not None and normalized_source not in {
+        "hackernews_who_is_hiring",
+        "himalayas_remote_jobs",
+        "a16z_talent_network",
+        "sequoia_portfolio_ats",
+    }:
+        return JSONResponse({"error": "invalid_source"}, status_code=400)
     if status is None or status.strip().casefold() in {"", "all", "any"}:
         normalized_status = None
     else:
@@ -5228,12 +5252,10 @@ async def dashboard_job_leads_handler(
         except ValueError:
             return JSONResponse({"error": "invalid_status"}, status_code=400)
 
-    leads = await asyncio.to_thread(
-        list_job_leads,
-        settings,
-        status=normalized_status,
-        limit=limit,
-    )
+    list_kwargs: dict[str, Any] = {"status": normalized_status, "limit": limit}
+    if normalized_source is not None:
+        list_kwargs["source_key"] = normalized_source
+    leads = await asyncio.to_thread(list_job_leads, settings, **list_kwargs)
     return JSONResponse(
         jsonable_encoder([job_lead_display_payload(lead) for lead in leads])
     )
@@ -5242,8 +5264,9 @@ async def dashboard_job_leads_handler(
 async def dashboard_job_lead_scrape_status_handler(
     request: Request,
     job_id: str | None = Query(default=None),
+    source: str | None = Query(default=None),
 ) -> JSONResponse:
-    """Return the latest, or one requested, HN scrape status for the Gigs view."""
+    """Return the latest lead sync status for one source or job ID."""
     session, error_response = await _dashboard_session_or_error(
         request,
         required_permission=DASHBOARD_PERMISSION_GIGS_READ,
@@ -5256,6 +5279,15 @@ async def dashboard_job_lead_scrape_status_handler(
         return steering_error
 
     normalized_job_id = job_id.strip() if job_id is not None else ""
+    normalized_source = source.strip() if source is not None else None
+    if normalized_source not in {
+        None,
+        "hackernews_who_is_hiring",
+        "himalayas_remote_jobs",
+        "a16z_talent_network",
+        "sequoia_portfolio_ats",
+    }:
+        return JSONResponse({"error": "invalid_source"}, status_code=400)
     if job_id is not None and not normalized_job_id:
         return JSONResponse({"error": "job_id_required"}, status_code=400)
 
@@ -5264,18 +5296,27 @@ async def dashboard_job_lead_scrape_status_handler(
         if job is None or job.type != _JOB_LEAD_SCRAPE_JOB_TYPE:
             return JSONResponse({"error": "job_not_found"}, status_code=404)
     else:
-        jobs = await asyncio.to_thread(
-            list_jobs,
-            settings,
-            created_after=datetime.now(tz=timezone.utc)
+        query_kwargs: dict[str, Any] = {
+            "created_after": datetime.now(tz=timezone.utc)
             - timedelta(days=_JOB_LEAD_SCRAPE_STATUS_LOOKBACK_DAYS),
-            limit=1,
-            job_type=_JOB_LEAD_SCRAPE_JOB_TYPE,
-        )
+            "limit": 1,
+            "job_type": _JOB_LEAD_SCRAPE_JOB_TYPE,
+        }
+        if normalized_source is not None:
+            query_kwargs["payload_sources"] = tuple(
+                alias
+                for alias, canonical in _JOB_LEAD_SOURCE_ALIASES.items()
+                if canonical == normalized_source
+            )
+        jobs = await asyncio.to_thread(list_jobs, settings, **query_kwargs)
         job = jobs[0] if jobs else None
 
     return JSONResponse(
-        jsonable_encoder(_dashboard_job_lead_scrape_status_payload(job))
+        jsonable_encoder(
+            _dashboard_job_lead_scrape_status_payload(
+                job, source=normalized_source or "hackernews_who_is_hiring"
+            )
+        )
     )
 
 
@@ -5529,13 +5570,14 @@ async def dashboard_sync_job_leads_handler(request: Request) -> JSONResponse:
     except Exception:
         return JSONResponse({"error": "invalid_payload"}, status_code=400)
 
-    normalized_source = payload.source.strip() or "hackernews_who_is_hiring"
-    if normalized_source.casefold() not in {
-        "hn",
-        "hackernews",
-        "hackernews_who_is_hiring",
-    }:
+    requested_source = payload.source.strip().casefold() or "hackernews_who_is_hiring"
+    normalized_source = _JOB_LEAD_SOURCE_ALIASES.get(requested_source)
+    if normalized_source is None:
         return JSONResponse({"error": "unsupported_job_lead_source"}, status_code=400)
+    if payload.story_id is not None and normalized_source != "hackernews_who_is_hiring":
+        return JSONResponse(
+            {"error": "story_id_only_supported_for_hackernews"}, status_code=400
+        )
     now = datetime.now(tz=timezone.utc)
     job = await asyncio.to_thread(
         enqueue_job,

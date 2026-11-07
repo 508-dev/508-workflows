@@ -79,6 +79,12 @@ describe("dashboard utility helpers", () => {
     expect(messageForApiError({ error: "invalid_payload" }, "Request failed")).toBe(
       "The request contains invalid information. Refresh the page and try again.",
     )
+    expect(messageForApiError({ error: "job_lead_expired" }, "Request failed")).toContain(
+      "job is closed",
+    )
+    expect(
+      messageForApiError({ error: "job_lead_source_check_failed" }, "Request failed"),
+    ).toContain("Try again later")
   })
 
   it("keeps shared onboarding eligibility errors action-neutral", () => {

@@ -404,6 +404,7 @@ def list_jobs(
     limit: int,
     status: JobStatus | None = None,
     job_type: str | None = None,
+    payload_sources: tuple[str, ...] | None = None,
 ) -> list[JobRecord]:
     """Load recent jobs created after the given UTC datetime."""
     with get_postgres_connection(settings) as conn:
@@ -417,6 +418,9 @@ def list_jobs(
             if job_type is not None:
                 conditions.append("type = %s")
                 params.append(job_type)
+            if payload_sources is not None:
+                conditions.append("payload #>> '{kwargs,source}' = ANY(%s)")
+                params.append(list(payload_sources))
 
             where_clause = " AND ".join(conditions)
             query = f"""

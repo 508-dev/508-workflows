@@ -105,6 +105,12 @@ export function messageForApiError(record: Record<string, unknown>, fallback: st
   if (error === "invalid_payload") {
     return "The request contains invalid information. Refresh the page and try again."
   }
+  if (error === "job_lead_expired") {
+    return "This job is closed. Review the source listing and reject this lead."
+  }
+  if (error === "job_lead_source_check_failed") {
+    return "Could not confirm whether this job is still open. Try again later."
+  }
   if (error === "ambiguous_person") {
     return "Multiple people matched. Choose the matching person record."
   }
