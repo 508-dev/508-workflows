@@ -15,6 +15,7 @@ from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 from pydantic import BaseModel, ConfigDict, Field
+from lxml import html as lxml_html
 
 from five08.job_channels import JobPostingType
 from five08.job_leads import (
@@ -43,6 +44,63 @@ HN_WHO_IS_HIRING_SOURCE_TYPE = "hackernews"
 HIMALAYAS_SOURCE_KEY = "himalayas_remote_jobs"
 HIMALAYAS_API_URL = "https://himalayas.app/jobs/api/search"
 HIMALAYAS_MAX_PAGES = 5
+A16Z_SOURCE_KEY = "a16z_talent_network"
+SEQUOIA_SOURCE_KEY = "sequoia_portfolio_ats"
+A16Z_SEARCH_TERMS = ("contract", "contractor", "freelance", "part-time", "fractional")
+SEQUOIA_GREENHOUSE_BOARDS = {"Reddit": "reddit"}
+_GIG_TITLE_RE = re.compile(
+    r"\b(?:contract(?:or)?|freelanc(?:e|er)|fractional|part[ -]time)\b", re.I
+)
+
+
+def _title_is_gig(title: str) -> bool:
+    return bool(_GIG_TITLE_RE.search(title))
+
+
+def _curated_lead(
+    *,
+    source_key: str,
+    source_type: str,
+    source_url: str,
+    title: str,
+    organization: str,
+    location: str | None,
+    apply_url: str,
+    posted_at: datetime | None = None,
+) -> JobLeadInput:
+    tags = ["part-time" if re.search(r"\bpart[ -]time\b", title, re.I) else "contract"]
+    remote = bool(location and re.search(r"\bremote\b", location, re.I))
+    if remote:
+        tags.append("remote")
+    body = f"{title} at {organization}. Location: {location or 'unspecified'}. Apply: {apply_url}"
+    return JobLeadInput(
+        source_key=source_key,
+        source_type=source_type,
+        external_id=source_url,
+        source_url=source_url,
+        source_posted_at=posted_at,
+        title=title,
+        organization=organization,
+        body_raw=body,
+        body_normalized=body,
+        posting_type=JobPostingType.PART_TIME,
+        location=location,
+        remote=remote,
+        apply_url=apply_url,
+        tags=tags,
+        confidence=0.75,
+        metadata={
+            "contractor_classification": {
+                "is_contractor_friendly": True,
+                "posting_type": JobPostingType.PART_TIME.value,
+                "tags": tags,
+                "confidence": 0.75,
+                "confidence_label": "medium",
+                "rationale": "Gig employment term appears in the job title; verify during review.",
+                "method": "heuristic",
+            }
+        },
+    )
 
 
 def himalayas_job_is_open(source_url: str, *, timeout_seconds: float = 15.0) -> bool:
@@ -1131,6 +1189,148 @@ class HimalayasRemoteJobsLeadSource:
         }
 
 
+class A16zTalentLeadSource:
+    """Collect title-explicit gigs from bounded public a16z search results."""
+
+    source_key = A16Z_SOURCE_KEY
+
+    def __init__(self, *, timeout_seconds: float = 15.0) -> None:
+        self.timeout_seconds = timeout_seconds
+        self.scanned = 0
+        self.included = 0
+
+    def collect(self) -> list[JobLeadInput]:
+        leads: list[JobLeadInput] = []
+        seen: set[str] = set()
+        self.scanned = self.included = 0
+        for term in A16Z_SEARCH_TERMS:
+            request = Request(
+                f"https://jobs.a16z.com/jobs?{urlencode({'q': term})}",
+                headers={"User-Agent": "508-workflows-job-leads/1.0"},
+            )
+            with urlopen(request, timeout=self.timeout_seconds) as response:
+                document = lxml_html.fromstring(response.read())
+            cards = document.xpath("//article[.//h2/a]")
+            if not cards:
+                raise ValueError(f"a16z search returned no job cards for {term}")
+            for card in cards:
+                self.scanned += 1
+                title_links = card.xpath("./h2/a")
+                if not title_links:
+                    continue
+                title = title_links[0].text_content().strip()
+                path = title_links[0].get("href", "")
+                if not path.startswith("/jobs/") or not _title_is_gig(title):
+                    continue
+                source_url = f"https://jobs.a16z.com{path}"
+                if source_url in seen:
+                    continue
+                company_links = card.xpath("./div[@data-nosnippet='true']/a")
+                apply_links = card.xpath("./a[normalize-space()='Apply']")
+                if not company_links or not apply_links:
+                    continue
+                apply_url = apply_links[0].get("href", "")
+                if urlsplit(apply_url).scheme != "https":
+                    continue
+                location_nodes = card.xpath("./div[2]/span[1]/span")
+                location = (
+                    location_nodes[0].text_content().strip() if location_nodes else None
+                )
+                dates = card.xpath(".//time/@datetime | .//time/@dateTime")
+                leads.append(
+                    _curated_lead(
+                        source_key=self.source_key,
+                        source_type="a16z",
+                        source_url=source_url,
+                        title=title,
+                        organization=company_links[0].text_content().strip(),
+                        location=location,
+                        apply_url=apply_url,
+                        posted_at=_parse_datetime(dates[0]) if dates else None,
+                    )
+                )
+                seen.add(source_url)
+                self.included += 1
+        return leads
+
+    def collection_report(self) -> dict[str, Any]:
+        return {
+            "potential_gigs_scraped": self.scanned,
+            "included": self.included,
+            "filtered_out": self.scanned - self.included,
+            "filter_reasons": {"invalid_or_duplicate": self.scanned - self.included},
+            "searches_scanned": len(A16Z_SEARCH_TERMS),
+        }
+
+
+class SequoiaPortfolioATSLeadSource:
+    """Collect roles from public ATS feeds for a curated Sequoia portfolio subset."""
+
+    source_key = SEQUOIA_SOURCE_KEY
+
+    def __init__(self, *, timeout_seconds: float = 15.0) -> None:
+        self.timeout_seconds = timeout_seconds
+        self.scanned = 0
+        self.included = 0
+
+    def collect(self) -> list[JobLeadInput]:
+        leads: list[JobLeadInput] = []
+        self.scanned = self.included = 0
+        for company, board in SEQUOIA_GREENHOUSE_BOARDS.items():
+            request = Request(
+                f"https://boards-api.greenhouse.io/v1/boards/{board}/jobs",
+                headers={"User-Agent": "508-workflows-job-leads/1.0"},
+            )
+            with urlopen(request, timeout=self.timeout_seconds) as response:
+                payload = json.load(response)
+            jobs = payload.get("jobs")
+            if not isinstance(jobs, list):
+                raise ValueError(f"Invalid Greenhouse jobs list for {board}")
+            for job in jobs:
+                self.scanned += 1
+                if not isinstance(job, dict):
+                    continue
+                title = job.get("title")
+                source_url = job.get("absolute_url")
+                if not isinstance(title, str) or not _title_is_gig(title):
+                    continue
+                if (
+                    not isinstance(source_url, str)
+                    or urlsplit(source_url).scheme != "https"
+                    or urlsplit(source_url).hostname != "job-boards.greenhouse.io"
+                ):
+                    continue
+                location_data = job.get("location") or {}
+                location = (
+                    location_data.get("name")
+                    if isinstance(location_data, dict)
+                    else None
+                )
+                leads.append(
+                    _curated_lead(
+                        source_key=self.source_key,
+                        source_type="sequoia_portfolio_ats",
+                        source_url=source_url,
+                        title=title,
+                        organization=company,
+                        location=location if isinstance(location, str) else None,
+                        apply_url=source_url,
+                        posted_at=_parse_datetime(job.get("updated_at")),
+                    )
+                )
+                self.included += 1
+        return leads
+
+    def collection_report(self) -> dict[str, Any]:
+        return {
+            "potential_gigs_scraped": self.scanned,
+            "included": self.included,
+            "filtered_out": self.scanned - self.included,
+            "filter_reasons": {"invalid_or_duplicate": self.scanned - self.included},
+            "portfolio_companies_scanned": len(SEQUOIA_GREENHOUSE_BOARDS),
+        }
+
+
 def build_job_lead_source(
     source: str,
     *,
@@ -1150,6 +1350,14 @@ def build_job_lead_source(
         if story_id is not None:
             raise ValueError("story_id is only supported for Hacker News")
         return HimalayasRemoteJobsLeadSource()
+    if normalized in {"a16z", A16Z_SOURCE_KEY}:
+        if story_id is not None:
+            raise ValueError("story_id is only supported for Hacker News")
+        return A16zTalentLeadSource()
+    if normalized in {"sequoia", SEQUOIA_SOURCE_KEY}:
+        if story_id is not None:
+            raise ValueError("story_id is only supported for Hacker News")
+        return SequoiaPortfolioATSLeadSource()
     raise ValueError(f"Unsupported job lead source: {source}")
 
 

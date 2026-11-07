@@ -5536,11 +5536,19 @@ async def dashboard_sync_job_leads_handler(request: Request) -> JSONResponse:
         "hackernews_who_is_hiring",
         "himalayas",
         "himalayas_remote_jobs",
+        "a16z",
+        "a16z_talent_network",
+        "sequoia",
+        "sequoia_portfolio_ats",
     }:
         return JSONResponse({"error": "unsupported_job_lead_source"}, status_code=400)
     if payload.story_id is not None and normalized_source.casefold() in {
         "himalayas",
         "himalayas_remote_jobs",
+        "a16z",
+        "a16z_talent_network",
+        "sequoia",
+        "sequoia_portfolio_ats",
     }:
         return JSONResponse(
             {"error": "story_id_only_supported_for_hackernews"}, status_code=400

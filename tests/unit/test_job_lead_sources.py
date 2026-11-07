@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from io import BytesIO
 from types import SimpleNamespace
 
+import pytest
+
 import five08.job_lead_sources as job_lead_sources
 from five08.job_lead_sources import (
     HackerNewsThread,
@@ -716,6 +718,80 @@ def test_himalayas_source_pages_and_preserves_application_link(monkeypatch) -> N
     assert leads[0].source_url == leads[0].external_id
     assert leads[0].posting_type is JobPostingType.PART_TIME
     assert source.collection_report()["included"] == 1
+
+
+def test_a16z_source_collects_title_matched_jobs_and_deduplicates(monkeypatch) -> None:
+    calls: list[str] = []
+    markup = b"""<html><body>
+    <article><div data-nosnippet="true"><a href="/jobs/acme">Acme</a></div>
+      <h2><a href="/jobs/acme/123--contract-engineer">Contract Engineer</a></h2>
+      <div><span><span>Remote, US</span></span><time dateTime="2026-10-29T16:59:01Z">Posted</time></div>
+      <a href="https://jobs.ashbyhq.com/acme/123/application">Apply</a></article>
+    <article><div data-nosnippet="true"><a href="/jobs/acme">Acme</a></div>
+      <h2><a href="/jobs/acme/456--full-time">Full-time Engineer</a></h2>
+      <a href="https://jobs.ashbyhq.com/acme/456/application">Apply</a></article>
+    </body></html>"""
+
+    def fake_urlopen(request, *, timeout):  # noqa: ANN001, ANN202
+        assert timeout == 15.0
+        calls.append(request.full_url)
+        return BytesIO(markup)
+
+    monkeypatch.setattr(job_lead_sources, "urlopen", fake_urlopen)
+    source = job_lead_sources.A16zTalentLeadSource()
+    leads = source.collect()
+
+    assert len(calls) == len(job_lead_sources.A16Z_SEARCH_TERMS)
+    assert len(leads) == 1
+    assert leads[0].organization == "Acme"
+    assert leads[0].apply_url == "https://jobs.ashbyhq.com/acme/123/application"
+    assert leads[0].remote is True
+    assert source.collection_report()["included"] == 1
+
+
+def test_sequoia_source_uses_public_portfolio_ats_and_filters_titles(
+    monkeypatch,
+) -> None:
+    import json
+
+    calls: list[str] = []
+    payload = {
+        "jobs": [
+            {
+                "title": "Community Manager (Contract)",
+                "absolute_url": "https://job-boards.greenhouse.io/reddit/jobs/123",
+                "location": {"name": "Remote"},
+            },
+            {
+                "title": "Full-time Engineer",
+                "absolute_url": "https://job-boards.greenhouse.io/reddit/jobs/456",
+            },
+        ]
+    }
+
+    def fake_urlopen(request, *, timeout):  # noqa: ANN001, ANN202
+        assert timeout == 15.0
+        calls.append(request.full_url)
+        return BytesIO(json.dumps(payload).encode())
+
+    monkeypatch.setattr(job_lead_sources, "urlopen", fake_urlopen)
+    source = job_lead_sources.SequoiaPortfolioATSLeadSource()
+    leads = source.collect()
+
+    assert calls == ["https://boards-api.greenhouse.io/v1/boards/reddit/jobs"]
+    assert len(leads) == 1
+    assert leads[0].title == "Community Manager (Contract)"
+    assert leads[0].source_url == leads[0].apply_url
+    assert source.collection_report()["portfolio_companies_scanned"] == 1
+
+
+def test_a16z_source_reports_missing_job_cards(monkeypatch) -> None:
+    monkeypatch.setattr(
+        job_lead_sources, "urlopen", lambda *_args, **_kwargs: BytesIO(b"<html></html>")
+    )
+
+    with pytest.raises(ValueError, match="no job cards"):
+        job_lead_sources.A16zTalentLeadSource().collect()
 
 
 def test_himalayas_job_check_uses_api_and_recognizes_closed(monkeypatch) -> None:

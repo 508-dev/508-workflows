@@ -1799,8 +1799,19 @@ function App() {
     if (selectedGigId) await loadGigDetail(selectedGigId)
   }
 
-  async function syncGigLeads(source: "hackernews_who_is_hiring" | "himalayas_remote_jobs") {
-    const sourceLabel = source === "himalayas_remote_jobs" ? "Himalayas" : "HN"
+  async function syncGigLeads(
+    source:
+      | "hackernews_who_is_hiring"
+      | "himalayas_remote_jobs"
+      | "a16z_talent_network"
+      | "sequoia_portfolio_ats",
+  ) {
+    const sourceLabel = {
+      hackernews_who_is_hiring: "HN",
+      himalayas_remote_jobs: "Himalayas",
+      a16z_talent_network: "a16z",
+      sequoia_portfolio_ats: "Sequoia portfolio",
+    }[source]
     setBusy("gigLeadsSync", true)
     showToast(`Queueing ${sourceLabel} lead sync`)
     try {
@@ -5694,6 +5705,16 @@ function JobLeadScrapeStatusPanel({
 }) {
   const result = status?.result
   const isHimalayas = status?.source === "himalayas_remote_jobs" || status?.source === "himalayas"
+  const isA16z = status?.source === "a16z_talent_network" || status?.source === "a16z"
+  const isSequoia = status?.source === "sequoia_portfolio_ats" || status?.source === "sequoia"
+  const isJobBoard = isHimalayas || isA16z || isSequoia
+  const sourceTitle = isHimalayas
+    ? "Himalayas"
+    : isA16z
+      ? "a16z"
+      : isSequoia
+        ? "Sequoia portfolio ATS"
+        : "Hacker News"
   const threads = Array.isArray(result?.threads) ? result.threads : []
   const firstThread = threads[0]
   const hasDiscoveryCounts = typeof result?.potential_gigs_scraped === "number"
@@ -5715,7 +5736,7 @@ function JobLeadScrapeStatusPanel({
     <Card id="gigLeadScrapeStatus">
       <CardHeader>
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <CardTitle>{isHimalayas ? "Himalayas sync" : "Hacker News scrape"}</CardTitle>
+          <CardTitle>{sourceTitle} sync</CardTitle>
           <Badge variant={jobLeadScrapeStatusTone(status?.status)}>{statusLabel}</Badge>
         </div>
         <span className="text-sm text-muted-foreground">
@@ -5750,9 +5771,13 @@ function JobLeadScrapeStatusPanel({
         ) : null}
         {hasDiscoveryCounts ? (
           <>
-            {isHimalayas ? (
+            {isJobBoard ? (
               <p className="text-muted-foreground">
-                Recent remote contractor and part-time jobs from Himalayas.
+                {isHimalayas
+                  ? "Recent remote contractor and part-time jobs from Himalayas."
+                  : isA16z
+                    ? "Recent title-matched gigs from a16z public search results."
+                    : "Title-matched gigs from selected Sequoia portfolio company career feeds (currently Reddit)."}
               </p>
             ) : result?.thread_found && firstThread ? (
               <div className="grid gap-1">
@@ -5784,10 +5809,10 @@ function JobLeadScrapeStatusPanel({
             <dl className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
               <div className="rounded-md border bg-background p-3">
                 <dt className="text-xs font-bold text-muted-foreground">
-                  {isHimalayas ? "Source" : "HN comments"}
+                  {isJobBoard ? "Source" : "HN comments"}
                 </dt>
                 <dd id="gigLeadScrapeComments" className="text-lg font-extrabold">
-                  {isHimalayas ? "Himalayas" : scrapeCount(firstThread?.comments_reported)}
+                  {isJobBoard ? sourceTitle : scrapeCount(firstThread?.comments_reported)}
                 </dd>
               </div>
               <div className="rounded-md border bg-background p-3">
@@ -5820,7 +5845,7 @@ function JobLeadScrapeStatusPanel({
                 Filtered: {filterDetails.map(([label, count]) => `${count} ${label}`).join(", ")}.
               </p>
             ) : null}
-            {!isHimalayas && result?.thread_found && result.potential_gigs_scraped === 0 ? (
+            {!isJobBoard && result?.thread_found && result.potential_gigs_scraped === 0 ? (
               <p className="text-muted-foreground">
                 The monthly thread was found, but it has no top-level employer posts yet. Re-run the
                 scrape as posts arrive.
@@ -5880,7 +5905,13 @@ function GigsView(props: {
   onUpdateStatus: (gigId: string, status: string) => void
   onAddApplication: (gigId: string, crmProfile: string) => Promise<boolean>
   onUpdateApplicationStatus: (gigId: string, applicationId: string, status: string) => void
-  onSyncLeads: (source: "hackernews_who_is_hiring" | "himalayas_remote_jobs") => void
+  onSyncLeads: (
+    source:
+      | "hackernews_who_is_hiring"
+      | "himalayas_remote_jobs"
+      | "a16z_talent_network"
+      | "sequoia_portfolio_ats",
+  ) => void
   onReviewLead: (leadId: string, status: JobLeadReviewStatus) => void
   onStageLead: (leadId: string) => void
   onClearStagingRecovery: (leadId: string) => void
@@ -5975,7 +6006,7 @@ function GigsView(props: {
             Refresh
           </Button>
           {props.canManageLeads ? (
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               <Button
                 id="syncGigLeads"
                 type="button"
@@ -5993,6 +6024,20 @@ function GigsView(props: {
               >
                 <RefreshCw />
                 Sync Himalayas
+              </Button>
+              <Button
+                type="button"
+                onClick={() => props.onSyncLeads("a16z_talent_network")}
+                disabled={props.loading.gigLeadsSync}
+              >
+                <RefreshCw /> Sync a16z
+              </Button>
+              <Button
+                type="button"
+                onClick={() => props.onSyncLeads("sequoia_portfolio_ats")}
+                disabled={props.loading.gigLeadsSync}
+              >
+                <RefreshCw /> Sync Sequoia portfolio
               </Button>
             </div>
           ) : null}
