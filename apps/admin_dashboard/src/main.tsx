@@ -326,6 +326,17 @@ type JobLead = {
 
 type JobLeadReviewStatus = "pending" | "approved" | "rejected"
 
+const JOB_LEAD_SOURCES = [
+  { key: "hackernews_who_is_hiring", label: "Hacker News" },
+  { key: "himalayas_remote_jobs", label: "Himalayas" },
+  { key: "a16z_talent_network", label: "a16z" },
+  { key: "sequoia_portfolio_ats", label: "Sequoia portfolio" },
+] as const
+type JobLeadSourceKey = (typeof JOB_LEAD_SOURCES)[number]["key"]
+function jobLeadSourceLabel(source?: string) {
+  return JOB_LEAD_SOURCES.find((item) => item.key === source)?.label || source || "Unknown"
+}
+
 type JobLeadScrapeThread = {
   story_id?: number
   title?: string
@@ -956,7 +967,9 @@ function App() {
   const [jobs, setJobs] = useState<Job[]>([])
   const [gigs, setGigs] = useState<Gig[]>([])
   const [gigLeads, setGigLeads] = useState<JobLead[]>([])
-  const [gigLeadScrapeStatus, setGigLeadScrapeStatus] = useState<JobLeadScrapeStatus | null>(null)
+  const [gigLeadScrapeStatuses, setGigLeadScrapeStatuses] = useState<
+    Partial<Record<JobLeadSourceKey, JobLeadScrapeStatus>>
+  >({})
   const [jobPostChannels, setJobPostChannels] = useState<JobPostChannel[]>([])
   const [availableJobPostChannels, setAvailableJobPostChannels] = useState<JobPostChannel[]>([])
   const [knowledgeChannels, setKnowledgeChannels] = useState<KnowledgeChannel[]>([])
@@ -1025,6 +1038,7 @@ function App() {
   const [gigLimit, setGigLimit] = useState(100)
   const [activeGigTab, setActiveGigTab] = useState<GigTab>(gigTabFromHash)
   const [gigLeadStatus, setGigLeadStatus] = useState("pending")
+  const [gigLeadSource, setGigLeadSource] = useState<JobLeadSourceKey | "">("")
   const [projectQuery, setProjectQuery] = useState("")
   const [projectStatus, setProjectStatus] = useState(initialProjectDetailId ? "" : "Open")
   const [staleRecruitingDays, setStaleRecruitingDays] = useState(7)
@@ -1190,12 +1204,14 @@ function App() {
   function gigLeadsUrl() {
     const params = new URLSearchParams({ limit: "50" })
     if (gigLeadStatus) params.set("status", gigLeadStatus)
+    if (gigLeadSource) params.set("source", gigLeadSource)
     return `/dashboard/api/gig-leads?${params.toString()}`
   }
 
-  function gigLeadScrapeStatusUrl(jobId?: string) {
+  function gigLeadScrapeStatusUrl(jobId?: string, source?: JobLeadSourceKey) {
     const params = new URLSearchParams()
     if (jobId) params.set("job_id", jobId)
+    if (source) params.set("source", source)
     const query = params.toString()
     return `/dashboard/api/gig-leads/scrape-status${query ? `?${query}` : ""}`
   }
@@ -1254,19 +1270,28 @@ function App() {
     }
   }
 
-  async function fetchGigLeadScrapeStatus(jobId?: string) {
-    return requestJson<JobLeadScrapeStatus>(gigLeadScrapeStatusUrl(jobId))
+  async function fetchGigLeadScrapeStatus(jobId?: string, source?: JobLeadSourceKey) {
+    return requestJson<JobLeadScrapeStatus>(gigLeadScrapeStatusUrl(jobId, source))
   }
 
-  async function loadGigLeadScrapeStatus(jobId?: string) {
+  async function loadGigLeadScrapeStatus() {
     setBusy("gigLeadScrapeStatus", true)
     try {
-      const payload = await fetchGigLeadScrapeStatus(jobId)
-      setGigLeadScrapeStatus(payload)
-      return payload
+      const statuses = await Promise.allSettled(
+        JOB_LEAD_SOURCES.map(({ key }) => fetchGigLeadScrapeStatus(undefined, key)),
+      )
+      setGigLeadScrapeStatuses((current) => {
+        const next = { ...current }
+        statuses.forEach((result, index) => {
+          if (result.status === "fulfilled") next[JOB_LEAD_SOURCES[index].key] = result.value
+        })
+        return next
+      })
+      if (statuses.some((result) => result.status === "rejected")) {
+        showToast("Some job lead sync statuses could not be loaded", "warning")
+      }
     } catch (error) {
-      showError(error, "Unable to load HN scrape status")
-      return null
+      showError(error, "Unable to load job lead sync statuses")
     } finally {
       setBusy("gigLeadScrapeStatus", false)
     }
@@ -1331,11 +1356,11 @@ function App() {
     }
   }
 
-  async function pollGigLeadSyncJob(jobId: string) {
+  async function pollGigLeadSyncJob(jobId: string, source: JobLeadSourceKey) {
     for (let attempt = 0; attempt < GIG_LEAD_SYNC_MAX_POLLS; attempt += 1) {
       await new Promise((resolve) => window.setTimeout(resolve, GIG_LEAD_SYNC_POLL_INTERVAL_MS))
       const detail = await fetchGigLeadScrapeStatus(jobId)
-      setGigLeadScrapeStatus(detail)
+      setGigLeadScrapeStatuses((current) => ({ ...current, [source]: detail }))
       const status = String(detail.status || "")
         .trim()
         .toLowerCase()
@@ -1349,19 +1374,22 @@ function App() {
           Number.isFinite(included) && Number.isFinite(filteredOut)
             ? `: ${included} included, ${filteredOut} filtered out`
             : ""
-        showToast(`HN lead scrape finished${summary}; refreshing leads`, "ok")
+        showToast(`${jobLeadSourceLabel(source)} sync finished${summary}; refreshing leads`, "ok")
         await loadGigLeads()
         if (view === "jobs") await loadJobs()
         return
       }
 
       if (view === "jobs") await loadJobs()
-      showToast(`HN lead scrape ${status || "finished"}; check background task ${jobId}`, "warning")
+      showToast(
+        `${jobLeadSourceLabel(source)} sync ${status || "finished"}; check background task ${jobId}`,
+        "warning",
+      )
       return
     }
 
     showToast(
-      `HN lead scrape is still running; refresh leads or check background task ${jobId}`,
+      `${jobLeadSourceLabel(source)} sync is still running; refresh leads or check background task ${jobId}`,
       "warning",
     )
   }
@@ -1799,56 +1827,72 @@ function App() {
     if (selectedGigId) await loadGigDetail(selectedGigId)
   }
 
-  async function syncGigLeads(
-    source:
-      | "hackernews_who_is_hiring"
-      | "himalayas_remote_jobs"
-      | "a16z_talent_network"
-      | "sequoia_portfolio_ats",
-  ) {
-    const sourceLabel = {
-      hackernews_who_is_hiring: "HN",
-      himalayas_remote_jobs: "Himalayas",
-      a16z_talent_network: "a16z",
-      sequoia_portfolio_ats: "Sequoia portfolio",
-    }[source]
+  async function syncGigLeads(source: JobLeadSourceKey | "all") {
+    const sources = source === "all" ? JOB_LEAD_SOURCES.map((item) => item.key) : [source]
     setBusy("gigLeadsSync", true)
-    showToast(`Queueing ${sourceLabel} lead sync`)
+    showToast(`Queueing ${source === "all" ? "all sources" : jobLeadSourceLabel(source)} lead sync`)
     try {
-      const payload = await requestJson<{
-        job_id?: string
-        created?: boolean
-        source?: string
-        story_id?: number | null
-      }>("/dashboard/api/gig-leads/sync", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ source }),
-      })
-      showToast(
-        payload.created === false
-          ? `${sourceLabel} sync already queued`
-          : `${sourceLabel} sync queued`,
-        "ok",
+      const queued = await Promise.allSettled(
+        sources.map(async (item) => {
+          const payload = await requestJson<{
+            job_id?: string
+            created?: boolean
+            source?: string
+            story_id?: number | null
+          }>("/dashboard/api/gig-leads/sync", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ source: item }),
+          })
+          if (payload.job_id) {
+            setGigLeadScrapeStatuses((current) => ({
+              ...current,
+              [item]: {
+                status: "queued",
+                job_id: payload.job_id,
+                source: item,
+                story_id: payload.story_id || null,
+                result: null,
+              },
+            }))
+          }
+          return { source: item, jobId: payload.job_id }
+        }),
       )
-      if (payload.job_id) {
-        setGigLeadScrapeStatus({
-          status: "queued",
-          job_id: payload.job_id,
-          source: payload.source || source,
-          story_id: payload.story_id || null,
-          result: null,
+      const jobs = queued.flatMap((result, index) => {
+        if (result.status === "fulfilled") return [result.value]
+        setGigLeadScrapeStatuses((current) => ({
+          ...current,
+          [sources[index]]: {
+            status: "failed",
+            source: sources[index],
+            last_error: "Unable to queue source sync",
+          },
+        }))
+        showError(result.reason, `Unable to queue ${jobLeadSourceLabel(sources[index])} sync`)
+        return []
+      })
+      if (jobs.length) {
+        showToast(`${jobs.length} source sync${jobs.length === 1 ? "" : "s"} queued`, "ok")
+        const monitored = await Promise.allSettled(
+          jobs.map(async ({ source: item, jobId }) => {
+            if (jobId) await pollGigLeadSyncJob(jobId, item)
+          }),
+        )
+        monitored.forEach((result, index) => {
+          if (result.status === "rejected") {
+            showError(
+              result.reason,
+              `Unable to monitor ${jobLeadSourceLabel(jobs[index].source)} sync`,
+            )
+          }
         })
-        try {
-          await pollGigLeadSyncJob(payload.job_id)
-        } catch (error) {
-          showError(error, `Unable to monitor ${sourceLabel} lead sync`)
-        }
       } else {
-        await loadGigLeads()
+        await loadGigLeadScrapeStatus()
       }
+      await loadGigLeads()
     } catch (error) {
-      showError(error, `Unable to queue ${sourceLabel} lead sync`)
+      showError(error, "Unable to queue job lead sync")
     } finally {
       setBusy("gigLeadsSync", false)
     }
@@ -2917,7 +2961,7 @@ function App() {
   // biome-ignore lint/correctness/useExhaustiveDependencies: lead reload intentionally follows lead status changes only while gigs is active.
   useEffect(() => {
     if (view === "gigs" && permissions.length > 0) void loadGigLeads()
-  }, [gigLeadStatus])
+  }, [gigLeadStatus, gigLeadSource])
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: projects reload intentionally follows status changes only while projects is active.
   useEffect(() => {
@@ -3256,7 +3300,7 @@ function App() {
             <GigsView
               gigs={sortedGigs}
               leads={gigLeads}
-              scrapeStatus={gigLeadScrapeStatus}
+              scrapeStatuses={gigLeadScrapeStatuses}
               jobPostChannels={jobPostChannels}
               selectedGig={selectedGig}
               selectedGigId={selectedGigId}
@@ -3266,6 +3310,7 @@ function App() {
               status={gigStatus}
               query={gigQuery}
               leadStatus={gigLeadStatus}
+              leadSource={gigLeadSource}
               includeHistorical={gigIncludeHistorical}
               limit={gigLimit}
               staleDays={staleRecruitingDays}
@@ -3280,6 +3325,7 @@ function App() {
               setStatus={setGigStatus}
               setQuery={setGigQuery}
               setLeadStatus={setGigLeadStatus}
+              setLeadSource={setGigLeadSource}
               setIncludeHistorical={setGigIncludeHistorical}
               setLimit={setGigLimit}
               onRefresh={refreshGigsView}
@@ -5697,16 +5743,18 @@ function scrapeCount(value?: number | null) {
 }
 
 function JobLeadScrapeStatusPanel({
+  source,
   status,
   loading,
 }: {
+  source: JobLeadSourceKey
   status: JobLeadScrapeStatus | null
   loading: boolean
 }) {
   const result = status?.result
-  const isHimalayas = status?.source === "himalayas_remote_jobs" || status?.source === "himalayas"
-  const isA16z = status?.source === "a16z_talent_network" || status?.source === "a16z"
-  const isSequoia = status?.source === "sequoia_portfolio_ats" || status?.source === "sequoia"
+  const isHimalayas = source === "himalayas_remote_jobs"
+  const isA16z = source === "a16z_talent_network"
+  const isSequoia = source === "sequoia_portfolio_ats"
   const isJobBoard = isHimalayas || isA16z || isSequoia
   const sourceTitle = isHimalayas
     ? "Himalayas"
@@ -5731,9 +5779,10 @@ function JobLeadScrapeStatusPanel({
     .toLowerCase()
   const statusLabel =
     normalizedStatus === "not_run" ? "Not run" : titleCase(normalizedStatus || "Unknown")
+  const panelId = (id: string) => (source === "hackernews_who_is_hiring" ? id : `${id}-${source}`)
 
   return (
-    <Card id="gigLeadScrapeStatus">
+    <Card id={panelId("gigLeadScrapeStatus")}>
       <CardHeader>
         <div className="flex flex-wrap items-center justify-between gap-2">
           <CardTitle>{sourceTitle} sync</CardTitle>
@@ -5806,36 +5855,36 @@ function JobLeadScrapeStatusPanel({
               </p>
             )}
 
-            <dl className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
+            <dl className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
               <div className="rounded-md border bg-background p-3">
                 <dt className="text-xs font-bold text-muted-foreground">
                   {isJobBoard ? "Source" : "HN comments"}
                 </dt>
-                <dd id="gigLeadScrapeComments" className="text-lg font-extrabold">
+                <dd id={panelId("gigLeadScrapeComments")} className="text-lg font-extrabold">
                   {isJobBoard ? sourceTitle : scrapeCount(firstThread?.comments_reported)}
                 </dd>
               </div>
               <div className="rounded-md border bg-background p-3">
                 <dt className="text-xs font-bold text-muted-foreground">Potential gigs scanned</dt>
-                <dd id="gigLeadScrapeScanned" className="text-lg font-extrabold">
+                <dd id={panelId("gigLeadScrapeScanned")} className="text-lg font-extrabold">
                   {scrapeCount(result?.potential_gigs_scraped)}
                 </dd>
               </div>
               <div className="rounded-md border bg-background p-3">
                 <dt className="text-xs font-bold text-muted-foreground">Included</dt>
-                <dd id="gigLeadScrapeIncluded" className="text-lg font-extrabold">
+                <dd id={panelId("gigLeadScrapeIncluded")} className="text-lg font-extrabold">
                   {scrapeCount(result?.included)}
                 </dd>
               </div>
               <div className="rounded-md border bg-background p-3">
                 <dt className="text-xs font-bold text-muted-foreground">Filtered out</dt>
-                <dd id="gigLeadScrapeFiltered" className="text-lg font-extrabold">
+                <dd id={panelId("gigLeadScrapeFiltered")} className="text-lg font-extrabold">
                   {scrapeCount(result?.filtered_out)}
                 </dd>
               </div>
               <div className="rounded-md border bg-background p-3">
                 <dt className="text-xs font-bold text-muted-foreground">Records changed</dt>
-                <dd id="gigLeadScrapePersisted" className="text-lg font-extrabold">
+                <dd id={panelId("gigLeadScrapePersisted")} className="text-lg font-extrabold">
                   {scrapeCount(result?.persisted ?? result?.total)}
                 </dd>
               </div>
@@ -5872,7 +5921,7 @@ function JobLeadScrapeStatusPanel({
 function GigsView(props: {
   gigs: Gig[]
   leads: JobLead[]
-  scrapeStatus: JobLeadScrapeStatus | null
+  scrapeStatuses: Partial<Record<JobLeadSourceKey, JobLeadScrapeStatus>>
   jobPostChannels: JobPostChannel[]
   selectedGig: Gig | null
   selectedGigId: string
@@ -5882,6 +5931,7 @@ function GigsView(props: {
   status: string
   query: string
   leadStatus: string
+  leadSource: JobLeadSourceKey | ""
   includeHistorical: boolean
   limit: number
   staleDays: number
@@ -5896,6 +5946,7 @@ function GigsView(props: {
   setStatus: (value: string) => void
   setQuery: (value: string) => void
   setLeadStatus: (value: string) => void
+  setLeadSource: (value: JobLeadSourceKey | "") => void
   setIncludeHistorical: (value: boolean) => void
   setLimit: (value: number) => void
   onRefresh: () => void
@@ -5905,13 +5956,7 @@ function GigsView(props: {
   onUpdateStatus: (gigId: string, status: string) => void
   onAddApplication: (gigId: string, crmProfile: string) => Promise<boolean>
   onUpdateApplicationStatus: (gigId: string, applicationId: string, status: string) => void
-  onSyncLeads: (
-    source:
-      | "hackernews_who_is_hiring"
-      | "himalayas_remote_jobs"
-      | "a16z_talent_network"
-      | "sequoia_portfolio_ats",
-  ) => void
+  onSyncLeads: (source: JobLeadSourceKey | "all") => void
   onReviewLead: (leadId: string, status: JobLeadReviewStatus) => void
   onStageLead: (leadId: string) => void
   onClearStagingRecovery: (leadId: string) => void
@@ -5980,7 +6025,7 @@ function GigsView(props: {
     <Card className="grid gap-3 p-4">
       {tabBar}
       {props.activeTab === "leads" ? (
-        <div className="grid gap-3 md:grid-cols-[minmax(160px,.6fr)_auto_auto] md:items-end">
+        <div className="grid gap-3 md:grid-cols-[minmax(160px,.6fr)_minmax(160px,.6fr)_auto_auto] md:items-end">
           <Label>
             Lead status
             <Select
@@ -5995,6 +6040,21 @@ function GigsView(props: {
               <option value="all">All statuses</option>
             </Select>
           </Label>
+          <Label>
+            Source
+            <Select
+              id="gigLeadSource"
+              value={props.leadSource}
+              onChange={(event) => props.setLeadSource(event.target.value as JobLeadSourceKey | "")}
+            >
+              <option value="">All sources</option>
+              {JOB_LEAD_SOURCES.map(({ key, label }) => (
+                <option key={key} value={key}>
+                  {label}
+                </option>
+              ))}
+            </Select>
+          </Label>
           <Button
             id="refreshGigLeads"
             type="button"
@@ -6007,6 +6067,14 @@ function GigsView(props: {
           </Button>
           {props.canManageLeads ? (
             <div className="flex flex-wrap gap-2">
+              <Button
+                id="syncAllGigLeads"
+                type="button"
+                onClick={() => props.onSyncLeads("all")}
+                disabled={props.loading.gigLeadsSync}
+              >
+                <RefreshCw /> Sync all
+              </Button>
               <Button
                 id="syncGigLeads"
                 type="button"
@@ -6119,10 +6187,16 @@ function GigsView(props: {
       <>
         {filterBar}
 
-        <JobLeadScrapeStatusPanel
-          status={props.scrapeStatus}
-          loading={Boolean(props.loading.gigLeadScrapeStatus)}
-        />
+        <div className="grid gap-3 md:grid-cols-2">
+          {JOB_LEAD_SOURCES.map(({ key }) => (
+            <JobLeadScrapeStatusPanel
+              key={key}
+              source={key}
+              status={props.scrapeStatuses[key] || null}
+              loading={Boolean(props.loading.gigLeadScrapeStatus)}
+            />
+          ))}
+        </div>
 
         <section className="grid gap-3 md:grid-cols-4" aria-label="Lead summary">
           <Metric id="gigLeadMetricTotal" label="Leads" value={leadCounts.total} />
@@ -6491,6 +6565,7 @@ function JobLeadListItem({
         <div className="flex flex-wrap items-center gap-2">
           <strong className="text-base">{lead.title || "Untitled lead"}</strong>
           <Badge variant={jobLeadStatusTone(lead.status)}>{jobLeadWorkflowStatusLabel(lead)}</Badge>
+          <Badge variant="neutral">{jobLeadSourceLabel(lead.source_key)}</Badge>
           {lead.remote ? <Badge variant="queued">Remote</Badge> : null}
           <Badge variant="neutral">{jobLeadClassificationLabel(lead)}</Badge>
         </div>

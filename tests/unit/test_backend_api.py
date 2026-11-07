@@ -5361,6 +5361,15 @@ def test_dashboard_job_lead_scrape_status_reports_not_run(client: TestClient) ->
     }
 
 
+def test_dashboard_job_lead_status_payload_names_requested_source_when_not_run() -> None:
+    payload = api._dashboard_job_lead_scrape_status_payload(
+        None, source="a16z_talent_network"
+    )
+
+    assert payload["status"] == "not_run"
+    assert payload["source"] == "a16z_talent_network"
+
+
 def test_dashboard_review_job_lead_approves_without_holding_thread(
     client: TestClient,
 ) -> None:

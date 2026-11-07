@@ -117,6 +117,10 @@ or part-time work. It stores job metadata and the direct application link,
 without copying full job descriptions. Search result coverage is limited by
 the board's public first page.
 
+Operators can run all four sources together or trigger any source alone. Each
+source has its own latest-run status and counts, and leads show a source label.
+The source filter is applied before the 50-lead page limit.
+
 The Sequoia pilot reads Reddit's public Greenhouse job feed. Reddit is a
 Sequoia portfolio company; this is **not** a complete Sequoia job board sync.
 The Consider-powered Sequoia board's terms require written permission for

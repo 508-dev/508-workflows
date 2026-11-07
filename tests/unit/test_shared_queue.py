@@ -15,6 +15,7 @@ from five08.queue import (
     mark_job_succeeded,
     list_jobs_needing_queue_reconciliation,
     list_due_retry_job_ids,
+    list_jobs,
     reserve_jobs_for_redelivery,
     redeliver_due_failed_job,
     redeliver_queued_job,
@@ -22,6 +23,30 @@ from five08.queue import (
     get_postgres_connection,
 )
 from five08.settings import SharedSettings
+
+
+def test_list_jobs_filters_payload_source_before_limit() -> None:
+    cursor = MagicMock()
+    cursor.fetchall.return_value = []
+    connection = MagicMock()
+    connection.__enter__.return_value.cursor.return_value.__enter__.return_value = (
+        cursor
+    )
+
+    with patch("five08.queue.get_postgres_connection", return_value=connection):
+        jobs = list_jobs(
+            SharedSettings(),
+            created_after=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            limit=1,
+            job_type="scrape_job_leads_job",
+            payload_source="a16z_talent_network",
+        )
+
+    assert jobs == []
+    query, params = cursor.execute.call_args.args
+    assert "payload #>> '{kwargs,source}' = %s" in query
+    assert query.index("payload #>> '{kwargs,source}' = %s") < query.index("LIMIT %s")
+    assert params[-3:] == ("scrape_job_leads_job", "a16z_talent_network", 1)
 
 
 def test_enqueue_job_persists_and_dispatches_to_queue_client() -> None:
