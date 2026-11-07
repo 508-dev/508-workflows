@@ -51,10 +51,20 @@ SEQUOIA_GREENHOUSE_BOARDS = {"Reddit": "reddit"}
 _GIG_TITLE_RE = re.compile(
     r"\b(?:contract(?:or)?|freelanc(?:e|er)|fractional|part[ -]time)\b", re.I
 )
+_NON_EMPLOYMENT_CONTRACT_RE = re.compile(
+    r"\b(?:smart|customer|client|commercial|sales|government|enterprise|"
+    r"legal|vendor|procurement)\s+contracts?\b|"
+    r"\bcontracts?\s+(?:administrat(?:ion|or)|analy(?:sis|st)|"
+    r"manag(?:ement|er)|specialist|counsel|negotiat(?:ion|or)|"
+    r"operations|solutions|compliance|officer)\b",
+    re.I,
+)
 
 
 def _title_is_gig(title: str) -> bool:
-    return bool(_GIG_TITLE_RE.search(title))
+    if _FULL_TIME_RE.search(title):
+        return False
+    return bool(_GIG_TITLE_RE.search(_NON_EMPLOYMENT_CONTRACT_RE.sub("", title)))
 
 
 def _himalayas_location(job: dict[str, Any]) -> str:

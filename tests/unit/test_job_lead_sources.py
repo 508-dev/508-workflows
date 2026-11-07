@@ -794,6 +794,25 @@ def test_a16z_source_reports_missing_job_cards(monkeypatch) -> None:
         job_lead_sources.A16zTalentLeadSource().collect()
 
 
+@pytest.mark.parametrize(
+    ("title", "expected"),
+    [
+        ("Senior Smart Contract Engineer (Full-time)", False),
+        ("Contract Administrator", False),
+        ("Contract Solutions Counsel", False),
+        ("Customer Contracts Manager", False),
+        ("Contract Recruiter", True),
+        ("Community Manager (Contract)", True),
+        ("Freelance Smart Contract Engineer", True),
+        ("Part-time Contract Administrator", True),
+    ],
+)
+def test_title_is_gig_excludes_contract_domain_terms(
+    title: str, expected: bool
+) -> None:
+    assert job_lead_sources._title_is_gig(title) is expected
+
+
 def test_a16z_source_accepts_valid_empty_search(monkeypatch) -> None:
     markup = (
         b"<html><body><p>0 jobs</p><p>No roles match those filters.</p></body></html>"

@@ -115,7 +115,9 @@ results for each of five gig terms, deduplicates jobs, and keeps only roles
 whose titles explicitly mention contract, contractor, freelance, fractional,
 or part-time work. It stores job metadata and the direct application link,
 without copying full job descriptions. Search result coverage is limited by
-the board's public first page.
+the board's public first page. Titles that describe a contract domain (such as
+smart contracts or contract administration) or explicitly say full-time are
+excluded from this title-only pilot.
 
 Operators can run all four sources together or trigger any source alone. Each
 source has its own latest-run status and counts, and leads show a source label.
