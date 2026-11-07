@@ -39,14 +39,16 @@ def test_list_jobs_filters_payload_source_before_limit() -> None:
             created_after=datetime(2026, 1, 1, tzinfo=timezone.utc),
             limit=1,
             job_type="scrape_job_leads_job",
-            payload_source="a16z_talent_network",
+            payload_sources=("a16z_talent_network", "a16z"),
         )
 
     assert jobs == []
     query, params = cursor.execute.call_args.args
-    assert "payload #>> '{kwargs,source}' = %s" in query
-    assert query.index("payload #>> '{kwargs,source}' = %s") < query.index("LIMIT %s")
-    assert params[-3:] == ("scrape_job_leads_job", "a16z_talent_network", 1)
+    assert "payload #>> '{kwargs,source}' = ANY(%s)" in query
+    assert query.index("payload #>> '{kwargs,source}' = ANY(%s)") < query.index(
+        "LIMIT %s"
+    )
+    assert params[-3:] == ("scrape_job_leads_job", ["a16z_talent_network", "a16z"], 1)
 
 
 def test_enqueue_job_persists_and_dispatches_to_queue_client() -> None:

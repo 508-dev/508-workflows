@@ -57,6 +57,19 @@ def _title_is_gig(title: str) -> bool:
     return bool(_GIG_TITLE_RE.search(title))
 
 
+def _himalayas_location(job: dict[str, Any]) -> str:
+    countries = job.get("locationRestrictions")
+    timezones = job.get("timezoneRestrictions")
+    parts = [str(value) for value in countries] if isinstance(countries, list) else []
+    if isinstance(timezones, list) and timezones:
+        offsets = [
+            f"UTC{value:+g}" if isinstance(value, int | float) else str(value)
+            for value in timezones
+        ]
+        parts.append(f"UTC offsets: {', '.join(offsets)}")
+    return "; ".join(parts) if parts else "Worldwide"
+
+
 def _curated_lead(
     *,
     source_key: str,
@@ -1069,11 +1082,15 @@ class HimalayasRemoteJobsLeadSource:
         self.expired = 0
         self.pages = 0
         self.included = 0
+        self.incomplete = False
+        self.incomplete_reason: str | None = None
 
     def collect(self) -> list[JobLeadInput]:
         leads: list[JobLeadInput] = []
         seen: set[str] = set()
         self.scanned = self.expired = self.pages = self.included = 0
+        self.incomplete = False
+        self.incomplete_reason = None
         now = datetime.now(timezone.utc)
         for page in range(1, self.max_pages + 1):
             params = urlencode(
@@ -1087,11 +1104,26 @@ class HimalayasRemoteJobsLeadSource:
                 f"{HIMALAYAS_API_URL}?{params}",
                 headers={"User-Agent": "508-workflows-job-leads/1.0"},
             )
-            with urlopen(request, timeout=self.timeout_seconds) as response:
-                payload = json.load(response)
-            jobs = payload.get("jobs")
-            if not isinstance(jobs, list):
-                raise ValueError("Himalayas jobs API returned an invalid jobs list")
+            try:
+                with urlopen(request, timeout=self.timeout_seconds) as response:
+                    payload = json.load(response)
+                jobs = payload.get("jobs")
+                if not isinstance(jobs, list):
+                    raise ValueError("Himalayas jobs API returned an invalid jobs list")
+            except Exception as exc:
+                if self.pages == 0:
+                    raise
+                logger.warning(
+                    "Himalayas page %s failed after %s completed pages: %s",
+                    page,
+                    self.pages,
+                    exc,
+                )
+                self.incomplete = True
+                self.incomplete_reason = (
+                    f"Page {page} could not be loaded. Retry the sync."
+                )
+                break
             self.pages += 1
             if not jobs:
                 break
@@ -1123,12 +1155,7 @@ class HimalayasRemoteJobsLeadSource:
                 body_raw = str(job.get("description") or job.get("excerpt") or "")
                 body = html_to_text(body_raw)
                 posting_type = JobPostingType.PART_TIME
-                locations = job.get("locationRestrictions")
-                location = (
-                    ", ".join(str(value) for value in locations)
-                    if isinstance(locations, list) and locations
-                    else "Worldwide"
-                )
+                location = _himalayas_location(job)
                 leads.append(
                     JobLeadInput(
                         source_key=self.source_key,
@@ -1155,6 +1182,12 @@ class HimalayasRemoteJobsLeadSource:
                             "himalayas_expiry_date": expiry.isoformat()
                             if expiry
                             else None,
+                            "himalayas_location_restrictions": job.get(
+                                "locationRestrictions"
+                            ),
+                            "himalayas_timezone_restrictions": job.get(
+                                "timezoneRestrictions"
+                            ),
                             "contractor_classification": {
                                 "is_contractor_friendly": True,
                                 "posting_type": posting_type.value,
@@ -1186,6 +1219,8 @@ class HimalayasRemoteJobsLeadSource:
                 "invalid_or_duplicate": self.scanned - self.included - self.expired,
             },
             "pages_scanned": self.pages,
+            "incomplete": self.incomplete,
+            "incomplete_reason": self.incomplete_reason,
         }
 
 
@@ -1212,6 +1247,10 @@ class A16zTalentLeadSource:
                 document = lxml_html.fromstring(response.read())
             cards = document.xpath("//article[.//h2/a]")
             if not cards:
+                if document.xpath(
+                    "//p[normalize-space()='No roles match those filters.']"
+                ):
+                    continue
                 raise ValueError(f"a16z search returned no job cards for {term}")
             for card in cards:
                 self.scanned += 1

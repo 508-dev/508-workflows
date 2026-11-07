@@ -351,6 +351,17 @@ _PROJECT_ROSTER_USER_CANDIDATE_CACHE_LOCK = threading.RLock()
 _PROJECT_ROSTER_USER_CANDIDATE_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _JOB_LEAD_SCRAPE_JOB_TYPE = "scrape_job_leads_job"
 _JOB_LEAD_SCRAPE_STATUS_LOOKBACK_DAYS = 366
+_JOB_LEAD_SOURCE_ALIASES = {
+    "hn": "hackernews_who_is_hiring",
+    "hackernews": "hackernews_who_is_hiring",
+    "hackernews_who_is_hiring": "hackernews_who_is_hiring",
+    "himalayas": "himalayas_remote_jobs",
+    "himalayas_remote_jobs": "himalayas_remote_jobs",
+    "a16z": "a16z_talent_network",
+    "a16z_talent_network": "a16z_talent_network",
+    "sequoia": "sequoia_portfolio_ats",
+    "sequoia_portfolio_ats": "sequoia_portfolio_ats",
+}
 
 
 @dataclass(frozen=True)
@@ -1517,7 +1528,7 @@ async def _post_job_lead_to_discord(
                 "tags": tags,
                 "engagement_status": engagement_status.value,
             },
-            timeout=15.0,
+            timeout=30.0,
         )
     except httpx.HTTPError as exc:
         logger.warning("Failed posting job lead %s to Discord: %s", lead_id, exc)
@@ -1559,7 +1570,7 @@ async def _stage_job_lead_to_discord(
                 "lead_id": lead_id,
                 "reviewer_discord_user_id": reviewer_discord_user_id,
             },
-            timeout=15.0,
+            timeout=30.0,
         )
     except httpx.HTTPError as exc:
         logger.warning("Failed staging job lead %s in Discord: %s", lead_id, exc)
@@ -5292,7 +5303,11 @@ async def dashboard_job_lead_scrape_status_handler(
             "job_type": _JOB_LEAD_SCRAPE_JOB_TYPE,
         }
         if normalized_source is not None:
-            query_kwargs["payload_source"] = normalized_source
+            query_kwargs["payload_sources"] = tuple(
+                alias
+                for alias, canonical in _JOB_LEAD_SOURCE_ALIASES.items()
+                if canonical == normalized_source
+            )
         jobs = await asyncio.to_thread(list_jobs, settings, **query_kwargs)
         job = jobs[0] if jobs else None
 
@@ -5555,27 +5570,11 @@ async def dashboard_sync_job_leads_handler(request: Request) -> JSONResponse:
     except Exception:
         return JSONResponse({"error": "invalid_payload"}, status_code=400)
 
-    normalized_source = payload.source.strip() or "hackernews_who_is_hiring"
-    if normalized_source.casefold() not in {
-        "hn",
-        "hackernews",
-        "hackernews_who_is_hiring",
-        "himalayas",
-        "himalayas_remote_jobs",
-        "a16z",
-        "a16z_talent_network",
-        "sequoia",
-        "sequoia_portfolio_ats",
-    }:
+    requested_source = payload.source.strip().casefold() or "hackernews_who_is_hiring"
+    normalized_source = _JOB_LEAD_SOURCE_ALIASES.get(requested_source)
+    if normalized_source is None:
         return JSONResponse({"error": "unsupported_job_lead_source"}, status_code=400)
-    if payload.story_id is not None and normalized_source.casefold() in {
-        "himalayas",
-        "himalayas_remote_jobs",
-        "a16z",
-        "a16z_talent_network",
-        "sequoia",
-        "sequoia_portfolio_ats",
-    }:
+    if payload.story_id is not None and normalized_source != "hackernews_who_is_hiring":
         return JSONResponse(
             {"error": "story_id_only_supported_for_hackernews"}, status_code=400
         )

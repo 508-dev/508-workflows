@@ -5361,13 +5361,37 @@ def test_dashboard_job_lead_scrape_status_reports_not_run(client: TestClient) ->
     }
 
 
-def test_dashboard_job_lead_status_payload_names_requested_source_when_not_run() -> None:
+def test_dashboard_job_lead_status_payload_names_requested_source_when_not_run() -> (
+    None
+):
     payload = api._dashboard_job_lead_scrape_status_payload(
         None, source="a16z_talent_network"
     )
 
     assert payload["status"] == "not_run"
     assert payload["source"] == "a16z_talent_network"
+
+
+def test_dashboard_job_lead_status_finds_legacy_alias_runs(client: TestClient) -> None:
+    session = _dashboard_write_session()
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.list_jobs", return_value=[]) as mock_jobs,
+    ):
+        response = client.get(
+            "/dashboard/api/gig-leads/scrape-status?source=a16z_talent_network"
+        )
+
+    assert response.status_code == 200
+    assert response.json()["source"] == "a16z_talent_network"
+    assert set(mock_jobs.call_args.kwargs["payload_sources"]) == {
+        "a16z",
+        "a16z_talent_network",
+    }
 
 
 def test_dashboard_review_job_lead_approves_without_holding_thread(
@@ -5650,6 +5674,29 @@ def test_dashboard_sync_job_leads_accepts_himalayas_without_story_id(
         "source": "himalayas_remote_jobs",
         "story_id": None,
     }
+
+
+def test_dashboard_sync_job_leads_normalizes_alias_before_enqueue(
+    client: TestClient,
+) -> None:
+    session = _dashboard_write_session()
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api.enqueue_job",
+            return_value=Mock(id="job-a16z-1", created=True),
+        ) as mock_enqueue,
+        patch("five08.backend.api.insert_audit_event"),
+    ):
+        response = client.post("/dashboard/api/gig-leads/sync", json={"source": "a16z"})
+
+    assert response.status_code == 202
+    assert response.json()["source"] == "a16z_talent_network"
+    assert mock_enqueue.call_args.kwargs["kwargs"]["source"] == "a16z_talent_network"
 
 
 def test_dashboard_sync_job_leads_rejects_himalayas_story_id(

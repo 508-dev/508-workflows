@@ -4139,7 +4139,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         if lead.source_key == HIMALAYAS_SOURCE_KEY:
             try:
                 is_open = await asyncio.to_thread(
-                    himalayas_job_is_open, lead.source_url
+                    himalayas_job_is_open, lead.source_url, timeout_seconds=5.0
                 )
             except Exception as exc:
                 logger.warning("Failed checking Himalayas lead %s: %s", lead.id, exc)
@@ -4328,7 +4328,7 @@ class JobsCog(DiscordAuditCogMixin, commands.Cog):
         if current.source_key == HIMALAYAS_SOURCE_KEY:
             try:
                 is_open = await asyncio.to_thread(
-                    himalayas_job_is_open, current.source_url
+                    himalayas_job_is_open, current.source_url, timeout_seconds=5.0
                 )
             except Exception as exc:
                 logger.warning("Failed checking Himalayas lead %s: %s", current.id, exc)

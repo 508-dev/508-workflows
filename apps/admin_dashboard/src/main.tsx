@@ -367,6 +367,8 @@ type JobLeadScrapeResult = {
   updated?: number
   persisted?: number
   total?: number
+  incomplete?: boolean
+  incomplete_reason?: string | null
 }
 
 type JobLeadScrapeStatus = {
@@ -5778,7 +5780,11 @@ function JobLeadScrapeStatusPanel({
     .trim()
     .toLowerCase()
   const statusLabel =
-    normalizedStatus === "not_run" ? "Not run" : titleCase(normalizedStatus || "Unknown")
+    result?.incomplete && normalizedStatus === "succeeded"
+      ? "Partial"
+      : normalizedStatus === "not_run"
+        ? "Not run"
+        : titleCase(normalizedStatus || "Unknown")
   const panelId = (id: string) => (source === "hackernews_who_is_hiring" ? id : `${id}-${source}`)
 
   return (
@@ -5786,7 +5792,9 @@ function JobLeadScrapeStatusPanel({
       <CardHeader>
         <div className="flex flex-wrap items-center justify-between gap-2">
           <CardTitle>{sourceTitle} sync</CardTitle>
-          <Badge variant={jobLeadScrapeStatusTone(status?.status)}>{statusLabel}</Badge>
+          <Badge variant={result?.incomplete ? "queued" : jobLeadScrapeStatusTone(status?.status)}>
+            {statusLabel}
+          </Badge>
         </div>
         <span className="text-sm text-muted-foreground">
           {loading
@@ -5807,6 +5815,12 @@ function JobLeadScrapeStatusPanel({
         {status?.last_error ? (
           <p className="rounded-md border border-red-400/40 bg-red-500/10 p-3 text-red-200">
             {status.last_error}
+          </p>
+        ) : null}
+        {result?.incomplete ? (
+          <p className="rounded-md border border-yellow-400/40 bg-yellow-500/10 p-3 text-yellow-200">
+            Partial sync:{" "}
+            {result.incomplete_reason || "A source page could not be loaded. Retry the sync."}
           </p>
         ) : null}
         {!hasDiscoveryCounts &&

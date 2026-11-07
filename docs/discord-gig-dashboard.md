@@ -120,6 +120,9 @@ the board's public first page.
 Operators can run all four sources together or trigger any source alone. Each
 source has its own latest-run status and counts, and leads show a source label.
 The source filter is applied before the 50-lead page limit.
+Himalayas leads show country and UTC-offset eligibility where supplied by the
+API. If a later Himalayas page fails, completed pages are saved and that
+source's status card labels the sync as partial so an operator can retry it.
 
 The Sequoia pilot reads Reddit's public Greenhouse job feed. Reddit is a
 Sequoia portfolio company; this is **not** a complete Sequoia job board sync.

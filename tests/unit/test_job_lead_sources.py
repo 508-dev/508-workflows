@@ -794,6 +794,79 @@ def test_a16z_source_reports_missing_job_cards(monkeypatch) -> None:
         job_lead_sources.A16zTalentLeadSource().collect()
 
 
+def test_a16z_source_accepts_valid_empty_search(monkeypatch) -> None:
+    markup = (
+        b"<html><body><p>0 jobs</p><p>No roles match those filters.</p></body></html>"
+    )
+    monkeypatch.setattr(
+        job_lead_sources, "urlopen", lambda *_args, **_kwargs: BytesIO(markup)
+    )
+
+    source = job_lead_sources.A16zTalentLeadSource()
+    assert source.collect() == []
+    assert source.collection_report()["searches_scanned"] == len(
+        job_lead_sources.A16Z_SEARCH_TERMS
+    )
+
+
+def test_himalayas_source_preserves_timezone_restrictions(monkeypatch) -> None:
+    import json
+
+    job = {
+        "guid": "https://himalayas.app/companies/acme/jobs/contract-engineer",
+        "applicationLink": "https://himalayas.app/companies/acme/jobs/contract-engineer",
+        "title": "Contract Engineer",
+        "companyName": "Acme",
+        "employmentType": "Contractor",
+        "description": "Build APIs",
+        "locationRestrictions": [],
+        "timezoneRestrictions": [-5, 0, 5.5],
+    }
+    monkeypatch.setattr(
+        job_lead_sources,
+        "urlopen",
+        lambda *_args, **_kwargs: BytesIO(json.dumps({"jobs": [job]}).encode()),
+    )
+
+    lead = job_lead_sources.HimalayasRemoteJobsLeadSource().collect()[0]
+
+    assert lead.location == "UTC offsets: UTC-5, UTC+0, UTC+5.5"
+    assert lead.metadata["himalayas_timezone_restrictions"] == [-5, 0, 5.5]
+
+
+def test_himalayas_source_reports_partial_run_after_later_page_fails(
+    monkeypatch,
+) -> None:
+    import json
+
+    calls = 0
+    job = {
+        "guid": "https://himalayas.app/companies/acme/jobs/contract-engineer",
+        "applicationLink": "https://himalayas.app/companies/acme/jobs/contract-engineer",
+        "title": "Contract Engineer",
+        "companyName": "Acme",
+        "employmentType": "Contractor",
+        "description": "Build APIs",
+    }
+
+    def fake_urlopen(*_args, **_kwargs):  # noqa: ANN202
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise TimeoutError("page unavailable")
+        return BytesIO(json.dumps({"jobs": [job] * 20}).encode())
+
+    monkeypatch.setattr(job_lead_sources, "urlopen", fake_urlopen)
+
+    source = job_lead_sources.HimalayasRemoteJobsLeadSource()
+    leads = source.collect()
+
+    assert len(leads) == 1
+    assert source.collection_report()["incomplete"] is True
+    assert source.collection_report()["pages_scanned"] == 1
+    assert calls == 2
+
+
 def test_himalayas_job_check_uses_api_and_recognizes_closed(monkeypatch) -> None:
     from urllib.error import HTTPError
 
