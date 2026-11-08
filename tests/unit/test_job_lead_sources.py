@@ -179,6 +179,18 @@ class _FakeOffTopicHackerNewsClient(_FakeHackerNewsClient):
                     "author": "company",
                     "text": "Sales Finance Co | Contract Backend Engineer | Remote<p>Build APIs.",
                 },
+                {
+                    "id": 25,
+                    "parent_id": item_id,
+                    "author": "company",
+                    "text": "Acme — Senior Software Engineer | Remote | Contract<p>Build APIs.",
+                },
+                {
+                    "id": 26,
+                    "parent_id": item_id,
+                    "author": "company",
+                    "text": "Acme | Contract Software Engineer, Sales | Remote<p>Build APIs.",
+                },
             ],
         }
 
@@ -571,8 +583,15 @@ def test_hacker_news_source_filters_role_before_review_queue() -> None:
         classifier=_PositiveJobLeadClassifier(),  # type: ignore[arg-type]
     )
 
-    assert [lead.external_id for lead in source.collect()] == ["22", "23", "24"]
+    assert [lead.external_id for lead in source.collect()] == [
+        "22",
+        "23",
+        "24",
+        "25",
+        "26",
+    ]
     assert source.collection_report()["filter_reasons"]["irrelevant_role"] == 1
+    assert source.irrelevant_external_ids == {"21"}
 
 
 def test_hacker_news_source_reports_no_discovered_thread() -> None:
@@ -816,6 +835,9 @@ def test_a16z_source_collects_title_matched_jobs_and_deduplicates(monkeypatch) -
     assert source.collection_report()["filter_reasons"]["irrelevant_role"] == len(
         job_lead_sources.A16Z_SEARCH_TERMS
     )
+    assert source.irrelevant_external_ids == {
+        "https://jobs.a16z.com/jobs/acme/789--recruiter"
+    }
 
 
 def test_sequoia_source_uses_public_portfolio_ats_and_filters_titles(
@@ -857,6 +879,9 @@ def test_sequoia_source_uses_public_portfolio_ats_and_filters_titles(
     assert leads[0].source_url == leads[0].apply_url
     assert source.collection_report()["portfolio_companies_scanned"] == 1
     assert source.collection_report()["filter_reasons"]["irrelevant_role"] == 1
+    assert source.irrelevant_external_ids == {
+        "https://job-boards.greenhouse.io/reddit/jobs/789"
+    }
 
 
 def test_a16z_source_reports_missing_job_cards(monkeypatch) -> None:
@@ -986,6 +1011,9 @@ def test_himalayas_source_filters_off_topic_contractor_roles(monkeypatch) -> Non
 
     assert [lead.title for lead in leads] == ["Contract Data Engineer"]
     assert source.collection_report()["filter_reasons"]["irrelevant_role"] == 1
+    assert source.irrelevant_external_ids == {
+        "https://himalayas.app/companies/acme/jobs/contract-recruiter"
+    }
 
 
 def test_himalayas_source_reports_partial_run_after_later_page_fails(

@@ -116,18 +116,26 @@ def test_reject_unreviewed_irrelevant_leads_preserves_relevant_titles(
             [
                 {
                     "id": "11111111-1111-1111-1111-111111111111",
+                    "external_id": "recruiter",
                     "title": "Acme | Contract Recruiter | Remote",
                     "body_normalized": "Acme | Contract Recruiter | Remote\nRecruit engineers.",
                 },
                 {
                     "id": "22222222-2222-2222-2222-222222222222",
+                    "external_id": "engineer",
                     "title": "Acme | Remote | US | Contract",
                     "body_normalized": "Acme | Remote | US | Contract | Senior Software Engineer\nBuild APIs.",
+                },
+                {
+                    "id": "33333333-3333-3333-3333-333333333333",
+                    "external_id": "stale",
+                    "title": "Acme | Contract Data Engineer | Remote",
+                    "body_normalized": "Acme | Contract Data Engineer | Remote\nBuild pipelines.",
                 },
             ]
         ]
     )
-    cursor.rowcount = 1
+    cursor.rowcount = 2
     _install_connection_stub(monkeypatch, cursor)
 
     count = job_leads.reject_unreviewed_irrelevant_job_leads(
@@ -136,16 +144,20 @@ def test_reject_unreviewed_irrelevant_leads_preserves_relevant_titles(
         lead_is_relevant=lambda title, body: _lead_is_coop_role(
             HN_WHO_IS_HIRING_SOURCE_KEY, title, body
         ),
+        current_irrelevant_external_ids={"stale"},
     )
 
-    assert count == 1
+    assert count == 2
     assert "status = 'pending'" in cursor.executed[0][0]
     assert "reviewed_at IS NULL" in cursor.executed[0][0]
     assert "relevance_override" in cursor.executed[0][0]
     for query, _params in cursor.executed:
         assert "staging_reservation_token IS NULL" in query
         assert "staged_discord_thread_id IS NULL" in query
-    assert cursor.executed[1][1][1] == ["11111111-1111-1111-1111-111111111111"]
+    assert cursor.executed[1][1][1] == [
+        "11111111-1111-1111-1111-111111111111",
+        "33333333-3333-3333-3333-333333333333",
+    ]
     assert _single_jsonb_param(cursor.executed[1][1]) == {
         "relevance_filter": "outside_coop_roles"
     }
