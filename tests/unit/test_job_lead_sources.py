@@ -167,6 +167,12 @@ class _FakeOffTopicHackerNewsClient(_FakeHackerNewsClient):
                     "author": "company",
                     "text": "Acme | Contract Data Engineer | Remote<p>Build pipelines.",
                 },
+                {
+                    "id": 23,
+                    "parent_id": item_id,
+                    "author": "company",
+                    "text": "Acme | Remote | US | Contract | Senior Software Engineer<p>Build APIs.",
+                },
             ],
         }
 
@@ -559,7 +565,7 @@ def test_hacker_news_source_filters_role_before_review_queue() -> None:
         classifier=_PositiveJobLeadClassifier(),  # type: ignore[arg-type]
     )
 
-    assert [lead.external_id for lead in source.collect()] == ["22"]
+    assert [lead.external_id for lead in source.collect()] == ["22", "23"]
     assert source.collection_report()["filter_reasons"]["irrelevant_role"] == 1
 
 
@@ -648,13 +654,16 @@ def test_scrape_refreshes_existing_non_contractor_without_inserting(
     monkeypatch.setattr(
         job_lead_sources, "build_job_lead_source", lambda *_args, **_kwargs: adapter
     )
+    events: list[str] = []
     monkeypatch.setattr(
         job_lead_sources,
         "reject_unreviewed_irrelevant_job_leads",
-        lambda *_args, **_kwargs: 2,
+        lambda *_args, **_kwargs: events.append("cleanup") or 2,
     )
     monkeypatch.setattr(
-        job_lead_sources, "upsert_job_lead", lambda *_args: ("lead-10", True)
+        job_lead_sources,
+        "upsert_job_lead",
+        lambda *_args: (events.append("upsert") or "lead-10", True),
     )
     monkeypatch.setattr(
         job_lead_sources,
@@ -664,6 +673,7 @@ def test_scrape_refreshes_existing_non_contractor_without_inserting(
     refreshed: list[str] = []
 
     def update_existing(_settings: object, lead: JobLeadInput) -> str:
+        events.append("update")
         refreshed.append(lead.external_id)
         return "lead-11"
 
@@ -676,6 +686,7 @@ def test_scrape_refreshes_existing_non_contractor_without_inserting(
     assert result["updated"] == 1
     assert result["rejected_existing"] == 2
     assert result["lead_ids"] == ["lead-10", "lead-11"]
+    assert events == ["upsert", "update", "cleanup"]
 
 
 def test_scrape_skips_reviewed_contractor_friendly_lead(monkeypatch) -> None:

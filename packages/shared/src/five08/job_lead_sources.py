@@ -99,6 +99,13 @@ def _title_is_coop_role(title: str) -> bool:
     return bool(_COOP_ROLE_RE.search(title)) and not _NON_COOP_ROLE_RE.search(title)
 
 
+def _lead_is_coop_role(source_key: str, title: str, body: str) -> bool:
+    """HN's full first line can carry roles beyond its abbreviated display title."""
+    if source_key == HN_WHO_IS_HIRING_SOURCE_KEY and body:
+        return _title_is_coop_role(body.splitlines()[0])
+    return _title_is_coop_role(title)
+
+
 def _title_is_gig(title: str) -> bool:
     if _FULL_TIME_RE.search(title):
         return False
@@ -1084,7 +1091,9 @@ class HackerNewsWhoIsHiringLeadSource:
                 if lead is None:
                     report.filtered_not_contractor_friendly += 1
                     continue
-                if not _title_is_coop_role(lead.title):
+                if not _lead_is_coop_role(
+                    self.source_key, lead.title, lead.body_normalized
+                ):
                     report.filtered_irrelevant_role += 1
                     continue
                 classification = (lead.metadata or {}).get(
@@ -1501,11 +1510,6 @@ def scrape_job_leads(
         story_id=story_id,
         include_non_contractor=True,
     )
-    rejected_existing = reject_unreviewed_irrelevant_job_leads(
-        settings,
-        source_key=adapter.source_key,
-        title_is_relevant=_title_is_coop_role,
-    )
     created = 0
     updated = 0
     lead_ids: list[str] = []
@@ -1550,6 +1554,13 @@ def scrape_job_leads(
             created += 1
         else:
             updated += 1
+    rejected_existing = reject_unreviewed_irrelevant_job_leads(
+        settings,
+        source_key=adapter.source_key,
+        lead_is_relevant=lambda title, body: _lead_is_coop_role(
+            adapter.source_key, title, body
+        ),
+    )
     return {
         "source": adapter.source_key,
         **collection_report,

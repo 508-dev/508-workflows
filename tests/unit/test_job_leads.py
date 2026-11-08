@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 import five08.job_leads as job_leads
 import pytest
 from five08.job_leads import JobLeadInput, JobLeadStatus
-from five08.job_lead_sources import _title_is_coop_role
+from five08.job_lead_sources import HN_WHO_IS_HIRING_SOURCE_KEY, _lead_is_coop_role
 
 
 class _CursorStub:
@@ -116,11 +116,13 @@ def test_reject_unreviewed_irrelevant_leads_preserves_relevant_titles(
             [
                 {
                     "id": "11111111-1111-1111-1111-111111111111",
-                    "title": "Contract Recruiter",
+                    "title": "Acme | Contract Recruiter | Remote",
+                    "body_normalized": "Acme | Contract Recruiter | Remote\nRecruit engineers.",
                 },
                 {
                     "id": "22222222-2222-2222-2222-222222222222",
-                    "title": "Data Engineer",
+                    "title": "Acme | Remote | US | Contract",
+                    "body_normalized": "Acme | Remote | US | Contract | Senior Software Engineer\nBuild APIs.",
                 },
             ]
         ]
@@ -130,8 +132,10 @@ def test_reject_unreviewed_irrelevant_leads_preserves_relevant_titles(
 
     count = job_leads.reject_unreviewed_irrelevant_job_leads(
         job_leads.SharedSettings(),
-        source_key="himalayas_remote_jobs",
-        title_is_relevant=_title_is_coop_role,
+        source_key=HN_WHO_IS_HIRING_SOURCE_KEY,
+        lead_is_relevant=lambda title, body: _lead_is_coop_role(
+            HN_WHO_IS_HIRING_SOURCE_KEY, title, body
+        ),
     )
 
     assert count == 1

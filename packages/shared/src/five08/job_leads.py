@@ -670,14 +670,14 @@ def reject_unreviewed_irrelevant_job_leads(
     settings: SharedSettings,
     *,
     source_key: str,
-    title_is_relevant: Callable[[str], bool],
+    lead_is_relevant: Callable[[str, str], bool],
 ) -> int:
     """Retire previously ingested off-topic leads without touching reviewed work."""
     with get_postgres_connection(settings) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
                 """
-                SELECT id::text AS id, title
+                SELECT id::text AS id, title, body_normalized
                 FROM job_leads
                 WHERE source_key = %s AND status = 'pending'
                   AND reviewed_at IS NULL
@@ -688,7 +688,9 @@ def reject_unreviewed_irrelevant_job_leads(
             ids = [
                 str(row["id"])
                 for row in cursor.fetchall()
-                if not title_is_relevant(str(row["title"] or ""))
+                if not lead_is_relevant(
+                    str(row["title"] or ""), str(row["body_normalized"] or "")
+                )
             ]
             if not ids:
                 return 0
