@@ -173,6 +173,12 @@ class _FakeOffTopicHackerNewsClient(_FakeHackerNewsClient):
                     "author": "company",
                     "text": "Acme | Remote | US | Contract | Senior Software Engineer<p>Build APIs.",
                 },
+                {
+                    "id": 24,
+                    "parent_id": item_id,
+                    "author": "company",
+                    "text": "Sales Finance Co | Contract Backend Engineer | Remote<p>Build APIs.",
+                },
             ],
         }
 
@@ -565,7 +571,7 @@ def test_hacker_news_source_filters_role_before_review_queue() -> None:
         classifier=_PositiveJobLeadClassifier(),  # type: ignore[arg-type]
     )
 
-    assert [lead.external_id for lead in source.collect()] == ["22", "23"]
+    assert [lead.external_id for lead in source.collect()] == ["22", "23", "24"]
     assert source.collection_report()["filter_reasons"]["irrelevant_role"] == 1
 
 
@@ -886,7 +892,9 @@ def test_title_is_gig_excludes_contract_domain_terms(
     [
         ("Contract Full Stack Engineer", True),
         ("Contract Senior Data Engineer", True),
+        ("Financial Systems Engineer (Contract)", True),
         ("Product Manager (Domains & DNS)", True),
+        ("Product Analyst", True),
         ("MBSE Engineer - SysML V2", True),
         ("Tech Lead", True),
         ("Freelance UX Designer", True),
@@ -905,6 +913,7 @@ def test_title_is_gig_excludes_contract_domain_terms(
         ("Psychiatric Nurse Practitioner", False),
         ("Principal Architect", False),
         ("Korean Language Expert", False),
+        ("Personal Financial Advisor", False),
         ("Audio Transcription Specialist", False),
     ],
 )

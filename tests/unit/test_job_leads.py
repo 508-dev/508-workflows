@@ -142,6 +142,9 @@ def test_reject_unreviewed_irrelevant_leads_preserves_relevant_titles(
     assert "status = 'pending'" in cursor.executed[0][0]
     assert "reviewed_at IS NULL" in cursor.executed[0][0]
     assert "relevance_override" in cursor.executed[0][0]
+    for query, _params in cursor.executed:
+        assert "staging_reservation_token IS NULL" in query
+        assert "staged_discord_thread_id IS NULL" in query
     assert cursor.executed[1][1][1] == ["11111111-1111-1111-1111-111111111111"]
     assert _single_jsonb_param(cursor.executed[1][1]) == {
         "relevance_filter": "outside_coop_roles"

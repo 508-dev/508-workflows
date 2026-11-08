@@ -69,7 +69,7 @@ _COOP_ROLE_RE = re.compile(
     r"engineer(?:ing)?|developer|programmer|sre|devops|"
     r"full[ -]?stack|front[ -]?end|back[ -]?end|data science|"
     r"data\s+(?:scientist|analyst|architect|specialist)|"
-    r"(?:product|technical product)\s+(?:manager|designer|lead|owner)|"
+    r"(?:product|technical product)\s+(?:manager|designer|lead|owner|analyst)|"
     r"(?:ux|ui|ux/ui|graphic|graphics|visual|brand|web|creative)\s+designer|"
     r"(?:ux|ui|ux/ui)\s+researcher|"
     r"(?:digital|performance|growth|product|content|email|social media)?\s*"
@@ -88,8 +88,7 @@ _NON_COOP_ROLE_RE = re.compile(
     r"\b(?:recruit(?:er|ing|ment)|talent acquisition|sourc(?:er|ing)|"
     r"sales|account manager|copywriter|transcri(?:ber|ption)|"
     r"data (?:entry|rater|annotator)|ai trainer|"
-    r"nurs(?:e|ing)|physician|therapist|psychologist|counselor|"
-    r"finance|financial|tax|legal|attorney|lawyer)\b",
+    r"nurs(?:e|ing)|physician|therapist|psychologist|counselor)\b",
     re.I,
 )
 
@@ -102,7 +101,8 @@ def _title_is_coop_role(title: str) -> bool:
 def _lead_is_coop_role(source_key: str, title: str, body: str) -> bool:
     """HN's full first line can carry roles beyond its abbreviated display title."""
     if source_key == HN_WHO_IS_HIRING_SOURCE_KEY and body:
-        return _title_is_coop_role(body.splitlines()[0])
+        parts = _split_header(body)
+        return _title_is_coop_role(" | ".join(parts[1:] if len(parts) > 1 else parts))
     return _title_is_coop_role(title)
 
 

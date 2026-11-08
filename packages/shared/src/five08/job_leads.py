@@ -682,6 +682,8 @@ def reject_unreviewed_irrelevant_job_leads(
                 WHERE source_key = %s AND status = 'pending'
                   AND reviewed_at IS NULL
                   AND NOT metadata @> '{"relevance_override": true}'::jsonb
+                  AND staging_reservation_token IS NULL
+                  AND staged_discord_thread_id IS NULL
                 """,
                 (source_key,),
             )
@@ -703,6 +705,8 @@ def reject_unreviewed_irrelevant_job_leads(
                 WHERE id = ANY(%s::uuid[]) AND status = 'pending'
                   AND reviewed_at IS NULL
                   AND NOT metadata @> '{"relevance_override": true}'::jsonb
+                  AND staging_reservation_token IS NULL
+                  AND staged_discord_thread_id IS NULL
                 """,
                 (Jsonb({"relevance_filter": "outside_coop_roles"}), ids),
             )

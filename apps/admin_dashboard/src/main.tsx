@@ -5924,8 +5924,8 @@ function JobLeadScrapeStatusPanel({
             ) : null}
             {result?.rejected_existing ? (
               <p className="text-muted-foreground">
-                {result.rejected_existing} previously unreviewed off-topic leads removed from
-                review.
+                {result.rejected_existing} previously unreviewed, unstaged off-topic leads removed
+                from review.
               </p>
             ) : null}
           </>
