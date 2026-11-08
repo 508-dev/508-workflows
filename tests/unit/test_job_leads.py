@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import five08.job_leads as job_leads
 import pytest
 from five08.job_leads import JobLeadInput, JobLeadStatus
+from five08.job_lead_sources import _title_is_coop_role
 
 
 class _CursorStub:
@@ -105,6 +106,42 @@ def _lead_row(**overrides: object) -> dict:
     }
     row.update(overrides)
     return row
+
+
+def test_reject_unreviewed_irrelevant_leads_preserves_relevant_titles(
+    monkeypatch,
+) -> None:
+    cursor = _CursorStub(
+        rows=[
+            [
+                {
+                    "id": "11111111-1111-1111-1111-111111111111",
+                    "title": "Contract Recruiter",
+                },
+                {
+                    "id": "22222222-2222-2222-2222-222222222222",
+                    "title": "Data Engineer",
+                },
+            ]
+        ]
+    )
+    cursor.rowcount = 1
+    _install_connection_stub(monkeypatch, cursor)
+
+    count = job_leads.reject_unreviewed_irrelevant_job_leads(
+        job_leads.SharedSettings(),
+        source_key="himalayas_remote_jobs",
+        title_is_relevant=_title_is_coop_role,
+    )
+
+    assert count == 1
+    assert "status = 'pending'" in cursor.executed[0][0]
+    assert "reviewed_at IS NULL" in cursor.executed[0][0]
+    assert "relevance_override" in cursor.executed[0][0]
+    assert cursor.executed[1][1][1] == ["11111111-1111-1111-1111-111111111111"]
+    assert _single_jsonb_param(cursor.executed[1][1]) == {
+        "relevance_filter": "outside_coop_roles"
+    }
 
 
 def test_upsert_job_lead_preserves_review_state_on_conflict(monkeypatch) -> None:
@@ -550,6 +587,7 @@ def test_review_job_lead_restores_rejected_lead_to_pending(monkeypatch) -> None:
     assert restored.reviewed_at is None
     query, params = cursor.executed[1]
     assert "status = ANY(%s)" in query
+    assert "relevance_override" in query
     assert params == (
         "pending",
         None,
