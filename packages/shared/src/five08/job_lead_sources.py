@@ -21,6 +21,7 @@ from five08.job_channels import JobPostingType
 from five08.job_leads import (
     JobLeadInput,
     existing_job_lead_external_ids,
+    reject_unreviewed_irrelevant_job_leads,
     update_existing_job_lead,
     upsert_job_lead,
 )
@@ -59,6 +60,52 @@ _NON_EMPLOYMENT_CONTRACT_RE = re.compile(
     r"operations|solutions|compliance|officer)\b",
     re.I,
 )
+_COOP_ROLE_RE = re.compile(
+    r"\b(?:"
+    r"(?:software|full[ -]?stack|front[ -]?end|back[ -]?end|web|mobile|"
+    r"platform|infrastructure|cloud|devops|site reliability|security|"
+    r"machine learning|ml|ai|data|analytics|mechanical|electrical|"
+    r"systems?)\s+(?:engineer(?:ing)?|developer|architect)|"
+    r"engineer(?:ing)?|developer|programmer|sre|devops|"
+    r"full[ -]?stack|front[ -]?end|back[ -]?end|data science|"
+    r"data\s+(?:scientist|analyst|architect|specialist)|"
+    r"(?:product|technical product)\s+(?:manager|designer|lead|owner|analyst)|"
+    r"(?:ux|ui|ux/ui|graphic|graphics|visual|brand|web|creative)\s+designer|"
+    r"(?:ux|ui|ux/ui)\s+researcher|"
+    r"(?:digital|performance|growth|product|content|email|social media)?\s*"
+    r"marketing\s+(?:expert|specialist|manager|strategist|consultant|lead)|"
+    r"(?:seo|sem|paid media|media buying)\s+"
+    r"(?:expert|specialist|manager|strategist|consultant|lead)|"
+    r"media\s+(?:buyer|planner)|"
+    r"(?:shopify|e[ -]?commerce|amazon marketplace)\s+"
+    r"(?:expert|specialist|developer|designer|consultant|manager|lead)|"
+    r"(?:tech|technical|engineering)\s+(?:lead|architect)|"
+    r"(?:database|db|business intelligence|bi)\s+(?:administrator|analyst|engineer)"
+    r")\b",
+    re.I,
+)
+_NON_COOP_ROLE_RE = re.compile(
+    r"\b(?:recruit(?:er|ing|ment)|talent acquisition|sourc(?:er|ing)|"
+    r"sales|account manager|copywriter|transcri(?:ber|ption)|"
+    r"data (?:entry|rater|annotator)|ai trainer|"
+    r"nurs(?:e|ing)|physician|therapist|psychologist|counselor)\b",
+    re.I,
+)
+
+
+def _title_is_coop_role(title: str) -> bool:
+    """Keep explicit technical roles; source descriptions often mention unrelated skills."""
+    return any(
+        _COOP_ROLE_RE.search(part) and not _NON_COOP_ROLE_RE.search(part)
+        for part in re.split(r"[|,;]", title)
+    )
+
+
+def _lead_is_coop_role(source_key: str, title: str, body: str) -> bool:
+    """HN's full first line can carry roles beyond its abbreviated display title."""
+    if source_key == HN_WHO_IS_HIRING_SOURCE_KEY and body:
+        return _title_is_coop_role(body.splitlines()[0])
+    return _title_is_coop_role(title)
 
 
 def _title_is_gig(title: str) -> bool:
@@ -338,6 +385,7 @@ class HackerNewsThreadScrapeReport:
     filtered_empty: int = 0
     filtered_seeking_work: int = 0
     filtered_not_contractor_friendly: int = 0
+    filtered_irrelevant_role: int = 0
 
     @property
     def filtered_out(self) -> int:
@@ -345,6 +393,7 @@ class HackerNewsThreadScrapeReport:
             self.filtered_empty
             + self.filtered_seeking_work
             + self.filtered_not_contractor_friendly
+            + self.filtered_irrelevant_role
         )
 
     def payload(self) -> dict[str, Any]:
@@ -362,6 +411,7 @@ class HackerNewsThreadScrapeReport:
                 "empty": self.filtered_empty,
                 "seeking_work": self.filtered_seeking_work,
                 "not_contractor_friendly": self.filtered_not_contractor_friendly,
+                "irrelevant_role": self.filtered_irrelevant_role,
             },
         }
 
@@ -998,6 +1048,7 @@ class HackerNewsWhoIsHiringLeadSource:
         self.include_latest = include_latest
         self.include_non_contractor = include_non_contractor
         self._thread_reports: list[HackerNewsThreadScrapeReport] = []
+        self.irrelevant_external_ids: set[str] = set()
 
     def discover_threads(self) -> list[HackerNewsThread]:
         if self.story_id is not None:
@@ -1016,6 +1067,7 @@ class HackerNewsWhoIsHiringLeadSource:
     def collect(self) -> list[JobLeadInput]:
         leads: list[JobLeadInput] = []
         self._thread_reports = []
+        self.irrelevant_external_ids = set()
         for thread in self.discover_threads():
             tree = self.client.get_algolia_item_tree(thread.story_id)
             children = tree.get("children") or []
@@ -1043,6 +1095,12 @@ class HackerNewsWhoIsHiringLeadSource:
                 if lead is None:
                     report.filtered_not_contractor_friendly += 1
                     continue
+                if not _lead_is_coop_role(
+                    self.source_key, lead.title, lead.body_normalized
+                ):
+                    report.filtered_irrelevant_role += 1
+                    self.irrelevant_external_ids.add(lead.external_id)
+                    continue
                 classification = (lead.metadata or {}).get(
                     "contractor_classification", {}
                 )
@@ -1064,6 +1122,9 @@ class HackerNewsWhoIsHiringLeadSource:
             "not_contractor_friendly": sum(
                 report.filtered_not_contractor_friendly
                 for report in self._thread_reports
+            ),
+            "irrelevant_role": sum(
+                report.filtered_irrelevant_role for report in self._thread_reports
             ),
         }
         return {
@@ -1090,6 +1151,8 @@ class HimalayasRemoteJobsLeadSource:
         self.max_pages = max_pages
         self.scanned = 0
         self.expired = 0
+        self.irrelevant_role = 0
+        self.irrelevant_external_ids: set[str] = set()
         self.pages = 0
         self.included = 0
         self.incomplete = False
@@ -1098,7 +1161,12 @@ class HimalayasRemoteJobsLeadSource:
     def collect(self) -> list[JobLeadInput]:
         leads: list[JobLeadInput] = []
         seen: set[str] = set()
-        self.scanned = self.expired = self.pages = self.included = 0
+        self.scanned = 0
+        self.expired = 0
+        self.irrelevant_role = 0
+        self.irrelevant_external_ids = set()
+        self.pages = 0
+        self.included = 0
         self.incomplete = False
         self.incomplete_reason = None
         now = datetime.now(timezone.utc)
@@ -1162,6 +1230,10 @@ class HimalayasRemoteJobsLeadSource:
                 ):
                     continue
                 seen.add(guid)
+                if not _title_is_coop_role(title):
+                    self.irrelevant_role += 1
+                    self.irrelevant_external_ids.add(guid)
+                    continue
                 body_raw = str(job.get("description") or job.get("excerpt") or "")
                 body = html_to_text(body_raw)
                 posting_type = JobPostingType.PART_TIME
@@ -1226,7 +1298,11 @@ class HimalayasRemoteJobsLeadSource:
             "filtered_out": self.scanned - self.included,
             "filter_reasons": {
                 "expired": self.expired,
-                "invalid_or_duplicate": self.scanned - self.included - self.expired,
+                "irrelevant_role": self.irrelevant_role,
+                "invalid_or_duplicate": self.scanned
+                - self.included
+                - self.expired
+                - self.irrelevant_role,
             },
             "pages_scanned": self.pages,
             "incomplete": self.incomplete,
@@ -1243,11 +1319,14 @@ class A16zTalentLeadSource:
         self.timeout_seconds = timeout_seconds
         self.scanned = 0
         self.included = 0
+        self.irrelevant_role = 0
+        self.irrelevant_external_ids: set[str] = set()
 
     def collect(self) -> list[JobLeadInput]:
         leads: list[JobLeadInput] = []
         seen: set[str] = set()
-        self.scanned = self.included = 0
+        self.scanned = self.included = self.irrelevant_role = 0
+        self.irrelevant_external_ids = set()
         for term in A16Z_SEARCH_TERMS:
             request = Request(
                 f"https://jobs.a16z.com/jobs?{urlencode({'q': term})}",
@@ -1270,6 +1349,10 @@ class A16zTalentLeadSource:
                 title = title_links[0].text_content().strip()
                 path = title_links[0].get("href", "")
                 if not path.startswith("/jobs/") or not _title_is_gig(title):
+                    continue
+                if not _title_is_coop_role(title):
+                    self.irrelevant_role += 1
+                    self.irrelevant_external_ids.add(f"https://jobs.a16z.com{path}")
                     continue
                 source_url = f"https://jobs.a16z.com{path}"
                 if source_url in seen:
@@ -1307,7 +1390,12 @@ class A16zTalentLeadSource:
             "potential_gigs_scraped": self.scanned,
             "included": self.included,
             "filtered_out": self.scanned - self.included,
-            "filter_reasons": {"invalid_or_duplicate": self.scanned - self.included},
+            "filter_reasons": {
+                "irrelevant_role": self.irrelevant_role,
+                "invalid_or_duplicate": self.scanned
+                - self.included
+                - self.irrelevant_role,
+            },
             "searches_scanned": len(A16Z_SEARCH_TERMS),
         }
 
@@ -1321,10 +1409,13 @@ class SequoiaPortfolioATSLeadSource:
         self.timeout_seconds = timeout_seconds
         self.scanned = 0
         self.included = 0
+        self.irrelevant_role = 0
+        self.irrelevant_external_ids: set[str] = set()
 
     def collect(self) -> list[JobLeadInput]:
         leads: list[JobLeadInput] = []
-        self.scanned = self.included = 0
+        self.scanned = self.included = self.irrelevant_role = 0
+        self.irrelevant_external_ids = set()
         for company, board in SEQUOIA_GREENHOUSE_BOARDS.items():
             request = Request(
                 f"https://boards-api.greenhouse.io/v1/boards/{board}/jobs",
@@ -1342,6 +1433,11 @@ class SequoiaPortfolioATSLeadSource:
                 title = job.get("title")
                 source_url = job.get("absolute_url")
                 if not isinstance(title, str) or not _title_is_gig(title):
+                    continue
+                if not _title_is_coop_role(title):
+                    self.irrelevant_role += 1
+                    if isinstance(source_url, str):
+                        self.irrelevant_external_ids.add(source_url)
                     continue
                 if (
                     not isinstance(source_url, str)
@@ -1375,7 +1471,12 @@ class SequoiaPortfolioATSLeadSource:
             "potential_gigs_scraped": self.scanned,
             "included": self.included,
             "filtered_out": self.scanned - self.included,
-            "filter_reasons": {"invalid_or_duplicate": self.scanned - self.included},
+            "filter_reasons": {
+                "irrelevant_role": self.irrelevant_role,
+                "invalid_or_duplicate": self.scanned
+                - self.included
+                - self.irrelevant_role,
+            },
             "portfolio_companies_scanned": len(SEQUOIA_GREENHOUSE_BOARDS),
         }
 
@@ -1468,6 +1569,16 @@ def scrape_job_leads(
             created += 1
         else:
             updated += 1
+    rejected_existing = reject_unreviewed_irrelevant_job_leads(
+        settings,
+        source_key=adapter.source_key,
+        lead_is_relevant=lambda title, body: _lead_is_coop_role(
+            adapter.source_key, title, body
+        ),
+        current_irrelevant_external_ids=getattr(
+            adapter, "irrelevant_external_ids", set()
+        ),
+    )
     return {
         "source": adapter.source_key,
         **collection_report,
@@ -1475,6 +1586,7 @@ def scrape_job_leads(
         "updated": updated,
         "total": len(lead_ids),
         "persisted": len(lead_ids),
+        "rejected_existing": rejected_existing,
         "lead_ids": lead_ids,
     }
 

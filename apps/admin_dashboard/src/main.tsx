@@ -350,6 +350,7 @@ type JobLeadScrapeThread = {
     empty?: number
     seeking_work?: number
     not_contractor_friendly?: number
+    irrelevant_role?: number
     expired?: number
     invalid_or_duplicate?: number
   }
@@ -366,6 +367,7 @@ type JobLeadScrapeResult = {
   created?: number
   updated?: number
   persisted?: number
+  rejected_existing?: number
   total?: number
   incomplete?: boolean
   incomplete_reason?: string | null
@@ -5773,6 +5775,7 @@ function JobLeadScrapeStatusPanel({
     ["empty", filterReasons?.empty],
     ["seeking work", filterReasons?.seeking_work],
     ["not contractor-friendly", filterReasons?.not_contractor_friendly],
+    ["outside co-op roles", filterReasons?.irrelevant_role],
     ["expired", filterReasons?.expired],
     ["invalid or duplicate", filterReasons?.invalid_or_duplicate],
   ].filter(([, count]) => typeof count === "number" && count > 0) as Array<[string, number]>
@@ -5917,6 +5920,12 @@ function JobLeadScrapeStatusPanel({
             {typeof result?.created === "number" || typeof result?.updated === "number" ? (
               <p className="text-muted-foreground">
                 {result.created || 0} created · {result.updated || 0} updated
+              </p>
+            ) : null}
+            {result?.rejected_existing ? (
+              <p className="text-muted-foreground">
+                {result.rejected_existing} previously unreviewed, unstaged off-topic leads removed
+                from review.
               </p>
             ) : null}
           </>

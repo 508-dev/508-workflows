@@ -119,6 +119,16 @@ the board's public first page. Titles that describe a contract domain (such as
 smart contracts or contract administration) or explicitly say full-time are
 excluded from this title-only pilot.
 
+All four sources require a clear engineering, product, data, design, marketing,
+or ecommerce role in the job title or HN header before admitting a lead. The
+filter excludes recruiting, sales, clinical, language, and data annotation
+roles even when their descriptions mention technical skills. A sync also marks
+previously unreviewed, unstaged off-topic leads from that source as rejected so
+they leave the review queue. Reviewed, posted, and staged leads remain untouched.
+The source status reports role mismatches and this cleanup separately. Operators
+can restore a rejected lead if the title filter missed a suitable role; later
+syncs preserve that manual override.
+
 Operators can run all four sources together or trigger any source alone. Each
 source has its own latest-run status and counts, and leads show a source label.
 The source filter is applied before the 50-lead page limit.

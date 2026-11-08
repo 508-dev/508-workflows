@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 from psycopg.rows import dict_row
@@ -666,6 +666,55 @@ def existing_job_lead_external_ids(
     return {str(row["external_id"]) for row in rows}
 
 
+def reject_unreviewed_irrelevant_job_leads(
+    settings: SharedSettings,
+    *,
+    source_key: str,
+    lead_is_relevant: Callable[[str, str], bool],
+    current_irrelevant_external_ids: set[str],
+) -> int:
+    """Retire previously ingested off-topic leads without touching reviewed work."""
+    with get_postgres_connection(settings) as conn:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                SELECT id::text AS id, external_id, title, body_normalized
+                FROM job_leads
+                WHERE source_key = %s AND status = 'pending'
+                  AND reviewed_at IS NULL
+                  AND NOT metadata @> '{"relevance_override": true}'::jsonb
+                  AND staging_reservation_token IS NULL
+                  AND staged_discord_thread_id IS NULL
+                """,
+                (source_key,),
+            )
+            ids = [
+                str(row["id"])
+                for row in cursor.fetchall()
+                if str(row["external_id"]) in current_irrelevant_external_ids
+                or not lead_is_relevant(
+                    str(row["title"] or ""), str(row["body_normalized"] or "")
+                )
+            ]
+            if not ids:
+                return 0
+            cursor.execute(
+                """
+                UPDATE job_leads
+                SET status = 'rejected',
+                    metadata = metadata || %s::jsonb,
+                    updated_at = NOW()
+                WHERE id = ANY(%s::uuid[]) AND status = 'pending'
+                  AND reviewed_at IS NULL
+                  AND NOT metadata @> '{"relevance_override": true}'::jsonb
+                  AND staging_reservation_token IS NULL
+                  AND staged_discord_thread_id IS NULL
+                """,
+                (Jsonb({"relevance_filter": "outside_coop_roles"}), ids),
+            )
+            return cursor.rowcount
+
+
 def list_job_leads(
     settings: SharedSettings,
     *,
@@ -769,6 +818,11 @@ def review_job_lead(
             status = %s,
             reviewed_by_discord_user_id = %s,
             reviewed_at = CASE WHEN %s = 'pending' THEN NULL ELSE NOW() END,
+            metadata = CASE
+                WHEN status = 'rejected' AND metadata ? 'relevance_filter'
+                THEN metadata || '{"relevance_override": true}'::jsonb
+                ELSE metadata
+            END,
             staging_reservation_token = NULL,
             staging_reserved_at = NULL,
             updated_at = NOW()
