@@ -16,6 +16,9 @@ clients.
 | `scripts` | Local development, test, formatting, and Compose helpers. |
 | `docs` | Feature and operational documentation. |
 
+See [ERP finance integration](docs/erp-finance-api.md) for the Books Assistant and
+Books Health API client, reviewed financial actions, authentication and rollout.
+
 ## Quickstart
 
 Install dependencies:
