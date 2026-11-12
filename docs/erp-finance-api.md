@@ -7,8 +7,9 @@ checks, document submission and accounting state remain in the owning ERP app.
 This client does not register Discord commands or agent tools. Before exposing
 finance operations through either surface, verify the Discord user's ERP
 identity and finance permissions at the backend. Authenticate the underlying
-`ERPNextClient` as that verified ERP user (for example through their OAuth
-session). The existing shared ERP service token alone does not establish the
+`ERPNextClient` with that verified ERP user's API key and secret. This client
+uses Frappe's `token` authentication; OAuth would need a separate Bearer-token
+transport. The existing shared ERP service token alone does not establish the
 human's authority. The finance client has no actor override or arbitrary method
 path input, and credentials must stay in the backend.
 

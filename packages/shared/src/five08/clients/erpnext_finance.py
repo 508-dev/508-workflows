@@ -156,7 +156,7 @@ class ERPNextFinanceClient:
             not isinstance(expected_fingerprints, dict)
             or set(expected_fingerprints) != set(names)
             or any(
-                not isinstance(value, str) or not value
+                not isinstance(value, str) or not value.strip()
                 for value in expected_fingerprints.values()
             )
         ):

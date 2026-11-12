@@ -108,6 +108,16 @@ def test_bank_preview_cannot_omit_a_selected_lines_reviewed_fingerprint(
     transport.call_method.assert_not_called()
 
 
+def test_bank_preview_rejects_whitespace_fingerprint_without_request(
+    transport: Mock,
+) -> None:
+    with pytest.raises(ERPNextAPIError, match="fingerprint"):
+        ERPNextFinanceClient(transport).preview_bank_approval(
+            ["BT-1"], {"BT-1": " \t "}, "Co-op"
+        )
+    transport.call_method.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [{}, {"invoices": []}, {"invoices": ["BILL-1"], "all_eligible": True}],
