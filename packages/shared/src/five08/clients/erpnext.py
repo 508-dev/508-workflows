@@ -36,16 +36,9 @@ def _contact_email_matches_query(email: Any, query: str) -> bool:
 class ERPNextAPIError(Exception):
     """Raised when ERPNext returns an error or unexpected response."""
 
-    def __init__(
-        self,
-        message: str,
-        *,
-        status_code: int | None = None,
-        error_code: str | None = None,
-    ) -> None:
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
         super().__init__(message)
         self.status_code = status_code
-        self.error_code = error_code
 
 
 class ERPNextClient:
@@ -109,17 +102,9 @@ class ERPNextClient:
         self.status_code = response.status_code
         if not 200 <= response.status_code < 300:
             detail = self._error_detail(response)
-            try:
-                error_data = response.json()
-            except ValueError:
-                error_data = {}
-            error_code = (
-                error_data.get("error_code") if isinstance(error_data, dict) else None
-            )
             raise ERPNextAPIError(
                 f"ERPNext request failed status={response.status_code}: {detail}",
                 status_code=response.status_code,
-                error_code=error_code if isinstance(error_code, str) else None,
             )
 
         if not response.content:
