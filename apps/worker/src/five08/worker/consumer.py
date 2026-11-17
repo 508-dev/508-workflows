@@ -5,9 +5,20 @@ import signal
 import threading
 
 from five08.logging import configure_observability
+from five08.queue import list_due_retry_job_ids
 from five08.worker.config import settings
 
 logger = logging.getLogger(__name__)
+_WIKI_AUTHORING_JOB_NAME = "author_wiki_edit_proposal_job"
+_RETRY_RECOVERY_INTERVAL_SECONDS = 30
+
+
+def _recover_due_wiki_retries() -> None:
+    """Repair a committed retry whose scheduled Redis message was lost."""
+    from five08.worker.actors import execute_job
+
+    for job_id in list_due_retry_job_ids(settings, job_type=_WIKI_AUTHORING_JOB_NAME):
+        execute_job.send(job_id)
 
 
 def _safe_import_actors() -> bool:
@@ -73,7 +84,15 @@ def run() -> None:
         logger.info(
             "Worker started; waiting for shutdown signal for %s", settings.worker_name
         )
-        stop_requested.wait()
+        while not stop_requested.is_set():
+            if settings.wiki_editing_enabled:
+                try:
+                    _recover_due_wiki_retries()
+                except Exception:
+                    # A temporary Postgres/Redis failure must not stop normal
+                    # consumption; the next scan retries the durable rows.
+                    logger.exception("Wiki retry recovery scan failed")
+            stop_requested.wait(_RETRY_RECOVERY_INTERVAL_SECONDS)
     except Exception:
         logger.exception(
             "Worker initialization or execution failed name=%s queues=%s",

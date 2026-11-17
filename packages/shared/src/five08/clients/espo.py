@@ -2,6 +2,7 @@ import requests
 import urllib
 from typing import Any, Dict, List
 
+from five08.deadlines import DeadlineExceeded, clamp_timeout_seconds
 from five08.tls import default_ca_bundle_path
 
 
@@ -40,10 +41,18 @@ def http_build_query(data: Any) -> str:
 
 
 class EspoAPI:
-    def __init__(self, url: str, api_key: str, timeout_seconds: float = 20.0) -> None:
+    def __init__(
+        self,
+        url: str,
+        api_key: str,
+        timeout_seconds: float = 20.0,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> None:
         self.url = url
         self.api_key = api_key
         self.timeout_seconds = timeout_seconds
+        self.deadline_monotonic = deadline_monotonic
         self.status_code: int | None = None
 
     def request(
@@ -59,13 +68,21 @@ class EspoAPI:
         url = self.normalize_url(action)
 
         try:
+            timeout_seconds = clamp_timeout_seconds(
+                self.timeout_seconds,
+                deadline_monotonic=self.deadline_monotonic,
+            )
+        except DeadlineExceeded as exc:
+            raise EspoAPIError("Espo request deadline exceeded") from exc
+
+        try:
             if method in ["POST", "PATCH", "PUT"]:
                 response = requests.request(
                     method,
                     url,
                     headers=headers,
                     json=params,
-                    timeout=self.timeout_seconds,
+                    timeout=timeout_seconds,
                     verify=default_ca_bundle_path(),
                 )
             else:
@@ -75,7 +92,7 @@ class EspoAPI:
                     method,
                     url,
                     headers=headers,
-                    timeout=self.timeout_seconds,
+                    timeout=timeout_seconds,
                     verify=default_ca_bundle_path(),
                 )
         except requests.RequestException as exc:
@@ -110,10 +127,18 @@ class EspoAPI:
             url = url + "?" + http_build_query(params)
 
         try:
+            timeout_seconds = clamp_timeout_seconds(
+                self.timeout_seconds,
+                deadline_monotonic=self.deadline_monotonic,
+            )
+        except DeadlineExceeded as exc:
+            raise EspoAPIError("Espo request deadline exceeded") from exc
+
+        try:
             response = requests.get(
                 url,
                 headers=headers,
-                timeout=self.timeout_seconds,
+                timeout=timeout_seconds,
                 verify=default_ca_bundle_path(),
             )
         except requests.RequestException as exc:
@@ -186,10 +211,20 @@ class EspoClient:
     """Convenience wrapper around EspoAPI with normalized API base URL."""
 
     def __init__(
-        self, base_url: str, api_key: str, timeout_seconds: float = 20.0
+        self,
+        base_url: str,
+        api_key: str,
+        timeout_seconds: float = 20.0,
+        *,
+        deadline_monotonic: float | None = None,
     ) -> None:
         api_url = _normalize_api_base_url(base_url)
-        self.api = EspoAPI(api_url, api_key, timeout_seconds)
+        self.api = EspoAPI(
+            api_url,
+            api_key,
+            timeout_seconds,
+            deadline_monotonic=deadline_monotonic,
+        )
 
     @property
     def status_code(self) -> int | None:

@@ -10,6 +10,18 @@
 
 The `jobsctl` utility can inspect and rerun jobs by id.
 
+## Job lead sources
+
+The admin dashboard's Gigs → Leads view can queue `hackernews_who_is_hiring`
+or `himalayas_remote_jobs` through `POST /dashboard/api/gig-leads/sync`.
+The worker puts qualifying leads in the existing review queue; it does not
+publish them automatically. The HN source reads the latest monthly thread.
+The Himalayas source uses its public jobs API and scans up to five recent
+pages of contractor and part-time roles (at most 100 listings per run). It
+preserves the API's application link, credits Himalayas through the source URL,
+and checks that a listing is still open before staging or posting it to Discord.
+The Himalayas API refreshes daily, so more frequent syncs offer no benefit.
+
 Defaults:
 
 - Base URL:

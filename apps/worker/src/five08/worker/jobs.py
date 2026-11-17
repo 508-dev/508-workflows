@@ -5,9 +5,12 @@ import logging
 from datetime import datetime, timezone
 from email import message_from_bytes
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 from urllib.parse import unquote
 
+import requests
+
+from five08.agent.postgres_memory import PostgresMemoryStore
 from five08.redaction import (
     EMAIL_ADDRESS_PATTERN,
     PERCENT_ENCODED_EMAIL_ADDRESS_PATTERN,
@@ -21,13 +24,33 @@ from five08.worker.crm.resume_profile_processor import ResumeProfileProcessor
 from five08.worker.erpnext_project_sync import ERPNextProjectSyncProcessor
 from five08.worker.mailbox_resume_ingest import ResumeMailboxProcessor
 from five08.worker.masking import mask_email
+from five08.worker.wiki_omp_sandbox import SandboxedOmpWikiAuthoringRunner
+from five08.knowledge.models import KnowledgeEvidence
+from five08.knowledge.store import PostgresKnowledgeStore
 from five08.newsletter_sync import NewsletterSyncProcessor
 from five08.job_lead_sources import scrape_job_leads
+from five08.tls import default_ca_bundle_path
+from five08.wiki_editing.models import WikiAuthoringWorkItem, WikiSourceReference
+from five08.wiki_editing.omp import (
+    WIKI_AUTHORING_MIN_KNOWLEDGE_AUTHORITY,
+    WikiAuthoringMaterial,
+)
+from five08.wiki_editing.service import (
+    WikiEditingConfigurationError,
+    WikiEditingService,
+    build_outline_writer_client,
+)
+from five08.wiki_editing.store import PostgresWikiEditingStore
 
 logger = logging.getLogger(__name__)
 
 
 DOCUSEAL_COMPLETED_AT_UTC_FORMAT = "%Y-%m-%d %H:%M:%S"
+_REQUIRED_WIKI_KNOWLEDGE_METADATA = frozenset({"authority", "stale", "updated_at"})
+
+
+class AgentScheduleRunNonRetryableError(RuntimeError):
+    """Raised when the API rejects a malformed or unauthorized schedule run."""
 
 
 def process_contact_skills_job(contact_id: str) -> dict[str, Any]:
@@ -217,6 +240,17 @@ def sync_508_members_newsletters_job() -> dict[str, Any]:
     return _mask_newsletter_sync_result(processor.sync_508_members())
 
 
+def purge_expired_agent_memory_facts_job() -> dict[str, Any]:
+    """Remove expired durable agent-memory facts while the system is idle."""
+
+    logger.info("Processing expired agent memory cleanup job")
+    knowledge_store = PostgresKnowledgeStore(settings)
+    agent_memory_store = PostgresMemoryStore(settings.postgres_url)
+    knowledge_purged_count = knowledge_store.purge_expired_all_organizations()
+    agent_memory_purged_count = agent_memory_store.purge_expired_all_organizations()
+    return {"purged_count": knowledge_purged_count + agent_memory_purged_count}
+
+
 def scrape_job_leads_job(
     source: str = "hackernews_who_is_hiring",
     story_id: int | None = None,
@@ -230,6 +264,198 @@ def scrape_job_leads_job(
     return scrape_job_leads(settings, source=source, story_id=story_id)
 
 
+def _build_wiki_org_knowledge_search(
+    store: PostgresKnowledgeStore,
+) -> Callable[[str, WikiAuthoringWorkItem], list[WikiAuthoringMaterial]]:
+    """Return the narrowly scoped organization-memory reader available to OMP."""
+
+    def search(
+        question: str,
+        work: WikiAuthoringWorkItem,
+    ) -> list[WikiAuthoringMaterial]:
+        evidence_items = store.search_evidence(
+            question=question,
+            organization_id=work.request.organization_id,
+            actor_id=work.request.actor_id,
+            project_ids=(),
+            allow_private=False,
+            allow_project=False,
+            allow_org=True,
+            limit=4,
+            semantic_candidate_limit=0,
+        )
+        return [
+            WikiAuthoringMaterial(
+                source=WikiSourceReference(
+                    source_type="memory_fact",
+                    source_ref=evidence.source_ref,
+                    source_url=evidence.url,
+                    title=evidence.title,
+                ),
+                text=evidence.excerpt,
+                visibility="org",
+                knowledge_authority=evidence.authority,
+                knowledge_stale=evidence.stale,
+                knowledge_updated_at=evidence.updated_at,
+            )
+            for evidence in evidence_items
+            if _is_trusted_wiki_knowledge_evidence(evidence)
+        ][:4]
+
+    return search
+
+
+def _is_trusted_wiki_knowledge_evidence(evidence: KnowledgeEvidence) -> bool:
+    """Permit only current, verified organization facts into external authoring."""
+    return (
+        evidence.source_type == "memory"
+        and evidence.visibility == "org"
+        and _REQUIRED_WIKI_KNOWLEDGE_METADATA <= evidence.model_fields_set
+        and evidence.authority >= WIKI_AUTHORING_MIN_KNOWLEDGE_AUTHORITY
+        and evidence.stale is False
+        and evidence.updated_at is not None
+    )
+
+
+def _build_wiki_editing_service() -> WikiEditingService:
+    """Construct the worker-only service that owns bounded OMP authoring."""
+    if not settings.wiki_authoring_configured:
+        raise WikiEditingConfigurationError(
+            str(
+                settings.wiki_authoring_configuration_error
+                or "Wiki authoring worker is not fully configured."
+            )
+        )
+
+    def outline_client_factory():
+        return build_outline_writer_client(settings)
+
+    knowledge_store = PostgresKnowledgeStore(settings)
+    authoring_runner = SandboxedOmpWikiAuthoringRunner(
+        sandbox_url=str(settings.resolved_wiki_omp_sandbox_url or ""),
+        sandbox_token=str(settings.wiki_omp_sandbox_token or ""),
+        model=str(settings.wiki_omp_model or ""),
+        thinking=str(settings.wiki_omp_thinking or ""),
+        startup_timeout_seconds=cast(
+            float,
+            settings.wiki_omp_startup_timeout_seconds,
+        ),
+        authoring_timeout_seconds=cast(
+            float,
+            settings.wiki_omp_authoring_timeout_seconds,
+        ),
+        max_document_characters=settings.wiki_editing_max_document_characters,
+        outline_client_factory=outline_client_factory,
+        allowed_collection_id=str(settings.wiki_outline_collection_id or ""),
+        knowledge_search=_build_wiki_org_knowledge_search(knowledge_store),
+    )
+    return WikiEditingService(
+        settings=settings,
+        store=PostgresWikiEditingStore(settings),
+        outline_client_factory=outline_client_factory,
+        authoring_runner=authoring_runner,
+    )
+
+
+def author_wiki_edit_proposal_job(
+    proposal_id: str,
+    organization_id: str,
+) -> dict[str, Any]:
+    """Run the retryable draft-authoring phase; publishing stays user-confirmed."""
+    normalized_proposal_id = proposal_id.strip()
+    normalized_organization_id = organization_id.strip()
+    if not normalized_proposal_id or not normalized_organization_id:
+        raise ValueError("Wiki authoring job requires proposal and organization IDs.")
+
+    logger.info(
+        "Authoring wiki proposal proposal_id=%s organization_id=%s",
+        normalized_proposal_id,
+        normalized_organization_id,
+    )
+    response = _build_wiki_editing_service().author_proposal(
+        normalized_proposal_id,
+        organization_id=normalized_organization_id,
+    )
+    return response.model_dump(mode="json")
+
+
+def mark_wiki_authoring_retry_exhausted(
+    proposal_id: str,
+    organization_id: str,
+) -> None:
+    """Make an exhausted sandbox retry visible as a revisable draft failure."""
+    normalized_proposal_id = proposal_id.strip()
+    normalized_organization_id = organization_id.strip()
+    if not normalized_proposal_id or not normalized_organization_id:
+        raise ValueError("Wiki authoring job requires proposal and organization IDs.")
+    store = PostgresWikiEditingStore(settings)
+    store.fail_proposal_if_status(
+        normalized_proposal_id,
+        organization_id=normalized_organization_id,
+        failure_code="authoring_retry_exhausted",
+        expected_statuses=frozenset({"queued", "authoring"}),
+    )
+
+
+def run_agent_schedule_job(run_id: str) -> dict[str, Any]:
+    """Ask the API-owned agent runtime to execute one durable schedule run.
+
+    The worker intentionally holds no agent provider credentials. It owns the
+    durable retry lifecycle, while the API rechecks Discord roles, executes the
+    frozen read-only envelope, and delivers the report through the bot.
+    """
+
+    normalized_run_id = str(run_id or "").strip()
+    if not normalized_run_id:
+        raise AgentScheduleRunNonRetryableError("schedule_run_id_required")
+
+    configured_base_url = settings.agent_schedule_api_base_url.strip()
+    base_url = settings.resolved_agent_schedule_api_base_url
+    api_secret = str(settings.api_shared_secret or "").strip()
+    if not configured_base_url:
+        raise AgentScheduleRunNonRetryableError("agent_schedule_api_url_missing")
+    if not base_url:
+        raise AgentScheduleRunNonRetryableError("agent_schedule_api_url_invalid")
+    if not api_secret:
+        raise AgentScheduleRunNonRetryableError("api_shared_secret_missing")
+
+    logger.info(
+        "Executing agent schedule run_id=%s through backend API", normalized_run_id
+    )
+    try:
+        response = requests.post(
+            f"{base_url}/internal/agent-schedules/runs/{normalized_run_id}",
+            headers={"X-API-Secret": api_secret},
+            timeout=settings.agent_schedule_api_timeout_seconds,
+            verify=default_ca_bundle_path(),
+            allow_redirects=False,
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(f"agent_schedule_api_request_failed: {exc}") from exc
+
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+
+    if 200 <= response.status_code < 300:
+        return {
+            "run_id": normalized_run_id,
+            "status": str(payload.get("status") or "completed"),
+            "schedule_id": str(payload.get("schedule_id") or ""),
+            "delivery_status": str(payload.get("delivery_status") or ""),
+        }
+
+    error_code = str(payload.get("error") or "agent_schedule_api_rejected")
+    if response.status_code in {400, 403, 404, 422}:
+        raise AgentScheduleRunNonRetryableError(
+            f"agent_schedule_api_rejected:{response.status_code}:{error_code}"
+        )
+    raise RuntimeError(f"agent_schedule_api_failed:{response.status_code}:{error_code}")
+
+
 JOB_FUNCTIONS: dict[str, Callable[..., dict[str, Any]]] = {
     process_webhook_event.__name__: process_webhook_event,
     process_contact_skills_job.__name__: process_contact_skills_job,
@@ -241,6 +467,9 @@ JOB_FUNCTIONS: dict[str, Callable[..., dict[str, Any]]] = {
     sync_person_from_crm_job.__name__: sync_person_from_crm_job,
     sync_projects_from_erpnext_job.__name__: sync_projects_from_erpnext_job,
     sync_508_members_newsletters_job.__name__: sync_508_members_newsletters_job,
+    purge_expired_agent_memory_facts_job.__name__: purge_expired_agent_memory_facts_job,
     process_docuseal_agreement_job.__name__: process_docuseal_agreement_job,
     scrape_job_leads_job.__name__: scrape_job_leads_job,
+    run_agent_schedule_job.__name__: run_agent_schedule_job,
+    author_wiki_edit_proposal_job.__name__: author_wiki_edit_proposal_job,
 }

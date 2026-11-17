@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
+from five08 import deadlines
 from five08.clients.github import GitHubAppTokenProvider, GitHubClient
 from five08.tls import default_ca_bundle_path
 
@@ -28,6 +29,51 @@ def test_github_client_uses_default_ca_bundle() -> None:
         client.create_issue(repository="508-dev/508-workflows", title="Fix thing")
 
     assert mock_request.call_args.kwargs["verify"] == default_ca_bundle_path()
+
+
+def test_github_client_clamps_timeout_to_execution_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(deadlines, "monotonic", lambda: 100.0)
+    client = GitHubClient(token="token", deadline_monotonic=105.0)
+
+    with patch("five08.clients.github.requests.request") as mock_request:
+        mock_request.return_value = _FakeResponse()
+        client.get_issue(repository="508-dev/508-workflows", issue_number=1)
+
+    assert mock_request.call_args.kwargs["timeout"] == 5.0
+
+
+def test_github_client_passes_its_deadline_to_the_token_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Provider:
+        def __init__(self) -> None:
+            self.deadlines: list[float | None] = []
+
+        def get_token(
+            self,
+            *,
+            repositories: object = None,
+            permissions: object = None,
+            deadline_monotonic: float | None = None,
+        ) -> str:
+            del repositories, permissions
+            self.deadlines.append(deadline_monotonic)
+            return "token"
+
+        def invalidate(self, **_kwargs: object) -> None:
+            return None
+
+    provider = Provider()
+    monkeypatch.setattr(deadlines, "monotonic", lambda: 100.0)
+    client = GitHubClient(token_provider=provider, deadline_monotonic=105.0)
+
+    with patch("five08.clients.github.requests.request") as mock_request:
+        mock_request.return_value = _FakeResponse()
+        client.get_issue(repository="508-dev/508-workflows", issue_number=1)
+
+    assert provider.deadlines == [105.0]
 
 
 class _Response:
@@ -108,7 +154,9 @@ def test_github_client_refreshes_provider_once_after_unauthorized_response(
             *,
             repositories: object = None,
             permissions: object = None,
+            deadline_monotonic: float | None = None,
         ) -> str:
+            del deadline_monotonic
             self.requests.append((repositories, permissions))
             return self.tokens.pop(0)
 
@@ -159,7 +207,9 @@ def test_github_projects_use_organization_projects_permission(
             *,
             repositories: object = None,
             permissions: object = None,
+            deadline_monotonic: float | None = None,
         ) -> str:
+            del deadline_monotonic
             self.requests.append((repositories, permissions))
             return "token"
 
@@ -180,3 +230,52 @@ def test_github_projects_use_organization_projects_permission(
     )
 
     assert provider.requests == [(None, {"organization_projects": "write"})]
+
+
+def test_github_issue_search_marks_a_full_bounded_page_as_partial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single full REST page must not claim a repository-wide match count."""
+
+    client = GitHubClient(token="token")
+    raw_items = [
+        {"number": number, "title": f"Issue {number}", "body": "triage"}
+        for number in range(30)
+    ]
+
+    def list_request(*_args: object, **_kwargs: object) -> list[dict[str, object]]:
+        return raw_items
+
+    monkeypatch.setattr(client, "_list_request", list_request)
+
+    result = client.list_issues(
+        repository="508-dev/508-workflows",
+        query="triage",
+        limit=5,
+    )
+
+    assert len(result["issues"]) == 5
+    assert result["total_count"] == 30
+    assert result["search_is_partial"] is True
+
+
+def test_github_issue_search_marks_a_short_page_as_complete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A short first page exhausts the selected repository issue state."""
+
+    client = GitHubClient(token="token")
+
+    def list_request(*_args: object, **_kwargs: object) -> list[dict[str, object]]:
+        return [{"number": 1, "title": "Issue 1", "body": "triage"}]
+
+    monkeypatch.setattr(client, "_list_request", list_request)
+
+    result = client.list_issues(
+        repository="508-dev/508-workflows",
+        query="triage",
+        limit=5,
+    )
+
+    assert result["total_count"] == 1
+    assert result["search_is_partial"] is False

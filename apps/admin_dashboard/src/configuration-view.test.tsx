@@ -76,8 +76,13 @@ function renderConfigurationView(
       canWrite
       jobChannels={[]}
       availableJobChannels={[]}
+      knowledgeChannels={[]}
+      selectedKnowledgeChannelIds={[]}
+      knowledgeChannelsAvailable
+      knowledgeChannelLimit={8}
       onRefresh={vi.fn()}
       onRefreshJobChannels={vi.fn()}
+      onRefreshKnowledgeChannels={vi.fn()}
       onSave={vi.fn()}
       onClear={vi.fn()}
       onSaveJobChannel={vi.fn()}
@@ -211,6 +216,96 @@ describe("ConfigurationView", () => {
       expect(screen.queryByRole("heading", { name: "AI Providers" })).not.toBeInTheDocument()
     })
     expect(screen.getByRole("heading", { name: "Onboarding" })).toBeVisible()
+  })
+
+  it("selects Discord knowledge sources by name without exposing raw IDs", async () => {
+    window.history.replaceState({}, "", "/dashboard/configuration#knowledge-sources")
+    const onSave = vi.fn().mockResolvedValue(true)
+    renderConfigurationView({
+      items: [
+        ...items,
+        configItem({
+          key: "KNOWLEDGE_DISCORD_CHANNEL_IDS",
+          label: "Discord knowledge sources",
+          category: "Agent",
+          description: "Selected Discord answer sources.",
+          value_type: "csv",
+          source: "database",
+          configured: true,
+          value: "111",
+        }),
+      ],
+      knowledgeChannels: [
+        {
+          channel_id: "111",
+          channel_name: "general",
+          channel_type: "text",
+          parent_name: "Community",
+        },
+        {
+          channel_id: "222",
+          channel_name: "deployments",
+          channel_type: "text",
+          parent_name: "Engineering",
+        },
+      ],
+      selectedKnowledgeChannelIds: ["111"],
+      knowledgeChannelsAvailable: true,
+      knowledgeChannelLimit: 2,
+      onSave,
+    })
+
+    expect(screen.getByRole("button", { name: /Knowledge sources/ })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    )
+    expect(screen.getByText("#general")).toBeVisible()
+    expect(screen.getByText("#deployments")).toBeVisible()
+
+    fireEvent.change(screen.getByLabelText("Search Discord knowledge channels"), {
+      target: { value: "deploy" },
+    })
+    expect(screen.queryByText("#general")).not.toBeInTheDocument()
+    fireEvent.click(screen.getByLabelText("Use #deployments for Discord answers"))
+    fireEvent.click(screen.getByRole("button", { name: "Save sources" }))
+
+    await waitFor(() =>
+      expect(onSave).toHaveBeenCalledWith("KNOWLEDGE_DISCORD_CHANNEL_IDS", "111,222"),
+    )
+  })
+
+  it("can disable saved knowledge sources while the Discord bot is unavailable", () => {
+    window.history.replaceState({}, "", "/dashboard/configuration#knowledge-sources")
+    const onClear = vi.fn()
+    renderConfigurationView({
+      items: [
+        ...items,
+        configItem({
+          key: "KNOWLEDGE_DISCORD_CHANNEL_IDS",
+          label: "Discord knowledge sources",
+          category: "Agent",
+          description: "Selected Discord answer sources.",
+          value_type: "csv",
+          source: "database",
+          configured: true,
+          value: "111",
+        }),
+      ],
+      knowledgeChannels: [],
+      selectedKnowledgeChannelIds: ["111"],
+      knowledgeChannelsAvailable: false,
+      onClear,
+    })
+
+    expect(
+      screen.getByText(
+        "The Discord bot is unavailable, so channel choices cannot be refreshed or changed. You can still disable all Discord answer sources below.",
+      ),
+    ).toBeVisible()
+    fireEvent.click(screen.getByRole("button", { name: "Disable all sources" }))
+
+    expect(screen.getByRole("button", { name: "Save sources" })).toBeDisabled()
+    expect(onClear).toHaveBeenCalledWith("KNOWLEDGE_DISCORD_CHANNEL_IDS")
   })
 
   it("keeps the job channels tab selected from the hash and manages channels", async () => {

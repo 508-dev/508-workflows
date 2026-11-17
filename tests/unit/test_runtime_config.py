@@ -617,6 +617,23 @@ def test_runtime_config_list_marks_numeric_values_as_configured(
     assert item["value"] == 1
 
 
+def test_discord_knowledge_channels_runtime_config_is_bounded_and_normalized() -> None:
+    definition = runtime_config_definition_for_key("KNOWLEDGE_DISCORD_CHANNEL_IDS")
+
+    assert definition is not None
+    assert definition.category == "Agent"
+    assert definition.restart_required is False
+    assert coerce_runtime_config_value(definition, " 123,456,123 ") == "123,456"
+
+    with pytest.raises(ValueError, match="at most eight"):
+        coerce_runtime_config_value(
+            definition,
+            ",".join(str(channel_id) for channel_id in range(9)),
+        )
+    with pytest.raises(ValueError, match="Discord channel"):
+        coerce_runtime_config_value(definition, "not-a-channel")
+
+
 def test_parse_dotenv_keys_reads_env_file_once(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -9,30 +9,69 @@ import re
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, Mock, call, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
 
 import pytest
 from fastapi.testclient import TestClient
+from psycopg.types.json import Jsonb
 
 from five08.agent import (
     AgentExecutionResult,
     AgentIdentityContext,
+    AgentModelConfig,
     AgentOrchestrator,
+    AgentPlan,
+    AgentResponse,
+    AgentResponsePlannerMetadata,
+    AgentToolAction,
     InMemoryTaskStore,
     ToolRegistry,
+    ToolRuntimeConfig,
 )
+from five08.agent.state import InMemoryAgentStateStore
+from five08.agent.context import ContextLoadBounds
+from five08.knowledge.store import InMemoryKnowledgeStore
 from five08.backend import api
 from five08.job_channels import JobPostingType, RegisteredJobPostChannel
+from five08.settings import SharedSettings
 from five08.worker.masking import mask_email
+from five08.wiki_editing.assertions import (
+    WIKI_ASSERTION_HEADER,
+    create_wiki_action_assertion,
+)
+
+
+@pytest.fixture(autouse=True)
+def agent_state_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(api, "_AGENT_STATE_STORE", InMemoryAgentStateStore())
+    monkeypatch.setattr(api, "_KNOWLEDGE_STORE", InMemoryKnowledgeStore())
+    monkeypatch.setattr(api, "_AGENT_ORCHESTRATOR", None)
 
 
 class _HealthyRedis:
+    def __init__(self, rate_limit_state: dict[str, set[str]] | None = None) -> None:
+        self.rate_limit_state = rate_limit_state if rate_limit_state is not None else {}
+        self.eval_calls: list[tuple[object, ...]] = []
+
     def ping(self) -> bool:
         return True
+
+    def eval(self, *args: object) -> int:
+        self.eval_calls.append(args)
+        _script, num_keys, key, _window_ms, max_requests, member = args
+        assert num_keys == 1
+        members = self.rate_limit_state.setdefault(str(key), set())
+        if len(members) >= int(str(max_requests)):
+            return 1
+        members.add(str(member))
+        return 0
 
 
 class _FailingRedis:
     def ping(self) -> bool:
+        raise RuntimeError("redis unavailable")
+
+    def eval(self, *_args: object) -> int:
         raise RuntimeError("redis unavailable")
 
 
@@ -51,6 +90,156 @@ class _FakePostgresConnection:
 
     def close(self) -> None:
         return None
+
+
+def _pending_confirmation_plan() -> tuple[AgentPlan, AgentIdentityContext]:
+    context = AgentIdentityContext(
+        discord_user_id="123",
+        organization_id="org-1",
+        guild_id="org-1",
+        roles=["Steering Committee"],
+    )
+    plan = AgentPlan(
+        plan_id="pending-plan-1",
+        intent="create_task",
+        planner="deterministic_regex",
+        model_tier="fast",
+        model=AgentModelConfig().resolve("fast"),
+        actions=[
+            AgentToolAction(
+                tool_name="task_write.create_task",
+                arguments={"title": "Update onboarding docs"},
+                summary="Create the onboarding task",
+                requires_confirmation=True,
+            )
+        ],
+        human_summary="Create the onboarding task",
+        requires_confirmation=True,
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+    )
+    return plan, context
+
+
+def test_cached_api_orchestrator_refreshes_policy_from_live_runtime_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A process-local orchestrator must not retain dashboard GitHub settings."""
+
+    runtime_configs = [
+        ToolRuntimeConfig(
+            github_default_repo="508-dev/old-repository",
+            github_allowed_repos="508-dev/old-repository",
+        )
+    ]
+
+    def live_runtime_config(*_args: object) -> ToolRuntimeConfig:
+        return runtime_configs[0]
+
+    monkeypatch.setattr(
+        api,
+        "settings",
+        SharedSettings(
+            environment="production",
+            discord_server_id="1000",
+            agent_discord_admin_role_ids="1001",
+        ),
+    )
+    monkeypatch.setattr(api, "_AGENT_ORCHESTRATOR", None)
+    monkeypatch.setattr(
+        api.ToolRuntimeConfig,
+        "from_settings",
+        live_runtime_config,
+    )
+
+    orchestrator = api._get_agent_orchestrator()
+    initial_policy = orchestrator.policy
+
+    assert api._get_agent_orchestrator() is orchestrator
+    assert initial_policy.github_default_repo == "508-dev/old-repository"
+    assert "agent:schedule:manage" in initial_policy.scopes_for_context(
+        AgentIdentityContext(
+            discord_user_id="user-1",
+            organization_id="1000",
+            guild_id="1000",
+            role_ids=["1001"],
+        )
+    )
+    api._KNOWLEDGE_STORE.remember_fact(
+        scope_type="user",
+        scope_id="user-1",
+        key="timezone",
+        value_json={"text": "Asia/Tokyo"},
+        visibility="private",
+        source_type="request",
+        source_ref="agent_request",
+        source_excerpt=None,
+        created_by="user-1",
+        verification_status="user_confirmed",
+        organization_id="1000",
+    )
+    memory_context = orchestrator.context_loader.load(
+        context=AgentIdentityContext(
+            discord_user_id="user-1",
+            organization_id="1000",
+            guild_id="1000",
+            roles=["Backend"],
+            role_ids=["1001"],
+        ),
+        bounds=ContextLoadBounds(),
+    )
+    assert "Asia/Tokyo" in memory_context[0].text
+
+    runtime_configs[0] = ToolRuntimeConfig(
+        github_default_repo="508-dev/new-repository",
+        github_allowed_repos="508-dev/new-repository",
+    )
+    refreshed_policy = orchestrator.policy
+
+    assert api._get_agent_orchestrator() is orchestrator
+    assert refreshed_policy is not initial_policy
+    assert refreshed_policy.github_default_repo == "508-dev/new-repository"
+    assert refreshed_policy.github_configured_repositories == {"508-dev/new-repository"}
+    assert (
+        refreshed_policy.scopes_for_context(
+            AgentIdentityContext(
+                discord_user_id="user-1",
+                organization_id="2000",
+                guild_id="2000",
+                role_ids=["1001"],
+            )
+        )
+        == set()
+    )
+
+
+def test_api_knowledge_service_uses_configured_role_id_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        api,
+        "settings",
+        SharedSettings(
+            environment="production",
+            discord_server_id="1000",
+            agent_discord_engineer_role_ids="1001",
+        ),
+    )
+    monkeypatch.setattr(api, "_KNOWLEDGE_SERVICE", None)
+
+    service = api._get_knowledge_service()
+    configured_actor = AgentIdentityContext(
+        discord_user_id="user-1",
+        organization_id="1000",
+        guild_id="1000",
+        roles=["Backend"],
+        role_ids=["1001"],
+    )
+    name_only_actor = configured_actor.model_copy(
+        update={"roles": ["Engineer"], "role_ids": []}
+    )
+
+    assert "knowledge:read_org" in service.policy.scopes_for_context(configured_actor)
+    assert service.policy.scopes_for_context(name_only_actor) == set()
 
 
 def test_crm_sync_scheduler_skips_start_without_espo_config(
@@ -132,6 +321,122 @@ def test_lifespan_keeps_health_degraded_when_migrations_fail(
     assert payload["postgres_migrations_ok"] is False
 
 
+def test_lifespan_starts_agent_state_cleanup_after_migrations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Idle agent cleanup starts independently of schedule dispatch."""
+
+    cleanup_scheduler = AsyncMock()
+    worker_job_reconciliation_scheduler = AsyncMock()
+    run_retention_scheduler = AsyncMock()
+    pending_plan_cleanup_scheduler = AsyncMock()
+    monkeypatch.setattr(api, "get_redis_connection", lambda _settings: _HealthyRedis())
+    monkeypatch.setattr(api, "run_job_migrations", Mock())
+    monkeypatch.setattr(
+        api,
+        "get_postgres_connection",
+        lambda _settings: _FakePostgresConnection(),
+    )
+    monkeypatch.setattr(api, "build_queue_client", Mock(return_value=Mock()))
+    monkeypatch.setattr(api, "_knowledge_capture_cleanup_scheduler", cleanup_scheduler)
+    monkeypatch.setattr(
+        api,
+        "_worker_job_queue_reconciliation_scheduler",
+        worker_job_reconciliation_scheduler,
+    )
+    monkeypatch.setattr(
+        api,
+        "_agent_schedule_run_retention_scheduler",
+        run_retention_scheduler,
+    )
+    monkeypatch.setattr(
+        api,
+        "_pending_agent_plan_cleanup_scheduler",
+        pending_plan_cleanup_scheduler,
+    )
+    monkeypatch.setattr(api.settings, "crm_sync_enabled", False)
+    monkeypatch.setattr(api.settings, "newsletter_sync_enabled", False)
+    monkeypatch.setattr(api.settings, "email_resume_intake_enabled", False)
+    monkeypatch.setattr(api.settings, "agent_schedule_enabled", False)
+    monkeypatch.setattr(api.settings, "agent_memory_cleanup_enabled", False)
+
+    with TestClient(api.create_app(run_lifespan=True)):
+        cleanup_scheduler.assert_called_once_with()
+        worker_job_reconciliation_scheduler.assert_called_once()
+        run_retention_scheduler.assert_called_once_with()
+        pending_plan_cleanup_scheduler.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_worker_job_reconciliation_redelivers_persisted_jobs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed broker publish remains recoverable beyond the actor attempt."""
+
+    now = datetime.now(tz=timezone.utc)
+    queued = api.JobRecord(
+        id="queued-job",
+        type="example_job",
+        status=api.JobStatus.QUEUED,
+        payload={},
+        idempotency_key=None,
+        attempts=0,
+        max_attempts=8,
+        run_after=None,
+        locked_at=None,
+        locked_by=None,
+        last_error=None,
+        created_at=now,
+        updated_at=now,
+    )
+    failed = api.JobRecord(
+        id="failed-job",
+        type="example_job",
+        status=api.JobStatus.FAILED,
+        payload={},
+        idempotency_key=None,
+        attempts=1,
+        max_attempts=8,
+        run_after=now,
+        locked_at=None,
+        locked_by=None,
+        last_error="broker unavailable",
+        created_at=now,
+        updated_at=now,
+    )
+    queued_redelivery = Mock(return_value=True)
+    failed_redelivery = Mock(return_value=True)
+    list_recoverable = Mock(return_value=[queued, failed])
+    monkeypatch.setattr(
+        api,
+        "list_jobs_needing_queue_reconciliation",
+        list_recoverable,
+    )
+    monkeypatch.setattr(api, "redeliver_queued_job", queued_redelivery)
+    monkeypatch.setattr(api, "redeliver_due_failed_job", failed_redelivery)
+
+    queue = Mock()
+    await api._reconcile_pending_worker_jobs(queue)
+
+    list_recoverable.assert_called_once_with(
+        api.settings,
+        limit=api.settings.job_queue_reconciliation_batch_size,
+        minimum_age_seconds=api._JOB_QUEUE_REDELIVERY_BACKOFF_SECONDS,
+    )
+    queued_redelivery.assert_called_once_with(
+        queue,
+        settings=api.settings,
+        job_id="queued-job",
+        minimum_age_seconds=api._JOB_QUEUE_REDELIVERY_BACKOFF_SECONDS,
+    )
+    failed_redelivery.assert_called_once_with(
+        queue,
+        settings=api.settings,
+        job_id="failed-job",
+        minimum_age_seconds=api._JOB_QUEUE_REDELIVERY_BACKOFF_SECONDS,
+    )
+
+
 async def test_postgres_health_handles_missing_connection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -207,9 +512,58 @@ class _FakeAuthStore(api.RedisAuthStore):
 @pytest.fixture
 def auth_headers(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     """Configure API secret and return matching auth headers."""
+    monkeypatch.setattr(api.settings, "environment", "test")
     monkeypatch.setattr(api.settings, "api_shared_secret", "test-secret")
-    monkeypatch.setattr(api, "_AGENT_REQUEST_TIMESTAMPS", {})
+    monkeypatch.setattr(api.settings, "agent_allow_role_name_fallback", True)
     return {"X-API-Secret": "test-secret"}
+
+
+_OUTLINE_INVITATION_ASSERTION_SECRET = "test-outline-invitation-assertion-secret"
+
+
+def _outline_invitation_payload(
+    *,
+    roles: list[str] | None = None,
+    email: str = "jane@508.dev",
+    name: str | None = "Jane Doe",
+) -> dict[str, object]:
+    """Build the exact signed contract sent by the Discord CRM cog."""
+    payload: dict[str, object] = {
+        "email": email,
+        "actor": {
+            "discord_user_id": "123456789",
+            "discord_guild_id": "987654321",
+            "discord_roles": roles if roles is not None else ["Admin"],
+        },
+    }
+    if name is not None:
+        payload["name"] = name
+    return payload
+
+
+def _signed_outline_invitation_headers(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    auth_headers: dict[str, str],
+    payload: dict[str, object],
+    path: str = "/outline/invitations",
+) -> dict[str, str]:
+    """Return API + bot assertion headers for a fixed membership action."""
+    monkeypatch.setattr(
+        api.settings,
+        "wiki_editing_assertion_secret",
+        _OUTLINE_INVITATION_ASSERTION_SECRET,
+    )
+    monkeypatch.setattr(api.settings, "discord_server_id", "987654321")
+    return {
+        **auth_headers,
+        WIKI_ASSERTION_HEADER: create_wiki_action_assertion(
+            _OUTLINE_INVITATION_ASSERTION_SECRET,
+            method="POST",
+            path=path,
+            payload=payload,
+        ),
+    }
 
 
 @pytest.fixture
@@ -223,6 +577,49 @@ def app() -> api.FastAPI:
 @pytest.fixture
 def client(app: api.FastAPI) -> TestClient:
     return TestClient(app)
+
+
+def _agent_request_with_secret(
+    secret: str,
+    *,
+    body: bytes = b"{}",
+) -> api.Request:
+    """Build an agent request with a controlled JSON body for handler tests."""
+    delivered = False
+
+    async def receive() -> dict[str, object]:
+        nonlocal delivered
+        if delivered:
+            return {"type": "http.disconnect"}
+        delivered = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    return api.Request(
+        {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/agent/requests",
+            "raw_path": b"/agent/requests",
+            "query_string": b"",
+            "headers": [(b"x-api-secret", secret.encode("ascii"))],
+            "client": ("testclient", 50000),
+            "server": ("testserver", 80),
+            "app": SimpleNamespace(
+                state=SimpleNamespace(redis_conn=_HealthyRedis()),
+            ),
+        },
+        receive,
+    )
+
+
+async def _call_agent_handler(path: str, secret: str) -> api.JSONResponse:
+    request = _agent_request_with_secret(secret)
+    if path == "/agent/requests":
+        return await api.agent_request_handler(request)
+    return await api.agent_confirmation_handler(request, "x")
 
 
 def _dashboard_write_session() -> api.AuthSession:
@@ -932,6 +1329,185 @@ def test_audit_event_handler_persists_human_event(
     assert payload["person_id"] == "person-1"
 
 
+@pytest.mark.parametrize("path", ["/agent/requests", "/agent/confirmations/x"])
+def test_agent_routes_use_api_shared_secret(
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+) -> None:
+    """Agent routes use the same shared credential as protected API routes."""
+    monkeypatch.setattr(api.settings, "api_shared_secret", "api-secret")
+
+    authorized_response = asyncio.run(_call_agent_handler(path, "api-secret"))
+    unauthorized_response = asyncio.run(_call_agent_handler(path, "wrong-secret"))
+
+    assert authorized_response.status_code == 400
+    assert unauthorized_response.status_code == 401
+
+
+async def test_agent_request_returns_within_its_response_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def blocked_to_thread(
+        function: object, *_args: object, **_kwargs: object
+    ) -> object:
+        if function is api._agent_request_rate_limited:
+            return False
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(api.settings, "environment", "test")
+    monkeypatch.setattr(api.settings, "api_shared_secret", "api-secret")
+    monkeypatch.setattr(api.settings, "agent_request_response_budget_seconds", 0.01)
+    monkeypatch.setattr(api, "_AGENT_ORCHESTRATOR", Mock())
+    request = _agent_request_with_secret(
+        "api-secret",
+        body=json.dumps(
+            {
+                "message": "Search the web for current grants",
+                "context": {
+                    "discord_user_id": "123",
+                    "organization_id": "org-1",
+                    "guild_id": "org-1",
+                    "roles": ["Steering Committee"],
+                },
+            }
+        ).encode(),
+    )
+
+    with (
+        patch("five08.backend.api._schedule_agent_audit_event") as schedule_audit,
+        patch(
+            "five08.backend.api.asyncio.to_thread",
+            new=blocked_to_thread,
+        ),
+    ):
+        response = await api.agent_request_handler(request)
+
+    assert response.status_code == 504
+    assert json.loads(response.body) == {
+        "status": "failed",
+        "message": (
+            "The agent request took too long to complete. Please narrow the "
+            "request and try again."
+        ),
+    }
+    assert schedule_audit.call_args.kwargs["metadata"] == {
+        "status": "failed",
+        "reason": "agent_response_budget_exceeded",
+        "message_sanitized": "Search the web for current grants",
+    }
+
+
+def test_private_memory_requests_do_not_log_raw_facts() -> None:
+    message = "Remember that my timezone is Asia/Tokyo"
+    context = AgentIdentityContext(
+        discord_user_id="123",
+        organization_id="org-1",
+        guild_id="org-1",
+        roles=["Engineer"],
+    )
+    response = AgentOrchestrator().plan(message, context)
+    metadata = api._agent_request_audit_metadata(message=message, response=response)
+    assert metadata["action_names"] == ["memory_write.remember_fact"]
+    assert "Asia/Tokyo" not in json.dumps(metadata)
+    assert "message" not in metadata
+
+
+def test_private_memory_confirmation_audit_omits_fact_values(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    context = {
+        "discord_user_id": "123",
+        "organization_id": "org-1",
+        "guild_id": "org-1",
+        "roles": ["Engineer"],
+    }
+    with patch(
+        "five08.backend.api._write_agent_audit_event",
+        new_callable=AsyncMock,
+    ) as mock_write_audit:
+        draft = client.post(
+            "/agent/requests",
+            json={
+                "message": "Remember that my timezone is Asia/Tokyo",
+                "context": context,
+            },
+            headers=auth_headers,
+        )
+        assert draft.status_code == 202
+        plan_id = draft.json()["plan"]["plan_id"]
+        confirmed = client.post(
+            f"/agent/confirmations/{plan_id}",
+            json={
+                "confirm": True,
+                "context": context,
+            },
+            headers=auth_headers,
+        )
+
+    assert confirmed.status_code == 200
+    confirmation_audit = mock_write_audit.call_args_list[-1].kwargs
+    assert confirmation_audit["action"] == "agent.confirmation"
+    metadata = confirmation_audit["metadata"]
+    assert "results" not in metadata
+    assert metadata["tool_outcomes"] == [
+        {"tool_name": "memory_write.remember_fact", "status": "succeeded"}
+    ]
+    assert "Asia/Tokyo" not in json.dumps(metadata)
+
+
+def test_confirmation_storage_outage_is_retryable_and_does_not_consume_plan(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = {
+        "discord_user_id": "123",
+        "organization_id": "org-1",
+        "guild_id": "org-1",
+        "roles": ["Engineer"],
+    }
+    with patch("five08.backend.api._schedule_agent_audit_event"):
+        draft = client.post(
+            "/agent/requests",
+            json={
+                "message": "Remember that my timezone is UTC",
+                "context": context,
+            },
+            headers=auth_headers,
+        )
+        assert draft.status_code == 202
+        plan_id = draft.json()["plan"]["plan_id"]
+        store = api._AGENT_STATE_STORE
+        original_claim = store.claim_plan
+        monkeypatch.setattr(
+            store, "claim_plan", Mock(side_effect=RuntimeError("storage down"))
+        )
+        failed = client.post(
+            f"/agent/confirmations/{plan_id}",
+            json={
+                "confirm": True,
+                "context": context,
+            },
+            headers=auth_headers,
+        )
+        assert failed.status_code == 503
+        assert failed.json()["retryable"] is True
+        assert plan_id in store.plans
+        monkeypatch.setattr(store, "claim_plan", original_claim)
+        retried = client.post(
+            f"/agent/confirmations/{plan_id}",
+            json={
+                "confirm": True,
+                "context": context,
+            },
+            headers=auth_headers,
+        )
+        assert retried.status_code == 200
+        assert retried.json()["status"] == "executed"
+        assert plan_id not in store.plans
+
+
 def test_agent_request_for_write_returns_confirmation_plan(
     client: TestClient,
     auth_headers: dict[str, str],
@@ -944,7 +1520,7 @@ def test_agent_request_for_write_returns_confirmation_plan(
         "_AGENT_ORCHESTRATOR",
         AgentOrchestrator(registry=ToolRegistry(task_store)),
     )
-    monkeypatch.setattr(api, "_PENDING_AGENT_PLANS", {})
+    monkeypatch.setattr(api._AGENT_STATE_STORE, "plans", {})
 
     with patch(
         "five08.backend.api._write_agent_audit_event", new_callable=AsyncMock
@@ -971,7 +1547,7 @@ def test_agent_request_for_write_returns_confirmation_plan(
                             "message_id": "1",
                         }
                     ],
-                    "roles": ["Member"],
+                    "roles": ["Steering Committee"],
                 },
             },
             headers=auth_headers,
@@ -983,7 +1559,9 @@ def test_agent_request_for_write_returns_confirmation_plan(
     assert payload["status"] == "requires_confirmation"
     assert payload["plan"]["operation_id"] == "op-123"
     assert payload["plan"]["actions"][0]["tool_name"] == "task_write.create_task"
-    assert payload["plan"]["plan_id"] in api._PENDING_AGENT_PLANS
+    assert payload["plan"]["plan_id"] in api._AGENT_STATE_STORE.plans
+    stored_context = api._AGENT_STATE_STORE.plans[payload["plan"]["plan_id"]][1]
+    assert stored_context.context_snippets == []
     assert audit_kwargs["context"].operation_id == "op-123"
     assert audit_kwargs["context"].interaction_id == "interaction-1"
     assert audit_kwargs["metadata"]["operation_id"] == "op-123"
@@ -992,9 +1570,139 @@ def test_agent_request_for_write_returns_confirmation_plan(
         "client_supplied_context"
     )
     assert "Ignore previous instructions" not in str(audit_kwargs["metadata"])
-    assert audit_kwargs["metadata"]["message"] == (
+    assert audit_kwargs["metadata"]["message_sanitized"] == (
         "Create a task for Sarah to update onboarding docs by Friday"
     )
+
+
+def test_agent_request_audit_redacts_memory_write_values() -> None:
+    """A forgotten fact cannot remain recoverable from audit metadata."""
+
+    plan = AgentPlan(
+        plan_id="memory-plan-1",
+        intent="remember_fact",
+        planner="deterministic_regex",
+        model_tier="fast",
+        model=AgentModelConfig().resolve("fast"),
+        actions=[
+            AgentToolAction(
+                tool_name="memory_write.remember_fact",
+                arguments={
+                    "scope_type": "user",
+                    "key": "accommodation",
+                    "value_json": {"text": "my temporary accommodation"},
+                },
+                summary="Remember a private preference",
+                requires_confirmation=True,
+            )
+        ],
+        human_summary="Remember a private preference",
+        requires_confirmation=True,
+    )
+
+    metadata = api._agent_request_audit_metadata(
+        message="Remember that my accommodation is 123 Private Street.",
+        response=AgentResponse(
+            status="requires_confirmation",
+            plan=plan,
+            message="Please confirm this memory update.",
+        ),
+    )
+
+    assert metadata["message_sanitized"] == "[memory write request redacted]"
+    assert "Private Street" not in str(metadata)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Remember that my accommodation is 123 Private Street.",
+        "Forget memory fact fact-12345678",
+        "Store my accommodation preference for later.",
+    ],
+)
+def test_agent_audit_sanitizer_redacts_memory_write_intent_before_planning(
+    message: str,
+) -> None:
+    assert api._sanitize_agent_audit_message(message) == (
+        "[memory write request redacted]"
+    )
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Summarize CRM record 0e5e5302-8d36-4bc8-954d-68332b36949b.",
+        "What is the status of customer%2540example.com?",
+        "Summarize CRM contact contact%252D123.",
+    ],
+)
+def test_agent_audit_sanitizer_redacts_canonical_private_identifiers(
+    message: str,
+) -> None:
+    assert api._sanitize_agent_audit_message(message) == (
+        "[private agent request redacted]"
+    )
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_memory_request_redacts_preplanning_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The rate limiter must not retain an ordinary memory value in its audit."""
+
+    monkeypatch.setattr(api.settings, "environment", "test")
+    monkeypatch.setattr(api.settings, "api_shared_secret", "api-secret")
+    monkeypatch.setattr(
+        api,
+        "_agent_request_rate_limited",
+        lambda _redis_conn, _user_id: True,
+    )
+    audit = Mock()
+    monkeypatch.setattr(api, "_schedule_agent_audit_event", audit)
+    request = _agent_request_with_secret(
+        "api-secret",
+        body=json.dumps(
+            {
+                "message": "Remember that my accommodation is 123 Private Street.",
+                "context": {"discord_user_id": "123"},
+            }
+        ).encode(),
+    )
+
+    response = await api.agent_request_handler(request)
+
+    assert response.status_code == 429
+    assert audit.call_args.kwargs["metadata"]["message_sanitized"] == (
+        "[memory write request redacted]"
+    )
+
+
+def test_agent_request_audit_keeps_direct_answer_planner_metadata() -> None:
+    model = AgentModelConfig().resolve("fast")
+    response = AgentResponse(
+        status="executed",
+        message="A concise answer.",
+        planner_metadata=AgentResponsePlannerMetadata(
+            operation_id="op-123",
+            intent="general_question",
+            planner="live_model",
+            model_tier=model.tier,
+            model=model,
+        ),
+    )
+
+    metadata = api._agent_request_audit_metadata(
+        message="What is a cooperative?",
+        response=response,
+    )
+
+    assert metadata["intent"] == "general_question"
+    assert metadata["planner"] == "live_model"
+    assert metadata["operation_id"] == "op-123"
+    assert metadata["model"] == model.model
+    assert metadata["model_tier"] == "fast"
+    assert "planner_metadata" not in response.model_dump(mode="json")
 
 
 def test_agent_request_rejects_oversized_message(
@@ -1032,10 +1740,7 @@ def test_agent_request_audits_unsupported_message_with_sanitized_shape(
         response = client.post(
             "/agent/requests",
             json={
-                "message": (
-                    "frobnicate member agreement to Michael Wu at "
-                    "michael@example.com +1 415 555 1212"
-                ),
+                "message": "frobnicate member agreement for Michael Wu",
                 "context": {
                     "discord_user_id": "123",
                     "organization_id": "org-1",
@@ -1051,11 +1756,9 @@ def test_agent_request_audits_unsupported_message_with_sanitized_shape(
     metadata = audit_kwargs["metadata"]
     assert metadata["reason"] == "unsupported_agent_request"
     assert metadata["improvement_log"] is True
-    assert metadata["message_sanitized"] == ("frobnicate member agreement to [person]")
+    assert metadata["message_sanitized"] == ("frobnicate member agreement for [person]")
     assert "message" not in metadata
     assert "Michael Wu" not in str(metadata)
-    assert "michael@example.com" not in str(metadata)
-    assert "415" not in str(metadata)
 
 
 def test_agent_request_rate_limits_per_user(
@@ -1071,7 +1774,7 @@ def test_agent_request_rate_limits_per_user(
             "discord_user_id": "123",
             "organization_id": "org-1",
             "guild_id": "org-1",
-            "roles": ["Member"],
+            "roles": ["Steering Committee"],
         },
     }
 
@@ -1092,6 +1795,61 @@ def test_agent_request_rate_limits_per_user(
     assert second_response.json()["status"] == "denied"
 
 
+def test_agent_request_rate_limit_is_atomic_across_redis_clients(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Replica-local clients enforce one shared sliding-window allowance."""
+
+    shared_state: dict[str, set[str]] = {}
+    first_replica = _HealthyRedis(shared_state)
+    second_replica = _HealthyRedis(shared_state)
+    monkeypatch.setattr(api, "_AGENT_REQUEST_RATE_LIMIT_MAX_REQUESTS", 1)
+
+    assert api._agent_request_rate_limited(first_replica, "123") is False
+    assert api._agent_request_rate_limited(second_replica, "123") is True
+    assert api._agent_request_rate_limited(second_replica, "456") is False
+
+    script = str(first_replica.eval_calls[0][0])
+    assert "redis.call('TIME')" in script
+    assert "ZREMRANGEBYSCORE" in script
+    assert "ZCARD" in script
+    assert "ZADD" in script
+    assert "PEXPIRE" in script
+    assert "123" not in str(first_replica.eval_calls[0][2])
+
+
+@pytest.mark.asyncio
+async def test_agent_request_fails_closed_when_shared_rate_limit_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Redis outage must not silently bypass the shared admission boundary."""
+
+    monkeypatch.setattr(api.settings, "environment", "test")
+    monkeypatch.setattr(api.settings, "api_shared_secret", "api-secret")
+    request = _agent_request_with_secret(
+        "api-secret",
+        body=json.dumps(
+            {
+                "message": "Search the web for current grants",
+                "context": {"discord_user_id": "123"},
+            }
+        ).encode(),
+    )
+    request.app.state.redis_conn = _FailingRedis()
+    audit = Mock()
+    monkeypatch.setattr(api, "_schedule_agent_audit_event", audit)
+
+    response = await api.agent_request_handler(request)
+
+    assert response.status_code == 503
+    assert json.loads(response.body) == {
+        "status": "failed",
+        "message": "Agent request rate limiting is temporarily unavailable.",
+    }
+    assert audit.call_args.kwargs["result"] is api.AuditResult.ERROR
+    assert audit.call_args.kwargs["metadata"]["reason"] == "rate_limit_unavailable"
+
+
 def test_agent_request_rejects_when_pending_plan_capacity_is_full(
     client: TestClient,
     auth_headers: dict[str, str],
@@ -1104,7 +1862,7 @@ def test_agent_request_rejects_when_pending_plan_capacity_is_full(
         "_AGENT_ORCHESTRATOR",
         AgentOrchestrator(registry=ToolRegistry(task_store)),
     )
-    monkeypatch.setattr(api, "_PENDING_AGENT_PLANS", {})
+    monkeypatch.setattr(api._AGENT_STATE_STORE, "plans", {})
     monkeypatch.setattr(api, "_MAX_PENDING_AGENT_PLANS", 1)
 
     request_body = {
@@ -1113,7 +1871,7 @@ def test_agent_request_rejects_when_pending_plan_capacity_is_full(
             "discord_user_id": "123",
             "organization_id": "org-1",
             "guild_id": "org-1",
-            "roles": ["Member"],
+            "roles": ["Steering Committee"],
         },
     }
 
@@ -1136,20 +1894,145 @@ def test_agent_request_rejects_when_pending_plan_capacity_is_full(
     assert "capacity is full" in second_response.json()["message"]
 
 
-def test_pending_agent_plan_lock_is_created_per_running_loop(
+@pytest.mark.asyncio
+async def test_pending_agent_plan_uses_the_durable_state_store(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Pending-plan locks should be bound to the active request loop, not import time."""
-    monkeypatch.setattr(api, "_PENDING_AGENT_PLANS_LOCK", None)
-    monkeypatch.setattr(api, "_PENDING_AGENT_PLANS_LOCK_LOOP", None)
+    """Production confirmation storage must not depend on one API process."""
 
-    async def get_lock() -> asyncio.Lock:
-        return api._pending_agent_plans_lock()
+    plan, context = _pending_confirmation_plan()
+    store = Mock()
+    store.save_plan.return_value = True
+    monkeypatch.setattr(api, "_AGENT_STATE_STORE", store)
 
-    first_lock = asyncio.run(get_lock())
-    second_lock = asyncio.run(get_lock())
+    assert await api._store_pending_agent_plan(plan, context)
+    store.save_plan.assert_called_once_with(
+        plan,
+        context,
+        maximum=api._MAX_PENDING_AGENT_PLANS,
+        per_actor=api._MAX_PENDING_AGENT_PLANS_PER_ACTOR,
+    )
 
-    assert first_lock is not second_lock
+
+def test_durable_pending_agent_plan_store_uses_a_shared_capacity_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent replicas serialize capacity checks before persisting a plan."""
+
+    plan, context = _pending_confirmation_plan()
+    cursor = MagicMock()
+    cursor.fetchone.side_effect = [
+        {"pending_plan_count": 0},
+        {"pending_plan_count": 0},
+        {"plan_id": plan.plan_id},
+    ]
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.cursor.return_value.__enter__.return_value = cursor
+    monkeypatch.setattr(
+        api,
+        "get_postgres_connection",
+        lambda _settings: connection,
+    )
+
+    assert api._store_pending_agent_plan_durably(plan, context)
+
+    executed = cursor.execute.call_args_list
+    queries = [str(executed_call.args[0]) for executed_call in executed]
+    assert any("pg_advisory_xact_lock" in query for query in queries)
+    assert any("DELETE FROM agent_pending_plans" in query for query in queries)
+    insert_params = next(
+        executed_call.args[1]
+        for executed_call in executed
+        if "INSERT INTO agent_pending_plans" in str(executed_call.args[0])
+    )
+    assert insert_params[:2] == (plan.plan_id, context.discord_user_id)
+    assert isinstance(insert_params[2], Jsonb)
+    assert isinstance(insert_params[3], Jsonb)
+
+
+def test_durable_pending_agent_plan_cleanup_deletes_expired_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Expired confirmation payloads are purged without a new plan request."""
+
+    now = datetime(2026, 8, 17, 9, 0, tzinfo=timezone.utc)
+    cursor = MagicMock()
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.cursor.return_value.__enter__.return_value = cursor
+    monkeypatch.setattr(
+        api,
+        "get_postgres_connection",
+        lambda _settings: connection,
+    )
+
+    api._purge_expired_pending_agent_plans_durably(now=now)
+
+    cursor.execute.assert_called_once()
+    query, params = cursor.execute.call_args.args
+    assert "DELETE FROM agent_pending_plans" in query
+    assert "expires_at IS NOT NULL AND expires_at <= %s" in query
+    assert params == (now,)
+
+
+@pytest.mark.asyncio
+async def test_pending_agent_plan_cleanup_scheduler_purges_before_waiting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The idle cleanup loop runs a durable purge before each interval."""
+
+    purges: list[None] = []
+
+    def purge() -> None:
+        purges.append(None)
+
+    async def cancel_on_sleep(_seconds: float) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(api, "_purge_expired_pending_agent_plans_durably", purge)
+    monkeypatch.setattr(api.asyncio, "sleep", cancel_on_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await api._pending_agent_plan_cleanup_scheduler()
+
+    assert purges == [None]
+
+
+def test_durable_pending_agent_plan_claim_locks_and_consumes_one_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A confirmation can be loaded after a restart but cannot be claimed twice."""
+
+    plan, context = _pending_confirmation_plan()
+    cursor = MagicMock()
+    cursor.fetchone.return_value = {
+        "plan": plan.model_dump(mode="json"),
+        "original_context": context.model_dump(mode="json"),
+        "owner_discord_user_id": context.discord_user_id,
+        "expires_at": plan.expires_at,
+    }
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.cursor.return_value.__enter__.return_value = cursor
+    monkeypatch.setattr(
+        api,
+        "get_postgres_connection",
+        lambda _settings: connection,
+    )
+
+    status, pending = api._claim_pending_agent_plan_durably(
+        plan.plan_id,
+        discord_user_id=context.discord_user_id,
+    )
+
+    assert status == "claimed"
+    assert pending == (plan, context)
+    queries = [
+        str(executed_call.args[0]) for executed_call in cursor.execute.call_args_list
+    ]
+    assert "FOR UPDATE" in queries[0]
+    assert queries[-1].strip().startswith("DELETE FROM agent_pending_plans")
 
 
 @pytest.mark.asyncio
@@ -1184,17 +2067,17 @@ async def test_agent_audit_scheduler_keeps_strong_task_reference(
 
 
 @pytest.mark.asyncio
-async def test_agent_confirmation_claim_pops_before_expired_cleanup(
+async def test_agent_confirmation_claim_is_consumed_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Claiming a plan should not race itself if cleanup sees it as expired."""
+    """Only one consumer may claim a frozen plan."""
     plan_response = AgentOrchestrator(today=datetime.now(timezone.utc).date()).plan(
         "Create a task for Sarah to update onboarding docs by Friday",
         AgentIdentityContext(
             discord_user_id="123",
             organization_id="org-1",
             guild_id="org-1",
-            roles=["Member"],
+            roles=["Steering Committee"],
         ),
     )
     assert plan_response.plan is not None
@@ -1202,19 +2085,12 @@ async def test_agent_confirmation_claim_pops_before_expired_cleanup(
         discord_user_id="123",
         organization_id="org-1",
         guild_id="org-1",
-        roles=["Member"],
+        roles=["Steering Committee"],
     )
     monkeypatch.setattr(
-        api,
-        "_PENDING_AGENT_PLANS",
+        api._AGENT_STATE_STORE,
+        "plans",
         {plan_response.plan.plan_id: (plan_response.plan, original_context)},
-    )
-
-    def cleanup_removes_plan(*, now: datetime | None = None) -> None:
-        api._PENDING_AGENT_PLANS.pop(plan_response.plan.plan_id, None)
-
-    monkeypatch.setattr(
-        api, "_cleanup_expired_pending_agent_plans", cleanup_removes_plan
     )
 
     claim_status, pending = await api._claim_pending_agent_plan(
@@ -1225,6 +2101,10 @@ async def test_agent_confirmation_claim_pops_before_expired_cleanup(
     assert claim_status == "claimed"
     assert pending is not None
     assert pending[0].plan_id == plan_response.plan.plan_id
+    again, _ = await api._claim_pending_agent_plan(
+        plan_response.plan.plan_id, discord_user_id="123"
+    )
+    assert again == "not_found"
 
 
 def test_agent_confirmation_executes_frozen_plan_inline(
@@ -1239,7 +2119,7 @@ def test_agent_confirmation_executes_frozen_plan_inline(
         "_AGENT_ORCHESTRATOR",
         AgentOrchestrator(registry=ToolRegistry(task_store)),
     )
-    monkeypatch.setattr(api, "_PENDING_AGENT_PLANS", {})
+    monkeypatch.setattr(api._AGENT_STATE_STORE, "plans", {})
 
     with patch("five08.backend.api.insert_audit_event"):
         plan_response = client.post(
@@ -1250,7 +2130,7 @@ def test_agent_confirmation_executes_frozen_plan_inline(
                     "discord_user_id": "123",
                     "organization_id": "org-1",
                     "guild_id": "org-1",
-                    "roles": ["Member"],
+                    "roles": ["Steering Committee"],
                 },
             },
             headers=auth_headers,
@@ -1264,7 +2144,7 @@ def test_agent_confirmation_executes_frozen_plan_inline(
                     "discord_user_id": "123",
                     "organization_id": "org-1",
                     "guild_id": "org-1",
-                    "roles": ["Member"],
+                    "roles": ["Steering Committee"],
                 },
             },
             headers=auth_headers,
@@ -1274,7 +2154,294 @@ def test_agent_confirmation_executes_frozen_plan_inline(
     assert confirm_response.status_code == 200
     assert payload["status"] == "executed"
     assert payload["results"][0]["result"]["task_id"] == "TASK-001"
-    assert plan_id not in api._PENDING_AGENT_PLANS
+    assert plan_id not in api._AGENT_STATE_STORE.plans
+
+
+def test_agent_confirmation_routes_schedule_creation_through_schedule_gate(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A schedule plan never reaches the generic tool-registry executor."""
+
+    plan = AgentPlan(
+        plan_id="schedule-plan-1",
+        intent="create_agent_schedule",
+        planner="live_model",
+        model_tier="fast",
+        model=AgentModelConfig().resolve("fast"),
+        actions=[
+            AgentToolAction(
+                tool_name="agent_schedule.create",
+                arguments={
+                    "name": "Weekly onboarding health",
+                    "cron_expression": "0 9 * * 1",
+                    "timezone": "Asia/Tokyo",
+                    "prompt": "Inspect onboarding health and report blockers.",
+                },
+                summary="Create recurring report",
+                requires_confirmation=True,
+            )
+        ],
+        human_summary="Create recurring report",
+        requires_confirmation=True,
+    )
+    original_context = AgentIdentityContext(
+        discord_user_id="123",
+        organization_id="org-1",
+        guild_id="org-1",
+        channel_id="2000",
+        roles=["Admin"],
+    )
+    captured: dict[str, object] = {}
+
+    async def create_schedule(
+        _request: api.Request,
+        *,
+        plan: AgentPlan,
+        context: AgentIdentityContext,
+    ) -> api._ConfirmedAgentScheduleCreationResult:
+        captured["plan"] = plan
+        captured["context"] = context
+        return api._ConfirmedAgentScheduleCreationResult(
+            response=AgentResponse(
+                status="executed",
+                plan=plan,
+                results=[
+                    AgentExecutionResult(
+                        tool_name="agent_schedule.create",
+                        status="succeeded",
+                        result={"schedule_id": "schedule-2"},
+                    )
+                ],
+                message="Created recurring report `schedule-2`.",
+            )
+        )
+
+    generic_executor = Mock()
+    monkeypatch.setattr(api, "_AGENT_ORCHESTRATOR", generic_executor)
+    monkeypatch.setattr(
+        api,
+        "_AGENT_STATE_STORE",
+        InMemoryAgentStateStore(),
+    )
+    api._AGENT_STATE_STORE.plans[plan.plan_id] = (plan, original_context)
+    monkeypatch.setattr(
+        api,
+        "_execute_confirmed_agent_schedule_creation_plan",
+        create_schedule,
+    )
+
+    with patch("five08.backend.api.insert_audit_event"):
+        response = client.post(
+            f"/agent/confirmations/{plan.plan_id}",
+            json={
+                "confirm": True,
+                "context": {
+                    "discord_user_id": "123",
+                    "organization_id": "org-1",
+                    "guild_id": "org-1",
+                    "channel_id": "attacker-selected-channel",
+                    "roles": ["Admin"],
+                },
+            },
+            headers=auth_headers,
+        )
+
+    assert response.status_code == 200
+    assert response.json()["results"][0]["result"]["schedule_id"] == "schedule-2"
+    assert captured["plan"] is plan
+    confirmation_context = captured["context"]
+    assert isinstance(confirmation_context, AgentIdentityContext)
+    assert confirmation_context.channel_id == "2000"
+    generic_executor.execute_plan.assert_not_called()
+
+
+def test_agent_confirmation_replays_successful_schedule_creation_after_lost_response(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lost responses replay a completed outcome without repeating schedule creation."""
+
+    plan = AgentPlan(
+        plan_id="schedule-plan-replay",
+        intent="create_agent_schedule",
+        planner="live_model",
+        model_tier="fast",
+        model=AgentModelConfig().resolve("fast"),
+        actions=[
+            AgentToolAction(
+                tool_name="agent_schedule.create",
+                arguments={
+                    "name": "Weekly onboarding health",
+                    "cron_expression": "0 9 * * 1",
+                    "timezone": "Asia/Tokyo",
+                    "prompt": "Inspect onboarding health and report blockers.",
+                },
+                summary="Create recurring report",
+                requires_confirmation=True,
+            )
+        ],
+        human_summary="Create recurring report",
+        requires_confirmation=True,
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+    )
+    original_context = AgentIdentityContext(
+        discord_user_id="123",
+        organization_id="org-1",
+        guild_id="org-1",
+        channel_id="2000",
+        roles=["Admin"],
+    )
+    operation_ids: list[str] = []
+
+    async def create_schedule(
+        _request: api.Request,
+        *,
+        payload: object,
+        context: AgentIdentityContext,
+    ) -> tuple[dict[str, object], int]:
+        assert context.channel_id == "2000"
+        operation_ids.append(str(getattr(payload, "operation_id")))
+        return {
+            "status": "created",
+            "schedule": {"id": "schedule-2", "next_run_at": None},
+        }, 201
+
+    monkeypatch.setattr(api, "_AGENT_ORCHESTRATOR", Mock())
+    monkeypatch.setattr(api, "_create_agent_schedule_for_context", create_schedule)
+    api._AGENT_STATE_STORE.plans[plan.plan_id] = (plan, original_context)
+    confirmation = {
+        "confirm": True,
+        "context": {
+            "discord_user_id": "123",
+            "organization_id": "org-1",
+            "guild_id": "org-1",
+            "roles": ["Admin"],
+        },
+    }
+
+    with patch("five08.backend.api.insert_audit_event"):
+        first = client.post(
+            f"/agent/confirmations/{plan.plan_id}",
+            json=confirmation,
+            headers=auth_headers,
+        )
+        replay = client.post(
+            f"/agent/confirmations/{plan.plan_id}",
+            json=confirmation,
+            headers=auth_headers,
+        )
+        canceled_replay = client.post(
+            f"/agent/confirmations/{plan.plan_id}",
+            json={**confirmation, "confirm": False},
+            headers=auth_headers,
+        )
+
+    assert first.status_code == 200
+    assert replay.status_code == 200
+    assert canceled_replay.status_code == 200
+    assert replay.json() == first.json()
+    assert canceled_replay.json() == first.json()
+    assert canceled_replay.json()["status"] == "executed"
+    assert operation_ids == [plan.plan_id]
+    retained = api._AGENT_STATE_STORE.plans[plan.plan_id]
+    assert retained[:2] == (plan, original_context)
+    assert retained[2].status == "executed"
+
+
+def test_agent_confirmation_restores_schedule_plan_after_preflight_outage(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A proven no-write outage leaves the same confirmation retryable."""
+
+    plan = AgentPlan(
+        plan_id="schedule-plan-retry",
+        intent="create_agent_schedule",
+        planner="live_model",
+        model_tier="fast",
+        model=AgentModelConfig().resolve("fast"),
+        actions=[
+            AgentToolAction(
+                tool_name="agent_schedule.create",
+                arguments={
+                    "name": "Weekly onboarding health",
+                    "cron_expression": "0 9 * * 1",
+                    "timezone": "Asia/Tokyo",
+                    "prompt": "Inspect onboarding health and report blockers.",
+                },
+                summary="Create recurring report",
+                requires_confirmation=True,
+            )
+        ],
+        human_summary="Create recurring report",
+        requires_confirmation=True,
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+    )
+    original_context = AgentIdentityContext(
+        discord_user_id="123",
+        organization_id="org-1",
+        guild_id="org-1",
+        channel_id="2000",
+        roles=["Admin"],
+    )
+
+    async def preflight_outage(
+        _request: api.Request,
+        *,
+        plan: AgentPlan,
+        context: AgentIdentityContext,
+    ) -> api._ConfirmedAgentScheduleCreationResult:
+        return api._ConfirmedAgentScheduleCreationResult(
+            response=AgentResponse(
+                status="failed",
+                plan=plan,
+                results=[
+                    AgentExecutionResult(
+                        tool_name="agent_schedule.create",
+                        status="failed",
+                        error="member_snapshot_failed",
+                    )
+                ],
+                message="The recurring schedule could not be created.",
+            ),
+            retryable_preflight_failure=True,
+        )
+
+    monkeypatch.setattr(api, "_AGENT_ORCHESTRATOR", Mock())
+    monkeypatch.setattr(
+        api,
+        "_AGENT_STATE_STORE",
+        InMemoryAgentStateStore(),
+    )
+    api._AGENT_STATE_STORE.plans[plan.plan_id] = (plan, original_context)
+    monkeypatch.setattr(
+        api,
+        "_execute_confirmed_agent_schedule_creation_plan",
+        preflight_outage,
+    )
+
+    with patch("five08.backend.api.insert_audit_event"):
+        response = client.post(
+            f"/agent/confirmations/{plan.plan_id}",
+            json={
+                "confirm": True,
+                "context": {
+                    "discord_user_id": "123",
+                    "organization_id": "org-1",
+                    "guild_id": "org-1",
+                    "roles": ["Admin"],
+                },
+            },
+            headers=auth_headers,
+        )
+
+    assert response.status_code == 503
+    assert response.json()["retryable_confirmation"] is True
+    assert api._AGENT_STATE_STORE.plans[plan.plan_id] == (plan, original_context)
 
 
 def test_agent_confirmation_cancel_returns_canceled_status(
@@ -1289,9 +2456,9 @@ def test_agent_confirmation_cancel_returns_canceled_status(
         "_AGENT_ORCHESTRATOR",
         AgentOrchestrator(registry=ToolRegistry(task_store)),
     )
-    monkeypatch.setattr(api, "_PENDING_AGENT_PLANS", {})
+    monkeypatch.setattr(api._AGENT_STATE_STORE, "plans", {})
 
-    with patch("five08.backend.api.insert_audit_event") as mock_insert:
+    with patch("five08.backend.api._schedule_agent_audit_event") as mock_schedule:
         plan_response = client.post(
             "/agent/requests",
             json={
@@ -1300,7 +2467,7 @@ def test_agent_confirmation_cancel_returns_canceled_status(
                     "discord_user_id": "123",
                     "organization_id": "org-1",
                     "guild_id": "org-1",
-                    "roles": ["Member"],
+                    "roles": ["Steering Committee"],
                 },
             },
             headers=auth_headers,
@@ -1314,7 +2481,7 @@ def test_agent_confirmation_cancel_returns_canceled_status(
                     "discord_user_id": "123",
                     "organization_id": "org-1",
                     "guild_id": "org-1",
-                    "roles": ["Member"],
+                    "roles": ["Steering Committee"],
                 },
             },
             headers=auth_headers,
@@ -1323,33 +2490,25 @@ def test_agent_confirmation_cancel_returns_canceled_status(
     payload = cancel_response.json()
     assert cancel_response.status_code == 200
     assert payload["status"] == "canceled"
-    audit_payload = mock_insert.call_args.args[1]
-    assert audit_payload.result == api.AuditResult.SUCCESS
-    assert audit_payload.metadata["status"] == "canceled"
-    assert plan_id not in api._PENDING_AGENT_PLANS
+    audit_payload = mock_schedule.call_args.kwargs
+    assert audit_payload["result"] == api.AuditResult.SUCCESS
+    assert audit_payload["metadata"]["status"] == "canceled"
+    assert plan_id not in api._AGENT_STATE_STORE.plans
 
 
-def test_agent_confirmation_uses_original_context_for_execution(
+def test_agent_confirmation_does_not_accept_supplied_scopes_after_role_revocation(
     client: TestClient,
     auth_headers: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Confirmation should ignore spoofed roles/scopes/context from the client."""
+    """A Member cannot restore a revoked task permission through `scopes`."""
     task_store = InMemoryTaskStore()
-    task_store.create_task(
-        title="Existing task",
-        project="Atlas",
-        assignee="Sarah",
-        due_date=None,
-        organization_id="org-1",
-        created_by="456",
-    )
     monkeypatch.setattr(
         api,
         "_AGENT_ORCHESTRATOR",
         AgentOrchestrator(registry=ToolRegistry(task_store)),
     )
-    monkeypatch.setattr(api, "_PENDING_AGENT_PLANS", {})
+    monkeypatch.setattr(api._AGENT_STATE_STORE, "plans", {})
 
     with patch("five08.backend.api.insert_audit_event"):
         plan_response = client.post(
@@ -1360,7 +2519,7 @@ def test_agent_confirmation_uses_original_context_for_execution(
                     "discord_user_id": "123",
                     "organization_id": "org-1",
                     "guild_id": "org-1",
-                    "roles": ["Member"],
+                    "roles": ["Steering Committee"],
                 },
             },
             headers=auth_headers,
@@ -1375,7 +2534,7 @@ def test_agent_confirmation_uses_original_context_for_execution(
                     "internal_user_id": "456",
                     "organization_id": "org-1",
                     "guild_id": "org-1",
-                    "roles": ["Member", "Admin"],
+                    "roles": ["Member"],
                     "scopes": ["task:update_own"],
                 },
             },
@@ -1385,7 +2544,7 @@ def test_agent_confirmation_uses_original_context_for_execution(
     payload = confirm_response.json()
     assert confirm_response.status_code == 403
     assert payload["status"] == "denied"
-    assert "creator" in payload["results"][0]["error"]
+    assert "Missing required scopes" in payload["results"][0]["error"]
 
 
 def test_agent_confirmation_uses_fresh_non_escalating_roles(
@@ -1401,7 +2560,7 @@ def test_agent_confirmation_uses_fresh_non_escalating_roles(
         "_AGENT_ORCHESTRATOR",
         AgentOrchestrator(registry=ToolRegistry(task_store)),
     )
-    monkeypatch.setattr(api, "_PENDING_AGENT_PLANS", {})
+    monkeypatch.setattr(api._AGENT_STATE_STORE, "plans", {})
 
     class CapturingOrchestrator:
         def execute_plan(
@@ -1464,16 +2623,7 @@ def test_agent_confirmation_uses_fresh_non_escalating_roles(
     assert context.guild_id == "org-1"
     assert context.roles == ["Member"]
     assert context.scopes == []
-    assert captured["effective_scopes"] == {
-        "context:read_current_thread",
-        "github:repository:member:read",
-        "github:repository:member:write",
-        "memory:read_self",
-        "memory:write_self",
-        "project:read",
-        "task:create",
-        "task:update_own",
-    }
+    assert captured["effective_scopes"] == set()
 
 
 def test_agent_confirmation_preserves_operation_envelope(
@@ -1487,7 +2637,7 @@ def test_agent_confirmation_preserves_operation_envelope(
         "_AGENT_ORCHESTRATOR",
         AgentOrchestrator(registry=ToolRegistry(InMemoryTaskStore())),
     )
-    monkeypatch.setattr(api, "_PENDING_AGENT_PLANS", {})
+    monkeypatch.setattr(api._AGENT_STATE_STORE, "plans", {})
 
     class CapturingOrchestrator:
         def execute_plan(
@@ -1525,7 +2675,7 @@ def test_agent_confirmation_preserves_operation_envelope(
                     "thread_id": "thread-1",
                     "parent_message_id": "parent-1",
                     "response_destination_visibility": "private",
-                    "roles": ["Member"],
+                    "roles": ["Steering Committee"],
                     "context_snippets": [
                         {
                             "source_type": "discord_message",
@@ -1567,28 +2717,34 @@ def test_agent_confirmation_preserves_operation_envelope(
     assert context.channel_id == "channel-1"
     assert context.thread_id == "thread-1"
     assert context.parent_message_id == "parent-1"
-    assert len(context.context_snippets) == 1
+    # Raw, client-supplied thread text is deliberately not retained across the
+    # confirmation window; the frozen plan already captures the allowed work.
+    assert context.context_snippets == []
     plan = captured["plan"]
     assert isinstance(plan, api.AgentPlan)
     assert plan.context_sources[0].source_ref == "client_supplied_context"
     confirmation_audit_call = mock_write_audit.call_args_list[-1].kwargs
     assert confirmation_audit_call["action"] == "agent.confirmation"
     assert confirmation_audit_call["context"].operation_id == "op-confirm-1"
+    assert confirmation_audit_call["metadata"]["tool_outcomes"] == [
+        {"tool_name": "task_write.create_task", "status": "succeeded"}
+    ]
+    assert "results" not in confirmation_audit_call["metadata"]
 
 
-def test_agent_confirmation_executes_with_confirm_time_member_role(
+def test_agent_confirmation_executes_with_confirm_time_steering_role(
     client: TestClient,
     auth_headers: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A retained member role should keep member-scoped writes executable."""
+    """A retained Steering Committee role should keep task writes executable."""
     task_store = InMemoryTaskStore()
     monkeypatch.setattr(
         api,
         "_AGENT_ORCHESTRATOR",
         AgentOrchestrator(registry=ToolRegistry(task_store)),
     )
-    monkeypatch.setattr(api, "_PENDING_AGENT_PLANS", {})
+    monkeypatch.setattr(api._AGENT_STATE_STORE, "plans", {})
 
     with patch("five08.backend.api.insert_audit_event"):
         plan_response = client.post(
@@ -1599,7 +2755,7 @@ def test_agent_confirmation_executes_with_confirm_time_member_role(
                     "discord_user_id": "123",
                     "organization_id": "org-1",
                     "guild_id": "org-1",
-                    "roles": ["Admin", "Member"],
+                    "roles": ["Admin", "Steering Committee"],
                 },
             },
             headers=auth_headers,
@@ -1613,7 +2769,7 @@ def test_agent_confirmation_executes_with_confirm_time_member_role(
                     "discord_user_id": "123",
                     "organization_id": "org-1",
                     "guild_id": "org-1",
-                    "roles": ["Member"],
+                    "roles": ["Steering Committee"],
                 },
             },
             headers=auth_headers,
@@ -1636,7 +2792,7 @@ def test_agent_confirmation_claims_plan_once(
         "_AGENT_ORCHESTRATOR",
         AgentOrchestrator(registry=ToolRegistry(task_store)),
     )
-    monkeypatch.setattr(api, "_PENDING_AGENT_PLANS", {})
+    monkeypatch.setattr(api._AGENT_STATE_STORE, "plans", {})
 
     with patch("five08.backend.api.insert_audit_event"):
         plan_response = client.post(
@@ -1647,7 +2803,7 @@ def test_agent_confirmation_claims_plan_once(
                     "discord_user_id": "123",
                     "organization_id": "org-1",
                     "guild_id": "org-1",
-                    "roles": ["Member"],
+                    "roles": ["Steering Committee"],
                 },
             },
             headers=auth_headers,
@@ -1661,7 +2817,7 @@ def test_agent_confirmation_claims_plan_once(
                     "discord_user_id": "123",
                     "organization_id": "org-1",
                     "guild_id": "org-1",
-                    "roles": ["Member"],
+                    "roles": ["Steering Committee"],
                 },
             },
             headers=auth_headers,
@@ -1674,7 +2830,7 @@ def test_agent_confirmation_claims_plan_once(
                     "discord_user_id": "123",
                     "organization_id": "org-1",
                     "guild_id": "org-1",
-                    "roles": ["Member"],
+                    "roles": ["Steering Committee"],
                 },
             },
             headers=auth_headers,
@@ -1690,9 +2846,9 @@ def test_agent_confirmation_not_found_is_audited(
     auth_headers: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(api, "_PENDING_AGENT_PLANS", {})
+    monkeypatch.setattr(api._AGENT_STATE_STORE, "plans", {})
 
-    with patch("five08.backend.api.insert_audit_event") as mock_insert:
+    with patch("five08.backend.api._schedule_agent_audit_event") as mock_schedule:
         response = client.post(
             "/agent/confirmations/missing-plan",
             json={
@@ -1709,12 +2865,12 @@ def test_agent_confirmation_not_found_is_audited(
         )
 
     assert response.status_code == 404
-    audit_payload = mock_insert.call_args.args[1]
-    assert audit_payload.action == "agent.confirmation"
-    assert audit_payload.result == api.AuditResult.DENIED
-    assert audit_payload.correlation_id == "interaction-1"
-    assert audit_payload.metadata["reason"] == "plan_not_found"
-    assert audit_payload.metadata["plan_id"] == "missing-plan"
+    audit_payload = mock_schedule.call_args.kwargs
+    assert audit_payload["action"] == "agent.confirmation"
+    assert audit_payload["result"] == api.AuditResult.DENIED
+    assert audit_payload["context"].interaction_id == "interaction-1"
+    assert audit_payload["metadata"]["reason"] == "plan_not_found"
+    assert audit_payload["metadata"]["plan_id"] == "missing-plan"
 
 
 def test_agent_confirmation_expired_plan_is_audited(
@@ -1728,9 +2884,9 @@ def test_agent_confirmation_expired_plan_is_audited(
         "_AGENT_ORCHESTRATOR",
         AgentOrchestrator(registry=ToolRegistry(task_store)),
     )
-    monkeypatch.setattr(api, "_PENDING_AGENT_PLANS", {})
+    monkeypatch.setattr(api._AGENT_STATE_STORE, "plans", {})
 
-    with patch("five08.backend.api.insert_audit_event") as mock_insert:
+    with patch("five08.backend.api._schedule_agent_audit_event") as mock_schedule:
         plan_response = client.post(
             "/agent/requests",
             json={
@@ -1740,14 +2896,14 @@ def test_agent_confirmation_expired_plan_is_audited(
                     "organization_id": "org-1",
                     "guild_id": "org-1",
                     "interaction_id": "interaction-1",
-                    "roles": ["Member"],
+                    "roles": ["Steering Committee"],
                 },
             },
             headers=auth_headers,
         )
         plan_id = plan_response.json()["plan"]["plan_id"]
-        plan, context = api._PENDING_AGENT_PLANS[plan_id]
-        api._PENDING_AGENT_PLANS[plan_id] = (
+        plan, context = api._AGENT_STATE_STORE.plans[plan_id]
+        api._AGENT_STATE_STORE.plans[plan_id] = (
             plan.model_copy(
                 update={"expires_at": datetime.now(timezone.utc) - timedelta(seconds=1)}
             ),
@@ -1767,12 +2923,12 @@ def test_agent_confirmation_expired_plan_is_audited(
         )
 
     assert response.status_code == 410
-    audit_payload = mock_insert.call_args.args[1]
-    assert audit_payload.action == "agent.confirmation"
-    assert audit_payload.result == api.AuditResult.DENIED
-    assert audit_payload.resource_id == plan_id
-    assert audit_payload.correlation_id == "interaction-1"
-    assert audit_payload.metadata["reason"] == "plan_expired"
+    audit_payload = mock_schedule.call_args.kwargs
+    assert audit_payload["action"] == "agent.confirmation"
+    assert audit_payload["result"] == api.AuditResult.DENIED
+    assert audit_payload["plan"].plan_id == plan_id
+    assert audit_payload["context"].interaction_id == "interaction-1"
+    assert audit_payload["metadata"]["reason"] == "plan_expired"
 
 
 def test_auth_login_returns_503_when_store_not_ready(client: TestClient) -> None:
@@ -2395,6 +3551,235 @@ def test_dashboard_configuration_requires_admin_permission(
     assert forbidden_response.status_code == 403
     assert forbidden_response.json()["error"] == "forbidden"
     mock_forbidden_list.assert_not_called()
+
+
+def test_dashboard_knowledge_channels_returns_live_options_and_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="validated",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    monkeypatch.setattr(api.settings, "knowledge_discord_channel_ids", "111,222")
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._list_knowledge_channels_from_bot",
+            new_callable=AsyncMock,
+            return_value={
+                "channels": [
+                    {
+                        "channel_id": "111",
+                        "channel_name": "general",
+                        "channel_type": "text",
+                        "parent_name": "Community",
+                    }
+                ]
+            },
+        ),
+    ):
+        response = client.get("/dashboard/api/knowledge-channels")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "channels": [
+            {
+                "channel_id": "111",
+                "channel_name": "general",
+                "channel_type": "text",
+                "parent_name": "Community",
+            }
+        ],
+        "selected_channel_ids": ["111", "222"],
+        "maximum_selected": 8,
+        "available": True,
+    }
+
+
+def test_dashboard_knowledge_channel_update_rejects_stale_selection(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="validated",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._list_knowledge_channels_from_bot",
+            new_callable=AsyncMock,
+            return_value={
+                "channels": [
+                    {
+                        "channel_id": "111",
+                        "channel_name": "general",
+                        "channel_type": "text",
+                    }
+                ]
+            },
+        ),
+        patch("five08.backend.api.set_runtime_config_value") as mock_set,
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ),
+    ):
+        response = client.put(
+            "/dashboard/api/configuration/KNOWLEDGE_DISCORD_CHANNEL_IDS",
+            json={"value": "111,999"},
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "error": "Some selected Discord channels are no longer accessible; "
+        "refresh and try again"
+    }
+    mock_set.assert_not_called()
+
+
+def test_dashboard_configuration_update_preserves_environment_lock_conflict(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="validated",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    error = "OPENAI_MODEL is configured by environment"
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api.set_runtime_config_value",
+            side_effect=ValueError(error),
+        ),
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ),
+    ):
+        response = client.put(
+            "/dashboard/api/configuration/OPENAI_MODEL",
+            json={"value": "gpt-4.1-mini"},
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {"error": error}
+
+
+def test_dashboard_configuration_update_redacts_unexpected_value_errors(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="validated",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+    sensitive_error = "Traceback: provider secret leaked"
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api.set_runtime_config_value",
+            side_effect=ValueError(sensitive_error),
+        ),
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ) as mock_audit,
+    ):
+        response = client.put(
+            "/dashboard/api/configuration/OPENAI_MODEL",
+            json={"value": "gpt-4.1-mini"},
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "Invalid value for OPENAI_MODEL"}
+    assert mock_audit.await_args.kwargs["metadata"]["error"] == (
+        "Invalid value for OPENAI_MODEL"
+    )
+    assert sensitive_error not in response.text
+
+
+def test_dashboard_knowledge_channel_clear_remains_available_during_bot_outage(
+    client: TestClient,
+) -> None:
+    session = api.AuthSession(
+        subject="admin-1",
+        email="admin@508.dev",
+        display_name="Admin User",
+        groups=["Admin"],
+        is_admin=True,
+        id_token="validated",
+        expires_at=4_102_444_800,
+        actor_provider=api.ActorProvider.DISCORD.value,
+    )
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api._list_knowledge_channels_from_bot",
+            new_callable=AsyncMock,
+            return_value=None,
+        ) as mock_list,
+        patch("five08.backend.api.delete_runtime_config_value") as mock_delete,
+        patch(
+            "five08.backend.api._write_auth_audit_event",
+            new_callable=AsyncMock,
+        ),
+    ):
+        response = client.put(
+            "/dashboard/api/configuration/KNOWLEDGE_DISCORD_CHANNEL_IDS",
+            json={"clear": True},
+        )
+
+    assert response.status_code == 200
+    mock_list.assert_not_awaited()
+    mock_delete.assert_called_once()
 
 
 def test_dashboard_configuration_update_audits_secret_value_required(
@@ -3976,6 +5361,39 @@ def test_dashboard_job_lead_scrape_status_reports_not_run(client: TestClient) ->
     }
 
 
+def test_dashboard_job_lead_status_payload_names_requested_source_when_not_run() -> (
+    None
+):
+    payload = api._dashboard_job_lead_scrape_status_payload(
+        None, source="a16z_talent_network"
+    )
+
+    assert payload["status"] == "not_run"
+    assert payload["source"] == "a16z_talent_network"
+
+
+def test_dashboard_job_lead_status_finds_legacy_alias_runs(client: TestClient) -> None:
+    session = _dashboard_write_session()
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.list_jobs", return_value=[]) as mock_jobs,
+    ):
+        response = client.get(
+            "/dashboard/api/gig-leads/scrape-status?source=a16z_talent_network"
+        )
+
+    assert response.status_code == 200
+    assert response.json()["source"] == "a16z_talent_network"
+    assert set(mock_jobs.call_args.kwargs["payload_sources"]) == {
+        "a16z",
+        "a16z_talent_network",
+    }
+
+
 def test_dashboard_review_job_lead_approves_without_holding_thread(
     client: TestClient,
 ) -> None:
@@ -4229,6 +5647,79 @@ def test_dashboard_sync_job_leads_rejects_unsupported_source(
     mock_enqueue.assert_not_called()
 
 
+def test_dashboard_sync_job_leads_accepts_himalayas_without_story_id(
+    client: TestClient,
+) -> None:
+    session = _dashboard_write_session()
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api.enqueue_job",
+            return_value=Mock(id="job-himalayas-1", created=True),
+        ) as mock_enqueue,
+        patch("five08.backend.api.insert_audit_event"),
+    ):
+        response = client.post(
+            "/dashboard/api/gig-leads/sync",
+            json={"source": "himalayas_remote_jobs"},
+        )
+
+    assert response.status_code == 202
+    assert response.json()["source"] == "himalayas_remote_jobs"
+    assert mock_enqueue.call_args.kwargs["kwargs"] == {
+        "source": "himalayas_remote_jobs",
+        "story_id": None,
+    }
+
+
+def test_dashboard_sync_job_leads_normalizes_alias_before_enqueue(
+    client: TestClient,
+) -> None:
+    session = _dashboard_write_session()
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api.enqueue_job",
+            return_value=Mock(id="job-a16z-1", created=True),
+        ) as mock_enqueue,
+        patch("five08.backend.api.insert_audit_event"),
+    ):
+        response = client.post("/dashboard/api/gig-leads/sync", json={"source": "a16z"})
+
+    assert response.status_code == 202
+    assert response.json()["source"] == "a16z_talent_network"
+    assert mock_enqueue.call_args.kwargs["kwargs"]["source"] == "a16z_talent_network"
+
+
+def test_dashboard_sync_job_leads_rejects_himalayas_story_id(
+    client: TestClient,
+) -> None:
+    session = _dashboard_write_session()
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch("five08.backend.api.enqueue_job") as mock_enqueue,
+    ):
+        response = client.post(
+            "/dashboard/api/gig-leads/sync",
+            json={"source": "himalayas_remote_jobs", "story_id": 123},
+        )
+
+    assert response.status_code == 400
+    assert mock_enqueue.call_count == 0
+
+
 def test_dashboard_stage_job_lead_posts_to_holding_forum(
     client: TestClient,
 ) -> None:
@@ -4407,7 +5898,7 @@ async def test_post_job_lead_to_discord_maps_bot_auth_failure(
     monkeypatch: pytest.MonkeyPatch,
     app: api.FastAPI,
 ) -> None:
-    monkeypatch.setattr(api.settings, "discord_bot_internal_base_url", "http://bot")
+    monkeypatch.setattr(api.settings, "discord_bot_internal_base_url", "https://bot")
     monkeypatch.setattr(api.settings, "api_shared_secret", "secret")
     http_client = Mock()
     http_client.post = AsyncMock(
@@ -4428,6 +5919,86 @@ async def test_post_job_lead_to_discord_maps_bot_auth_failure(
     assert payload == {"error": "bot_auth_failed"}
     assert "approve_before_post" not in http_client.post.await_args.kwargs["json"]
     assert http_client.post.await_args.kwargs["json"]["engagement_status"] == "lead"
+
+
+async def test_get_discord_diagnostics_from_bot_uses_internal_api_secret(
+    monkeypatch: pytest.MonkeyPatch,
+    app: api.FastAPI,
+) -> None:
+    monkeypatch.setattr(
+        api.settings,
+        "discord_bot_internal_base_url",
+        "http://discord_bot",
+    )
+    monkeypatch.setattr(api.settings, "api_shared_secret", "secret")
+    response = Mock(status_code=200, text="")
+    response.json.return_value = {
+        "guild": {"id": "123", "name": "508.dev"},
+        "roles": [],
+    }
+    http_client = Mock()
+    http_client.get = AsyncMock(return_value=response)
+    request = Mock(app=app)
+
+    with patch("five08.backend.api._http_client_from_app", return_value=http_client):
+        payload, error = await api._get_discord_diagnostics_from_bot(
+            request,
+            refresh=True,
+        )
+
+    assert error is None
+    assert payload == response.json.return_value
+    http_client.get.assert_awaited_once_with(
+        "http://discord_bot/internal/diagnostics/discord",
+        headers={"X-API-Secret": "secret"},
+        params={"refresh": "true"},
+        timeout=10.0,
+    )
+
+
+async def test_discord_diagnostics_rejects_unsafe_endpoint_before_sending_secret(
+    monkeypatch: pytest.MonkeyPatch,
+    app: api.FastAPI,
+) -> None:
+    monkeypatch.setattr(
+        api.settings,
+        "discord_bot_internal_base_url",
+        "http://bot.example",
+    )
+    monkeypatch.setattr(api.settings, "api_shared_secret", "secret")
+    request = Mock(app=app)
+
+    with patch("five08.backend.api._http_client_from_app") as http_client:
+        payload, error = await api._get_discord_diagnostics_from_bot(request)
+
+    assert payload is None
+    assert error == "bot_endpoint_not_configured"
+    http_client.assert_not_called()
+
+
+async def test_agent_schedule_bot_request_rejects_unsafe_endpoint_before_secret(
+    monkeypatch: pytest.MonkeyPatch,
+    app: api.FastAPI,
+) -> None:
+    monkeypatch.setattr(
+        api.settings,
+        "discord_bot_internal_base_url",
+        "http://bot.example",
+    )
+    monkeypatch.setattr(api.settings, "api_shared_secret", "secret")
+    request = Mock(app=app)
+
+    with (
+        patch("five08.backend.api._http_client_from_app") as http_client,
+        pytest.raises(RuntimeError, match="bot_endpoint_not_configured"),
+    ):
+        await api._request_agent_schedule_bot_json(
+            request,
+            path="/internal/agent-schedules/member-snapshot",
+            payload={"guild_id": "1000", "discord_user_id": "1001"},
+        )
+
+    http_client.assert_not_called()
 
 
 def test_dashboard_job_channels_returns_registered_channels(
@@ -4632,11 +6203,35 @@ async def test_post_job_lead_to_discord_requires_bot_endpoint(
     assert payload == {"error": "bot_endpoint_not_configured"}
 
 
+async def test_post_job_lead_to_discord_rejects_external_cleartext_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+    app: api.FastAPI,
+) -> None:
+    monkeypatch.setattr(
+        api.settings,
+        "discord_bot_internal_base_url",
+        "http://bot.example",
+    )
+    monkeypatch.setattr(api.settings, "api_shared_secret", "secret")
+    request = Mock(app=app)
+
+    with patch("five08.backend.api._http_client_from_app") as http_client:
+        payload, status_code = await api._post_job_lead_to_discord(
+            request,
+            lead_id="lead-1",
+            reviewer_discord_user_id="steering-1",
+        )
+
+    assert status_code == 503
+    assert payload == {"error": "bot_endpoint_not_configured"}
+    http_client.assert_not_called()
+
+
 async def test_post_job_lead_to_discord_requires_api_secret(
     monkeypatch: pytest.MonkeyPatch,
     app: api.FastAPI,
 ) -> None:
-    monkeypatch.setattr(api.settings, "discord_bot_internal_base_url", "http://bot")
+    monkeypatch.setattr(api.settings, "discord_bot_internal_base_url", "https://bot")
     monkeypatch.setattr(api.settings, "api_shared_secret", "")
     request = Mock(app=app)
 
@@ -4654,7 +6249,7 @@ async def test_post_job_lead_to_discord_adds_generic_error_for_empty_bot_failure
     monkeypatch: pytest.MonkeyPatch,
     app: api.FastAPI,
 ) -> None:
-    monkeypatch.setattr(api.settings, "discord_bot_internal_base_url", "http://bot")
+    monkeypatch.setattr(api.settings, "discord_bot_internal_base_url", "https://bot")
     monkeypatch.setattr(api.settings, "api_shared_secret", "secret")
     response = Mock(status_code=503)
     response.json.side_effect = ValueError("empty body")
@@ -4677,7 +6272,7 @@ async def test_post_job_lead_to_discord_handles_http_errors(
     monkeypatch: pytest.MonkeyPatch,
     app: api.FastAPI,
 ) -> None:
-    monkeypatch.setattr(api.settings, "discord_bot_internal_base_url", "http://bot")
+    monkeypatch.setattr(api.settings, "discord_bot_internal_base_url", "https://bot")
     monkeypatch.setattr(api.settings, "api_shared_secret", "secret")
     http_client = Mock()
     http_client.post = AsyncMock(side_effect=api.httpx.ConnectError("boom"))

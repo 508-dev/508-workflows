@@ -7,6 +7,7 @@ import difflib
 import logging
 import re
 import time
+from collections.abc import Mapping
 from typing import Any, Awaitable, Callable, Literal, cast
 from uuid import uuid4
 
@@ -18,6 +19,17 @@ from discord.ext import commands
 from five08.agent import AgentIdentityContext, PolicyEngine, ToolRuntimeConfig
 from five08.discord_bot.config import settings
 from five08.discord_bot.utils.audit import DiscordAuditCogMixin
+from five08.discord_bot.utils.knowledge_context import (
+    collect_discord_sources,
+    collect_thread_context,
+)
+from five08.discord_bot.utils.memory_views import MemoryFactsView
+from five08.engagements import EngagementStatus, parse_status_from_title
+from five08.job_discovery import (
+    JOB_SEARCH_MAX_AGE_DAYS,
+    parse_proximity_location,
+    search_job_posts,
+)
 from five08.tls import default_ca_bundle_path
 
 logger = logging.getLogger(__name__)
@@ -32,6 +44,83 @@ _PUBLIC_SAFE_CLARIFICATION_MESSAGES = frozenset(
 )
 _GENERIC_UNSUPPORTED_AGENT_MESSAGE = "I could not map that to a supported workflow."
 _AGENT_RESPONSE_THREAD_NAME = "Agent response"
+NO_MENTIONS = discord.AllowedMentions.none()
+_KNOWLEDGE_CAPTURE_RE = re.compile(
+    r"\b(?:remember|save)\s+(?:this|the)\s+"
+    r"(?:thread|conversation|answer|discussion)\b",
+    re.I,
+)
+_KNOWLEDGE_QUESTION_RE = re.compile(
+    r"^(?:i\s+(?:forgot|forget)[,;:]?\s*)?"
+    r"(?:who|what|where|when|why|how|does|do|did|is|are|can|could|has|have)\b",
+    re.I,
+)
+_KNOWLEDGE_RECALL_PREFIX_RE = re.compile(
+    r"^(?:i\s+(?:forgot|forget)[,;:]?\s*|remind\s+me\s+)"
+    r"(?:who|what|where|when|why|how|does|do|did|is|are|can|could|has|have)\b",
+    re.I,
+)
+_AGENT_ACTION_RE = re.compile(
+    r"\b(?:add|approve|assign|cancel|create|delete|forget|invite|post|reject|"
+    r"remember|remove|save|send|submit|sync|update)\b",
+    re.I,
+)
+_AGENT_LIVE_WORKFLOW_RE = re.compile(
+    r"\b(?:github\s+(?:issues?|projects?|repositor(?:y|ies)|repos?)|tasks?|"
+    r"onboarding\s+queue|unlinked\s+(?:discord\s+)?members?)\b",
+    re.I,
+)
+_ORGANIZATION_AUDIENCE_ROLE_NAMES = frozenset(
+    {
+        "admin",
+        "engineer",
+        "member",
+        "owner",
+        "project manager",
+        "project_manager",
+        "steering committee",
+        "workflows engineer",
+    }
+)
+_KNOWLEDGE_CAPTURE_ACTIONS = ("remember", "save")
+_KNOWLEDGE_CAPTURE_TARGETS = ("thread", "conversation", "answer", "discussion")
+_KNOWLEDGE_CAPTURE_COMPONENT_RE = re.compile(
+    r"^knowledge:capture:(?P<action>[cx]):"
+    r"(?P<draft_id>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}):"
+    r"(?P<guild_id>\d+):(?P<channel_id>\d+)$"
+)
+_AGENT_CONFIRMATION_COMPONENT_RE = re.compile(
+    r"^agent:plan:(?P<action>[cx]):(?P<plan_id>[A-Za-z0-9_-]{1,64}):"
+    r"(?P<guild_id>\d+):(?P<message_id>\d+)$"
+)
+
+
+def _knowledge_capture_component_id(
+    *,
+    action: Literal["c", "x"],
+    draft_id: str,
+    guild_id: str,
+    channel_id: str,
+) -> str:
+    custom_id = f"knowledge:capture:{action}:{draft_id}:{guild_id}:{channel_id}"
+    if len(custom_id) > 100:
+        raise ValueError("Knowledge capture component ID exceeds Discord's limit")
+    return custom_id
+
+
+def _agent_confirmation_component_id(
+    *,
+    action: Literal["c", "x"],
+    plan_id: str,
+    guild_id: str,
+    message_id: str,
+) -> str:
+    custom_id = f"agent:plan:{action}:{plan_id}:{guild_id}:{message_id}"
+    if len(custom_id) > 100:
+        raise ValueError("Agent confirmation component ID exceeds Discord's limit")
+    return custom_id
+
+
 _AGENT_HELP_REQUESTS = frozenset(
     {
         "help",
@@ -40,6 +129,11 @@ _AGENT_HELP_REQUESTS = frozenset(
         "what things can you do",
         "what can the agent do",
         "what can you help with",
+        "what permissions do i have",
+        "what are my permissions",
+        "what access do i have",
+        "what can my role access",
+        "what can my roles access",
     }
 )
 _AGENT_PRESENCE_CHECKS = frozenset(
@@ -65,11 +159,86 @@ _AGENT_ACKNOWLEDGEMENTS = frozenset(
         "okay",
         "got it",
         "cool",
-        "nevermind",
-        "never mind",
-        "cancel",
     }
 )
+_CONFIRMATION_ROLE_REFRESH_UNAVAILABLE = (
+    "Discord membership could not be refreshed; try again."
+)
+
+
+class AgentConfirmationDynamicButton(
+    discord.ui.DynamicItem[discord.ui.Button[Any]],
+    template=_AGENT_CONFIRMATION_COMPONENT_RE,
+):
+    """Restart-safe dispatcher for persisted agent plan controls."""
+
+    def __init__(
+        self,
+        *,
+        action: Literal["c", "x"],
+        plan_id: str,
+        guild_id: str,
+        message_id: str,
+    ) -> None:
+        self.action = action
+        self.plan_id = plan_id
+        self.guild_id = guild_id
+        self.message_id = message_id
+        super().__init__(
+            discord.ui.Button(
+                label="Confirm" if action == "c" else "Cancel",
+                style=(
+                    discord.ButtonStyle.primary
+                    if action == "c"
+                    else discord.ButtonStyle.secondary
+                ),
+                custom_id=_agent_confirmation_component_id(
+                    action=action,
+                    plan_id=plan_id,
+                    guild_id=guild_id,
+                    message_id=message_id,
+                ),
+            )
+        )
+
+    @classmethod
+    async def from_custom_id(
+        cls,
+        interaction: discord.Interaction,
+        item: discord.ui.Item[Any],
+        match: re.Match[str],
+        /,
+    ) -> "AgentConfirmationDynamicButton":
+        del interaction, item
+        return cls(
+            action=cast(Literal["c", "x"], match["action"]),
+            plan_id=match["plan_id"],
+            guild_id=match["guild_id"],
+            message_id=match["message_id"],
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        get_cog = getattr(interaction.client, "get_cog", None)
+        cog = get_cog("AgentCog") if callable(get_cog) else None
+        if not isinstance(cog, AgentCog):
+            await interaction.response.send_message(
+                "Agent confirmation is temporarily unavailable. Try again.",
+                ephemeral=True,
+            )
+            return
+        guild_id = None if self.guild_id == "0" else self.guild_id
+        message_id = None if self.message_id == "0" else self.message_id
+        view = AgentConfirmationView(
+            cog=cog,
+            requester_id=interaction.user.id,
+            plan_id=self.plan_id,
+            context={
+                "organization_id": guild_id,
+                "guild_id": guild_id,
+                "message_id": message_id,
+            },
+        )
+        await view._finish(interaction, confirm=self.action == "c")
 
 
 class AgentConfirmationView(discord.ui.View):
@@ -88,70 +257,72 @@ class AgentConfirmationView(discord.ui.View):
         self.requester_id = requester_id
         self.plan_id = plan_id
         self.context = context
+        guild_id = str(context.get("guild_id") or context.get("organization_id") or "0")
+        message_id = str(context.get("message_id") or "0")
+        for action in ("c", "x"):
+            self.add_item(
+                AgentConfirmationDynamicButton(
+                    action=cast(Literal["c", "x"], action),
+                    plan_id=plan_id,
+                    guild_id=guild_id,
+                    message_id=message_id,
+                )
+            )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id == self.requester_id:
-            return True
-        await interaction.response.send_message(
-            "Only the requester can confirm this agent plan.",
-            ephemeral=True,
-        )
-        return False
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                "Only the requester can confirm this agent plan.",
+                ephemeral=True,
+            )
+            return False
+
+        original_guild_id = str(
+            self.context.get("guild_id") or self.context.get("organization_id") or ""
+        ).strip()
+        interaction_guild_id = getattr(interaction, "guild_id", None)
+        if (
+            not original_guild_id
+            or (
+                interaction_guild_id is not None
+                and str(interaction_guild_id) != original_guild_id
+            )
+            or not self.cog._agent_guild_is_allowed(original_guild_id)
+        ):
+            await interaction.response.send_message(
+                "This agent plan is not available in this Discord server.",
+                ephemeral=True,
+            )
+            return False
+        return True
 
     def _disable(self) -> None:
         for item in self.children:
-            if isinstance(item, discord.ui.Button):
-                item.disabled = True
+            if isinstance(item, AgentConfirmationDynamicButton):
+                item.item.disabled = True
         self.stop()
 
-    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.primary)
     async def confirm(
         self,
         interaction: discord.Interaction,
-        button: discord.ui.Button["AgentConfirmationView"],
+        button: discord.ui.Button["AgentConfirmationView"] | None,
     ) -> None:
-        await interaction.response.defer(ephemeral=True)
-        try:
-            confirmation_context = await self._confirmation_context(interaction)
-            response = await self.cog._post_agent_confirmation(
-                plan_id=self.plan_id,
-                context=confirmation_context,
-                confirm=True,
-            )
-            transport_failed = False
-        except Exception as exc:
-            logger.warning("Agent confirmation request failed: %s", exc)
-            response = {"status": "failed", "message": str(exc)}
-            transport_failed = True
-        self.cog._audit_command_safe(
-            interaction=interaction,
-            action="agent.confirm",
-            result=AgentCog._audit_result_for_agent_response(response),
-            metadata={
-                "plan_id": self.plan_id,
-                "status": response.get("status"),
-                "error": response.get("error"),
-            },
-        )
-        if not transport_failed:
-            self._disable()
-        await interaction.followup.send(
-            self.cog._format_agent_response(response),
-            ephemeral=True,
-        )
-        if not transport_failed and interaction.message is not None:
-            try:
-                await interaction.message.edit(view=self)
-            except discord.HTTPException:
-                logger.warning(
-                    "Failed disabling agent confirmation view", exc_info=True
-                )
+        del button
+        await self._finish(interaction, confirm=True)
 
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(
         self,
         interaction: discord.Interaction,
-        button: discord.ui.Button["AgentConfirmationView"],
+        button: discord.ui.Button["AgentConfirmationView"] | None,
+    ) -> None:
+        del button
+        await self._finish(interaction, confirm=False)
+
+    async def _finish(
+        self,
+        interaction: discord.Interaction,
+        *,
+        confirm: bool,
     ) -> None:
         await interaction.response.defer(ephemeral=True)
         try:
@@ -159,16 +330,25 @@ class AgentConfirmationView(discord.ui.View):
             response = await self.cog._post_agent_confirmation(
                 plan_id=self.plan_id,
                 context=confirmation_context,
-                confirm=False,
+                confirm=confirm,
             )
-            transport_failed = False
+            transport_failed = bool(
+                response.get("retryable_confirmation") or response.get("retryable")
+            )
         except Exception as exc:
-            logger.warning("Agent cancellation request failed: %s", exc)
-            response = {"status": "failed", "message": str(exc)}
+            logger.warning("Agent plan response request failed: %s", exc)
+            response = {
+                "status": "failed",
+                "message": (
+                    _CONFIRMATION_ROLE_REFRESH_UNAVAILABLE
+                    if str(exc) == _CONFIRMATION_ROLE_REFRESH_UNAVAILABLE
+                    else "The agent service could not be reached. Try again."
+                ),
+            }
             transport_failed = True
         self.cog._audit_command_safe(
             interaction=interaction,
-            action="agent.cancel",
+            action="agent.confirm" if confirm else "agent.cancel",
             result=AgentCog._audit_result_for_agent_response(response),
             metadata={
                 "plan_id": self.plan_id,
@@ -195,16 +375,27 @@ class AgentConfirmationView(discord.ui.View):
         interaction: discord.Interaction,
     ) -> dict[str, Any]:
         context = self.cog._build_agent_context(interaction)
-        original_guild_id = self.context.get("guild_id")
-        if context.get("organization_id") is None and original_guild_id:
+        original_guild_id = str(
+            self.context.get("guild_id") or self.context.get("organization_id") or ""
+        ).strip()
+        if original_guild_id:
+            # Bind the confirmation to the tenant that produced the plan.  More
+            # importantly, reload the guild member rather than trusting either
+            # the interaction object or Discord.py's member cache: a role may
+            # have been revoked during the confirmation window.
             context["organization_id"] = self.context.get("organization_id")
             context["guild_id"] = original_guild_id
             context["channel_id"] = self.context.get("channel_id")
-            fresh_roles = await self.cog._guild_role_names(
-                guild_id=str(original_guild_id),
+            fresh_roles, fresh_role_ids = await self.cog._guild_role_snapshot(
+                guild_id=original_guild_id,
                 user_id=interaction.user.id,
+                require_fresh=True,
             )
-            context["roles"] = fresh_roles or self._original_roles()
+            # A confirmation may execute a write. If Discord cannot refresh
+            # membership, fail closed rather than relying on roles captured
+            # when the plan was first proposed.
+            context["roles"] = fresh_roles
+            context["role_ids"] = fresh_role_ids
         original_message_id = self.context.get("message_id")
         if original_message_id:
             context["message_id"] = original_message_id
@@ -213,15 +404,202 @@ class AgentConfirmationView(discord.ui.View):
             context["operation_id"] = original_operation_id
         return context
 
-    def _original_roles(self) -> list[str]:
-        roles = self.context.get("roles")
-        if not isinstance(roles, list):
-            return []
-        return [
-            str(role).strip()
-            for role in roles
-            if isinstance(role, str) and str(role).strip()
-        ]
+
+class KnowledgeCaptureDynamicButton(
+    discord.ui.DynamicItem[discord.ui.Button[Any]],
+    template=_KNOWLEDGE_CAPTURE_COMPONENT_RE,
+):
+    """Restart-safe dispatcher for persisted knowledge capture controls."""
+
+    def __init__(
+        self,
+        *,
+        action: Literal["c", "x"],
+        draft_id: str,
+        guild_id: str,
+        channel_id: str,
+    ) -> None:
+        self.action = action
+        self.draft_id = draft_id
+        self.guild_id = guild_id
+        self.channel_id = channel_id
+        super().__init__(
+            discord.ui.Button(
+                label="Remember" if action == "c" else "Cancel",
+                style=(
+                    discord.ButtonStyle.primary
+                    if action == "c"
+                    else discord.ButtonStyle.secondary
+                ),
+                custom_id=_knowledge_capture_component_id(
+                    action=action,
+                    draft_id=draft_id,
+                    guild_id=guild_id,
+                    channel_id=channel_id,
+                ),
+            )
+        )
+
+    @classmethod
+    async def from_custom_id(
+        cls,
+        interaction: discord.Interaction,
+        item: discord.ui.Item[Any],
+        match: re.Match[str],
+        /,
+    ) -> "KnowledgeCaptureDynamicButton":
+        del interaction, item
+        return cls(
+            action=cast(Literal["c", "x"], match["action"]),
+            draft_id=match["draft_id"],
+            guild_id=match["guild_id"],
+            channel_id=match["channel_id"],
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        get_cog = getattr(interaction.client, "get_cog", None)
+        cog = get_cog("AgentCog") if callable(get_cog) else None
+        if not isinstance(cog, AgentCog):
+            await interaction.response.send_message(
+                "Knowledge confirmation is temporarily unavailable. Try again.",
+                ephemeral=True,
+            )
+            return
+        view = KnowledgeCaptureView(
+            cog=cog,
+            requester_id=interaction.user.id,
+            draft_id=self.draft_id,
+            context={
+                "organization_id": self.guild_id,
+                "guild_id": self.guild_id,
+                "channel_id": self.channel_id,
+            },
+        )
+        await view._finish(interaction, confirm=self.action == "c")
+
+
+class KnowledgeCaptureView(discord.ui.View):
+    """Confirmation controls for one frozen backend knowledge draft."""
+
+    def __init__(
+        self,
+        *,
+        cog: "AgentCog",
+        requester_id: int,
+        draft_id: str,
+        context: dict[str, Any],
+    ) -> None:
+        super().__init__(timeout=settings.knowledge_capture_draft_ttl_seconds)
+        self.cog = cog
+        self.requester_id = requester_id
+        self.draft_id = draft_id
+        self.context = context
+        guild_id = str(context.get("guild_id") or context.get("organization_id") or "0")
+        channel_id = str(context.get("channel_id") or "0")
+        for action in ("c", "x"):
+            self.add_item(
+                KnowledgeCaptureDynamicButton(
+                    action=cast(Literal["c", "x"], action),
+                    draft_id=draft_id,
+                    guild_id=guild_id,
+                    channel_id=channel_id,
+                )
+            )
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.requester_id:
+            return True
+        await interaction.response.send_message(
+            "Only the requester can confirm this knowledge capture.",
+            ephemeral=True,
+        )
+        return False
+
+    def _disable(self) -> None:
+        for item in self.children:
+            if isinstance(item, KnowledgeCaptureDynamicButton):
+                item.item.disabled = True
+        self.stop()
+
+    async def _finish(
+        self,
+        interaction: discord.Interaction,
+        *,
+        confirm: bool,
+    ) -> None:
+        await interaction.response.defer(ephemeral=True)
+        try:
+            context = await self._confirmation_context(interaction)
+            response = await self.cog._post_knowledge_confirmation(
+                draft_id=self.draft_id,
+                context=context,
+                confirm=confirm,
+            )
+            http_status = response.get("http_status")
+            transport_failed = isinstance(http_status, int) and http_status >= 500
+        except Exception:
+            logger.warning("Knowledge capture confirmation failed", exc_info=True)
+            response = {
+                "status": "failed",
+                "message": "The knowledge service could not be reached. Try again.",
+            }
+            transport_failed = True
+        self.cog._audit_command_safe(
+            interaction=interaction,
+            action=(
+                "knowledge.capture.confirm" if confirm else "knowledge.capture.cancel"
+            ),
+            result=AgentCog._audit_result_for_agent_response(response),
+            metadata={
+                "draft_id": self.draft_id,
+                "status": response.get("status"),
+                "error": response.get("error"),
+            },
+        )
+        if not transport_failed:
+            self._disable()
+        await interaction.followup.send(
+            self.cog._format_knowledge_capture_response(response),
+            ephemeral=True,
+        )
+        if not transport_failed and interaction.message is not None:
+            try:
+                await interaction.message.edit(view=self)
+            except discord.HTTPException:
+                logger.warning(
+                    "Failed disabling knowledge confirmation view",
+                    exc_info=True,
+                )
+
+    async def _confirmation_context(
+        self,
+        interaction: discord.Interaction,
+    ) -> dict[str, Any]:
+        context = self.cog._build_agent_context(interaction)
+        original_guild_id = str(
+            self.context.get("guild_id") or self.context.get("organization_id") or ""
+        ).strip()
+        if context.get("organization_id") is None and original_guild_id:
+            context["organization_id"] = (
+                self.context.get("organization_id") or original_guild_id
+            )
+            context["guild_id"] = original_guild_id
+            context["channel_id"] = self.context.get("channel_id")
+            context["thread_id"] = self.context.get("thread_id")
+            fresh_roles, fresh_role_ids = await self.cog._guild_role_snapshot(
+                guild_id=str(original_guild_id),
+                user_id=interaction.user.id,
+                require_fresh=True,
+            )
+            context["roles"] = fresh_roles
+            context["role_ids"] = fresh_role_ids
+        original_message_id = self.context.get("message_id")
+        if original_message_id:
+            context["message_id"] = original_message_id
+        original_operation_id = self.context.get("operation_id")
+        if original_operation_id:
+            context["operation_id"] = original_operation_id
+        return context
 
 
 class AgentCog(DiscordAuditCogMixin, commands.Cog):
@@ -245,13 +623,36 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         """Send a natural-language request to the backend agent gateway."""
         await interaction.response.defer(ephemeral=True)
 
+        guild_id = getattr(interaction, "guild_id", None)
+        if not self._agent_guild_is_allowed(guild_id):
+            await interaction.followup.send(
+                "Agent workflows are not enabled for this Discord server.",
+                ephemeral=True,
+            )
+            return
+
         local_response = self._local_agent_response(
             request=request,
             roles=self._role_names_from_user(interaction.user),
+            role_ids=self._role_ids_from_user(interaction.user),
+            guild_id=str(guild_id) if guild_id is not None else None,
             transport="slash",
         )
         if local_response is not None:
             await interaction.followup.send(local_response, ephemeral=True)
+            return
+
+        if self._is_job_search_request(request):
+            content = await self._search_jobs_for_member(
+                guild=interaction.guild,
+                member=interaction.user,
+                query=request,
+            )
+            await interaction.followup.send(
+                content,
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
             return
 
         context = self._build_agent_context(interaction)
@@ -285,7 +686,9 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             },
         )
 
-        view: AgentConfirmationView | None = None
+        view: discord.ui.View | None = self._memory_view(
+            response, interaction.user.id, context
+        )
         plan = response.get("plan") if isinstance(response.get("plan"), dict) else None
         if response.get("status") == "requires_confirmation" and plan is not None:
             plan_id = str(plan.get("plan_id") or "")
@@ -310,6 +713,73 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             ephemeral=True,
         )
 
+    @app_commands.command(
+        name="ask",
+        description="Ask Outline, selected Discord channels, and remembered knowledge",
+    )
+    @app_commands.describe(question="The organizational question to answer")
+    async def ask_command(
+        self,
+        interaction: discord.Interaction,
+        question: str,
+    ) -> None:
+        """Ask the backend knowledge service and keep the result private."""
+        await interaction.response.defer(ephemeral=True)
+        context = self._build_agent_context(interaction)
+        try:
+            response = await self._post_knowledge_query(
+                question=question,
+                context=context,
+            )
+        except Exception:
+            logger.warning("Knowledge query request failed", exc_info=True)
+            self._audit_command_safe(
+                interaction=interaction,
+                action="knowledge.query",
+                result="error",
+                metadata={"reason": "transport_failed"},
+            )
+            await interaction.followup.send(
+                "The knowledge service could not be reached. Try again shortly.",
+                ephemeral=True,
+            )
+            return
+
+        self._audit_command_safe(
+            interaction=interaction,
+            action="knowledge.query",
+            result=self._audit_result_for_agent_response(response),
+            metadata={
+                "status": response.get("status"),
+                "citation_count": len(response.get("citations") or []),
+                "error": response.get("error"),
+            },
+        )
+        await interaction.followup.send(
+            self._format_knowledge_query_response(response),
+            ephemeral=True,
+        )
+
+    @app_commands.command(
+        name="find-jobs",
+        description="Find recent gigs and job leads matching your description",
+    )
+    @app_commands.describe(
+        query="Describe the work, skills, location, or hours you want"
+    )
+    async def find_jobs(self, interaction: discord.Interaction, query: str) -> None:
+        await interaction.response.defer(ephemeral=True)
+        content = await self._search_jobs_for_member(
+            guild=interaction.guild,
+            member=interaction.user,
+            query=query,
+        )
+        await interaction.followup.send(
+            content,
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
     @commands.Cog.listener("on_message")
     async def agent_mention(self, message: discord.Message) -> None:
         """Handle natural-language agent requests when the bot is mentioned."""
@@ -325,6 +795,18 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         bot_mentioned = any(user.id == bot_user.id for user in message.mentions)
         agent_thread = self._is_agent_thread(message.channel, bot_user.id)
         if not bot_mentioned and not agent_thread:
+            return
+        if not self._agent_guild_is_allowed(message.guild.id):
+            self._audit_message_safe(
+                message=message,
+                action="agent.mention",
+                result="denied",
+                metadata={"reason": "guild_not_allowed"},
+            )
+            await message.reply(
+                "Agent workflows are not enabled for this Discord server.",
+                mention_author=False,
+            )
             return
 
         request = (
@@ -347,9 +829,18 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             )
             return
 
+        if self._is_knowledge_capture_request(request):
+            await self._handle_knowledge_capture_mention(
+                message=message,
+                request=request,
+            )
+            return
+
         local_response = self._local_agent_response(
             request=request,
             roles=self._role_names_from_user(message.author),
+            role_ids=self._role_ids_from_user(message.author),
+            guild_id=str(message.guild.id),
             transport="mention",
         )
         if local_response is not None:
@@ -360,7 +851,38 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             )
             return
 
+        if self._is_job_search_request(request):
+            async with message.channel.typing():
+                content = await self._search_jobs_for_member(
+                    guild=message.guild,
+                    member=message.author,
+                    query=request,
+                )
+            try:
+                await message.author.send(
+                    content, allowed_mentions=discord.AllowedMentions.none()
+                )
+            except discord.HTTPException:
+                await message.reply(
+                    "I couldn't send a DM. Use `/find-jobs` for a private response.",
+                    mention_author=False,
+                )
+                return
+            try:
+                await message.reply("I sent job matches by DM.", mention_author=False)
+            except discord.HTTPException:
+                logger.warning("Could not acknowledge job search DM", exc_info=True)
+            return
+
         context = self._build_agent_context_from_message(message)
+        if self._is_knowledge_question(request):
+            await self._handle_knowledge_question_mention(
+                message=message,
+                question=request,
+                context=context,
+            )
+            return
+        context["context_snippets"] = await collect_thread_context(message)
         try:
             async with message.channel.typing():
                 response = await self._post_agent_request(
@@ -391,7 +913,9 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             },
         )
 
-        view: AgentConfirmationView | None = None
+        view: discord.ui.View | None = self._memory_view(
+            response, message.author.id, context
+        )
         plan = response.get("plan") if isinstance(response.get("plan"), dict) else None
         if response.get("status") == "requires_confirmation" and plan is not None:
             plan_id = str(plan.get("plan_id") or "")
@@ -422,6 +946,453 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                 "I couldn't send you a DM. Use `/agent` for a private response.",
                 mention_author=False,
             )
+
+    @staticmethod
+    def _is_knowledge_capture_request(request: str) -> bool:
+        normalized = request.strip()
+        polite_prefix = re.match(
+            r"(?i)^(?:can|could)\s+you(?:\s+please)?\s+",
+            normalized,
+        )
+        if polite_prefix is not None:
+            command = normalized[polite_prefix.end() :].rstrip(".!?")
+            if re.fullmatch(
+                r"(?i)suggest (?:facts|memories)(?: worth saving)? from "
+                r"(?:this|the) (?:thread|conversation)",
+                command,
+            ):
+                return True
+            command_tokens = re.findall(
+                r"[a-z]+",
+                command.casefold(),
+            )
+            short_command = len(command_tokens) in {2, 3} and (
+                len(command_tokens) == 2 or command_tokens[1] in {"this", "the"}
+            )
+            audience_command = (
+                len(command_tokens) in {5, 6}
+                and command_tokens[1] in {"this", "the"}
+                and command_tokens[3] == "for"
+                and command_tokens[-1] in {"team", "project"}
+                and (len(command_tokens) == 5 or command_tokens[4] == "the")
+            )
+            if not short_command and not audience_command:
+                return False
+            target_token = command_tokens[2] if audience_command else command_tokens[-1]
+            return bool(
+                difflib.get_close_matches(
+                    command_tokens[0],
+                    _KNOWLEDGE_CAPTURE_ACTIONS,
+                    n=1,
+                    cutoff=0.78,
+                )
+                and difflib.get_close_matches(
+                    target_token,
+                    _KNOWLEDGE_CAPTURE_TARGETS,
+                    n=1,
+                    cutoff=0.72,
+                )
+            )
+        elif re.match(
+            r"(?i)^(?:do|did|what|how|why|where|when|can|could)\b", normalized
+        ):
+            return False
+        if re.fullmatch(
+            r"(?i)suggest (?:facts|memories)(?: worth saving)? from (?:this|the) (?:thread|conversation)",
+            normalized.rstrip(".!"),
+        ):
+            return True
+        if _KNOWLEDGE_CAPTURE_RE.search(normalized) is not None:
+            return True
+        tokens = re.findall(r"[a-z]+", normalized.casefold())
+        if len(tokens) < 2:
+            return False
+        has_action = any(
+            difflib.get_close_matches(
+                token,
+                _KNOWLEDGE_CAPTURE_ACTIONS,
+                n=1,
+                cutoff=0.78,
+            )
+            for token in tokens[:4]
+        )
+        has_target = any(
+            difflib.get_close_matches(
+                token,
+                _KNOWLEDGE_CAPTURE_TARGETS,
+                n=1,
+                cutoff=0.72,
+            )
+            for token in tokens
+        )
+        return has_action and has_target
+
+    @staticmethod
+    def _is_knowledge_question(request: str) -> bool:
+        normalized = re.sub(r"\s+", " ", request).strip()
+        if not normalized:
+            return False
+        if re.search(r"\bremember\b", normalized, re.I) and re.search(
+            r"\b(?:me|my|mine)\b",
+            normalized,
+            re.I,
+        ):
+            return False
+        if _AGENT_LIVE_WORKFLOW_RE.search(normalized) is not None:
+            return False
+        if _KNOWLEDGE_RECALL_PREFIX_RE.search(normalized) is not None:
+            return True
+        if re.match(r"(?i)^(?:do|did|what|how|where|when)\b.*\bremember\b", normalized):
+            return True
+        if _AGENT_ACTION_RE.search(normalized) is not None:
+            return False
+        return (
+            normalized.endswith("?")
+            or _KNOWLEDGE_QUESTION_RE.search(normalized) is not None
+        )
+
+    async def _handle_knowledge_capture_mention(
+        self,
+        *,
+        message: discord.Message,
+        request: str,
+    ) -> None:
+        context = self._build_agent_context_from_message(message)
+        if not self._requester_can_read_capture_history(message):
+            self._audit_message_safe(
+                message=message,
+                action="knowledge.capture",
+                result="denied",
+                metadata={"reason": "requester_cannot_read_history"},
+            )
+            await message.reply(
+                "I can't capture this conversation because you don't currently have "
+                "permission to read its message history.",
+                mention_author=False,
+            )
+            return
+        messages = await self._knowledge_capture_messages(message)
+        if not messages:
+            self._audit_message_safe(
+                message=message,
+                action="knowledge.capture",
+                result="error",
+                metadata={"reason": "no_reply_or_thread_context"},
+            )
+            await message.reply(
+                "Reply to the answer you want saved, or use this inside its thread.",
+                mention_author=False,
+            )
+            return
+        payload = {
+            "context": context,
+            "source": self._knowledge_source_payload(message),
+            "messages": messages,
+            "requested_visibility": (
+                "project"
+                if re.search(r"\bfor (?:the )?project\b", request, re.I)
+                else "org"
+                if re.search(
+                    r"\bfor (?:the )?(?:team|everyone|organization)\b", request, re.I
+                )
+                else "private"
+            ),
+        }
+        try:
+            async with message.channel.typing():
+                response = await self._post_knowledge_capture(payload)
+        except Exception:
+            logger.warning("Knowledge capture request failed", exc_info=True)
+            self._audit_message_safe(
+                message=message,
+                action="knowledge.capture",
+                result="error",
+                metadata={"reason": "transport_failed"},
+            )
+            await message.reply(
+                "The knowledge service could not be reached. Try again shortly.",
+                mention_author=False,
+            )
+            return
+
+        result = self._audit_result_for_agent_response(response)
+        if result != "success":
+            self._audit_message_safe(
+                message=message,
+                action="knowledge.capture",
+                result=result,
+                metadata={
+                    "status": response.get("status"),
+                    "error": response.get("error"),
+                },
+            )
+        view: KnowledgeCaptureView | None = None
+        draft_id = str(response.get("draft_id") or "")
+        if response.get("status") == "requires_confirmation" and draft_id:
+            view = KnowledgeCaptureView(
+                cog=self,
+                requester_id=message.author.id,
+                draft_id=draft_id,
+                context=context,
+            )
+
+        try:
+            preview_parts = self._format_knowledge_capture_preview_parts(response)
+            for preview_part in preview_parts[:-1]:
+                await message.author.send(preview_part)
+            final_part = preview_parts[-1]
+            if view is None:
+                await message.author.send(final_part)
+            else:
+                await message.author.send(final_part, view=view)
+        except discord.HTTPException:
+            logger.warning(
+                "Failed sending knowledge capture preview by DM user=%s",
+                getattr(message.author, "id", None),
+                exc_info=True,
+            )
+            await message.reply(
+                "I couldn't DM the private capture preview. Enable DMs and try again.",
+                mention_author=False,
+            )
+            return
+
+        if view is not None:
+            acknowledgement = (
+                "I sent a capture preview by DM. Nothing is saved until you confirm."
+            )
+        else:
+            acknowledgement = "I sent the knowledge capture result by DM."
+        await message.reply(acknowledgement, mention_author=False)
+
+    async def _handle_knowledge_question_mention(
+        self,
+        *,
+        message: discord.Message,
+        question: str,
+        context: dict[str, Any],
+    ) -> None:
+        try:
+            async with message.channel.typing():
+                response = await self._post_knowledge_query(
+                    question=question,
+                    context=context,
+                )
+        except Exception:
+            logger.warning("Knowledge query request failed", exc_info=True)
+            self._audit_message_safe(
+                message=message,
+                action="knowledge.query",
+                result="error",
+                metadata={"reason": "transport_failed"},
+            )
+            await message.reply(
+                "The knowledge service could not be reached. Try again shortly.",
+                mention_author=False,
+            )
+            return
+
+        result = self._audit_result_for_agent_response(response)
+        if result != "success":
+            self._audit_message_safe(
+                message=message,
+                action="knowledge.query",
+                result=result,
+                metadata={
+                    "status": response.get("status"),
+                    "error": response.get("error"),
+                },
+            )
+        formatted = self._format_knowledge_query_response(response)
+        if (
+            response.get("status") == "answered"
+            and response.get("public_safe")
+            and self._discord_destination_is_org_only(message)
+        ):
+            await self._send_mention_public_response(
+                message=message,
+                request=question,
+                content=formatted,
+            )
+            return
+        try:
+            await message.author.send(formatted)
+        except discord.HTTPException:
+            logger.warning(
+                "Failed sending knowledge answer by DM user=%s",
+                getattr(message.author, "id", None),
+                exc_info=True,
+            )
+            await message.reply(
+                "I found a private result but couldn't DM you. Use `/ask` instead.",
+                mention_author=False,
+            )
+            return
+        await message.reply(
+            "I sent the knowledge answer by DM.",
+            mention_author=False,
+        )
+
+    async def _knowledge_capture_messages(
+        self,
+        trigger: discord.Message,
+    ) -> list[dict[str, Any]]:
+        source_messages: list[Any] = []
+        if not self._requester_can_read_capture_history(trigger):
+            return []
+        if isinstance(trigger.channel, discord.Thread):
+            try:
+                async for source_message in trigger.channel.history(
+                    limit=settings.knowledge_capture_max_messages,
+                    oldest_first=False,
+                ):
+                    source_messages.append(source_message)
+            except (discord.Forbidden, discord.HTTPException):
+                logger.warning(
+                    "Failed reading Discord thread for capture", exc_info=True
+                )
+                return []
+        else:
+            answer = await self._referenced_message(trigger)
+            if answer is None:
+                return []
+            question = await self._referenced_message(answer)
+            if question is not None:
+                source_messages.append(question)
+            source_messages.append(answer)
+
+        trigger_id = str(trigger.id)
+        serialized = [
+            payload
+            for source_message in source_messages
+            if str(getattr(source_message, "id", "")) != trigger_id
+            and (payload := self._serialize_knowledge_message(source_message))
+            is not None
+        ]
+        return serialized[: settings.knowledge_capture_max_messages]
+
+    @staticmethod
+    def _requester_can_read_capture_history(trigger: discord.Message) -> bool:
+        permissions_for = getattr(trigger.channel, "permissions_for", None)
+        if not callable(permissions_for):
+            return False
+        try:
+            permissions = permissions_for(trigger.author)
+        except (AttributeError, TypeError):
+            return False
+        return bool(
+            getattr(permissions, "view_channel", False)
+            and getattr(permissions, "read_message_history", False)
+        )
+
+    async def _referenced_message(self, message: Any) -> Any | None:
+        reference = getattr(message, "reference", None)
+        if reference is None:
+            return None
+        resolved = getattr(reference, "resolved", None)
+        if resolved is not None and hasattr(resolved, "content"):
+            return resolved
+        message_id = getattr(reference, "message_id", None)
+        fetch_message = getattr(message.channel, "fetch_message", None)
+        if message_id is None or not callable(fetch_message):
+            return None
+        fetch_message = cast(Callable[[int], Awaitable[Any]], fetch_message)
+        try:
+            return await fetch_message(message_id)
+        except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+            return None
+
+    @staticmethod
+    def _serialize_knowledge_message(message: Any) -> dict[str, Any] | None:
+        content = str(getattr(message, "content", "") or "").strip()
+        author = getattr(message, "author", None)
+        created_at = getattr(message, "created_at", None)
+        if not content or author is None or created_at is None:
+            return None
+        author_name = str(
+            getattr(author, "display_name", None)
+            or getattr(author, "name", None)
+            or getattr(author, "id", "Unknown")
+        )
+        return {
+            "message_id": str(message.id),
+            "author_id": str(author.id),
+            "author_name": author_name[:128],
+            "content": content[:4096],
+            "created_at": created_at.isoformat(),
+            "jump_url": str(getattr(message, "jump_url", "") or "") or None,
+            "author_is_bot": bool(getattr(author, "bot", False)),
+        }
+
+    def _knowledge_source_payload(self, message: discord.Message) -> dict[str, Any]:
+        guild_id = str(message.guild.id) if message.guild is not None else ""
+        channel_id = str(getattr(message.channel, "id", ""))
+        is_thread = isinstance(message.channel, discord.Thread)
+        source_ref = str(getattr(message, "jump_url", "") or "")
+        if not source_ref:
+            source_ref = f"discord:{guild_id}:{channel_id}:{message.id}"
+        title = str(getattr(message.channel, "name", "Discord conversation") or "")
+        return {
+            "source_type": "discord_thread" if is_thread else "discord_message",
+            "source_ref": source_ref,
+            "title": title[:256] or "Discord conversation",
+            "guild_id": guild_id,
+            "channel_id": channel_id,
+            "thread_id": channel_id if is_thread else None,
+            "source_visibility": self._discord_source_visibility(message),
+        }
+
+    @staticmethod
+    def _discord_source_visibility(message: discord.Message) -> str:
+        return (
+            "org" if AgentCog._discord_destination_is_org_only(message) else "private"
+        )
+
+    @staticmethod
+    def _discord_destination_is_org_only(message: discord.Message) -> bool:
+        """Return whether every role that can view the channel is organizational."""
+        guild = message.guild
+        channel = message.channel
+        if guild is None:
+            return False
+        is_private = getattr(channel, "is_private", None)
+        if callable(is_private) and is_private():
+            return False
+        permissions_for = getattr(channel, "permissions_for", None)
+        if not callable(permissions_for):
+            return False
+
+        # Role checks do not reveal a guest granted access through an explicit
+        # member overwrite. Treat any such grant as non-organizational.
+        overwrite_source = getattr(channel, "parent", None) or channel
+        overwrites = getattr(overwrite_source, "overwrites", None)
+        if isinstance(overwrites, Mapping):
+            role_ids = {
+                getattr(role, "id", None) for role in getattr(guild, "roles", [])
+            }
+            bot_member_id = getattr(getattr(guild, "me", None), "id", None)
+            for target, overwrite in overwrites.items():
+                if getattr(overwrite, "view_channel", None) is not True:
+                    continue
+                target_id = getattr(target, "id", None)
+                is_bot_member = bot_member_id is not None and target_id == bot_member_id
+                if target_id not in role_ids and not is_bot_member:
+                    return False
+
+        member_can_view = False
+        for role in getattr(guild, "roles", []):
+            role_name = str(getattr(role, "name", "") or "").strip().casefold()
+            try:
+                can_view = bool(getattr(permissions_for(role), "view_channel", False))
+            except (AttributeError, TypeError):
+                return False
+            if not can_view:
+                continue
+            if role_name == "member":
+                member_can_view = True
+            if role_name not in _ORGANIZATION_AUDIENCE_ROLE_NAMES:
+                return False
+        return member_can_view
 
     @staticmethod
     def _extract_mention_request(content: str, bot_user_id: int) -> str:
@@ -486,6 +1457,140 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         return AgentCog._matches_smalltalk(normalized, _AGENT_HELP_REQUESTS)
 
     @staticmethod
+    def _is_job_search_request(request: str) -> bool:
+        text = request.casefold()
+        return bool(
+            not re.search(
+                r"\b(?:create|update|delete|assign|publish|remember|forget)\b",
+                text,
+            )
+            and not re.search(
+                r"\b(?:post|close)\s+(?:(?:a|an|the|this)\s+)?"
+                r"(?:job|gig|role|position|opening)\b"
+                r"|\bsend\s+(?:(?:a|an|the|this)\s+)?"
+                r"(?:jobs?|gigs?|roles?|positions?|openings?)\s+to\b",
+                text,
+            )
+            and not re.search(
+                r"\b(?:add|open)\s+(?:(?:a|an)\s+)?(?:todo|issue)\b",
+                text,
+            )
+            and not re.search(
+                r"\b(?:search|find|list|show)\s+"
+                r"(?:(?:\w+|#\w+)\s+){0,3}"
+                r"(?:github\s+issues?|gh\s+issues?|issues?|todos?|tasks?|"
+                r"crm\s+contacts?|contacts?)\b",
+                text,
+            )
+            and re.search(
+                r"\b(?:jobs?|gigs?|roles?|positions?|openings?|opportunities)\b", text
+            )
+            and (
+                re.search(
+                    r"\b(?:find|search|looking|show|any|recommend|match|suitable|fit)\b",
+                    text,
+                )
+                or parse_proximity_location(request)[0]
+            )
+        )
+
+    async def _search_jobs_for_member(
+        self,
+        *,
+        guild: discord.Guild | None,
+        member: discord.abc.User,
+        query: str,
+    ) -> str:
+        if guild is None or not isinstance(member, discord.Member):
+            return "Search for jobs inside the 508 server."
+        proximity_requested, proximity_location = parse_proximity_location(query)
+        if proximity_requested and not proximity_location:
+            return "Please include a city or time zone so I can look for nearby jobs."
+        active_ids: list[str] = []
+        lead_ids: list[str] = []
+        lead_target = str(
+            settings.discord_unqualified_leads_forum_channel or ""
+        ).strip()
+        lead_name = re.sub(r"[-_]+", " ", lead_target.casefold())
+        for channel in guild.channels:
+            if not isinstance(channel, discord.ForumChannel):
+                continue
+            if not channel.permissions_for(member).view_channel:
+                continue
+            if channel.name in {"gigs", "fulltime-roles"}:
+                active_ids.append(str(channel.id))
+            elif lead_target and (
+                str(channel.id) == lead_target
+                if lead_target.isdecimal()
+                else re.sub(r"[-_]+", " ", channel.name.casefold()) == lead_name
+            ):
+                lead_ids.append(str(channel.id))
+        try:
+            candidates = await asyncio.to_thread(
+                search_job_posts,
+                settings,
+                guild_id=str(guild.id),
+                active_channel_ids=active_ids,
+                lead_channel_ids=lead_ids,
+                query=query,
+                limit=50,
+            )
+        except Exception:
+            logger.warning(
+                "Job discovery search failed guild=%s", guild.id, exc_info=True
+            )
+            return "I couldn't search the job listings right now. Please try again."
+
+        lines = [f"Recent job matches (posted within {JOB_SEARCH_MAX_AGE_DAYS} days):"]
+        found = 0
+        for candidate in candidates:
+            thread_id = str(candidate.get("thread_id") or "")
+            channel_id = str(candidate.get("channel_id") or "")
+            if not thread_id.isdecimal() or not channel_id.isdecimal():
+                continue
+            try:
+                thread = guild.get_thread(
+                    int(thread_id)
+                ) or await self.bot.fetch_channel(int(thread_id))
+            except discord.HTTPException:
+                continue
+            if (
+                not isinstance(thread, discord.Thread)
+                or thread.archived
+                or thread.locked
+            ):
+                continue
+            if thread.parent_id != int(channel_id):
+                continue
+            if parse_status_from_title(str(thread.name or "")) in {
+                EngagementStatus.FILLED,
+                EngagementStatus.LOST,
+                EngagementStatus.OUTDATED,
+                EngagementStatus.DUPLICATE,
+            }:
+                continue
+            title = discord.utils.escape_markdown(
+                discord.utils.escape_mentions(str(candidate.get("title") or "Job post"))
+            )[:110]
+            label = (
+                "Unverified lead"
+                if candidate.get("kind") == "unverified_lead"
+                else "Recruiting"
+            )
+            lines.append(
+                f"• **{title}** · {label} · https://discord.com/channels/{guild.id}/{thread_id}"
+            )
+            found += 1
+            if found == 5:
+                break
+        if not found:
+            return "I found no recent open posts matching that description in forums you can view. Try broader skills or hours."
+        lines.append(
+            "Unverified leads still need review; confirm availability in the post before applying."
+        )
+        return "\n".join(lines)[:1900]
+
+    @staticmethod
     def _is_agent_presence_check(request: str) -> bool:
         normalized = request.casefold().strip(" ?!.")
         return AgentCog._matches_smalltalk(normalized, _AGENT_PRESENCE_CHECKS)
@@ -495,15 +1600,31 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         normalized = request.casefold().strip(" ?!.")
         return AgentCog._matches_smalltalk(normalized, _AGENT_ACKNOWLEDGEMENTS)
 
+    @staticmethod
+    def _agent_guild_is_allowed(guild_id: object | None) -> bool:
+        """Apply the configured Discord-guild boundary before dispatch."""
+
+        normalized_guild_id = str(guild_id).strip() if guild_id is not None else None
+        return PolicyEngine.from_settings(settings).guild_is_allowed(
+            normalized_guild_id
+        )
+
     def _local_agent_response(
         self,
         *,
         request: str,
         roles: list[str],
+        role_ids: list[str],
+        guild_id: str | None,
         transport: Literal["slash", "mention"],
     ) -> str | None:
         if self._is_agent_help_request(request):
-            return self._agent_capabilities_message(roles=roles, transport=transport)
+            return self._agent_capabilities_message(
+                roles=roles,
+                role_ids=role_ids,
+                guild_id=guild_id,
+                transport=transport,
+            )
         if self._is_agent_presence_check(request):
             return (
                 "Yes, I can see this. Ask for a supported workflow, or ask "
@@ -555,19 +1676,27 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
     def _agent_capabilities_message(
         *,
         roles: list[str],
+        role_ids: list[str],
+        guild_id: str | None,
         transport: Literal["slash", "mention"] = "mention",
     ) -> str:
-        policy = PolicyEngine.from_runtime_config(
-            ToolRuntimeConfig.from_settings(settings)
+        policy = PolicyEngine.from_settings(
+            settings,
+            runtime_config=ToolRuntimeConfig.from_settings(settings),
         )
         scopes = policy.scopes_for_context(
             AgentIdentityContext(
                 discord_user_id="capability-preview",
-                organization_id="capability-preview",
+                organization_id=guild_id,
+                guild_id=guild_id,
                 roles=roles,
+                role_ids=role_ids,
             )
         )
         capabilities: list[str] = []
+        capabilities.append(
+            "- Jobs: ask for work by skill, location, or hours; or use `/find-jobs`."
+        )
         if "project:read" in scopes:
             capabilities.append("- Tasks: search a project.")
         task_writes: list[str] = []
@@ -581,8 +1710,32 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             capabilities.append(
                 "- Memory: remember and review your private preferences."
             )
+        if "agent:chat" in scopes:
+            capabilities.append(
+                "- Agent chat: answer general questions and plan approved work."
+            )
+        if "web:research" in scopes:
+            capabilities.append(
+                "- Public web: research current information and read public pages."
+            )
+        if "billing:invoice:read" in scopes:
+            capabilities.append(
+                "- Billing: search Sales/Purchase invoices and suppliers (read-only)."
+            )
+        if "erp:project:read" in scopes:
+            capabilities.append(
+                "- ERP projects: search projects and view read-only summaries."
+            )
+        if "knowledge:read_org" in scopes:
+            capabilities.append(
+                "- Knowledge: ask source-grounded questions across remembered answers and the wiki."
+            )
+        if "knowledge:capture_org" in scopes:
+            capabilities.append(
+                "- Capture: tag me with `remember this thread` to review and save an answer."
+            )
         if {
-            "github:repository:member:read",
+            "github:issue:read",
             "github:repository:configured:read",
             "github:repository:all:read",
         } & scopes:
@@ -602,6 +1755,10 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         if "user:manage" in scopes or "mailbox:create" in scopes:
             capabilities.append(
                 "- Ops: create 508 accounts, Authentik SSO users, Outline invites, and mailboxes."
+            )
+        if "agent:schedule:manage" in scopes:
+            capabilities.append(
+                "- Recurring reports: ask me to schedule a read-only report in this channel; I will show the exact timing before creating it."
             )
         if not capabilities:
             lines = [
@@ -690,7 +1847,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
     def _should_reply_publicly_to_mention(
         *,
         response: dict[str, Any],
-        view: AgentConfirmationView | None,
+        view: discord.ui.View | None,
     ) -> bool:
         if view is not None:
             return False
@@ -719,9 +1876,13 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
     ) -> None:
         thread = await self._mention_response_thread(message=message, request=request)
         if thread is not None:
-            await thread.send(content[:1900])
+            await thread.send(content[:1900], allowed_mentions=NO_MENTIONS)
             return
-        await message.reply(content[:1900], mention_author=False)
+        await message.reply(
+            content[:1900],
+            mention_author=False,
+            allowed_mentions=NO_MENTIONS,
+        )
 
     async def _mention_response_thread(
         self,
@@ -755,7 +1916,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         self,
         message: discord.Message,
         response: dict[str, Any],
-        view: AgentConfirmationView | None,
+        view: discord.ui.View | None,
     ) -> bool:
         try:
             formatted_response = self._format_agent_response(response)
@@ -780,6 +1941,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
 
     def _build_agent_context(self, interaction: discord.Interaction) -> dict[str, Any]:
         role_names = self._role_names_from_user(interaction.user)
+        role_ids = self._role_ids_from_user(interaction.user)
 
         # Slash commands do not have a Discord message id; button interactions do.
         # Keep message_id as the visible Discord message when present and use
@@ -813,6 +1975,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             ),
             "response_destination_visibility": "private",
             "roles": role_names,
+            "role_ids": role_ids,
             "scopes": [],
             "impersonation": False,
             "interaction_id": str(interaction.id),
@@ -838,6 +2001,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                 self._response_destination_visibility_from_message(message)
             ),
             "roles": self._role_names_from_user(message.author),
+            "role_ids": self._role_ids_from_user(message.author),
             "scopes": [],
             "impersonation": False,
             "interaction_id": None,
@@ -875,6 +2039,19 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             if str(getattr(role, "name", "")).strip()
         ]
 
+    @staticmethod
+    def _role_ids_from_user(user: discord.abc.User) -> list[str]:
+        """Return de-duplicated Discord role snowflakes from a member object."""
+
+        role_ids: list[str] = []
+        for role in getattr(user, "roles", []):
+            role_id = str(getattr(role, "id", "")).strip()
+            if not role_id or not role_id.isdecimal() or int(role_id) <= 0:
+                continue
+            if role_id not in role_ids:
+                role_ids.append(role_id)
+        return role_ids
+
     def _cached_guild_role_names(self, *, guild_id: str, user_id: int) -> list[str]:
         try:
             guild = self.bot.get_guild(int(guild_id))
@@ -887,22 +2064,93 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             return []
         return self._role_names_from_user(member)
 
-    async def _guild_role_names(self, *, guild_id: str, user_id: int) -> list[str]:
+    async def _guild_role_names(
+        self, *, guild_id: str, user_id: int
+    ) -> list[str] | None:
+        """Fetch current role names, preserving retryability on a Discord outage."""
+
         try:
             guild = self.bot.get_guild(int(guild_id))
         except (TypeError, ValueError):
-            return []
+            return None
         if guild is None:
-            return []
-        member = guild.get_member(user_id)
-        if member is None and hasattr(guild, "fetch_member"):
-            try:
+            return None
+        try:
+            async with asyncio.timeout(3):
                 member = await guild.fetch_member(user_id)
+        except discord.NotFound:
+            return []
+        except (TimeoutError, discord.HTTPException):
+            return None
+        return self._role_names_from_user(member)
+
+    async def _guild_role_snapshot(
+        self,
+        *,
+        guild_id: str,
+        user_id: int,
+        require_fresh: bool = False,
+    ) -> tuple[list[str], list[str]]:
+        """Return role names and IDs from a guild member snapshot.
+
+        Confirmation reauthorization requests a REST snapshot explicitly, so
+        revocations cannot be masked by Discord.py's member cache.
+        """
+
+        try:
+            guild = self.bot.get_guild(int(guild_id))
+        except (AttributeError, TypeError, ValueError):
+            if require_fresh:
+                raise RuntimeError(_CONFIRMATION_ROLE_REFRESH_UNAVAILABLE) from None
+            return [], []
+        if guild is None:
+            if require_fresh:
+                # A cache miss is not proof that the requester lost access.
+                # Preserve the confirmation so an API/gateway recovery can
+                # refresh the member instead of consuming it with stale state.
+                raise RuntimeError(_CONFIRMATION_ROLE_REFRESH_UNAVAILABLE)
+            return [], []
+        fetch_member = getattr(guild, "fetch_member", None)
+        if require_fresh:
+            if not callable(fetch_member):
+                logger.warning(
+                    "Cannot refresh Discord member roles for agent confirmation: "
+                    "guild does not support fetch_member"
+                )
+                return [], []
+            fetch_member_call = cast(
+                Callable[[int], Awaitable[discord.Member]], fetch_member
+            )
+            try:
+                member = await fetch_member_call(user_id)
+            except discord.NotFound:
+                # A 404 is definitive evidence that the requester is no
+                # longer a member, so submit an empty snapshot and let the
+                # backend deny and consume the confirmation.
+                return [], []
+            except Exception as exc:
+                logger.warning(
+                    "Failed refreshing Discord member roles for agent confirmation",
+                    exc_info=True,
+                )
+                # HTTP 5xx/429/permission and network failures cannot prove
+                # that access was revoked. Abort before the backend atomically
+                # consumes the pending confirmation so the requester can retry.
+                raise RuntimeError(_CONFIRMATION_ROLE_REFRESH_UNAVAILABLE) from exc
+            return self._role_names_from_user(member), self._role_ids_from_user(member)
+
+        member = guild.get_member(user_id)
+        if member is None and callable(fetch_member):
+            fetch_member_call = cast(
+                Callable[[int], Awaitable[discord.Member]], fetch_member
+            )
+            try:
+                member = await fetch_member_call(user_id)
             except (discord.HTTPException, discord.NotFound, discord.Forbidden):
                 member = None
         if member is None:
-            return []
-        return self._role_names_from_user(member)
+            return [], []
+        return self._role_names_from_user(member), self._role_ids_from_user(member)
 
     def _audit_message_safe(
         self,
@@ -949,7 +2197,74 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             payload,
         )
 
-    def _post_backend_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    async def _post_knowledge_capture(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        # Project captures may serially resolve the project, actor identity, and
+        # project access before model extraction and draft persistence. Each
+        # database stage has separate connection and statement deadlines.
+        pipeline_timeout = (
+            settings.knowledge_source_timeout_seconds * 2 * 4
+            + settings.knowledge_model_timeout_seconds * 2
+            + 1.0
+        )
+        return await asyncio.to_thread(
+            self._post_backend_json,
+            "/knowledge/captures",
+            payload,
+            max(settings.knowledge_api_timeout_seconds, pipeline_timeout),
+        )
+
+    async def _post_knowledge_confirmation(
+        self,
+        *,
+        draft_id: str,
+        context: dict[str, Any],
+        confirm: bool,
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            self._post_backend_json,
+            f"/knowledge/captures/{draft_id}/confirmation",
+            {"context": context, "confirm": confirm},
+            settings.knowledge_api_timeout_seconds,
+        )
+
+    async def _post_knowledge_query(
+        self,
+        *,
+        question: str,
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        sources: list[dict[str, Any]] = []
+        source_errors: list[str] = []
+        if settings.knowledge_enabled:
+            sources, source_errors = await collect_discord_sources(
+                self.bot, settings, context, question
+            )
+        payload: dict[str, Any] = {"question": question, "context": context}
+        if sources:
+            payload["discord_sources"] = sources
+        if source_errors:
+            payload["source_errors"] = source_errors
+        return await asyncio.to_thread(
+            self._post_backend_json,
+            "/knowledge/queries",
+            payload,
+            max(
+                settings.knowledge_api_timeout_seconds,
+                settings.knowledge_source_timeout_seconds
+                + settings.knowledge_model_timeout_seconds
+                + 1.0,
+            ),
+        )
+
+    def _post_backend_json(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
         base_url = settings.backend_api_base_url.rstrip("/")
         secret = str(settings.api_shared_secret or "").strip()
         if not base_url or not secret:
@@ -959,7 +2274,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             f"{base_url}{path}",
             headers={"X-API-Secret": secret},
             json=payload,
-            timeout=settings.agent_api_timeout_seconds,
+            timeout=timeout_seconds or settings.agent_api_timeout_seconds,
             verify=default_ca_bundle_path(),
         )
         try:
@@ -992,6 +2307,113 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         if isinstance(http_status, int) and http_status >= 400:
             return "error"
         return "success"
+
+    @staticmethod
+    def _format_knowledge_capture_preview_parts(
+        response: dict[str, Any],
+    ) -> list[str]:
+        status = str(response.get("status") or "failed")
+        message = str(response.get("message") or "").strip()
+        if status != "requires_confirmation":
+            return [(message or f"Knowledge capture status: {status}")[:1900]]
+
+        visibility = AgentCog._safe_discord_text(
+            str(response.get("visibility") or "private")
+        )
+        sections = [
+            f"Review this knowledge capture\nVisibility: {visibility}",
+        ]
+        candidates = response.get("candidates")
+        if isinstance(candidates, list):
+            for index, candidate in enumerate(candidates[:3], start=1):
+                if not isinstance(candidate, dict):
+                    continue
+                question = AgentCog._safe_discord_text(
+                    str(candidate.get("question") or "")
+                )
+                answer = AgentCog._safe_discord_text(str(candidate.get("answer") or ""))
+                sections.append(f"{index}. Q: {question}\n   A: {answer}")
+        sections.append("Choose **Remember** to save exactly this preview, or cancel.")
+
+        parts: list[str] = []
+        for section in sections:
+            remaining = section
+            while remaining:
+                chunk = remaining[:1900]
+                remaining = remaining[1900:]
+                if parts and len(parts[-1]) + len(chunk) + 2 <= 1900:
+                    parts[-1] += "\n\n" + chunk
+                else:
+                    parts.append(chunk)
+        return parts or ["I could not render that knowledge capture."]
+
+    @staticmethod
+    def _format_knowledge_capture_response(response: dict[str, Any]) -> str:
+        parts = AgentCog._format_knowledge_capture_preview_parts(response)
+        if len(parts) == 1:
+            return parts[0]
+        return "The capture preview was sent in multiple messages."
+
+    @staticmethod
+    def _format_knowledge_query_response(response: dict[str, Any]) -> str:
+        answer = str(
+            response.get("answer")
+            or response.get("message")
+            or response.get("error")
+            or "I could not answer that question."
+        ).strip()
+        safe_answer = AgentCog._safe_discord_text(answer)
+        source_lines: list[str] = []
+        citations = response.get("citations")
+        if isinstance(citations, list) and citations:
+            for index, citation in enumerate(citations[:8], start=1):
+                if not isinstance(citation, dict):
+                    continue
+                title = AgentCog._safe_discord_text(
+                    str(
+                        citation.get("title") or citation.get("source_type") or "Source"
+                    )
+                )
+                url = str(citation.get("url") or "").strip()
+                stale = " (review due)" if citation.get("stale") else ""
+                if re.match(r"^https?://", url, flags=re.I) and len(url) <= 500:
+                    source_lines.append(f"{index}. {title[:300]}{stale} — <{url}>")
+                else:
+                    source_type = AgentCog._safe_discord_text(
+                        str(citation.get("source_type") or "source")
+                    )
+                    source_lines.append(
+                        f"{index}. {title[:300]}{stale} ({source_type[:80]})"
+                    )
+
+        suffix_parts: list[str] = []
+        if source_lines:
+            included_sources: list[str] = []
+            for source_line in source_lines:
+                candidate = "\n".join([*included_sources, source_line])
+                if len(candidate) > 850 and included_sources:
+                    break
+                included_sources.append(source_line[:850])
+            suffix_parts.append("Sources:\n" + "\n".join(included_sources))
+        if response.get("source_errors"):
+            suffix_parts.append("Some knowledge sources were temporarily unavailable.")
+        suffix = "\n\n".join(suffix_parts)
+        answer_limit = 1900 - (len(suffix) + 2 if suffix else 0)
+        rendered_answer = safe_answer[: max(1, answer_limit)].rstrip()
+        return (f"{rendered_answer}\n\n{suffix}" if suffix else rendered_answer)[:1900]
+
+    @staticmethod
+    def _safe_discord_text(value: str) -> str:
+        return discord.utils.escape_markdown(discord.utils.escape_mentions(value))
+
+    @staticmethod
+    def _safe_discord_url(value: str) -> str:
+        """Render provider-controlled URLs as text, never as Markdown syntax."""
+
+        return discord.utils.escape_markdown(
+            discord.utils.escape_mentions(value),
+            ignore_links=False,
+        )
 
     def _format_agent_response(self, response: dict[str, Any]) -> str:
         http_status = response.get("http_status")
@@ -1069,9 +2491,49 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                     lines.extend(
                         self._format_contact_result_lines(tool_name, result_payload)
                     )
+                elif tool_name in {
+                    "billing_read.search_invoices",
+                    "billing_read.get_invoice_summary",
+                    "billing_read.search_suppliers",
+                    "erp_read.search_projects",
+                    "erp_read.get_project_summary",
+                } and isinstance(result_payload, dict):
+                    lines.extend(
+                        self._format_erp_read_result_lines(tool_name, result_payload)
+                    )
                 elif isinstance(result_payload, dict) and "facts" in result_payload:
                     lines.extend(
                         self._format_memory_fact_result_lines(tool_name, result_payload)
+                    )
+                elif (
+                    tool_name == "agent_schedule.create"
+                    and isinstance(result_payload, dict)
+                    and result_payload.get("schedule_id")
+                ):
+                    schedule_id = str(result_payload["schedule_id"])
+                    next_run = str(result_payload.get("next_run_at") or "unknown")
+                    lines.append(
+                        f"- agent_schedule.create: created `{schedule_id}` (next: {next_run})"
+                    )
+                elif (
+                    tool_name == "web_read.search"
+                    and isinstance(result_payload, dict)
+                    and "results" in result_payload
+                ):
+                    lines.extend(self._format_web_search_result_lines(result_payload))
+                elif (
+                    tool_name == "web_read.extract"
+                    and isinstance(result_payload, dict)
+                    and "content" in result_payload
+                ):
+                    lines.extend(self._format_web_extract_result_lines(result_payload))
+                elif isinstance(result_payload, dict) and isinstance(
+                    result_payload.get("fact"), dict
+                ):
+                    lines.extend(
+                        self._format_memory_fact_result_lines(
+                            tool_name, {"facts": [result_payload["fact"]]}
+                        )
                     )
                 else:
                     result_error = str(result.get("error") or "").strip()
@@ -1086,6 +2548,28 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                         lines.append(f"  Recovery email failed: {recovery_email_error}")
 
         return "\n".join(lines)[:1900]
+
+    def _memory_view(
+        self, response: dict[str, Any], user_id: int, context: dict[str, Any]
+    ) -> MemoryFactsView | None:
+        for result in response.get("results") or []:
+            if (
+                result.get("tool_name") != "memory_read.get_user_facts"
+                or result.get("status") != "succeeded"
+            ):
+                continue
+            facts = [
+                fact
+                for fact in (result.get("result") or {}).get("facts") or []
+                if fact.get("id")
+                and fact.get("visibility") == "private"
+                and fact.get("scope_id") == str(user_id)
+            ]
+            if facts:
+                return MemoryFactsView(
+                    cog=self, requester_id=user_id, context=context, facts=facts
+                )
+        return None
 
     @staticmethod
     def _format_memory_fact_result_lines(
@@ -1102,9 +2586,13 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             key = str(fact.get("key") or "memory").strip()
             value = AgentCog._format_memory_fact_value(fact.get("value_json"))
             if value:
-                lines.append(f"  - {key}: {value}")
+                lines.append(
+                    f"  - {AgentCog._safe_discord_text(key)}: {AgentCog._safe_discord_text(value)}"
+                )
             else:
                 lines.append(f"  - {key}")
+            if fact.get("id"):
+                lines.append(f"    ID: {fact['id']}")
         return lines
 
     @staticmethod
@@ -1121,6 +2609,46 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         if isinstance(value, str):
             return value.strip()
         return ""
+
+    @staticmethod
+    def _format_web_search_result_lines(payload: dict[str, Any]) -> list[str]:
+        items = payload.get("results")
+        results = items if isinstance(items, list) else []
+        provider = AgentCog._safe_discord_text(
+            str(payload.get("provider") or "web").strip()
+        )
+        lines = [f"- web_read.search ({provider}): {len(results)} results"]
+        for item in results[:3]:
+            if not isinstance(item, dict):
+                continue
+            title = AgentCog._safe_discord_text(
+                str(item.get("title") or "Untitled result").strip()
+            )
+            url = AgentCog._safe_discord_url(str(item.get("url") or "").strip())
+            snippet = AgentCog._safe_discord_text(
+                " ".join(str(item.get("snippet") or "").split())
+            )
+            lines.append(f"  - {title} {url}".strip())
+            if snippet:
+                lines.append(f"    {snippet[:240]}")
+        return lines
+
+    @staticmethod
+    def _format_web_extract_result_lines(payload: dict[str, Any]) -> list[str]:
+        provider = AgentCog._safe_discord_text(
+            str(payload.get("provider") or "firecrawl").strip()
+        )
+        title = AgentCog._safe_discord_text(
+            str(payload.get("title") or "Public web page").strip()
+        )
+        url = AgentCog._safe_discord_url(str(payload.get("url") or "").strip())
+        content = AgentCog._safe_discord_text(
+            " ".join(str(payload.get("content") or "").split())
+        )
+        lines = [f"- web_read.extract ({provider}): {title} {url}".strip()]
+        if content:
+            lines.append(f"  {content[:600]}")
+        return lines
 
     @staticmethod
     def _result_recovery_email_error(payload: object) -> str | None:
@@ -1172,7 +2700,107 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             lines.append(f"  - {name} {suffix}".strip())
         return lines
 
+    @staticmethod
+    def _format_erp_read_result_lines(
+        tool_name: object,
+        payload: dict[str, Any],
+    ) -> list[str]:
+        def safe_field(value: object) -> str:
+            return AgentCog._safe_discord_text(str(value).strip())
+
+        if "invoices" in payload:
+            raw_invoices = payload.get("invoices")
+            invoices = raw_invoices if isinstance(raw_invoices, list) else []
+            lines = [f"- {tool_name}: {len(invoices)} invoices"]
+            for invoice in invoices[:5]:
+                if not isinstance(invoice, dict):
+                    continue
+                invoice_id = safe_field(invoice.get("invoice_id") or "Unknown invoice")
+                status = safe_field(invoice.get("status") or "unknown")
+                posting_date = safe_field(invoice.get("posting_date") or "")
+                lines.append(
+                    "  - "
+                    + " · ".join(
+                        part for part in [invoice_id, status, posting_date] if part
+                    )
+                )
+            return lines
+
+        if "invoice" in payload:
+            invoice = payload.get("invoice")
+            if not isinstance(invoice, dict):
+                return [f"- {tool_name}: no matching invoice"]
+            invoice_id = safe_field(invoice.get("invoice_id") or "Unknown invoice")
+            status = safe_field(invoice.get("status") or "unknown")
+            party = safe_field(invoice.get("customer") or invoice.get("supplier") or "")
+            currency = invoice.get("currency") or ""
+            total = invoice.get("grand_total")
+            suffix = " ".join(
+                safe_field(part)
+                for part in (currency, total)
+                if part is not None and str(part).strip()
+            )
+            lines = [
+                "  - "
+                + " · ".join(
+                    part for part in [invoice_id, status, party, suffix] if part
+                )
+            ]
+            return [f"- {tool_name}: invoice summary", *lines]
+
+        if "suppliers" in payload:
+            raw_suppliers = payload.get("suppliers")
+            suppliers = raw_suppliers if isinstance(raw_suppliers, list) else []
+            lines = [f"- {tool_name}: {len(suppliers)} suppliers"]
+            for supplier in suppliers[:5]:
+                if not isinstance(supplier, dict):
+                    continue
+                supplier_id = str(supplier.get("supplier_id") or "").strip()
+                name = safe_field(
+                    supplier.get("supplier_name") or supplier_id or "Unknown supplier"
+                )
+                email = safe_field(supplier.get("email") or "")
+                lines.append(
+                    "  - " + " · ".join(part for part in [name, email] if part)
+                )
+            return lines
+
+        if "projects" in payload:
+            raw_projects = payload.get("projects")
+            projects = raw_projects if isinstance(raw_projects, list) else []
+            lines = [f"- {tool_name}: {len(projects)} ERP projects"]
+            for project in projects[:5]:
+                if not isinstance(project, dict):
+                    continue
+                project_id = safe_field(project.get("project_id") or "Unknown project")
+                name = safe_field(project.get("project_name") or "")
+                status = safe_field(project.get("status") or "")
+                lines.append(
+                    "  - "
+                    + " · ".join(part for part in [project_id, name, status] if part)
+                )
+            return lines
+
+        if "project" in payload:
+            project = payload.get("project")
+            if not isinstance(project, dict):
+                return [f"- {tool_name}: no matching ERP project"]
+            project_id = safe_field(project.get("project_id") or "Unknown project")
+            name = safe_field(project.get("project_name") or "")
+            status = safe_field(project.get("status") or "")
+            customer = safe_field(project.get("customer") or "")
+            return [
+                f"- {tool_name}: ERP project summary",
+                "  - "
+                + " · ".join(
+                    part for part in [project_id, name, status, customer] if part
+                ),
+            ]
+
+        return [f"- {tool_name}: no read-only ERP results"]
+
 
 async def setup(bot: commands.Bot) -> None:
     """Load the agent cog."""
+    bot.add_dynamic_items(AgentConfirmationDynamicButton, KnowledgeCaptureDynamicButton)
     await bot.add_cog(AgentCog(bot))

@@ -345,6 +345,7 @@ def list_dashboard_projects(
     include_all: bool = False,
     limit: int = 100,
     include_roster: bool = True,
+    timeout_seconds: float | None = None,
 ) -> list[dict[str, Any]]:
     """Return project cache rows shaped for the operations dashboard.
 
@@ -439,7 +440,11 @@ def list_dashboard_projects(
         LIMIT %s
         """
 
-    with get_postgres_connection(settings) as conn:
+    with get_postgres_connection(
+        settings,
+        connect_timeout_seconds=timeout_seconds,
+        statement_timeout_seconds=timeout_seconds,
+    ) as conn:
         with conn.cursor(row_factory=dict_row) as cursor:
             cursor.execute(trusted_sql(query), params)
             project_rows = [dict(row) for row in cursor.fetchall()]

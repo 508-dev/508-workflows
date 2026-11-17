@@ -8,6 +8,7 @@ from urllib.parse import quote, urljoin
 
 import requests
 
+from five08.deadlines import DeadlineExceeded, clamp_timeout_seconds
 from five08.tls import default_ca_bundle_path
 
 
@@ -48,10 +49,13 @@ class ERPNextClient:
         base_url: str,
         api_key: str,
         timeout_seconds: float = 20.0,
+        *,
+        deadline_monotonic: float | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/") + "/"
         self.api_key = api_key
         self.timeout_seconds = timeout_seconds
+        self.deadline_monotonic = deadline_monotonic
         self.status_code: int | None = None
         self._session = requests.Session()
         self._session.headers.update(
@@ -77,12 +81,19 @@ class ERPNextClient:
         """Send one request to ERPNext and return a JSON object."""
         url = urljoin(self.base_url, path.lstrip("/"))
         try:
+            timeout_seconds = clamp_timeout_seconds(
+                self.timeout_seconds,
+                deadline_monotonic=self.deadline_monotonic,
+            )
+        except DeadlineExceeded as exc:
+            raise ERPNextAPIError("ERPNext request deadline exceeded") from exc
+        try:
             response = self._session.request(
                 method.upper(),
                 url,
                 params=params,
                 json=payload,
-                timeout=self.timeout_seconds,
+                timeout=timeout_seconds,
                 verify=default_ca_bundle_path(),
             )
         except requests.RequestException as exc:

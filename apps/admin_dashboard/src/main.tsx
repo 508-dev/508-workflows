@@ -3,6 +3,7 @@ import {
   ArrowLeft,
   Bell,
   BriefcaseBusiness,
+  CalendarClock,
   ClipboardList,
   ExternalLink,
   FileClock,
@@ -13,6 +14,7 @@ import {
   RefreshCw,
   Search,
   Send,
+  Server,
   Settings,
   ShieldCheck,
   UserMinus,
@@ -22,7 +24,12 @@ import {
 } from "lucide-react"
 import { type ReactNode, StrictMode, useEffect, useMemo, useRef, useState } from "react"
 import { createRoot } from "react-dom/client"
+import {
+  type AgentScheduleRunResponse,
+  agentScheduleRunToastMessage,
+} from "@/agent-schedule-run-status"
 import { Empty } from "@/components/empty"
+import { OnboardingEmailSendStatus } from "@/components/onboarding-email-send-status"
 import { SortableTableHead } from "@/components/sortable-table-head"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -48,11 +55,19 @@ import {
   jsonPreview,
   labelForOnboardingState,
   linkedinUrl,
+  messageForApiError,
   onboardingStateValue,
   type Tone,
   toneForOnboardingState,
 } from "@/dashboard-utils"
 import { cn } from "@/lib/utils"
+import {
+  type AgentSchedule,
+  type AgentScheduleCreateValues,
+  type AgentScheduleRun,
+  type AgentSchedulesResponse,
+  AgentSchedulesView,
+} from "@/views/agent-schedules-view"
 import {
   type ConfigurationItem,
   type ConfigurationResponse,
@@ -60,7 +75,13 @@ import {
   type JobChannelsResponse,
   type JobPostChannel,
   type JobPostChannelTag,
+  type KnowledgeChannel,
+  type KnowledgeChannelsResponse,
 } from "@/views/configuration-view"
+import {
+  type DiscordDiagnosticsResponse,
+  DiscordDiagnosticsView,
+} from "@/views/discord-diagnostics-view"
 import {
   type NewsletterStatus,
   type NewsletterSuppression,
@@ -80,6 +101,8 @@ type View =
   | "jobs"
   | "agent"
   | "audit"
+  | "schedules"
+  | "diagnostics"
   | "configuration"
 type SortDirection = "asc" | "desc"
 type GigTab = "gigs" | "leads"
@@ -303,6 +326,17 @@ type JobLead = {
 
 type JobLeadReviewStatus = "pending" | "approved" | "rejected"
 
+const JOB_LEAD_SOURCES = [
+  { key: "hackernews_who_is_hiring", label: "Hacker News" },
+  { key: "himalayas_remote_jobs", label: "Himalayas" },
+  { key: "a16z_talent_network", label: "a16z" },
+  { key: "sequoia_portfolio_ats", label: "Sequoia portfolio" },
+] as const
+type JobLeadSourceKey = (typeof JOB_LEAD_SOURCES)[number]["key"]
+function jobLeadSourceLabel(source?: string) {
+  return JOB_LEAD_SOURCES.find((item) => item.key === source)?.label || source || "Unknown"
+}
+
 type JobLeadScrapeThread = {
   story_id?: number
   title?: string
@@ -316,6 +350,9 @@ type JobLeadScrapeThread = {
     empty?: number
     seeking_work?: number
     not_contractor_friendly?: number
+    irrelevant_role?: number
+    expired?: number
+    invalid_or_duplicate?: number
   }
 }
 
@@ -330,7 +367,10 @@ type JobLeadScrapeResult = {
   created?: number
   updated?: number
   persisted?: number
+  rejected_existing?: number
   total?: number
+  incomplete?: boolean
+  incomplete_reason?: string | null
 }
 
 type JobLeadScrapeStatus = {
@@ -564,6 +604,8 @@ const routes: Record<View, string> = {
   jobs: "/dashboard/jobs",
   agent: "/dashboard/agent",
   audit: "/dashboard/audit",
+  schedules: "/dashboard/schedules",
+  diagnostics: "/dashboard/diagnostics",
   configuration: "/dashboard/configuration",
 }
 
@@ -576,6 +618,8 @@ const routePermissions: Record<View, string> = {
   jobs: "jobs:read",
   agent: "audit:read",
   audit: "audit:read",
+  schedules: "configuration:read",
+  diagnostics: "configuration:read",
   configuration: "configuration:read",
 }
 
@@ -672,38 +716,6 @@ function stringFieldFromPayload(payload: unknown, key: string) {
   if (typeof value === "string") return value
   if (value === undefined || value === null) return undefined
   return JSON.stringify(value)
-}
-
-function messageForApiError(record: Record<string, unknown>, fallback: string) {
-  const detail = record.detail
-  if (typeof detail === "string" && detail.trim()) return detail
-
-  const error = record.error
-  if (typeof error !== "string") return fallback
-  if (error === "person_not_found") {
-    const person =
-      typeof record.person === "string" && record.person.trim() ? record.person : "that person"
-    return `No CRM person, ERPNext user, or ERPNext supplier matched "${person}". Try an email address or an exact name from CRM/ERPNext.`
-  }
-  if (error === "candidate_not_found") {
-    return "The selected person record is no longer available. Search again and choose one of the current matches."
-  }
-  if (error === "invalid_crm_profile") {
-    return "Paste a valid CRM Contact profile URL or Contact id."
-  }
-  if (error === "crm_profile_not_found") {
-    return "That CRM Contact profile was not found."
-  }
-  if (error === "crm_profile_mismatch") {
-    return "CRM returned a different Contact than the profile requested. Check the profile URL and try again."
-  }
-  if (error === "crm_profile_lookup_failed") {
-    return "CRM profile lookup failed. Try again after CRM is reachable."
-  }
-  if (error === "ambiguous_person") {
-    return "Multiple people matched. Choose the matching person record."
-  }
-  return error || fallback
 }
 
 function messageFromUnknown(error: unknown, fallback: string) {
@@ -959,9 +971,15 @@ function App() {
   const [jobs, setJobs] = useState<Job[]>([])
   const [gigs, setGigs] = useState<Gig[]>([])
   const [gigLeads, setGigLeads] = useState<JobLead[]>([])
-  const [gigLeadScrapeStatus, setGigLeadScrapeStatus] = useState<JobLeadScrapeStatus | null>(null)
+  const [gigLeadScrapeStatuses, setGigLeadScrapeStatuses] = useState<
+    Partial<Record<JobLeadSourceKey, JobLeadScrapeStatus>>
+  >({})
   const [jobPostChannels, setJobPostChannels] = useState<JobPostChannel[]>([])
   const [availableJobPostChannels, setAvailableJobPostChannels] = useState<JobPostChannel[]>([])
+  const [knowledgeChannels, setKnowledgeChannels] = useState<KnowledgeChannel[]>([])
+  const [selectedKnowledgeChannelIds, setSelectedKnowledgeChannelIds] = useState<string[]>([])
+  const [knowledgeChannelsAvailable, setKnowledgeChannelsAvailable] = useState(false)
+  const [knowledgeChannelLimit, setKnowledgeChannelLimit] = useState(8)
   const [projects, setProjects] = useState<Project[]>([])
   const [projectsSummary, setProjectsSummary] = useState<ProjectsResponse["summary"]>({})
   const [wikiMatches, setWikiMatches] = useState<WikiMatchPreview | null>(null)
@@ -977,6 +995,14 @@ function App() {
   const [onboardingVolunteers, setOnboardingVolunteers] = useState<OnboardingVolunteer[]>([])
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([])
   const [agentReport, setAgentReport] = useState<AgentReport | null>(null)
+  const [agentSchedules, setAgentSchedules] = useState<AgentSchedule[]>([])
+  const [agentScheduleDeliveryAttention, setAgentScheduleDeliveryAttention] = useState<
+    AgentScheduleRun[]
+  >([])
+  const [agentScheduleDispatcherEnabled, setAgentScheduleDispatcherEnabled] = useState(false)
+  const [discordDiagnostics, setDiscordDiagnostics] = useState<DiscordDiagnosticsResponse | null>(
+    null,
+  )
   const [configurationItems, setConfigurationItems] = useState<ConfigurationItem[]>([])
   const [configurationFocus, setConfigurationFocus] = useState<{
     category: string
@@ -984,6 +1010,9 @@ function App() {
   } | null>(null)
   const [jobDetail, setJobDetail] = useState<JobDetail | null>(null)
   const [loading, setLoading] = useState<Record<string, boolean>>({})
+  const [onboardingEmailSendStartedAt, setOnboardingEmailSendStartedAt] = useState<
+    Record<string, number>
+  >({})
   const [devErrors, setDevErrors] = useState<DashboardDevError[]>([])
   const [historicalPersonChoice, setHistoricalPersonChoice] = useState<{
     projectId: string
@@ -999,6 +1028,8 @@ function App() {
     people: { key: "name", direction: "asc" },
     agent: { key: "occurred_at", direction: "desc" },
     audit: { key: "occurred_at", direction: "desc" },
+    schedules: { key: "next_run_at", direction: "asc" },
+    diagnostics: { key: "position", direction: "desc" },
     configuration: { key: "category", direction: "asc" },
   })
 
@@ -1011,6 +1042,7 @@ function App() {
   const [gigLimit, setGigLimit] = useState(100)
   const [activeGigTab, setActiveGigTab] = useState<GigTab>(gigTabFromHash)
   const [gigLeadStatus, setGigLeadStatus] = useState("pending")
+  const [gigLeadSource, setGigLeadSource] = useState<JobLeadSourceKey | "">("")
   const [projectQuery, setProjectQuery] = useState("")
   const [projectStatus, setProjectStatus] = useState(initialProjectDetailId ? "" : "Open")
   const [staleRecruitingDays, setStaleRecruitingDays] = useState(7)
@@ -1176,12 +1208,14 @@ function App() {
   function gigLeadsUrl() {
     const params = new URLSearchParams({ limit: "50" })
     if (gigLeadStatus) params.set("status", gigLeadStatus)
+    if (gigLeadSource) params.set("source", gigLeadSource)
     return `/dashboard/api/gig-leads?${params.toString()}`
   }
 
-  function gigLeadScrapeStatusUrl(jobId?: string) {
+  function gigLeadScrapeStatusUrl(jobId?: string, source?: JobLeadSourceKey) {
     const params = new URLSearchParams()
     if (jobId) params.set("job_id", jobId)
+    if (source) params.set("source", source)
     const query = params.toString()
     return `/dashboard/api/gig-leads/scrape-status${query ? `?${query}` : ""}`
   }
@@ -1240,19 +1274,28 @@ function App() {
     }
   }
 
-  async function fetchGigLeadScrapeStatus(jobId?: string) {
-    return requestJson<JobLeadScrapeStatus>(gigLeadScrapeStatusUrl(jobId))
+  async function fetchGigLeadScrapeStatus(jobId?: string, source?: JobLeadSourceKey) {
+    return requestJson<JobLeadScrapeStatus>(gigLeadScrapeStatusUrl(jobId, source))
   }
 
-  async function loadGigLeadScrapeStatus(jobId?: string) {
+  async function loadGigLeadScrapeStatus() {
     setBusy("gigLeadScrapeStatus", true)
     try {
-      const payload = await fetchGigLeadScrapeStatus(jobId)
-      setGigLeadScrapeStatus(payload)
-      return payload
+      const statuses = await Promise.allSettled(
+        JOB_LEAD_SOURCES.map(({ key }) => fetchGigLeadScrapeStatus(undefined, key)),
+      )
+      setGigLeadScrapeStatuses((current) => {
+        const next = { ...current }
+        statuses.forEach((result, index) => {
+          if (result.status === "fulfilled") next[JOB_LEAD_SOURCES[index].key] = result.value
+        })
+        return next
+      })
+      if (statuses.some((result) => result.status === "rejected")) {
+        showToast("Some job lead sync statuses could not be loaded", "warning")
+      }
     } catch (error) {
-      showError(error, "Unable to load HN scrape status")
-      return null
+      showError(error, "Unable to load job lead sync statuses")
     } finally {
       setBusy("gigLeadScrapeStatus", false)
     }
@@ -1317,11 +1360,11 @@ function App() {
     }
   }
 
-  async function pollGigLeadSyncJob(jobId: string) {
+  async function pollGigLeadSyncJob(jobId: string, source: JobLeadSourceKey) {
     for (let attempt = 0; attempt < GIG_LEAD_SYNC_MAX_POLLS; attempt += 1) {
       await new Promise((resolve) => window.setTimeout(resolve, GIG_LEAD_SYNC_POLL_INTERVAL_MS))
       const detail = await fetchGigLeadScrapeStatus(jobId)
-      setGigLeadScrapeStatus(detail)
+      setGigLeadScrapeStatuses((current) => ({ ...current, [source]: detail }))
       const status = String(detail.status || "")
         .trim()
         .toLowerCase()
@@ -1335,19 +1378,22 @@ function App() {
           Number.isFinite(included) && Number.isFinite(filteredOut)
             ? `: ${included} included, ${filteredOut} filtered out`
             : ""
-        showToast(`HN lead scrape finished${summary}; refreshing leads`, "ok")
+        showToast(`${jobLeadSourceLabel(source)} sync finished${summary}; refreshing leads`, "ok")
         await loadGigLeads()
         if (view === "jobs") await loadJobs()
         return
       }
 
       if (view === "jobs") await loadJobs()
-      showToast(`HN lead scrape ${status || "finished"}; check background task ${jobId}`, "warning")
+      showToast(
+        `${jobLeadSourceLabel(source)} sync ${status || "finished"}; check background task ${jobId}`,
+        "warning",
+      )
       return
     }
 
     showToast(
-      `HN lead scrape is still running; refresh leads or check background task ${jobId}`,
+      `${jobLeadSourceLabel(source)} sync is still running; refresh leads or check background task ${jobId}`,
       "warning",
     )
   }
@@ -1785,42 +1831,72 @@ function App() {
     if (selectedGigId) await loadGigDetail(selectedGigId)
   }
 
-  async function syncGigLeads() {
+  async function syncGigLeads(source: JobLeadSourceKey | "all") {
+    const sources = source === "all" ? JOB_LEAD_SOURCES.map((item) => item.key) : [source]
     setBusy("gigLeadsSync", true)
-    showToast("Queueing HN lead scrape")
+    showToast(`Queueing ${source === "all" ? "all sources" : jobLeadSourceLabel(source)} lead sync`)
     try {
-      const payload = await requestJson<{
-        job_id?: string
-        created?: boolean
-        source?: string
-        story_id?: number | null
-      }>("/dashboard/api/gig-leads/sync", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ source: "hackernews_who_is_hiring" }),
-      })
-      showToast(
-        payload.created === false ? "HN lead scrape already queued" : "HN lead scrape queued",
-        "ok",
+      const queued = await Promise.allSettled(
+        sources.map(async (item) => {
+          const payload = await requestJson<{
+            job_id?: string
+            created?: boolean
+            source?: string
+            story_id?: number | null
+          }>("/dashboard/api/gig-leads/sync", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ source: item }),
+          })
+          if (payload.job_id) {
+            setGigLeadScrapeStatuses((current) => ({
+              ...current,
+              [item]: {
+                status: "queued",
+                job_id: payload.job_id,
+                source: item,
+                story_id: payload.story_id || null,
+                result: null,
+              },
+            }))
+          }
+          return { source: item, jobId: payload.job_id }
+        }),
       )
-      if (payload.job_id) {
-        setGigLeadScrapeStatus({
-          status: "queued",
-          job_id: payload.job_id,
-          source: payload.source || "hackernews_who_is_hiring",
-          story_id: payload.story_id || null,
-          result: null,
+      const jobs = queued.flatMap((result, index) => {
+        if (result.status === "fulfilled") return [result.value]
+        setGigLeadScrapeStatuses((current) => ({
+          ...current,
+          [sources[index]]: {
+            status: "failed",
+            source: sources[index],
+            last_error: "Unable to queue source sync",
+          },
+        }))
+        showError(result.reason, `Unable to queue ${jobLeadSourceLabel(sources[index])} sync`)
+        return []
+      })
+      if (jobs.length) {
+        showToast(`${jobs.length} source sync${jobs.length === 1 ? "" : "s"} queued`, "ok")
+        const monitored = await Promise.allSettled(
+          jobs.map(async ({ source: item, jobId }) => {
+            if (jobId) await pollGigLeadSyncJob(jobId, item)
+          }),
+        )
+        monitored.forEach((result, index) => {
+          if (result.status === "rejected") {
+            showError(
+              result.reason,
+              `Unable to monitor ${jobLeadSourceLabel(jobs[index].source)} sync`,
+            )
+          }
         })
-        try {
-          await pollGigLeadSyncJob(payload.job_id)
-        } catch (error) {
-          showError(error, "Unable to monitor HN lead scrape")
-        }
       } else {
-        await loadGigLeads()
+        await loadGigLeadScrapeStatus()
       }
+      await loadGigLeads()
     } catch (error) {
-      showError(error, "Unable to queue HN lead scrape")
+      showError(error, "Unable to queue job lead sync")
     } finally {
       setBusy("gigLeadsSync", false)
     }
@@ -2229,6 +2305,10 @@ function App() {
       return null
     }
     const key = `onboarding-email-send:${contactId}`
+    setOnboardingEmailSendStartedAt((current) => ({
+      ...current,
+      [contactId]: current[contactId] ?? Date.now(),
+    }))
     setBusy(key, true)
     try {
       const payload = await requestJson<OnboardingEmailDraft>(
@@ -2263,6 +2343,11 @@ function App() {
       return null
     } finally {
       setBusy(key, false)
+      setOnboardingEmailSendStartedAt((current) => {
+        const next = { ...current }
+        delete next[contactId]
+        return next
+      })
     }
   }
 
@@ -2288,6 +2373,141 @@ function App() {
     }
   }
 
+  async function loadAgentSchedules() {
+    setBusy("agentSchedules", true)
+    try {
+      const schedules: AgentSchedule[] = []
+      let nextOffset: number | null = 0
+      let firstPage: AgentSchedulesResponse | null = null
+      while (nextOffset !== null) {
+        const currentOffset: number = nextOffset
+        const suffix: string = currentOffset === 0 ? "" : `?offset=${currentOffset}`
+        const payload: AgentSchedulesResponse = await requestJson<AgentSchedulesResponse>(
+          `/dashboard/api/agent-schedules${suffix}`,
+        )
+        firstPage ||= payload
+        schedules.push(...(payload.schedules || []))
+        nextOffset =
+          typeof payload.next_offset === "number" && payload.next_offset > currentOffset
+            ? payload.next_offset
+            : null
+      }
+      setAgentSchedules(schedules)
+      const deliveryAttention: AgentScheduleRun[] = [...(firstPage?.delivery_attention || [])]
+      let deliveryAttentionNextOffset = firstPage?.delivery_attention_next_offset
+      while (typeof deliveryAttentionNextOffset === "number" && deliveryAttentionNextOffset >= 0) {
+        const currentDeliveryAttentionOffset = deliveryAttentionNextOffset
+        const payload: AgentSchedulesResponse = await requestJson<AgentSchedulesResponse>(
+          `/dashboard/api/agent-schedules?delivery_attention_offset=${currentDeliveryAttentionOffset}`,
+        )
+        deliveryAttention.push(...(payload.delivery_attention || []))
+        deliveryAttentionNextOffset =
+          typeof payload.delivery_attention_next_offset === "number" &&
+          payload.delivery_attention_next_offset > currentDeliveryAttentionOffset
+            ? payload.delivery_attention_next_offset
+            : null
+      }
+      setAgentScheduleDeliveryAttention(deliveryAttention)
+      setAgentScheduleDispatcherEnabled(Boolean(firstPage?.scheduler_enabled))
+    } catch (error) {
+      showError(error, "Unable to load recurring agent schedules")
+    } finally {
+      setBusy("agentSchedules", false)
+    }
+  }
+
+  async function createAgentSchedule(values: AgentScheduleCreateValues) {
+    setBusy("createAgentSchedule", true)
+    try {
+      await requestJson<unknown>("/dashboard/api/agent-schedules", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(values),
+      })
+      showToast("Created recurring agent schedule", "ok")
+      await loadAgentSchedules()
+      return true
+    } catch (error) {
+      showError(error, "Unable to create the recurring agent schedule")
+      return false
+    } finally {
+      setBusy("createAgentSchedule", false)
+    }
+  }
+
+  async function controlAgentSchedule(scheduleId: string, action: "pause" | "resume" | "archive") {
+    const key = `agentSchedule:${scheduleId}`
+    setBusy(key, true)
+    try {
+      await requestJson<unknown>(
+        `/dashboard/api/agent-schedules/${encodeURIComponent(scheduleId)}`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action }),
+        },
+      )
+      showToast(`${action[0].toUpperCase()}${action.slice(1)}d recurring schedule`, "ok")
+      await loadAgentSchedules()
+    } catch (error) {
+      showError(error, "Unable to update the recurring agent schedule")
+    } finally {
+      setBusy(key, false)
+    }
+  }
+
+  async function runAgentSchedule(scheduleId: string) {
+    const key = `agentScheduleRun:${scheduleId}`
+    setBusy(key, true)
+    try {
+      const response = await requestJson<AgentScheduleRunResponse>(
+        `/dashboard/api/agent-schedules/${encodeURIComponent(scheduleId)}/run`,
+        { method: "POST" },
+      )
+      showToast(agentScheduleRunToastMessage(response), "ok")
+      await loadAgentSchedules()
+    } catch (error) {
+      showError(error, "Unable to queue the recurring agent schedule")
+    } finally {
+      setBusy(key, false)
+    }
+  }
+
+  async function resolveAgentScheduleDelivery(runId: string) {
+    const key = `agentScheduleDelivery:${runId}`
+    setBusy(key, true)
+    try {
+      await requestJson<unknown>(
+        `/dashboard/api/agent-schedules/runs/${encodeURIComponent(runId)}/delivery/resolve`,
+        { method: "POST" },
+      )
+      showToast("Marked the uncertain report delivery as unknown", "warning")
+      await loadAgentSchedules()
+    } catch (error) {
+      showError(error, "Unable to resolve the uncertain report delivery")
+    } finally {
+      setBusy(key, false)
+    }
+  }
+
+  async function loadKnowledgeChannels() {
+    setBusy("knowledgeChannels", true)
+    try {
+      const payload = await requestJson<KnowledgeChannelsResponse>(
+        "/dashboard/api/knowledge-channels",
+      )
+      setKnowledgeChannels(payload.channels || [])
+      setSelectedKnowledgeChannelIds(payload.selected_channel_ids || [])
+      setKnowledgeChannelsAvailable(payload.available)
+      setKnowledgeChannelLimit(payload.maximum_selected || 8)
+    } catch (error) {
+      setKnowledgeChannelsAvailable(false)
+      showError(error, "Unable to load Discord knowledge channels")
+    } finally {
+      setBusy("knowledgeChannels", false)
+    }
+  }
+
   async function loadConfiguration() {
     setBusy("configuration", true)
     try {
@@ -2297,6 +2517,20 @@ function App() {
       showError(error, "Unable to load configuration")
     } finally {
       setBusy("configuration", false)
+    }
+  }
+
+  async function loadDiscordDiagnostics(refresh = false) {
+    setBusy("diagnostics", true)
+    try {
+      const query = refresh ? "?refresh=true" : ""
+      setDiscordDiagnostics(
+        await requestJson<DiscordDiagnosticsResponse>(`/dashboard/api/discord-diagnostics${query}`),
+      )
+    } catch (error) {
+      showError(error, "Unable to load Discord diagnostics")
+    } finally {
+      setBusy("diagnostics", false)
     }
   }
 
@@ -2312,6 +2546,9 @@ function App() {
         },
       )
       setConfigurationItems(payload.items)
+      if (key === "KNOWLEDGE_DISCORD_CHANNEL_IDS") {
+        await loadKnowledgeChannels()
+      }
       showToast(`Saved ${key}`, "ok")
       return true
     } catch (error) {
@@ -2334,6 +2571,10 @@ function App() {
         },
       )
       setConfigurationItems(payload.items)
+      if (key === "KNOWLEDGE_DISCORD_CHANNEL_IDS") {
+        setSelectedKnowledgeChannelIds([])
+        await loadKnowledgeChannels()
+      }
       showToast(`Cleared ${key}`, "ok")
     } catch (error) {
       showError(error, `Unable to clear ${key}`)
@@ -2673,9 +2914,12 @@ function App() {
     if (view === "jobs") void loadJobs()
     if (view === "agent") void loadAgentReport()
     if (view === "audit") void loadAuditEvents()
+    if (view === "schedules") void loadAgentSchedules()
+    if (view === "diagnostics") void loadDiscordDiagnostics()
     if (view === "configuration") {
       void loadConfiguration()
       void loadJobPostChannels({ includeAvailable: true })
+      void loadKnowledgeChannels()
     }
   }, [view])
 
@@ -2699,9 +2943,12 @@ function App() {
     if (view === "jobs") void loadJobs()
     if (view === "agent") void loadAgentReport()
     if (view === "audit") void loadAuditEvents()
+    if (view === "schedules") void loadAgentSchedules()
+    if (view === "diagnostics") void loadDiscordDiagnostics()
     if (view === "configuration") {
       void loadConfiguration()
       void loadJobPostChannels({ includeAvailable: true })
+      void loadKnowledgeChannels()
     }
   }, [permissions])
 
@@ -2718,7 +2965,7 @@ function App() {
   // biome-ignore lint/correctness/useExhaustiveDependencies: lead reload intentionally follows lead status changes only while gigs is active.
   useEffect(() => {
     if (view === "gigs" && permissions.length > 0) void loadGigLeads()
-  }, [gigLeadStatus])
+  }, [gigLeadStatus, gigLeadSource])
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: projects reload intentionally follows status changes only while projects is active.
   useEffect(() => {
@@ -2967,7 +3214,9 @@ function App() {
               ["newsletter", "Newsletter", Mail],
               ["jobs", "Background tasks", Activity],
               ["agent", "Agent", ShieldCheck],
+              ["schedules", "Agent schedules", CalendarClock],
               ["audit", "Audit", FileClock],
+              ["diagnostics", "Discord diagnostics", Server],
               ["configuration", "Configuration", Settings],
             ] as const
           )
@@ -3055,7 +3304,7 @@ function App() {
             <GigsView
               gigs={sortedGigs}
               leads={gigLeads}
-              scrapeStatus={gigLeadScrapeStatus}
+              scrapeStatuses={gigLeadScrapeStatuses}
               jobPostChannels={jobPostChannels}
               selectedGig={selectedGig}
               selectedGigId={selectedGigId}
@@ -3065,6 +3314,7 @@ function App() {
               status={gigStatus}
               query={gigQuery}
               leadStatus={gigLeadStatus}
+              leadSource={gigLeadSource}
               includeHistorical={gigIncludeHistorical}
               limit={gigLimit}
               staleDays={staleRecruitingDays}
@@ -3079,6 +3329,7 @@ function App() {
               setStatus={setGigStatus}
               setQuery={setGigQuery}
               setLeadStatus={setGigLeadStatus}
+              setLeadSource={setGigLeadSource}
               setIncludeHistorical={setGigIncludeHistorical}
               setLimit={setGigLimit}
               onRefresh={refreshGigsView}
@@ -3138,6 +3389,7 @@ function App() {
               people={sortedOnboarding}
               sort={sort.onboarding}
               loading={loading}
+              emailSendStartedAt={onboardingEmailSendStartedAt}
               onboardingQuery={onboardingQuery}
               onboardingState={onboardingState}
               onboarderFilter={onboarderFilter}
@@ -3221,6 +3473,31 @@ function App() {
             <AgentView report={agentReport} loading={loading} onRefresh={loadAgentReport} />
           ) : null}
 
+          {view === "schedules" ? (
+            <AgentSchedulesView
+              schedules={agentSchedules}
+              deliveryAttention={agentScheduleDeliveryAttention}
+              schedulerEnabled={agentScheduleDispatcherEnabled}
+              loading={loading}
+              canWrite={can("configuration:write")}
+              canCreate={can("configuration:write") && user?.actor_provider === "discord"}
+              onRefresh={loadAgentSchedules}
+              onCreate={createAgentSchedule}
+              onControl={controlAgentSchedule}
+              onRun={runAgentSchedule}
+              onResolveDelivery={resolveAgentScheduleDelivery}
+            />
+          ) : null}
+
+          {view === "diagnostics" ? (
+            <DiscordDiagnosticsView
+              diagnostics={discordDiagnostics}
+              loading={loading.diagnostics}
+              onRefresh={() => loadDiscordDiagnostics(true)}
+              onNotice={(message, tone = "ok") => showToast(message, tone)}
+            />
+          ) : null}
+
           {view === "configuration" ? (
             <ConfigurationView
               items={configurationItems}
@@ -3228,10 +3505,15 @@ function App() {
               canWrite={can("configuration:write")}
               jobChannels={jobPostChannels}
               availableJobChannels={availableJobPostChannels}
+              knowledgeChannels={knowledgeChannels}
+              selectedKnowledgeChannelIds={selectedKnowledgeChannelIds}
+              knowledgeChannelsAvailable={knowledgeChannelsAvailable}
+              knowledgeChannelLimit={knowledgeChannelLimit}
               focusCategory={configurationFocus?.category}
               focusNonce={configurationFocus?.nonce}
               onRefresh={loadConfiguration}
               onRefreshJobChannels={() => loadJobPostChannels({ includeAvailable: true })}
+              onRefreshKnowledgeChannels={loadKnowledgeChannels}
               onSave={updateConfigurationValue}
               onClear={clearConfigurationValue}
               onSaveJobChannel={updateJobPostChannel}
@@ -5465,34 +5747,57 @@ function scrapeCount(value?: number | null) {
 }
 
 function JobLeadScrapeStatusPanel({
+  source,
   status,
   loading,
 }: {
+  source: JobLeadSourceKey
   status: JobLeadScrapeStatus | null
   loading: boolean
 }) {
   const result = status?.result
+  const isHimalayas = source === "himalayas_remote_jobs"
+  const isA16z = source === "a16z_talent_network"
+  const isSequoia = source === "sequoia_portfolio_ats"
+  const isJobBoard = isHimalayas || isA16z || isSequoia
+  const sourceTitle = isHimalayas
+    ? "Himalayas"
+    : isA16z
+      ? "a16z"
+      : isSequoia
+        ? "Sequoia portfolio ATS"
+        : "Hacker News"
   const threads = Array.isArray(result?.threads) ? result.threads : []
   const firstThread = threads[0]
-  const hasDiscoveryCounts = typeof result?.thread_found === "boolean"
+  const hasDiscoveryCounts = typeof result?.potential_gigs_scraped === "number"
   const filterReasons = result?.filter_reasons
   const filterDetails = [
     ["empty", filterReasons?.empty],
     ["seeking work", filterReasons?.seeking_work],
     ["not contractor-friendly", filterReasons?.not_contractor_friendly],
+    ["outside co-op roles", filterReasons?.irrelevant_role],
+    ["expired", filterReasons?.expired],
+    ["invalid or duplicate", filterReasons?.invalid_or_duplicate],
   ].filter(([, count]) => typeof count === "number" && count > 0) as Array<[string, number]>
   const normalizedStatus = String(status?.status || "")
     .trim()
     .toLowerCase()
   const statusLabel =
-    normalizedStatus === "not_run" ? "Not run" : titleCase(normalizedStatus || "Unknown")
+    result?.incomplete && normalizedStatus === "succeeded"
+      ? "Partial"
+      : normalizedStatus === "not_run"
+        ? "Not run"
+        : titleCase(normalizedStatus || "Unknown")
+  const panelId = (id: string) => (source === "hackernews_who_is_hiring" ? id : `${id}-${source}`)
 
   return (
-    <Card id="gigLeadScrapeStatus">
+    <Card id={panelId("gigLeadScrapeStatus")}>
       <CardHeader>
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <CardTitle>Hacker News scrape</CardTitle>
-          <Badge variant={jobLeadScrapeStatusTone(status?.status)}>{statusLabel}</Badge>
+          <CardTitle>{sourceTitle} sync</CardTitle>
+          <Badge variant={result?.incomplete ? "queued" : jobLeadScrapeStatusTone(status?.status)}>
+            {statusLabel}
+          </Badge>
         </div>
         <span className="text-sm text-muted-foreground">
           {loading
@@ -5508,13 +5813,17 @@ function JobLeadScrapeStatusPanel({
       </CardHeader>
       <CardContent className="grid gap-3 text-sm">
         {normalizedStatus === "not_run" ? (
-          <p className="text-muted-foreground">
-            Run “Scrape HN” to discover the current monthly Who is Hiring thread.
-          </p>
+          <p className="text-muted-foreground">Run a source sync to discover new job leads.</p>
         ) : null}
         {status?.last_error ? (
           <p className="rounded-md border border-red-400/40 bg-red-500/10 p-3 text-red-200">
             {status.last_error}
+          </p>
+        ) : null}
+        {result?.incomplete ? (
+          <p className="rounded-md border border-yellow-400/40 bg-yellow-500/10 p-3 text-yellow-200">
+            Partial sync:{" "}
+            {result.incomplete_reason || "A source page could not be loaded. Retry the sync."}
           </p>
         ) : null}
         {!hasDiscoveryCounts &&
@@ -5528,7 +5837,15 @@ function JobLeadScrapeStatusPanel({
         ) : null}
         {hasDiscoveryCounts ? (
           <>
-            {result?.thread_found && firstThread ? (
+            {isJobBoard ? (
+              <p className="text-muted-foreground">
+                {isHimalayas
+                  ? "Recent remote contractor and part-time jobs from Himalayas."
+                  : isA16z
+                    ? "Recent title-matched gigs from a16z public search results."
+                    : "Title-matched gigs from selected Sequoia portfolio company career feeds (currently Reddit)."}
+              </p>
+            ) : result?.thread_found && firstThread ? (
               <div className="grid gap-1">
                 {firstThread.url ? (
                   <a
@@ -5555,34 +5872,36 @@ function JobLeadScrapeStatusPanel({
               </p>
             )}
 
-            <dl className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
+            <dl className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
               <div className="rounded-md border bg-background p-3">
-                <dt className="text-xs font-bold text-muted-foreground">HN comments</dt>
-                <dd id="gigLeadScrapeComments" className="text-lg font-extrabold">
-                  {scrapeCount(firstThread?.comments_reported)}
+                <dt className="text-xs font-bold text-muted-foreground">
+                  {isJobBoard ? "Source" : "HN comments"}
+                </dt>
+                <dd id={panelId("gigLeadScrapeComments")} className="text-lg font-extrabold">
+                  {isJobBoard ? sourceTitle : scrapeCount(firstThread?.comments_reported)}
                 </dd>
               </div>
               <div className="rounded-md border bg-background p-3">
                 <dt className="text-xs font-bold text-muted-foreground">Potential gigs scanned</dt>
-                <dd id="gigLeadScrapeScanned" className="text-lg font-extrabold">
+                <dd id={panelId("gigLeadScrapeScanned")} className="text-lg font-extrabold">
                   {scrapeCount(result?.potential_gigs_scraped)}
                 </dd>
               </div>
               <div className="rounded-md border bg-background p-3">
                 <dt className="text-xs font-bold text-muted-foreground">Included</dt>
-                <dd id="gigLeadScrapeIncluded" className="text-lg font-extrabold">
+                <dd id={panelId("gigLeadScrapeIncluded")} className="text-lg font-extrabold">
                   {scrapeCount(result?.included)}
                 </dd>
               </div>
               <div className="rounded-md border bg-background p-3">
                 <dt className="text-xs font-bold text-muted-foreground">Filtered out</dt>
-                <dd id="gigLeadScrapeFiltered" className="text-lg font-extrabold">
+                <dd id={panelId("gigLeadScrapeFiltered")} className="text-lg font-extrabold">
                   {scrapeCount(result?.filtered_out)}
                 </dd>
               </div>
               <div className="rounded-md border bg-background p-3">
                 <dt className="text-xs font-bold text-muted-foreground">Records changed</dt>
-                <dd id="gigLeadScrapePersisted" className="text-lg font-extrabold">
+                <dd id={panelId("gigLeadScrapePersisted")} className="text-lg font-extrabold">
                   {scrapeCount(result?.persisted ?? result?.total)}
                 </dd>
               </div>
@@ -5592,7 +5911,7 @@ function JobLeadScrapeStatusPanel({
                 Filtered: {filterDetails.map(([label, count]) => `${count} ${label}`).join(", ")}.
               </p>
             ) : null}
-            {result?.thread_found && result.potential_gigs_scraped === 0 ? (
+            {!isJobBoard && result?.thread_found && result.potential_gigs_scraped === 0 ? (
               <p className="text-muted-foreground">
                 The monthly thread was found, but it has no top-level employer posts yet. Re-run the
                 scrape as posts arrive.
@@ -5601,6 +5920,12 @@ function JobLeadScrapeStatusPanel({
             {typeof result?.created === "number" || typeof result?.updated === "number" ? (
               <p className="text-muted-foreground">
                 {result.created || 0} created · {result.updated || 0} updated
+              </p>
+            ) : null}
+            {result?.rejected_existing ? (
+              <p className="text-muted-foreground">
+                {result.rejected_existing} previously unreviewed, unstaged off-topic leads removed
+                from review.
               </p>
             ) : null}
           </>
@@ -5619,7 +5944,7 @@ function JobLeadScrapeStatusPanel({
 function GigsView(props: {
   gigs: Gig[]
   leads: JobLead[]
-  scrapeStatus: JobLeadScrapeStatus | null
+  scrapeStatuses: Partial<Record<JobLeadSourceKey, JobLeadScrapeStatus>>
   jobPostChannels: JobPostChannel[]
   selectedGig: Gig | null
   selectedGigId: string
@@ -5629,6 +5954,7 @@ function GigsView(props: {
   status: string
   query: string
   leadStatus: string
+  leadSource: JobLeadSourceKey | ""
   includeHistorical: boolean
   limit: number
   staleDays: number
@@ -5643,6 +5969,7 @@ function GigsView(props: {
   setStatus: (value: string) => void
   setQuery: (value: string) => void
   setLeadStatus: (value: string) => void
+  setLeadSource: (value: JobLeadSourceKey | "") => void
   setIncludeHistorical: (value: boolean) => void
   setLimit: (value: number) => void
   onRefresh: () => void
@@ -5652,7 +5979,7 @@ function GigsView(props: {
   onUpdateStatus: (gigId: string, status: string) => void
   onAddApplication: (gigId: string, crmProfile: string) => Promise<boolean>
   onUpdateApplicationStatus: (gigId: string, applicationId: string, status: string) => void
-  onSyncLeads: () => void
+  onSyncLeads: (source: JobLeadSourceKey | "all") => void
   onReviewLead: (leadId: string, status: JobLeadReviewStatus) => void
   onStageLead: (leadId: string) => void
   onClearStagingRecovery: (leadId: string) => void
@@ -5721,7 +6048,7 @@ function GigsView(props: {
     <Card className="grid gap-3 p-4">
       {tabBar}
       {props.activeTab === "leads" ? (
-        <div className="grid gap-3 md:grid-cols-[minmax(160px,.6fr)_auto_auto] md:items-end">
+        <div className="grid gap-3 md:grid-cols-[minmax(160px,.6fr)_minmax(160px,.6fr)_auto_auto] md:items-end">
           <Label>
             Lead status
             <Select
@@ -5736,6 +6063,21 @@ function GigsView(props: {
               <option value="all">All statuses</option>
             </Select>
           </Label>
+          <Label>
+            Source
+            <Select
+              id="gigLeadSource"
+              value={props.leadSource}
+              onChange={(event) => props.setLeadSource(event.target.value as JobLeadSourceKey | "")}
+            >
+              <option value="">All sources</option>
+              {JOB_LEAD_SOURCES.map(({ key, label }) => (
+                <option key={key} value={key}>
+                  {label}
+                </option>
+              ))}
+            </Select>
+          </Label>
           <Button
             id="refreshGigLeads"
             type="button"
@@ -5747,15 +6089,48 @@ function GigsView(props: {
             Refresh
           </Button>
           {props.canManageLeads ? (
-            <Button
-              id="syncGigLeads"
-              type="button"
-              onClick={props.onSyncLeads}
-              disabled={props.loading.gigLeadsSync}
-            >
-              <RefreshCw />
-              Scrape HN
-            </Button>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                id="syncAllGigLeads"
+                type="button"
+                onClick={() => props.onSyncLeads("all")}
+                disabled={props.loading.gigLeadsSync}
+              >
+                <RefreshCw /> Sync all
+              </Button>
+              <Button
+                id="syncGigLeads"
+                type="button"
+                onClick={() => props.onSyncLeads("hackernews_who_is_hiring")}
+                disabled={props.loading.gigLeadsSync}
+              >
+                <RefreshCw />
+                Scrape HN
+              </Button>
+              <Button
+                id="syncHimalayasLeads"
+                type="button"
+                onClick={() => props.onSyncLeads("himalayas_remote_jobs")}
+                disabled={props.loading.gigLeadsSync}
+              >
+                <RefreshCw />
+                Sync Himalayas
+              </Button>
+              <Button
+                type="button"
+                onClick={() => props.onSyncLeads("a16z_talent_network")}
+                disabled={props.loading.gigLeadsSync}
+              >
+                <RefreshCw /> Sync a16z
+              </Button>
+              <Button
+                type="button"
+                onClick={() => props.onSyncLeads("sequoia_portfolio_ats")}
+                disabled={props.loading.gigLeadsSync}
+              >
+                <RefreshCw /> Sync Sequoia portfolio
+              </Button>
+            </div>
           ) : null}
         </div>
       ) : (
@@ -5835,10 +6210,16 @@ function GigsView(props: {
       <>
         {filterBar}
 
-        <JobLeadScrapeStatusPanel
-          status={props.scrapeStatus}
-          loading={Boolean(props.loading.gigLeadScrapeStatus)}
-        />
+        <div className="grid gap-3 md:grid-cols-2">
+          {JOB_LEAD_SOURCES.map(({ key }) => (
+            <JobLeadScrapeStatusPanel
+              key={key}
+              source={key}
+              status={props.scrapeStatuses[key] || null}
+              loading={Boolean(props.loading.gigLeadScrapeStatus)}
+            />
+          ))}
+        </div>
 
         <section className="grid gap-3 md:grid-cols-4" aria-label="Lead summary">
           <Metric id="gigLeadMetricTotal" label="Leads" value={leadCounts.total} />
@@ -6207,6 +6588,7 @@ function JobLeadListItem({
         <div className="flex flex-wrap items-center gap-2">
           <strong className="text-base">{lead.title || "Untitled lead"}</strong>
           <Badge variant={jobLeadStatusTone(lead.status)}>{jobLeadWorkflowStatusLabel(lead)}</Badge>
+          <Badge variant="neutral">{jobLeadSourceLabel(lead.source_key)}</Badge>
           {lead.remote ? <Badge variant="queued">Remote</Badge> : null}
           <Badge variant="neutral">{jobLeadClassificationLabel(lead)}</Badge>
         </div>
@@ -7433,6 +7815,7 @@ function OnboardingView(props: {
   people: Person[]
   sort: { key: string; direction: SortDirection }
   loading: Record<string, boolean>
+  emailSendStartedAt: Record<string, number>
   canWrite: boolean
   onboardingQuery: string
   onboardingState: string
@@ -7655,6 +8038,7 @@ function OnboardingView(props: {
                   }
                   person={person}
                   loading={props.loading}
+                  sendStartedAt={props.emailSendStartedAt[person.crm_contact_id || ""]}
                   canWrite={props.canWrite}
                   onAssign={props.onAssign}
                   onSuggestions={props.onSuggestions}
@@ -8025,6 +8409,7 @@ function EngineerSetupPanel({
 function OnboardingRow({
   person,
   loading,
+  sendStartedAt,
   canWrite,
   onAssign,
   onSuggestions,
@@ -8038,6 +8423,7 @@ function OnboardingRow({
 }: {
   person: Person
   loading: Record<string, boolean>
+  sendStartedAt?: number
   canWrite: boolean
   onAssign: (contactId: string | undefined, onboarder: string) => void
   onSuggestions: (contactId: string | undefined) => Promise<OnboardingVolunteer[]>
@@ -8290,6 +8676,9 @@ function OnboardingRow({
                 {emailDraft ? "Edit draft" : "Draft email"}
               </Button>
             ) : null}
+            {sendBusy && sendStartedAt !== undefined && (!emailOpen || !emailDraft) ? (
+              <OnboardingEmailSendStatus startedAt={sendStartedAt} />
+            ) : null}
           </div>
         </TableCell>
         <TableCell>
@@ -8443,6 +8832,9 @@ function OnboardingRow({
                       <Send />
                       {sendBusy ? "Sending" : "Send"}
                     </Button>
+                    {sendBusy && sendStartedAt !== undefined ? (
+                      <OnboardingEmailSendStatus startedAt={sendStartedAt} />
+                    ) : null}
                     {sendUnavailableMessage ? (
                       <span className="text-sm text-muted-foreground">
                         {sendUnavailableMessage}

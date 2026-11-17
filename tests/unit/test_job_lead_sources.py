@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
+from io import BytesIO
 from types import SimpleNamespace
+
+import pytest
 
 import five08.job_lead_sources as job_lead_sources
 from five08.job_lead_sources import (
@@ -123,7 +127,7 @@ class _FakeClassifierHackerNewsClient(_FakeHackerNewsClient):
                     "parent_id": item_id,
                     "author": "company",
                     "created_at": "2026-06-01T15:03:00Z",
-                    "text": "Fulltime Co | Employee-only backend role | Remote",
+                    "text": "Fulltime Co | Employee-only Backend Engineer | Remote",
                 },
             ],
         }
@@ -142,6 +146,51 @@ class _FakeSeekingWorkHackerNewsClient(_FakeHackerNewsClient):
                     "created_at": "2026-06-01T15:02:00Z",
                     "text": "SEEKING WORK | Remote | Freelance Python engineer",
                 }
+            ],
+        }
+
+
+class _FakeOffTopicHackerNewsClient(_FakeHackerNewsClient):
+    def get_algolia_item_tree(self, item_id: int) -> dict:
+        return {
+            "id": item_id,
+            "children": [
+                {
+                    "id": 21,
+                    "parent_id": item_id,
+                    "author": "company",
+                    "text": "Acme | Contract Recruiter | Remote<p>Recruit engineers.",
+                },
+                {
+                    "id": 22,
+                    "parent_id": item_id,
+                    "author": "company",
+                    "text": "Acme | Contract Data Engineer | Remote<p>Build pipelines.",
+                },
+                {
+                    "id": 23,
+                    "parent_id": item_id,
+                    "author": "company",
+                    "text": "Acme | Remote | US | Contract | Senior Software Engineer<p>Build APIs.",
+                },
+                {
+                    "id": 24,
+                    "parent_id": item_id,
+                    "author": "company",
+                    "text": "Sales Finance Co | Contract Backend Engineer | Remote<p>Build APIs.",
+                },
+                {
+                    "id": 25,
+                    "parent_id": item_id,
+                    "author": "company",
+                    "text": "Acme — Senior Software Engineer | Remote | Contract<p>Build APIs.",
+                },
+                {
+                    "id": 26,
+                    "parent_id": item_id,
+                    "author": "company",
+                    "text": "Acme | Contract Software Engineer, Sales | Remote<p>Build APIs.",
+                },
             ],
         }
 
@@ -512,6 +561,7 @@ def test_hacker_news_source_reports_thread_and_filter_counts() -> None:
                     "empty": 0,
                     "seeking_work": 1,
                     "not_contractor_friendly": 0,
+                    "irrelevant_role": 0,
                 },
             }
         ],
@@ -522,8 +572,26 @@ def test_hacker_news_source_reports_thread_and_filter_counts() -> None:
             "empty": 0,
             "seeking_work": 1,
             "not_contractor_friendly": 0,
+            "irrelevant_role": 0,
         },
     }
+
+
+def test_hacker_news_source_filters_role_before_review_queue() -> None:
+    source = HackerNewsWhoIsHiringLeadSource(
+        client=_FakeOffTopicHackerNewsClient(),
+        classifier=_PositiveJobLeadClassifier(),  # type: ignore[arg-type]
+    )
+
+    assert [lead.external_id for lead in source.collect()] == [
+        "22",
+        "23",
+        "24",
+        "25",
+        "26",
+    ]
+    assert source.collection_report()["filter_reasons"]["irrelevant_role"] == 1
+    assert source.irrelevant_external_ids == {"21"}
 
 
 def test_hacker_news_source_reports_no_discovered_thread() -> None:
@@ -542,6 +610,7 @@ def test_hacker_news_source_reports_no_discovered_thread() -> None:
             "empty": 0,
             "seeking_work": 0,
             "not_contractor_friendly": 0,
+            "irrelevant_role": 0,
         },
     }
 
@@ -610,8 +679,16 @@ def test_scrape_refreshes_existing_non_contractor_without_inserting(
     monkeypatch.setattr(
         job_lead_sources, "build_job_lead_source", lambda *_args, **_kwargs: adapter
     )
+    events: list[str] = []
     monkeypatch.setattr(
-        job_lead_sources, "upsert_job_lead", lambda *_args: ("lead-10", True)
+        job_lead_sources,
+        "reject_unreviewed_irrelevant_job_leads",
+        lambda *_args, **_kwargs: events.append("cleanup") or 2,
+    )
+    monkeypatch.setattr(
+        job_lead_sources,
+        "upsert_job_lead",
+        lambda *_args: (events.append("upsert") or "lead-10", True),
     )
     monkeypatch.setattr(
         job_lead_sources,
@@ -621,6 +698,7 @@ def test_scrape_refreshes_existing_non_contractor_without_inserting(
     refreshed: list[str] = []
 
     def update_existing(_settings: object, lead: JobLeadInput) -> str:
+        events.append("update")
         refreshed.append(lead.external_id)
         return "lead-11"
 
@@ -631,7 +709,9 @@ def test_scrape_refreshes_existing_non_contractor_without_inserting(
     assert refreshed == ["11"]
     assert result["created"] == 1
     assert result["updated"] == 1
+    assert result["rejected_existing"] == 2
     assert result["lead_ids"] == ["lead-10", "lead-11"]
+    assert events == ["upsert", "update", "cleanup"]
 
 
 def test_scrape_skips_reviewed_contractor_friendly_lead(monkeypatch) -> None:
@@ -657,6 +737,11 @@ def test_scrape_skips_reviewed_contractor_friendly_lead(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         job_lead_sources,
+        "reject_unreviewed_irrelevant_job_leads",
+        lambda *_args, **_kwargs: 0,
+    )
+    monkeypatch.setattr(
+        job_lead_sources,
         "existing_job_lead_external_ids",
         lambda *_args, **_kwargs: set(),
     )
@@ -678,6 +763,340 @@ def test_hacker_news_source_rejects_seeking_work_before_classifier() -> None:
     )
 
     assert source.collect() == []
+
+
+def test_himalayas_source_pages_and_preserves_application_link(monkeypatch) -> None:
+    class Response(BytesIO):
+        status = 200
+
+    calls: list[str] = []
+
+    def fake_urlopen(request, *, timeout):  # noqa: ANN001, ANN202
+        import json
+
+        assert timeout == 15.0
+        calls.append(request.full_url)
+        job = {
+            "guid": "https://himalayas.app/companies/acme/jobs/contract-engineer",
+            "applicationLink": "https://himalayas.app/companies/acme/jobs/contract-engineer?utm_source=api",
+            "title": "Contract Engineer",
+            "companyName": "Acme",
+            "employmentType": "Contractor",
+            "description": "<p>Build APIs</p>",
+            "pubDate": 1793970010,
+            "expiryDate": 1893970010,
+            "locationRestrictions": [],
+        }
+        jobs = [job] * 20 if len(calls) == 1 else [job]
+        return Response(json.dumps({"jobs": jobs}).encode())
+
+    monkeypatch.setattr(job_lead_sources, "urlopen", fake_urlopen)
+    source = job_lead_sources.HimalayasRemoteJobsLeadSource()
+    leads = source.collect()
+
+    assert len(calls) == 2
+    assert len(leads) == 1
+    assert leads[0].apply_url.endswith("?utm_source=api")
+    assert leads[0].source_url == leads[0].external_id
+    assert leads[0].posting_type is JobPostingType.PART_TIME
+    assert source.collection_report()["included"] == 1
+
+
+def test_a16z_source_collects_title_matched_jobs_and_deduplicates(monkeypatch) -> None:
+    calls: list[str] = []
+    markup = b"""<html><body>
+    <article><div data-nosnippet="true"><a href="/jobs/acme">Acme</a></div>
+      <h2><a href="/jobs/acme/123--contract-engineer">Contract Engineer</a></h2>
+      <div><span><span>Remote, US</span></span><time dateTime="2026-10-29T16:59:01Z">Posted</time></div>
+      <a href="https://jobs.ashbyhq.com/acme/123/application">Apply</a></article>
+    <article><div data-nosnippet="true"><a href="/jobs/acme">Acme</a></div>
+      <h2><a href="/jobs/acme/456--full-time">Full-time Engineer</a></h2>
+      <a href="https://jobs.ashbyhq.com/acme/456/application">Apply</a></article>
+    <article><div data-nosnippet="true"><a href="/jobs/acme">Acme</a></div>
+      <h2><a href="/jobs/acme/789--recruiter">Contract Recruiter</a></h2>
+      <a href="https://jobs.ashbyhq.com/acme/789/application">Apply</a></article>
+    </body></html>"""
+
+    def fake_urlopen(request, *, timeout):  # noqa: ANN001, ANN202
+        assert timeout == 15.0
+        calls.append(request.full_url)
+        return BytesIO(markup)
+
+    monkeypatch.setattr(job_lead_sources, "urlopen", fake_urlopen)
+    source = job_lead_sources.A16zTalentLeadSource()
+    leads = source.collect()
+
+    assert len(calls) == len(job_lead_sources.A16Z_SEARCH_TERMS)
+    assert len(leads) == 1
+    assert leads[0].organization == "Acme"
+    assert leads[0].apply_url == "https://jobs.ashbyhq.com/acme/123/application"
+    assert leads[0].remote is True
+    assert source.collection_report()["included"] == 1
+    assert source.collection_report()["filter_reasons"]["irrelevant_role"] == len(
+        job_lead_sources.A16Z_SEARCH_TERMS
+    )
+    assert source.irrelevant_external_ids == {
+        "https://jobs.a16z.com/jobs/acme/789--recruiter"
+    }
+
+
+def test_sequoia_source_uses_public_portfolio_ats_and_filters_titles(
+    monkeypatch,
+) -> None:
+    import json
+
+    calls: list[str] = []
+    payload = {
+        "jobs": [
+            {
+                "title": "Software Engineer (Contract)",
+                "absolute_url": "https://job-boards.greenhouse.io/reddit/jobs/123",
+                "location": {"name": "Remote"},
+            },
+            {
+                "title": "Full-time Engineer",
+                "absolute_url": "https://job-boards.greenhouse.io/reddit/jobs/456",
+            },
+            {
+                "title": "Community Manager (Contract)",
+                "absolute_url": "https://job-boards.greenhouse.io/reddit/jobs/789",
+            },
+        ]
+    }
+
+    def fake_urlopen(request, *, timeout):  # noqa: ANN001, ANN202
+        assert timeout == 15.0
+        calls.append(request.full_url)
+        return BytesIO(json.dumps(payload).encode())
+
+    monkeypatch.setattr(job_lead_sources, "urlopen", fake_urlopen)
+    source = job_lead_sources.SequoiaPortfolioATSLeadSource()
+    leads = source.collect()
+
+    assert calls == ["https://boards-api.greenhouse.io/v1/boards/reddit/jobs"]
+    assert len(leads) == 1
+    assert leads[0].title == "Software Engineer (Contract)"
+    assert leads[0].source_url == leads[0].apply_url
+    assert source.collection_report()["portfolio_companies_scanned"] == 1
+    assert source.collection_report()["filter_reasons"]["irrelevant_role"] == 1
+    assert source.irrelevant_external_ids == {
+        "https://job-boards.greenhouse.io/reddit/jobs/789"
+    }
+
+
+def test_a16z_source_reports_missing_job_cards(monkeypatch) -> None:
+    monkeypatch.setattr(
+        job_lead_sources, "urlopen", lambda *_args, **_kwargs: BytesIO(b"<html></html>")
+    )
+
+    with pytest.raises(ValueError, match="no job cards"):
+        job_lead_sources.A16zTalentLeadSource().collect()
+
+
+@pytest.mark.parametrize(
+    ("title", "expected"),
+    [
+        ("Senior Smart Contract Engineer (Full-time)", False),
+        ("Contract Administrator", False),
+        ("Contract Solutions Counsel", False),
+        ("Customer Contracts Manager", False),
+        ("Contract Recruiter", True),
+        ("Community Manager (Contract)", True),
+        ("Freelance Smart Contract Engineer", True),
+        ("Part-time Contract Administrator", True),
+    ],
+)
+def test_title_is_gig_excludes_contract_domain_terms(
+    title: str, expected: bool
+) -> None:
+    assert job_lead_sources._title_is_gig(title) is expected
+
+
+@pytest.mark.parametrize(
+    ("title", "expected"),
+    [
+        ("Contract Full Stack Engineer", True),
+        ("Contract Senior Data Engineer", True),
+        ("Financial Systems Engineer (Contract)", True),
+        ("Product Manager (Domains & DNS)", True),
+        ("Product Analyst", True),
+        ("MBSE Engineer - SysML V2", True),
+        ("Tech Lead", True),
+        ("Freelance UX Designer", True),
+        ("Freelance Graphic Designer", True),
+        ("Contract UI Designer", True),
+        ("Shopify Expert", True),
+        ("Ecommerce Specialist", True),
+        ("Performance Marketing Manager", True),
+        ("Product Marketing Manager", True),
+        ("Media Planner & Buyer", True),
+        ("Contract Recruiter", False),
+        ("Engineering Recruiter", False),
+        ("Editing AI Content Producer", False),
+        ("Dutch AI Data Rater", False),
+        ("AWS Sales Account Manager", False),
+        ("Psychiatric Nurse Practitioner", False),
+        ("Principal Architect", False),
+        ("Korean Language Expert", False),
+        ("Personal Financial Advisor", False),
+        ("Audio Transcription Specialist", False),
+    ],
+)
+def test_title_is_coop_role(title: str, expected: bool) -> None:
+    assert job_lead_sources._title_is_coop_role(title) is expected
+
+
+def test_a16z_source_accepts_valid_empty_search(monkeypatch) -> None:
+    markup = (
+        b"<html><body><p>0 jobs</p><p>No roles match those filters.</p></body></html>"
+    )
+    monkeypatch.setattr(
+        job_lead_sources, "urlopen", lambda *_args, **_kwargs: BytesIO(markup)
+    )
+
+    source = job_lead_sources.A16zTalentLeadSource()
+    assert source.collect() == []
+    assert source.collection_report()["searches_scanned"] == len(
+        job_lead_sources.A16Z_SEARCH_TERMS
+    )
+
+
+def test_himalayas_source_preserves_timezone_restrictions(monkeypatch) -> None:
+    import json
+
+    job = {
+        "guid": "https://himalayas.app/companies/acme/jobs/contract-engineer",
+        "applicationLink": "https://himalayas.app/companies/acme/jobs/contract-engineer",
+        "title": "Contract Engineer",
+        "companyName": "Acme",
+        "employmentType": "Contractor",
+        "description": "Build APIs",
+        "locationRestrictions": [],
+        "timezoneRestrictions": [-5, 0, 5.5],
+    }
+    monkeypatch.setattr(
+        job_lead_sources,
+        "urlopen",
+        lambda *_args, **_kwargs: BytesIO(json.dumps({"jobs": [job]}).encode()),
+    )
+
+    lead = job_lead_sources.HimalayasRemoteJobsLeadSource().collect()[0]
+
+    assert lead.location == "UTC offsets: UTC-5, UTC+0, UTC+5.5"
+    assert lead.metadata["himalayas_timezone_restrictions"] == [-5, 0, 5.5]
+
+
+def test_himalayas_source_filters_off_topic_contractor_roles(monkeypatch) -> None:
+    jobs = [
+        {
+            "guid": f"https://himalayas.app/companies/acme/jobs/{slug}",
+            "applicationLink": f"https://himalayas.app/companies/acme/jobs/{slug}",
+            "title": title,
+            "employmentType": "Contractor",
+            "description": "We use Python and data tools.",
+        }
+        for slug, title in (
+            ("contract-recruiter", "Contract Recruiter"),
+            ("data-engineer", "Contract Data Engineer"),
+        )
+    ]
+    monkeypatch.setattr(
+        job_lead_sources,
+        "urlopen",
+        lambda *_args, **_kwargs: BytesIO(json.dumps({"jobs": jobs}).encode()),
+    )
+
+    source = job_lead_sources.HimalayasRemoteJobsLeadSource()
+    leads = source.collect()
+
+    assert [lead.title for lead in leads] == ["Contract Data Engineer"]
+    assert source.collection_report()["filter_reasons"]["irrelevant_role"] == 1
+    assert source.irrelevant_external_ids == {
+        "https://himalayas.app/companies/acme/jobs/contract-recruiter"
+    }
+
+
+def test_himalayas_source_reports_partial_run_after_later_page_fails(
+    monkeypatch,
+) -> None:
+    import json
+
+    calls = 0
+    job = {
+        "guid": "https://himalayas.app/companies/acme/jobs/contract-engineer",
+        "applicationLink": "https://himalayas.app/companies/acme/jobs/contract-engineer",
+        "title": "Contract Engineer",
+        "companyName": "Acme",
+        "employmentType": "Contractor",
+        "description": "Build APIs",
+    }
+
+    def fake_urlopen(*_args, **_kwargs):  # noqa: ANN202
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise TimeoutError("page unavailable")
+        return BytesIO(json.dumps({"jobs": [job] * 20}).encode())
+
+    monkeypatch.setattr(job_lead_sources, "urlopen", fake_urlopen)
+
+    source = job_lead_sources.HimalayasRemoteJobsLeadSource()
+    leads = source.collect()
+
+    assert len(leads) == 1
+    assert source.collection_report()["incomplete"] is True
+    assert source.collection_report()["pages_scanned"] == 1
+    assert calls == 2
+
+
+def test_himalayas_job_check_uses_api_and_recognizes_closed(monkeypatch) -> None:
+    from urllib.error import HTTPError
+
+    def closed(request, *, timeout):  # noqa: ANN001, ANN202
+        assert (
+            request.full_url
+            == "https://himalayas.app/jobs/api/companies/acme/jobs/role"
+        )
+        raise HTTPError(request.full_url, 410, "closed", {}, None)
+
+    monkeypatch.setattr(job_lead_sources, "urlopen", closed)
+    assert (
+        job_lead_sources.himalayas_job_is_open(
+            "https://himalayas.app/companies/acme/jobs/role"
+        )
+        is False
+    )
+
+
+def test_himalayas_source_does_not_queue_expired_job(monkeypatch) -> None:
+    import json
+
+    class Response(BytesIO):
+        status = 200
+
+    def fake_urlopen(_request, *, timeout):  # noqa: ANN001, ANN202
+        assert timeout == 15.0
+        return Response(
+            json.dumps(
+                {
+                    "jobs": [
+                        {
+                            "guid": "https://himalayas.app/companies/acme/jobs/old-role",
+                            "applicationLink": "https://himalayas.app/companies/acme/jobs/old-role?utm_source=api",
+                            "title": "Old role",
+                            "employmentType": "Contractor",
+                            "expiryDate": 1700000000,
+                        }
+                    ]
+                }
+            ).encode()
+        )
+
+    monkeypatch.setattr(job_lead_sources, "urlopen", fake_urlopen)
+    source = job_lead_sources.HimalayasRemoteJobsLeadSource()
+
+    assert source.collect() == []
+    assert source.collection_report()["filter_reasons"]["expired"] == 1
 
 
 def test_classifier_falls_back_without_second_llm_call_after_provider_failure() -> None:

@@ -77,7 +77,7 @@ class DocusealAgreementProcessor:
         if not normalized_user_id:
             return {"status": "not_linked"}
 
-        base_url = settings.discord_bot_internal_base_url.strip()
+        base_url = settings.resolved_discord_bot_internal_base_url
         if not base_url:
             logger.warning(
                 "Skipping Member role grant for contact_id=%s: "

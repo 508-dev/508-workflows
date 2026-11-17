@@ -107,6 +107,42 @@ trail records the action. Posting a lead keeps the reviewer on the Leads tab,
 marks that card `Posted`, and exposes links to the resulting Discord thread and
 dashboard gig when available.
 
+## External Job Lead Sources
+
+The Leads tab also offers manual syncs for Himalayas, a16z, and a limited
+Sequoia portfolio pilot. a16z sync reads up to the first 25 public search
+results for each of five gig terms, deduplicates jobs, and keeps only roles
+whose titles explicitly mention contract, contractor, freelance, fractional,
+or part-time work. It stores job metadata and the direct application link,
+without copying full job descriptions. Search result coverage is limited by
+the board's public first page. Titles that describe a contract domain (such as
+smart contracts or contract administration) or explicitly say full-time are
+excluded from this title-only pilot.
+
+All four sources require a clear engineering, product, data, design, marketing,
+or ecommerce role in the job title or HN header before admitting a lead. The
+filter excludes recruiting, sales, clinical, language, and data annotation
+roles even when their descriptions mention technical skills. A sync also marks
+previously unreviewed, unstaged off-topic leads from that source as rejected so
+they leave the review queue. Reviewed, posted, and staged leads remain untouched.
+The source status reports role mismatches and this cleanup separately. Operators
+can restore a rejected lead if the title filter missed a suitable role; later
+syncs preserve that manual override.
+
+Operators can run all four sources together or trigger any source alone. Each
+source has its own latest-run status and counts, and leads show a source label.
+The source filter is applied before the 50-lead page limit.
+Himalayas leads show country and UTC-offset eligibility where supplied by the
+API. If a later Himalayas page fails, completed pages are saved and that
+source's status card labels the sync as partial so an operator can retry it.
+
+The Sequoia pilot reads Reddit's public Greenhouse job feed. Reddit is a
+Sequoia portfolio company; this is **not** a complete Sequoia job board sync.
+The Consider-powered Sequoia board's terms require written permission for
+automated access, so this adapter uses the portfolio company's public ATS
+feed. Both sources enter the existing human review queue. Title matches are
+signals to verify during review, not proof that the role is open to contractors.
+
 ## Candidate Sources
 
 `engagement_applications.source` records how a candidate entered the gig flow:
