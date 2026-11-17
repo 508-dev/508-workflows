@@ -39,6 +39,19 @@ that most often matter in local development and deployment.
   callers such as DocuSeal, Google Forms, and EspoCRM. When unset, webhook
   routes fall back to `API_SHARED_SECRET` for compatibility.
 
+## Container Log Retention
+
+Every service in `compose.yaml` uses Docker's `json-file` driver with a 20 MB
+rotation size and three retained files per container (approximately 60 MB).
+These limits take effect when containers are recreated; restarting an existing
+container does not update its logging configuration.
+
+On shared hosts, configure rotation for other stacks too. A noisy neighboring
+service can fill the filesystem and prevent PostgreSQL recovery and Redis
+persistence, breaking dashboard login links as well as queued jobs. Monitor host
+disk capacity in addition to application health. Never remove database volumes
+to recover disk space.
+
 ## Admin Dashboard Configuration
 
 The admin dashboard can store a small allowlist of movable integration

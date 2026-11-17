@@ -1,0 +1,211 @@
+{
+  "version": "discord-agent-observed.v1",
+  "mode": "live_planner",
+  "generated_at": "2026-08-28T06:38:07.132238+00:00",
+  "suite": "canonical",
+  "model": "openrouter",
+  "summary": {
+    "scenarios": 1,
+    "passed": 1,
+    "failed": 0,
+    "known_failures": 0
+  },
+  "metrics": {
+    "total_elapsed_ms": 62898,
+    "time_to_first_turn_ms": 62898,
+    "parse_successes": 1,
+    "parse_failures": 0,
+    "parse_success_rate": 1.0,
+    "provider_draft_failures": 0,
+    "provider_draft_parse_failures": 0,
+    "bad_plans": 0,
+    "bad_plan_rate": 0.0,
+    "production_failures": 0,
+    "avg_latency_ms": 62894.0,
+    "max_latency_ms": 62894,
+    "estimated_cost_usd": null,
+    "pricing_source": "official provider pricing docs; OpenAI org usage/cost API requires api.usage.read",
+    "retries": 0
+  },
+  "scenarios": [
+    {
+      "id": "github_todo_member_confirmation_001",
+      "fixture_id": "github_todo_member_confirmation_001",
+      "status": "passed",
+      "known_failure": null,
+      "checks": [
+        {
+          "name": "status",
+          "passed": true,
+          "expected": "requires_confirmation",
+          "observed": "requires_confirmation"
+        },
+        {
+          "name": "intent",
+          "passed": true,
+          "expected": "create_github_issue",
+          "observed": "create_github_issue"
+        },
+        {
+          "name": "model_tier",
+          "passed": true,
+          "expected": "strong",
+          "observed": "strong"
+        },
+        {
+          "name": "requires_confirmation",
+          "passed": true,
+          "expected": true,
+          "observed": true
+        },
+        {
+          "name": "action_count",
+          "passed": true,
+          "expected": 1,
+          "observed": 1
+        },
+        {
+          "name": "actions[0].tool_name",
+          "passed": true,
+          "expected": "github_issue.create_issue",
+          "observed": "github_issue.create_issue"
+        },
+        {
+          "name": "actions[0].requires_confirmation",
+          "passed": true,
+          "expected": true,
+          "observed": true
+        },
+        {
+          "name": "actions[0].required_scopes",
+          "passed": true,
+          "expected": [
+            "github:repository:member:write"
+          ],
+          "observed": [
+            "github:repository:member:write"
+          ]
+        },
+        {
+          "name": "actions[0].arguments",
+          "passed": true,
+          "expected": {
+            "title": "Follow up with the vendor",
+            "repository": "508-dev/todos"
+          },
+          "observed": {
+            "title": "Follow up with the vendor",
+            "repository": "508-dev/todos"
+          }
+        }
+      ],
+      "observed": {
+        "id": "github_todo_member_confirmation_001",
+        "fixture_id": "github_todo_member_confirmation_001",
+        "description": "A Discord Member can create a confirmed todo in the built-in sentinel repository.",
+        "tags": [
+          "canonical",
+          "github",
+          "todo",
+          "member",
+          "confirmation"
+        ],
+        "request_message": "Create todo: Follow up with the vendor",
+        "status": "requires_confirmation",
+        "message": "This action needs confirmation before execution.",
+        "clarification_question": null,
+        "intent": "create_github_issue",
+        "model_tier": "strong",
+        "model": {
+          "tier": "strong",
+          "model": "qwen/qwen3.8-flash",
+          "base_url": "https://openrouter.ai/api/v1",
+          "source_tier": "strong",
+          "fallback_used": false
+        },
+        "latency_ms": 62894,
+        "parse_success": true,
+        "parse_error": null,
+        "raw_model_output": "{\n  \"status\": \"planned\",\n  \"intent\": \"create_github_issue\",\n  \"clarification_question\": null,\n  \"actions\": [\n    {\n      \"tool_name\": \"github_issue.create_issue\",\n      \"arguments\": {\n        \"title\": \"Follow up with the vendor\",\n        \"repository\": \"508-dev/todos\"\n      },\n      \"summary\": \"Create a GitHub issue in 508-dev/todos with title 'Follow up with the vendor'\"\n    }\n  ]\n}",
+        "token_usage": {
+          "requests": 1,
+          "input_tokens": 1317,
+          "cached_input_tokens": 1280,
+          "output_tokens": 218,
+          "total_tokens": 1535
+        },
+        "estimated_cost_usd": null,
+        "requires_confirmation": true,
+        "actions": [
+          {
+            "tool_name": "github_issue.create_issue",
+            "arguments": {
+              "title": "Follow up with the vendor",
+              "repository": "508-dev/todos"
+            },
+            "risk": "medium",
+            "requires_confirmation": true,
+            "required_scopes": [
+              "github:repository:member:write"
+            ],
+            "summary": "Create GitHub issue: \"Follow up with the vendor\""
+          }
+        ],
+        "results": []
+      },
+      "provider_draft": {
+        "status": "passed",
+        "checks": [
+          {
+            "name": "provider_draft.parse_success",
+            "passed": true,
+            "expected": true,
+            "observed": true
+          },
+          {
+            "name": "provider_draft.status",
+            "passed": true,
+            "expected": "planned",
+            "observed": "planned"
+          },
+          {
+            "name": "provider_draft.intent",
+            "passed": true,
+            "expected": "create_github_issue",
+            "observed": "create_github_issue"
+          },
+          {
+            "name": "provider_draft.actions[0].schema_valid",
+            "passed": true,
+            "expected": true,
+            "observed": true
+          },
+          {
+            "name": "provider_draft.action_count",
+            "passed": true,
+            "expected": 1,
+            "observed": 1
+          },
+          {
+            "name": "provider_draft.actions[0].tool_name",
+            "passed": true,
+            "expected": "github_issue.create_issue",
+            "observed": "github_issue.create_issue"
+          },
+          {
+            "name": "provider_draft.actions[0].arguments",
+            "passed": true,
+            "expected": {
+              "title": "Follow up with the vendor",
+              "repository": "508-dev/todos"
+            },
+            "observed": {
+              "title": "Follow up with the vendor",
+              "repository": "508-dev/todos"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

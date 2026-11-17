@@ -137,9 +137,9 @@ Accordingly:
 6. Before selecting Qwen3.8 27B for multimodal work, add sanitized image and video fixtures with assertions for extraction accuracy, tool arguments, and refusal behavior. The current suite does not exercise vision.
 7. Add sanitized golden corpora for resume/profile and skill extraction, HN lead classification, job requirement extraction, and candidate reranking. Score field accuracy and ranking quality, not only parse/completeness success.
 
-## Verification
+## Verification and artifacts
 
 - Focused harness tests: `22 passed` in `tests/unit/test_agent_evals.py`.
 - Deterministic canonical replay: 26 passed, 0 failed, 1 known failure.
 - Live runs: four complete 27-scenario sweeps plus the seven-scenario Qwen3.8 Flash recovery pass.
-- Per-scenario generated reports and raw observations remain local-only and are intentionally excluded from this summary PR.
+- The sanitized, immutable [audit snapshot](../../tests/evals/discord-agent/artifacts/llm-workflow-flash-comparison-2026-08-28/README.md) includes the four full-sweep normalized observations and score summaries plus the seven Qwen3.8-Flash recovery observations. It supports the rankings, failure classifications, selected latencies, and token totals above; `SHA256SUMS` verifies its contents. The generated `reports/` directory remains local-only scratch output and is not an audit link.
