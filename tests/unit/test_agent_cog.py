@@ -1496,7 +1496,11 @@ def test_mention_rate_limit_prunes_expired_user_entries() -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_mention_sends_agent_response_by_dm() -> None:
+@pytest.mark.parametrize(
+    "request_text",
+    ["show tasks for project Atlas", "Could you look up the CRM contact for Riley?"],
+)
+async def test_agent_mention_sends_agent_response_by_dm(request_text: str) -> None:
     cog = AgentCog.__new__(AgentCog)
     cog.bot = SimpleNamespace(user=SimpleNamespace(id=999))
     cog._post_agent_request = AsyncMock(
@@ -1507,7 +1511,7 @@ async def test_agent_mention_sends_agent_response_by_dm() -> None:
     author = SimpleNamespace(id=123, bot=False, roles=[], send=AsyncMock())
     message = SimpleNamespace(
         id=555,
-        content="<@999> show tasks for project Atlas",
+        content=f"<@999> {request_text}",
         author=author,
         mentions=[SimpleNamespace(id=999)],
         guild=SimpleNamespace(id=456),
@@ -1518,9 +1522,7 @@ async def test_agent_mention_sends_agent_response_by_dm() -> None:
     await cog.agent_mention(message)
 
     cog._post_agent_request.assert_awaited_once()
-    assert cog._post_agent_request.await_args.kwargs["message"] == (
-        "show tasks for project Atlas"
-    )
+    assert cog._post_agent_request.await_args.kwargs["message"] == request_text
     assert (
         cog._post_agent_request.await_args.kwargs["context"][
             "response_destination_visibility"
