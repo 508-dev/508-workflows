@@ -1902,7 +1902,11 @@ def test_member_agreement_clarifies_when_crm_contact_has_no_email() -> None:
     assert "email address" in response.message
 
 
-def test_admin_can_search_crm_contacts() -> None:
+@pytest.mark.parametrize(
+    "request_text",
+    ["Find contact Sarah Example", "Can you find contact Sarah Example?"],
+)
+def test_admin_can_search_crm_contacts(request_text: str) -> None:
     captured: dict[str, object] = {}
 
     class FakeContact:
@@ -1931,9 +1935,7 @@ def test_admin_can_search_crm_contacts() -> None:
         )
     )
 
-    response = orchestrator.plan(
-        "Find contact Sarah Example", _context(roles=["Admin"])
-    )
+    response = orchestrator.plan(request_text, _context(roles=["Admin"]))
 
     assert response.status == "executed"
     assert captured["name__contains"] == "Sarah Example"

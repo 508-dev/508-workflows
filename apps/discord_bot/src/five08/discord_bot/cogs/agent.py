@@ -24,6 +24,8 @@ from five08.agent.routing import (
     JEV_ROUTING_THRESHOLD,
     Route,
     RoutingAnswer,
+    direct_crm_contact_query,
+    direct_public_web_url,
     request_decision,
 )
 from five08.discord_bot.config import settings
@@ -118,7 +120,6 @@ _EXPLICIT_AGENT_READ_RE = re.compile(
     r"^(?:(?:can|could|would) you (?:please )?|please )?(?:"
     r"(?:search|look up|lookup|research)\s+(?:the\s+)?(?:web|internet|online)\b"
     r"|(?:google|search online)\b"
-    r"|(?:read|fetch|open|extract|summarize)\s+https?://"
     r"|(?:search|find|list|show|view|lookup|get)\s+"
     r"(?:(?:sales|purchase)\s+invoices?|(?:erp(?:next)?\s+)?suppliers?|"
     r"erp(?:next)?\s+projects?)\b)",
@@ -1122,6 +1123,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             or _AGENT_LIVE_WORKFLOW_RE.search(request)
             or _EXPLICIT_AGENT_READ_RE.search(request)
             or _CRM_CONTACT_LOOKUP_RE.match(request)
+            or direct_crm_contact_query(request) is not None
             or _SHADOW_EXCLUDED_RE.search(request)
             or contains_sensitive_memory_text(request)
             or contains_private_agent_identifier(request)
@@ -1177,8 +1179,11 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         request: str,
     ) -> Route:
         """Choose the natural-language handler after capture and local replies."""
-        if _CRM_CONTACT_LOOKUP_RE.match(request) or _EXPLICIT_AGENT_READ_RE.search(
-            request
+        if (
+            direct_crm_contact_query(request) is not None
+            or direct_public_web_url(request) is not None
+            or _CRM_CONTACT_LOOKUP_RE.match(request)
+            or _EXPLICIT_AGENT_READ_RE.search(request)
         ):
             return "workflow"
         if _JOB_POSTING_DOC_LOOKUP_RE.fullmatch(

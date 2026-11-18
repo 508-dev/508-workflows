@@ -269,7 +269,7 @@ class KnowledgeSourceAdapters:
             timeout_seconds=self._timeout_seconds,
         )
         if query:
-            rows = _unambiguous_project_rows(rows, query)
+            rows = _unambiguous_project_rows(rows, query, alternate_query=search_query)
         evidence: list[KnowledgeEvidence] = []
         for row in rows:
             display_name = str(row.get("display_name") or "ERPNext project")
@@ -411,22 +411,25 @@ def _person_query(question: str) -> str | None:
 def _unambiguous_project_rows(
     rows: list[dict[str, Any]],
     query: str,
+    *,
+    alternate_query: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Return one project only when a name query resolves unambiguously."""
-    normalized_query = query.strip().casefold()
-    exact = [
-        row
-        for row in rows
-        if any(
-            str(row.get(field) or "").strip().casefold() == normalized_query
-            for field in ("display_name", "erpnext_project_id", "id")
-        )
-    ]
-    if len(exact) == 1:
-        return exact
-    if exact or len(rows) != 1:
-        return []
-    return rows
+    """Prefer the literal project name, then look for an exact normalized match."""
+    for candidate in dict.fromkeys([query, alternate_query]):
+        if not candidate:
+            continue
+        normalized_query = candidate.strip().casefold()
+        exact = [
+            row
+            for row in rows
+            if any(
+                str(row.get(field) or "").strip().casefold() == normalized_query
+                for field in ("display_name", "erpnext_project_id", "id")
+            )
+        ]
+        if exact:
+            return exact if len(exact) == 1 else []
+    return rows if len(rows) == 1 else []
 
 
 def _unambiguous_crm_rows(

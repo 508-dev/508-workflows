@@ -1286,17 +1286,33 @@ def test_admin_research_does_not_echo_unreviewed_wiki_text_when_synthesis_fails(
     assert response.source_errors == ["answer synthesis failed"]
 
 
-def test_erp_research_normalizes_project_prefix_for_a_bare_display_name(monkeypatch):
-    list_projects = Mock(
-        return_value=[
+@pytest.mark.parametrize("exact_prefixed_name_exists", [False, True])
+def test_erp_research_disambiguates_prefixed_names(
+    monkeypatch,
+    exact_prefixed_name_exists,
+):
+    projects = [
+        {
+            "id": "local-1",
+            "erpnext_project_id": "external-1",
+            "display_name": "Atlas",
+            "source_status": "Open",
+        },
+        {
+            "id": "local-2",
+            "erpnext_project_id": "external-2",
+            "display_name": "Atlas Mobile",
+        },
+    ]
+    if exact_prefixed_name_exists:
+        projects.append(
             {
-                "id": "local-1",
-                "erpnext_project_id": "external-1",
-                "display_name": "Atlas",
-                "source_status": "Open",
+                "id": "local-3",
+                "erpnext_project_id": "external-3",
+                "display_name": "Project Atlas",
             }
-        ]
-    )
+        )
+    list_projects = Mock(return_value=projects)
     monkeypatch.setattr(
         "five08.knowledge.sources.list_dashboard_projects", list_projects
     )
@@ -1308,5 +1324,8 @@ def test_erp_research_normalizes_project_prefix_for_a_bare_display_name(monkeypa
 
     assert list_projects.call_args.kwargs["query"] == "Atlas"
     assert len(evidence) == 1
-    assert evidence[0].title == "Atlas"
-    assert evidence[0].url == "https://erp.example/app/project/external-1"
+    assert evidence[0].title == (
+        "Project Atlas" if exact_prefixed_name_exists else "Atlas"
+    )
+    expected_id = "external-3" if exact_prefixed_name_exists else "external-1"
+    assert evidence[0].url == f"https://erp.example/app/project/{expected_id}"

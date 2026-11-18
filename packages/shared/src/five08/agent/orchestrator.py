@@ -33,6 +33,7 @@ from five08.agent.memory import (
     contains_sensitive_memory_text,
     validate_memory_value_for_persistence,
 )
+from five08.agent.routing import direct_crm_contact_query, direct_public_web_url
 from five08.agent.state import (
     AgentStateStore,
     ClarificationState,
@@ -1721,13 +1722,8 @@ class AgentOrchestrator:
     def _parse_public_web_action(self, text: str) -> AgentToolAction | None:
         """Recognize explicit public-web requests without stealing CRM/task intent."""
 
-        url_match = re.search(r"\bhttps?://[^\s<>]+", text, re.IGNORECASE)
-        lowered = text.casefold()
-        if url_match is not None and any(
-            marker in lowered
-            for marker in ("read", "fetch", "open", "extract", "summarize")
-        ):
-            url = url_match.group(0).rstrip('.,;:!?)]}"')
+        url = direct_public_web_url(text)
+        if url is not None:
             return AgentToolAction(
                 tool_name="web_read.extract",
                 arguments={"url": url},
@@ -2193,13 +2189,7 @@ class AgentOrchestrator:
         return None
 
     def _parse_crm_contact_search(self, text: str) -> AgentToolAction | None:
-        match = re.search(
-            r"\b(?:search crm(?: contacts)?|find contact|lookup contact|find member)"
-            r"\s+(?:for\s+)?(.+)",
-            text,
-            re.IGNORECASE,
-        )
-        query = _clean_text(match.group(1)) if match else None
+        query = direct_crm_contact_query(text)
         if not query:
             return None
         return AgentToolAction(

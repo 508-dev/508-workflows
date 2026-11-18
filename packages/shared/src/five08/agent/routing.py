@@ -1,8 +1,9 @@
-"""OpenRouter Decisions contract for observing Discord request routing."""
+"""Deterministic read routing and the Discord routing observation contract."""
 
 from __future__ import annotations
 
 import math
+import re
 from typing import Annotated, Literal
 
 import requests
@@ -29,6 +30,35 @@ ROUTES = {
     "with a job search or knowledge lookup.",
     "abstain": "The latest message alone does not identify a route clearly enough.",
 }
+
+
+_CRM_CONTACT_SEARCH_RE = re.compile(
+    r"\b(?:search crm(?: contacts)?|find contact|lookup contact|find member)"
+    r"\s+(?:for\s+)?(.+)",
+    re.I,
+)
+_PUBLIC_WEB_URL_RE = re.compile(r"\bhttps?://[^\s<>]+", re.I)
+_PUBLIC_WEB_READ_MARKERS = ("read", "fetch", "open", "extract", "summarize")
+
+
+def direct_crm_contact_query(text: str) -> str | None:
+    """Extract a contact query accepted by the CRM read workflow."""
+    match = _CRM_CONTACT_SEARCH_RE.search(text)
+    if match is None:
+        return None
+    query = " ".join(match.group(1).strip(" .,:;?!\"'").split())
+    return query or None
+
+
+def direct_public_web_url(text: str) -> str | None:
+    """Extract a URL when the request asks to read a public web page."""
+    match = _PUBLIC_WEB_URL_RE.search(text)
+    lowered = text.casefold()
+    if match is None or not any(
+        marker in lowered for marker in _PUBLIC_WEB_READ_MARKERS
+    ):
+        return None
+    return match.group(0).rstrip('.,;:!?)]}"')
 
 
 class RoutingAnswer(BaseModel):
