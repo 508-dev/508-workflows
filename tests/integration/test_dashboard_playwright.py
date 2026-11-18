@@ -516,6 +516,7 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
         gig_detail_requests: list[str] = []
         gigs_list_payload = _gigs_payload()
         job_leads_payload = _job_leads_payload()
+        scrape_sources: set[str] = set()
 
         def jobs_route(route: Any) -> None:
             request = route.request
@@ -687,6 +688,13 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
 
         def gig_lead_detail_route(route: Any) -> None:
             route.fulfill(json=job_leads_payload[0])
+
+        def gig_lead_sync_route(route: Any) -> None:
+            source = route.request.post_data_json["source"]
+            scrape_sources.add(source)
+            route.fulfill(
+                status=202, json={"job_id": f"scrape-{source}", "source": source}
+            )
 
         def gig_lead_scrape_status_route(route: Any) -> None:
             route.fulfill(
@@ -912,6 +920,7 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
         page.route("**/dashboard/api/knowledge-channels", knowledge_channels_route)
         page.route("**/dashboard/api/notifications?*", notifications_route)
         page.route("**/dashboard/api/job-channels", job_channels_route)
+        page.route("**/dashboard/api/gig-leads/sync", gig_lead_sync_route)
         page.route(
             "**/dashboard/api/gig-leads/scrape-status*", gig_lead_scrape_status_route
         )
@@ -1081,6 +1090,22 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
                 page.get_by_role("button", name="Qualify lead", exact=True)
             ).to_have_count(0)
             expect(page.locator("#gigLeadScrapeComments")).to_have_count(0)
+            expect(
+                page.get_by_role("link", name="Contract React Build")
+            ).to_be_visible()
+            with page.expect_request(re.compile(r"/gig-leads\?.*staged=false")):
+                page.get_by_role("button", name="Scrape now", exact=True).click()
+            assert scrape_sources == {
+                "hackernews_who_is_hiring",
+                "himalayas_remote_jobs",
+                "a16z_talent_network",
+                "sequoia_portfolio_ats",
+                "tokyodev",
+                "japan_dev",
+            }
+            expect(
+                page.get_by_role("button", name="Scrape now", exact=True)
+            ).to_be_enabled()
             page.get_by_role("button", name="Sources", exact=True).click()
             expect(page.locator("#gigLeadScrapeComments")).to_have_text("140")
             expect(page.locator("#gigLeadScrapeScanned")).to_have_text("108")

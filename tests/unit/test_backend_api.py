@@ -330,6 +330,8 @@ def test_lifespan_starts_agent_state_cleanup_after_migrations(
     worker_job_reconciliation_scheduler = AsyncMock()
     run_retention_scheduler = AsyncMock()
     pending_plan_cleanup_scheduler = AsyncMock()
+    lead_scrape_scheduler = AsyncMock()
+    monkeypatch.setattr(api, "_job_lead_scrape_scheduler", lead_scrape_scheduler)
     monkeypatch.setattr(api, "get_redis_connection", lambda _settings: _HealthyRedis())
     monkeypatch.setattr(api, "run_job_migrations", Mock())
     monkeypatch.setattr(
@@ -359,12 +361,61 @@ def test_lifespan_starts_agent_state_cleanup_after_migrations(
     monkeypatch.setattr(api.settings, "email_resume_intake_enabled", False)
     monkeypatch.setattr(api.settings, "agent_schedule_enabled", False)
     monkeypatch.setattr(api.settings, "agent_memory_cleanup_enabled", False)
+    monkeypatch.setattr(api.settings, "job_lead_daily_scrape_enabled", True)
 
     with TestClient(api.create_app(run_lifespan=True)):
         cleanup_scheduler.assert_called_once_with()
         worker_job_reconciliation_scheduler.assert_called_once()
         run_retention_scheduler.assert_called_once_with()
         pending_plan_cleanup_scheduler.assert_called_once_with()
+        lead_scrape_scheduler.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_daily_job_lead_scheduler_queues_each_source_and_retries_only_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    queue = Mock()
+    app = SimpleNamespace(state=SimpleNamespace(queue=queue))
+    sources = (
+        "hackernews_who_is_hiring",
+        "himalayas_remote_jobs",
+        "a16z_talent_network",
+        "sequoia_portfolio_ats",
+        "tokyodev",
+        "japan_dev",
+    )
+    now = datetime(2026, 11, 19, 3, tzinfo=timezone.utc)
+    clock = Mock()
+    clock.now.return_value = now
+    enqueued_job = api.EnqueuedJob(id="scheduled-scrape", created=True)
+    enqueue = AsyncMock(
+        side_effect=[OSError("queue unavailable")] + [enqueued_job] * 12
+    )
+    delays: list[float] = []
+
+    async def advance_clock(delay: float) -> None:
+        delays.append(delay)
+        if len(delays) == 3:
+            raise asyncio.CancelledError
+        clock.now.return_value += timedelta(seconds=delay)
+
+    monkeypatch.setattr(api, "datetime", clock)
+    monkeypatch.setattr(api, "_enqueue_job_lead_scrape", enqueue)
+    monkeypatch.setattr(api.asyncio, "sleep", advance_clock)
+
+    with pytest.raises(asyncio.CancelledError):
+        await api._job_lead_scrape_scheduler(app)
+
+    assert enqueue.await_args_list == [
+        call(queue, source=source, idempotency_key=f"job-leads:daily:{source}:{day}")
+        for day, item_sources in (
+            ("2026-11-19", (*sources, sources[0])),
+            ("2026-11-20", sources),
+        )
+        for source in item_sources
+    ]
+    assert delays == [300, 21 * 3600 - 300, 24 * 3600]
 
 
 @pytest.mark.asyncio

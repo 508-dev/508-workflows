@@ -3,6 +3,7 @@ import {
   ArrowLeft,
   Bell,
   BriefcaseBusiness,
+  Building2,
   CalendarClock,
   ClipboardList,
   ExternalLink,
@@ -12,6 +13,7 @@ import {
   Mail,
   Plus,
   RefreshCw,
+  Rss,
   Search,
   Send,
   Server,
@@ -993,6 +995,7 @@ function App() {
   const [selectedLeadId, setSelectedLeadId] = useState(detailIdFromPath("leads"))
   const [leadDetail, setLeadDetail] = useState<JobLead | null>(null)
   const gigLeadsRequest = useRef(0)
+  const [gigLeadsRevision, setGigLeadsRevision] = useState(0)
   const [selectedProjectId, setSelectedProjectId] = useState(initialProjectDetailId)
   const [notifications, setNotifications] = useState<DashboardNotification[]>([])
   const [notificationsOpen, setNotificationsOpen] = useState(false)
@@ -1930,6 +1933,7 @@ function App() {
             )
           }
         })
+        setGigLeadsRevision((current) => current + 1)
       } else {
         await loadGigLeadScrapeStatus()
       }
@@ -3012,6 +3016,7 @@ function App() {
     gigLeadStatus,
     gigLeadSource,
     gigLeadPostingType,
+    gigLeadsRevision,
   ])
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: source status and forum setup follow their respective views.
@@ -6176,6 +6181,17 @@ function GigsView(props: {
             <RefreshCw />
             Refresh
           </Button>
+          {props.activeTab === "holding" && props.canManageLeads ? (
+            <Button
+              type="button"
+              variant="secondary"
+              disabled={props.loading.gigLeadsSync}
+              onClick={() => props.onSyncLeads("all")}
+            >
+              <RefreshCw />
+              {props.loading.gigLeadsSync ? "Scraping sources…" : "Scrape now"}
+            </Button>
+          ) : null}
         </div>
       ) : (
         <div className="grid gap-3 md:grid-cols-[minmax(140px,.75fr)_minmax(220px,1.25fr)_auto_auto_auto] md:items-end">
@@ -6415,11 +6431,7 @@ function GigsView(props: {
                   >
                     {lead.title || "Untitled lead"}
                   </a>
-                  <div className="flex flex-wrap gap-x-3 gap-y-1 text-sm text-muted-foreground">
-                    {lead.organization ? <span>{lead.organization}</span> : null}
-                    <span>{jobLeadSourceLabel(lead.source_key)}</span>
-                    <span>{jobLeadClassificationLabel(lead)}</span>
-                  </div>
+                  <JobLeadMetadata lead={lead} />
                   {lead.body_normalized ? (
                     <p className="line-clamp-2 break-words text-sm">{lead.body_normalized}</p>
                   ) : null}
@@ -6688,6 +6700,28 @@ function jobLeadClassificationLabel(lead: JobLead) {
   return postingType ? postingTypeLabel : lead.review_summary || "Classification unavailable"
 }
 
+function JobLeadMetadata({ lead }: { lead: JobLead }) {
+  const pillClass = "gap-1.5 text-xs font-semibold normal-case"
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {lead.organization ? (
+        <Badge className={cn(pillClass, "text-foreground")}>
+          <Building2 className="size-3 shrink-0" aria-hidden="true" />
+          {lead.organization}
+        </Badge>
+      ) : null}
+      <Badge className={cn(pillClass, "border-violet-400/40 bg-violet-500/15 text-violet-200")}>
+        <Rss className="size-3 shrink-0" aria-hidden="true" />
+        {jobLeadSourceLabel(lead.source_key)}
+      </Badge>
+      <Badge className={cn(pillClass, "border-sky-400/40 bg-sky-500/15 text-sky-200")}>
+        <BriefcaseBusiness className="size-3 shrink-0" aria-hidden="true" />
+        {jobLeadClassificationLabel(lead)}
+      </Badge>
+    </div>
+  )
+}
+
 function jobLeadWorkflowStatusLabel(lead: JobLead) {
   if (lead.staging_in_progress) return "Posting"
   if (lead.status === "pending" && lead.staged_discord_thread_id) return "In holding forum"
@@ -6797,12 +6831,12 @@ function JobLeadDetail({
         <div className="flex flex-wrap items-center gap-2">
           <h1 className="text-lg font-bold">{lead.title || "Untitled lead"}</h1>
           <Badge variant={jobLeadStatusTone(lead.status)}>{jobLeadWorkflowStatusLabel(lead)}</Badge>
-          <Badge variant="neutral">{jobLeadSourceLabel(lead.source_key)}</Badge>
           {lead.remote ? <Badge variant="queued">Remote</Badge> : null}
-          <Badge variant="neutral">{jobLeadClassificationLabel(lead)}</Badge>
+        </div>
+        <div className="mt-2">
+          <JobLeadMetadata lead={lead} />
         </div>
         <div className="mt-2 flex flex-wrap gap-1.5">
-          {lead.organization ? <Badge variant="neutral">{lead.organization}</Badge> : null}
           {lead.location ? <Badge variant="neutral">{lead.location}</Badge> : null}
           {(lead.tags || []).slice(0, 6).map((tag) => (
             <Badge key={tag} variant="queued">

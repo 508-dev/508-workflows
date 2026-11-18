@@ -127,7 +127,14 @@ The source status reports role mismatches and this cleanup separately. Operators
 can restore a rejected lead if the title filter missed a suitable role; later
 syncs preserve that manual override.
 
-Operators can run all sources together or trigger any source alone. Each
+The API queues one scrape per source each UTC day. It catches up for the
+current day on startup, and retries a failed queue handoff within five minutes.
+Scrapes add or refresh dashboard leads. Posting to Discord remains a separate
+operator action. To disable the daily schedule, set
+`JOB_LEAD_DAILY_SCRAPE_ENABLED=false`.
+
+Use **Scrape now** in **To post** to run all sources on demand, or run a
+single source under **Sources**. Each
 source has its own latest-run status and counts, and leads show a source label.
 The source and employment-type filters apply before the 50-lead page limit.
 Himalayas leads show country and UTC-offset eligibility where supplied by the

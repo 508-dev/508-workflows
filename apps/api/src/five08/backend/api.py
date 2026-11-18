@@ -353,6 +353,7 @@ _PROJECT_ROSTER_USER_CANDIDATE_CACHE_LOCK = threading.RLock()
 _PROJECT_ROSTER_USER_CANDIDATE_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _JOB_LEAD_SCRAPE_JOB_TYPE = "scrape_job_leads_job"
 _JOB_LEAD_SCRAPE_STATUS_LOOKBACK_DAYS = 366
+_JOB_LEAD_SCRAPE_RETRY_SECONDS = 300
 _JOB_LEAD_SOURCE_ALIASES = {
     "hn": "hackernews_who_is_hiring",
     "hackernews": "hackernews_who_is_hiring",
@@ -366,6 +367,9 @@ _JOB_LEAD_SOURCE_ALIASES = {
     "tokyodev": "tokyodev",
     "japan_dev": "japan_dev",
 }
+
+
+_JOB_LEAD_SOURCES = tuple(dict.fromkeys(_JOB_LEAD_SOURCE_ALIASES.values()))
 
 
 @dataclass(frozen=True)
@@ -1199,6 +1203,24 @@ async def _enqueue_newsletter_sync_job(
     return job
 
 
+async def _enqueue_job_lead_scrape(
+    queue: QueueClient,
+    *,
+    source: str,
+    idempotency_key: str,
+    story_id: int | None = None,
+) -> EnqueuedJob:
+    return await asyncio.to_thread(
+        enqueue_job,
+        queue=queue,
+        fn=JOB_FUNCTIONS[_JOB_LEAD_SCRAPE_JOB_TYPE],
+        args=(),
+        settings=settings,
+        kwargs={"source": source, "story_id": story_id},
+        idempotency_key=idempotency_key,
+    )
+
+
 async def _enqueue_agent_memory_cleanup_job(queue: QueueClient) -> EnqueuedJob:
     """Enqueue a globally idempotent, worker-owned memory expiry sweep."""
 
@@ -1251,6 +1273,51 @@ async def _newsletter_sync_scheduler(app: FastAPI) -> None:
         except Exception:
             logger.exception("Failed scheduling 508 members newsletter sync job")
         await asyncio.sleep(interval_seconds)
+
+
+async def _job_lead_scrape_scheduler(app: FastAPI) -> None:
+    """Queue each lead source once per UTC date, including after API restarts."""
+    queue = app.state.queue
+    scheduled_day = None
+    enqueued_sources: set[str] = set()
+    while True:
+        now = datetime.now(tz=timezone.utc)
+        today = now.date()
+        if scheduled_day != today:
+            scheduled_day = today
+            enqueued_sources.clear()
+
+        for source in _JOB_LEAD_SOURCES:
+            if source in enqueued_sources:
+                continue
+            try:
+                job = await _enqueue_job_lead_scrape(
+                    queue,
+                    source=source,
+                    idempotency_key=f"job-leads:daily:{source}:{today.isoformat()}",
+                )
+            except Exception:
+                logger.exception(
+                    "Failed scheduling daily job lead scrape source=%s", source
+                )
+                continue
+            enqueued_sources.add(source)
+            if job.created:
+                logger.info(
+                    "Scheduled daily job lead scrape source=%s job_id=%s",
+                    source,
+                    job.id,
+                )
+
+        next_midnight = now.replace(
+            hour=0, minute=0, second=0, microsecond=0
+        ) + timedelta(days=1)
+        delay = max(
+            0.0, (next_midnight - datetime.now(tz=timezone.utc)).total_seconds()
+        )
+        if len(enqueued_sources) < len(_JOB_LEAD_SOURCES):
+            delay = min(delay, _JOB_LEAD_SCRAPE_RETRY_SECONDS)
+        await asyncio.sleep(delay)
 
 
 async def _agent_memory_cleanup_scheduler(app: FastAPI) -> None:
@@ -5626,13 +5693,10 @@ async def dashboard_sync_job_leads_handler(request: Request) -> JSONResponse:
             {"error": "story_id_only_supported_for_hackernews"}, status_code=400
         )
     now = datetime.now(tz=timezone.utc)
-    job = await asyncio.to_thread(
-        enqueue_job,
-        queue=request.app.state.queue,
-        fn=JOB_FUNCTIONS["scrape_job_leads_job"],
-        args=(),
-        settings=settings,
-        kwargs={"source": normalized_source, "story_id": payload.story_id},
+    job = await _enqueue_job_lead_scrape(
+        request.app.state.queue,
+        source=normalized_source,
+        story_id=payload.story_id,
         idempotency_key=(
             f"job-leads:{normalized_source}:{payload.story_id or 'latest'}:"
             f"{now.strftime('%Y%m%d%H%M')}"
@@ -15664,6 +15728,16 @@ async def _lifespan(app: FastAPI) -> Any:
     else:
         logger.info("508 members newsletter sync scheduler disabled by config")
 
+    if settings.job_lead_daily_scrape_enabled:
+        if app.state.postgres_migrations_ok:
+            app.state.job_lead_scrape_task = asyncio.create_task(
+                _job_lead_scrape_scheduler(app)
+            )
+        else:
+            logger.warning(
+                "Daily job lead scrapes disabled because Postgres migrations failed"
+            )
+
     if settings.email_resume_intake_enabled:
         app.state.email_resume_task = asyncio.create_task(_email_resume_scheduler())
     else:
@@ -15731,6 +15805,12 @@ async def _lifespan(app: FastAPI) -> Any:
 
         if hasattr(app.state, "email_resume_task"):
             task = app.state.email_resume_task
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        if hasattr(app.state, "job_lead_scrape_task"):
+            task = app.state.job_lead_scrape_task
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
