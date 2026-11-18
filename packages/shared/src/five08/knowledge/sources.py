@@ -254,9 +254,14 @@ class KnowledgeSourceAdapters:
         include_all: bool,
         limit: int = 5,
     ) -> list[KnowledgeEvidence]:
+        search_query = (
+            re.sub(r"^(?:(?:erpnext|erp) )?project (?:named )?", "", query, flags=re.I)
+            if query
+            else None
+        )
         rows = list_dashboard_projects(
             self.settings,
-            query=query,
+            query=search_query,
             viewer_emails=actor_emails,
             include_all=include_all,
             limit=limit,

@@ -398,10 +398,10 @@ class KnowledgeService:
             1.0,
             float(getattr(self.settings, "knowledge_source_timeout_seconds", 6.0)),
         )
-        plan = KnowledgeResearchPlan()
+        plan: KnowledgeResearchPlan | None = None
         if research and self.model is not None:
             try:
-                plan = self.model.plan_research(question=request.question) or plan
+                plan = self.model.plan_research(question=request.question)
             except Exception:
                 source_errors.append("research planning failed")
 
@@ -443,9 +443,9 @@ class KnowledgeService:
                 semantic_candidate_limit=semantic_limit,
             )
         }
-        wiki_topics = _research_terms(plan.wiki_topics)
-        projects = _research_terms(plan.projects)
-        contacts = _research_terms(plan.contacts)
+        wiki_topics = _research_terms(plan.wiki_topics) if plan is not None else []
+        projects = _research_terms(plan.projects) if plan is not None else []
+        contacts = _research_terms(plan.contacts) if plan is not None else []
         if allow_org and "knowledge:read_wiki" in scopes:
             for index, topic in enumerate(wiki_topics or [request.question], start=1):
                 name = f"wiki search {index}" if wiki_topics else "wiki"
@@ -468,11 +468,9 @@ class KnowledgeService:
                 )
         if allow_private and "crm:contact:read" in scopes:
             if research:
-                for index, contact in enumerate(
-                    contacts
-                    or _research_terms([_person_query(request.question) or ""]),
-                    start=1,
-                ):
+                if plan is None:
+                    contacts = _research_terms([_person_query(request.question) or ""])
+                for index, contact in enumerate(contacts, start=1):
                     searches[f"crm contact {index}"] = lambda contact=contact: (
                         self.sources.search_crm_contact(
                             contact,
@@ -488,12 +486,13 @@ class KnowledgeService:
         evidence.extend(self._collect_evidence(searches, deadline, source_errors))
         evidence = self._rank_evidence(evidence)
         if research:
-            evidence = self._expand_research_evidence(
-                evidence,
-                terms=_search_tokens(" ".join([request.question, *wiki_topics])),
-                timeout_seconds=timeout_seconds,
-                source_errors=source_errors,
-            )
+            if self.model is not None:
+                evidence = self._expand_research_evidence(
+                    evidence,
+                    terms=_search_tokens(" ".join([request.question, *wiki_topics])),
+                    timeout_seconds=timeout_seconds,
+                    source_errors=source_errors,
+                )
             evidence = [
                 item
                 for item in evidence
@@ -526,6 +525,10 @@ class KnowledgeService:
             return _insufficient_response(source_errors)
 
         if draft is None:
+            if research and self.model is not None:
+                if "answer synthesis failed" not in source_errors:
+                    source_errors.append("answer synthesis unavailable")
+                return _insufficient_response(source_errors)
             if not relevant_evidence:
                 return _insufficient_response(source_errors)
             selected = [relevant_evidence[0]]
@@ -537,6 +540,10 @@ class KnowledgeService:
             if not selected_ids or not selected_ids.issubset(
                 item.evidence_id for item in selected
             ):
+                if research:
+                    return _insufficient_response(
+                        [*source_errors, "invalid answer citations"]
+                    )
                 if not relevant_evidence:
                     return _insufficient_response(source_errors)
                 selected = [relevant_evidence[0]]
