@@ -60,6 +60,14 @@ _KNOWLEDGE_RECALL_PREFIX_RE = re.compile(
     r"(?:who|what|where|when|why|how|does|do|did|is|are|can|could|has|have)\b",
     re.I,
 )
+_JOB_POSTING_DOC_LOOKUP_RE = re.compile(
+    r"^(?:(?:where (?:can|do|should) (?:i|we)|(?:can|could) you(?: please)?|"
+    r"remind me where (?:to|(?:i|we) can))\s+)?"
+    r"(?:find|locate|look up|show me|search for)\s+"
+    r"(?:our|the|508(?:\.dev)?)\s+(?:job|gig)\s+(?:posting\s+)?"
+    r"(?:policy|policies|guide|guidelines|handbook|process|docs|documentation)[.!?]*",
+    re.I,
+)
 _AGENT_ACTION_RE = re.compile(
     r"\b(?:add|approve|assign|cancel|create|delete|forget|invite|post|reject|"
     r"remember|remove|save|send|submit|sync|update)\b",
@@ -851,7 +859,8 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             )
             return
 
-        if self._is_job_search_request(request):
+        route = self._mention_workflow_route(request)
+        if route == "job_search":
             async with message.channel.typing():
                 content = await self._search_jobs_for_member(
                     guild=message.guild,
@@ -875,7 +884,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             return
 
         context = self._build_agent_context_from_message(message)
-        if self._is_knowledge_question(request):
+        if route == "knowledge_question":
             await self._handle_knowledge_question_mention(
                 message=message,
                 question=request,
@@ -1026,6 +1035,19 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             for token in tokens
         )
         return has_action and has_target
+
+    @staticmethod
+    def _mention_workflow_route(
+        request: str,
+    ) -> Literal["job_search", "knowledge_question", "workflow"]:
+        """Choose the mention handler after capture and local replies."""
+        if _JOB_POSTING_DOC_LOOKUP_RE.fullmatch(request):
+            return "knowledge_question"
+        if AgentCog._is_job_search_request(request):
+            return "job_search"
+        if AgentCog._is_knowledge_question(request):
+            return "knowledge_question"
+        return "workflow"
 
     @staticmethod
     def _is_knowledge_question(request: str) -> bool:
