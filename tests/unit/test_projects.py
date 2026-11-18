@@ -396,3 +396,33 @@ def test_supplier_lookup_caches_erpnext_failures() -> None:
         )
 
     assert FailingERPNextClient.calls == 1
+
+
+def test_list_dashboard_projects_prioritizes_exact_names_before_open_status_and_limit():
+    cursor = Mock()
+    cursor.fetchall.return_value = []
+    connection = Mock()
+    connection.cursor.return_value.__enter__ = Mock(return_value=cursor)
+    connection.cursor.return_value.__exit__ = Mock(return_value=None)
+    context = Mock()
+    context.__enter__ = Mock(return_value=connection)
+    context.__exit__ = Mock(return_value=None)
+    with patch("five08.projects.get_postgres_connection", return_value=context):
+        list_dashboard_projects(
+            SharedSettings(),
+            query="Atlas",
+            preferred_query="Project Atlas",
+            include_all=True,
+            include_roster=False,
+            limit=5,
+        )
+
+    statement, params = cursor.execute.call_args.args
+    order = statement.split("ORDER BY", 1)[1]
+    assert (
+        order.index("THEN 0")
+        < order.index("THEN 1")
+        < order.index("= 'open' DESC")
+        < order.index("LIMIT")
+    )
+    assert params == ["%Atlas%", "%Atlas%", "%Atlas%", "Project Atlas", "Atlas", 5]

@@ -273,6 +273,40 @@ async def test_agent_command_researches_an_open_ended_question_privately() -> No
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "Could you summarize this page https://example.org/guide?",
+        "Can you find contact Alex?",
+    ],
+)
+async def test_agent_slash_preserves_explicit_read_workflows(request_text: str) -> None:
+    cog = AgentCog.__new__(AgentCog)
+    cog._post_agent_request = AsyncMock(
+        return_value={"status": "executed", "message": "Direct lookup completed."}
+    )
+    cog._post_knowledge_query = AsyncMock()
+    cog._audit_command_safe = Mock()
+    interaction = SimpleNamespace(
+        id=999,
+        user=SimpleNamespace(id=123, roles=[SimpleNamespace(name="Admin")]),
+        guild_id=456,
+        channel_id=789,
+        channel=SimpleNamespace(id=789),
+        message=None,
+        response=SimpleNamespace(defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+
+    await AgentCog.agent_command.callback(cog, interaction, request_text)
+
+    assert cog._post_agent_request.await_args.kwargs["message"] == request_text
+    cog._post_knowledge_query.assert_not_awaited()
+    assert "Direct lookup completed." in interaction.followup.send.await_args.args[0]
+    assert interaction.followup.send.await_args.kwargs["ephemeral"] is True
+
+
+@pytest.mark.asyncio
 async def test_disabled_knowledge_does_not_collect_discord_history(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
