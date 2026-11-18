@@ -1,0 +1,1468 @@
+{
+  "version": "discord-agent-mention-routing-audit.v1",
+  "evaluated_revision": "be0975f37e8af19bd44fed111ef9bc745c3e4b62",
+  "corpus": "routing/mentions.v1.json",
+  "threshold": 0.85,
+  "cases": 32,
+  "rules_correct": 27,
+  "models": {
+    "typesafe/jev-1.14": {
+      "summary": {
+        "endpoint": "decisions",
+        "accepted": 23,
+        "correct": 32,
+        "improvements": 5,
+        "regressions": 0,
+        "workflow_sent_elsewhere": 0,
+        "deferred": 9,
+        "p50_latency_ms": 348,
+        "p95_latency_ms": 432,
+        "reported_cost_usd": 0.000593334,
+        "calls_with_reported_cost": 32
+      },
+      "observations": [
+        {
+          "id": "job-search-technology",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.99,
+            "knowledge_question": 0.0,
+            "workflow": 0.0,
+            "abstain": 0.01
+          },
+          "latency_ms": 326,
+          "usage": {
+            "input_tokens": 440,
+            "output_tokens": 50,
+            "cost": 1.848e-05
+          }
+        },
+        {
+          "id": "job-search-polite",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 1.0,
+            "knowledge_question": 0.0,
+            "workflow": 0.0,
+            "abstain": 0.0
+          },
+          "latency_ms": 432,
+          "usage": {
+            "input_tokens": 442,
+            "output_tokens": 50,
+            "cost": 1.8564e-05
+          }
+        },
+        {
+          "id": "job-search-location",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.98,
+            "knowledge_question": 0.0,
+            "workflow": 0.0,
+            "abstain": 0.02
+          },
+          "latency_ms": 362,
+          "usage": {
+            "input_tokens": 436,
+            "output_tokens": 50,
+            "cost": 1.8312e-05
+          }
+        },
+        {
+          "id": "job-search-send-to-self",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.99,
+            "knowledge_question": 0.0,
+            "workflow": 0.0,
+            "abstain": 0.01
+          },
+          "latency_ms": 331,
+          "usage": {
+            "input_tokens": 438,
+            "output_tokens": 50,
+            "cost": 1.8396e-05
+          }
+        },
+        {
+          "id": "job-search-current",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.98,
+            "knowledge_question": 0.0,
+            "workflow": 0.02,
+            "abstain": 0.0
+          },
+          "latency_ms": 354,
+          "usage": {
+            "input_tokens": 439,
+            "output_tokens": 50,
+            "cost": 1.8438e-05
+          }
+        },
+        {
+          "id": "job-search-single-post",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.94,
+            "knowledge_question": 0.0,
+            "workflow": 0.02,
+            "abstain": 0.04
+          },
+          "latency_ms": 340,
+          "usage": {
+            "input_tokens": 437,
+            "output_tokens": 50,
+            "cost": 1.8354e-05
+          }
+        },
+        {
+          "id": "job-search-gig",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.99,
+            "knowledge_question": 0.0,
+            "workflow": 0.0,
+            "abstain": 0.01
+          },
+          "latency_ms": 376,
+          "usage": {
+            "input_tokens": 442,
+            "output_tokens": 50,
+            "cost": 1.8564e-05
+          }
+        },
+        {
+          "id": "job-search-postings",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "deferred",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.8,
+            "knowledge_question": 0.19,
+            "workflow": 0.0,
+            "abstain": 0.01
+          },
+          "latency_ms": 332,
+          "usage": {
+            "input_tokens": 442,
+            "output_tokens": 50,
+            "cost": 1.8564e-05
+          }
+        },
+        {
+          "id": "job-search-implicit",
+          "rules": "workflow",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.98,
+            "knowledge_question": 0.0,
+            "workflow": 0.0,
+            "abstain": 0.02
+          },
+          "latency_ms": 382,
+          "usage": {
+            "input_tokens": 445,
+            "output_tokens": 50,
+            "cost": 1.869e-05
+          }
+        },
+        {
+          "id": "job-search-elliptical",
+          "rules": "knowledge_question",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.99,
+            "knowledge_question": 0.0,
+            "workflow": 0.0,
+            "abstain": 0.01
+          },
+          "latency_ms": 348,
+          "usage": {
+            "input_tokens": 444,
+            "output_tokens": 50,
+            "cost": 1.8648e-05
+          }
+        },
+        {
+          "id": "knowledge-job-policy",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.0,
+            "knowledge_question": 1.0,
+            "workflow": 0.0,
+            "abstain": 0.0
+          },
+          "latency_ms": 393,
+          "usage": {
+            "input_tokens": 442,
+            "output_tokens": 50,
+            "cost": 1.8564e-05
+          }
+        },
+        {
+          "id": "knowledge-gig-guidelines",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.0,
+            "knowledge_question": 1.0,
+            "workflow": 0.0,
+            "abstain": 0.0
+          },
+          "latency_ms": 366,
+          "usage": {
+            "input_tokens": 441,
+            "output_tokens": 50,
+            "cost": 1.8522e-05
+          }
+        },
+        {
+          "id": "knowledge-job-guide-command",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.04,
+            "knowledge_question": 0.94,
+            "workflow": 0.0,
+            "abstain": 0.02
+          },
+          "latency_ms": 341,
+          "usage": {
+            "input_tokens": 438,
+            "output_tokens": 50,
+            "cost": 1.8396e-05
+          }
+        },
+        {
+          "id": "knowledge-job-policies-recall",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.0,
+            "knowledge_question": 1.0,
+            "workflow": 0.0,
+            "abstain": 0.0
+          },
+          "latency_ms": 328,
+          "usage": {
+            "input_tokens": 444,
+            "output_tokens": 50,
+            "cost": 1.8648e-05
+          }
+        },
+        {
+          "id": "knowledge-job-expired-policy",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "deferred",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.0,
+            "knowledge_question": 0.77,
+            "workflow": 0.09,
+            "abstain": 0.14
+          },
+          "latency_ms": 342,
+          "usage": {
+            "input_tokens": 441,
+            "output_tokens": 50,
+            "cost": 1.8522e-05
+          }
+        },
+        {
+          "id": "knowledge-onboarding",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.0,
+            "knowledge_question": 1.0,
+            "workflow": 0.0,
+            "abstain": 0.0
+          },
+          "latency_ms": 422,
+          "usage": {
+            "input_tokens": 442,
+            "output_tokens": 50,
+            "cost": 1.8564e-05
+          }
+        },
+        {
+          "id": "knowledge-recall",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.0,
+            "knowledge_question": 0.98,
+            "workflow": 0.01,
+            "abstain": 0.01
+          },
+          "latency_ms": 411,
+          "usage": {
+            "input_tokens": 442,
+            "output_tokens": 50,
+            "cost": 1.8564e-05
+          }
+        },
+        {
+          "id": "knowledge-job-policy-paraphrase",
+          "rules": "job_search",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.0,
+            "knowledge_question": 1.0,
+            "workflow": 0.0,
+            "abstain": 0.0
+          },
+          "latency_ms": 384,
+          "usage": {
+            "input_tokens": 443,
+            "output_tokens": 50,
+            "cost": 1.8606e-05
+          }
+        },
+        {
+          "id": "knowledge-job-process",
+          "rules": "job_search",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.01,
+            "knowledge_question": 0.99,
+            "workflow": 0.0,
+            "abstain": 0.0
+          },
+          "latency_ms": 432,
+          "usage": {
+            "input_tokens": 442,
+            "output_tokens": 50,
+            "cost": 1.8564e-05
+          }
+        },
+        {
+          "id": "knowledge-job-sources",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.0,
+            "knowledge_question": 1.0,
+            "workflow": 0.0,
+            "abstain": 0.0
+          },
+          "latency_ms": 324,
+          "usage": {
+            "input_tokens": 443,
+            "output_tokens": 50,
+            "cost": 1.8606e-05
+          }
+        },
+        {
+          "id": "workflow-job-task",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "deferred",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "workflow",
+          "probabilities": {
+            "job_search": 0.37,
+            "knowledge_question": 0.0,
+            "workflow": 0.61,
+            "abstain": 0.02
+          },
+          "latency_ms": 335,
+          "usage": {
+            "input_tokens": 444,
+            "output_tokens": 49,
+            "cost": 1.8648e-05
+          }
+        },
+        {
+          "id": "workflow-job-mixed-write",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "workflow",
+          "probabilities": {
+            "job_search": 0.08,
+            "knowledge_question": 0.0,
+            "workflow": 0.91,
+            "abstain": 0.01
+          },
+          "latency_ms": 468,
+          "usage": {
+            "input_tokens": 442,
+            "output_tokens": 49,
+            "cost": 1.8564e-05
+          }
+        },
+        {
+          "id": "workflow-policy-mixed-write",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "workflow",
+          "probabilities": {
+            "job_search": 0.0,
+            "knowledge_question": 0.02,
+            "workflow": 0.98,
+            "abstain": 0.0
+          },
+          "latency_ms": 335,
+          "usage": {
+            "input_tokens": 445,
+            "output_tokens": 49,
+            "cost": 1.869e-05
+          }
+        },
+        {
+          "id": "workflow-job-publish",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "deferred",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "workflow",
+          "probabilities": {
+            "job_search": 0.25,
+            "knowledge_question": 0.01,
+            "workflow": 0.42,
+            "abstain": 0.32
+          },
+          "latency_ms": 388,
+          "usage": {
+            "input_tokens": 439,
+            "output_tokens": 49,
+            "cost": 1.8438e-05
+          }
+        },
+        {
+          "id": "workflow-job-forward",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "deferred",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "workflow",
+          "probabilities": {
+            "job_search": 0.36,
+            "knowledge_question": 0.03,
+            "workflow": 0.53,
+            "abstain": 0.08
+          },
+          "latency_ms": 387,
+          "usage": {
+            "input_tokens": 442,
+            "output_tokens": 49,
+            "cost": 1.8564e-05
+          }
+        },
+        {
+          "id": "workflow-job-todo",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "workflow",
+          "probabilities": {
+            "job_search": 0.04,
+            "knowledge_question": 0.0,
+            "workflow": 0.93,
+            "abstain": 0.03
+          },
+          "latency_ms": 334,
+          "usage": {
+            "input_tokens": 443,
+            "output_tokens": 49,
+            "cost": 1.8606e-05
+          }
+        },
+        {
+          "id": "workflow-job-issue",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "deferred",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "workflow",
+          "probabilities": {
+            "job_search": 0.27,
+            "knowledge_question": 0.1,
+            "workflow": 0.46,
+            "abstain": 0.17
+          },
+          "latency_ms": 334,
+          "usage": {
+            "input_tokens": 453,
+            "output_tokens": 49,
+            "cost": 1.9026e-05
+          }
+        },
+        {
+          "id": "workflow-job-memory",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "deferred",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.71,
+            "knowledge_question": 0.0,
+            "workflow": 0.02,
+            "abstain": 0.27
+          },
+          "latency_ms": 339,
+          "usage": {
+            "input_tokens": 444,
+            "output_tokens": 50,
+            "cost": 1.8648e-05
+          }
+        },
+        {
+          "id": "workflow-task-question",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "workflow",
+          "probabilities": {
+            "job_search": 0.0,
+            "knowledge_question": 0.0,
+            "workflow": 0.98,
+            "abstain": 0.02
+          },
+          "latency_ms": 338,
+          "usage": {
+            "input_tokens": 441,
+            "output_tokens": 49,
+            "cost": 1.8522e-05
+          }
+        },
+        {
+          "id": "workflow-short-followup",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "deferred",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "abstain",
+          "probabilities": {
+            "job_search": 0.0,
+            "knowledge_question": 0.04,
+            "workflow": 0.01,
+            "abstain": 0.95
+          },
+          "latency_ms": 319,
+          "usage": {
+            "input_tokens": 434,
+            "output_tokens": 51,
+            "cost": 1.8228e-05
+          }
+        },
+        {
+          "id": "workflow-cancel",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "deferred",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "workflow",
+          "probabilities": {
+            "job_search": 0.0,
+            "knowledge_question": 0.0,
+            "workflow": 0.6,
+            "abstain": 0.4
+          },
+          "latency_ms": 401,
+          "usage": {
+            "input_tokens": 434,
+            "output_tokens": 49,
+            "cost": 1.8228e-05
+          }
+        },
+        {
+          "id": "workflow-loose-crm",
+          "rules": "knowledge_question",
+          "route": "workflow",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "workflow",
+          "probabilities": {
+            "job_search": 0.0,
+            "knowledge_question": 0.09,
+            "workflow": 0.89,
+            "abstain": 0.02
+          },
+          "latency_ms": 408,
+          "usage": {
+            "input_tokens": 443,
+            "output_tokens": 49,
+            "cost": 1.8606e-05
+          }
+        }
+      ]
+    },
+    "openai/gpt-4.1-mini": {
+      "summary": {
+        "endpoint": "chat",
+        "error": 32,
+        "correct": 27,
+        "improvements": 0,
+        "regressions": 0,
+        "workflow_sent_elsewhere": 1,
+        "p50_latency_ms": 64,
+        "p95_latency_ms": 116,
+        "reported_cost_usd": null,
+        "calls_with_reported_cost": 0
+      },
+      "observations": [
+        {
+          "id": "job-search-technology",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "error",
+          "latency_ms": 237,
+          "error": "HTTP 403"
+        },
+        {
+          "id": "job-search-polite",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "error",
+          "latency_ms": 116,
+          "error": "HTTP 403"
+        },
+        {
+          "id": "job-search-location",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "error",
+          "latency_ms": 62,
+          "error": "HTTP 403"
+        },
+        {
+          "id": "job-search-send-to-self",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "error",
+          "latency_ms": 63,
+          "error": "HTTP 403"
+        },
+        {
+          "id": "job-search-current",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "error",
+          "latency_ms": 60,
+          "error": "HTTP 403"
+        },
+        {
+          "id": "job-search-single-post",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "error",
+          "latency_ms": 59,
+          "error": "HTTP 403"
+        },
+        {
+          "id": "job-search-gig",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "error",
+          "latency_ms": 64,
+          "error": "HTTP 403"
+        },
+        {
+          "id": "job-search-postings",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "error",
+          "latency_ms": 74,
+          "error": "HTTP 403"
+        },
+        {
+          "id": "job-search-implicit",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "error",
+          "latency_ms": 73,
+          "error": "HTTP 403"
+        },
+        {
+          "id": "job-search-elliptical",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "error",
+          "latency_ms": 71,
+          "error": "HTTP 403"
+        },
+        {
+          "id": "knowledge-job-policy",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "error",
+          "latency_ms": 56,
+          "error": "HTTP 403"
+        },
+        {
+          "id": "knowledge-gig-guidelines",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "error",
+          "latency_ms": 68,
+          "error": "HTTP 403"
+        },
+        {
+          "id": "knowledge-job-guide-command",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "error",
+          "latency_ms": 78,
+          "error": "HTTP 403"
+        },
+        {
+          "id": "knowledge-job-policies-recall",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "error",
+          "latency_ms": 67,
+          "error": "HTTP 403"
+        },
+        {
+          "id": "knowledge-job-expired-policy",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "error",
+          "latency_ms": 75,
+          "error": "HTTP 403"
+        },
+        {
+          "id": "knowledge-onboarding",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "error",
+          "latency_ms": 100,
+          "error": "HTTP 403"
+        },
+        {
+          "id": "knowledge-recall",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "error",
+          "latency_ms": 55,
+          "error": "HTTP 403"
+        },
+        {
+          "id": "knowledge-job-policy-paraphrase",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "error",
+          "latency_ms": 52,
+          "error": "HTTP 403"
+        },
+        {
+          "id": "knowledge-job-process",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "error",
+          "latency_ms": 107,
+          "error": "HTTP 403"
+        },
+        {
+          "id": "knowledge-job-sources",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "error",
+          "latency_ms": 60,
+          "error": "HTTP 403"
+        },
+        {
+          "id": "workflow-job-task",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "error",
+          "latency_ms": 74,
+          "error": "HTTP 403"
+        },
+        {
+          "id": "workflow-job-mixed-write",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "error",
+          "latency_ms": 70,
+          "error": "HTTP 403"
+        },
+        {
+          "id": "workflow-policy-mixed-write",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "error",
+          "latency_ms": 68,
+          "error": "HTTP 403"
+        },
+        {
+          "id": "workflow-job-publish",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "error",
+          "latency_ms": 55,
+          "error": "HTTP 403"
+        },
+        {
+          "id": "workflow-job-forward",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "error",
+          "latency_ms": 53,
+          "error": "HTTP 403"
+        },
+        {
+          "id": "workflow-job-todo",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "error",
+          "latency_ms": 65,
+          "error": "HTTP 403"
+        },
+        {
+          "id": "workflow-job-issue",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "error",
+          "latency_ms": 55,
+          "error": "HTTP 403"
+        },
+        {
+          "id": "workflow-job-memory",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "error",
+          "latency_ms": 57,
+          "error": "HTTP 403"
+        },
+        {
+          "id": "workflow-task-question",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "error",
+          "latency_ms": 69,
+          "error": "HTTP 403"
+        },
+        {
+          "id": "workflow-short-followup",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "error",
+          "latency_ms": 53,
+          "error": "HTTP 403"
+        },
+        {
+          "id": "workflow-cancel",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "error",
+          "latency_ms": 51,
+          "error": "HTTP 403"
+        },
+        {
+          "id": "workflow-loose-crm",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "error",
+          "latency_ms": 59,
+          "error": "HTTP 403"
+        }
+      ]
+    },
+    "moonshotai/kimi-k2.6": {
+      "summary": {
+        "endpoint": "chat",
+        "accepted": 31,
+        "correct": 29,
+        "improvements": 5,
+        "regressions": 3,
+        "workflow_sent_elsewhere": 2,
+        "deferred": 1,
+        "p50_latency_ms": 605,
+        "p95_latency_ms": 1128,
+        "reported_cost_usd": 0.0028538938,
+        "calls_with_reported_cost": 32
+      },
+      "observations": [
+        {
+          "id": "job-search-technology",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "moonshotai/kimi-k2.6",
+          "provider": "Baidu",
+          "choice": "job_search",
+          "latency_ms": 2535,
+          "usage": {
+            "prompt_tokens": 355,
+            "completion_tokens": 7,
+            "cost": 7.62272e-05
+          }
+        },
+        {
+          "id": "job-search-polite",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "moonshotai/kimi-k2.6",
+          "provider": "CoreWeave",
+          "choice": "job_search",
+          "latency_ms": 547,
+          "usage": {
+            "prompt_tokens": 166,
+            "completion_tokens": 8,
+            "cost": 0.00013518
+          }
+        },
+        {
+          "id": "job-search-location",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "moonshotai/kimi-k2.6",
+          "provider": "Baidu",
+          "choice": "job_search",
+          "latency_ms": 552,
+          "usage": {
+            "prompt_tokens": 351,
+            "completion_tokens": 7,
+            "cost": 6.8839e-05
+          }
+        },
+        {
+          "id": "job-search-send-to-self",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "moonshotai/kimi-k2.6",
+          "provider": "Baidu",
+          "choice": "job_search",
+          "latency_ms": 758,
+          "usage": {
+            "prompt_tokens": 353,
+            "completion_tokens": 8,
+            "cost": 7.19058e-05
+          }
+        },
+        {
+          "id": "job-search-current",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "moonshotai/kimi-k2.6",
+          "provider": "Baidu",
+          "choice": "job_search",
+          "latency_ms": 540,
+          "usage": {
+            "prompt_tokens": 354,
+            "completion_tokens": 8,
+            "cost": 8.13645e-05
+          }
+        },
+        {
+          "id": "job-search-single-post",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "moonshotai/kimi-k2.6",
+          "provider": "Baidu",
+          "choice": "job_search",
+          "latency_ms": 726,
+          "usage": {
+            "prompt_tokens": 352,
+            "completion_tokens": 7,
+            "cost": 7.79738e-05
+          }
+        },
+        {
+          "id": "job-search-gig",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "moonshotai/kimi-k2.6",
+          "provider": "Baidu",
+          "choice": "job_search",
+          "latency_ms": 691,
+          "usage": {
+            "prompt_tokens": 357,
+            "completion_tokens": 7,
+            "cost": 7.53867e-05
+          }
+        },
+        {
+          "id": "job-search-postings",
+          "rules": "job_search",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "moonshotai/kimi-k2.6",
+          "provider": "CoreWeave",
+          "choice": "knowledge_question",
+          "latency_ms": 546,
+          "usage": {
+            "prompt_tokens": 166,
+            "completion_tokens": 9,
+            "cost": 9.059e-05
+          }
+        },
+        {
+          "id": "job-search-implicit",
+          "rules": "workflow",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "moonshotai/kimi-k2.6",
+          "provider": "CoreWeave",
+          "choice": "job_search",
+          "latency_ms": 641,
+          "usage": {
+            "prompt_tokens": 168,
+            "completion_tokens": 8,
+            "cost": 0.00013648
+          }
+        },
+        {
+          "id": "job-search-elliptical",
+          "rules": "knowledge_question",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "moonshotai/kimi-k2.6",
+          "provider": "Baidu",
+          "choice": "job_search",
+          "latency_ms": 534,
+          "usage": {
+            "prompt_tokens": 359,
+            "completion_tokens": 7,
+            "cost": 8.1672e-05
+          }
+        },
+        {
+          "id": "knowledge-job-policy",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "moonshotai/kimi-k2.6",
+          "provider": "Baidu",
+          "choice": "knowledge_question",
+          "latency_ms": 531,
+          "usage": {
+            "prompt_tokens": 357,
+            "completion_tokens": 8,
+            "cost": 7.47594e-05
+          }
+        },
+        {
+          "id": "knowledge-gig-guidelines",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "moonshotai/kimi-k2.6",
+          "provider": "Baidu",
+          "choice": "knowledge_question",
+          "latency_ms": 659,
+          "usage": {
+            "prompt_tokens": 356,
+            "completion_tokens": 8,
+            "cost": 8.0524e-05
+          }
+        },
+        {
+          "id": "knowledge-job-guide-command",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "moonshotai/kimi-k2.6",
+          "provider": "Baidu",
+          "choice": "knowledge_question",
+          "latency_ms": 1128,
+          "usage": {
+            "prompt_tokens": 353,
+            "completion_tokens": 8,
+            "cost": 7.54687e-05
+          }
+        },
+        {
+          "id": "knowledge-job-policies-recall",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "moonshotai/kimi-k2.6",
+          "provider": "Baidu",
+          "choice": "knowledge_question",
+          "latency_ms": 776,
+          "usage": {
+            "prompt_tokens": 359,
+            "completion_tokens": 8,
+            "cost": 8.10447e-05
+          }
+        },
+        {
+          "id": "knowledge-job-expired-policy",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "moonshotai/kimi-k2.6",
+          "provider": "CoreWeave",
+          "choice": "knowledge_question",
+          "latency_ms": 449,
+          "usage": {
+            "prompt_tokens": 165,
+            "completion_tokens": 9,
+            "cost": 8.994e-05
+          }
+        },
+        {
+          "id": "knowledge-onboarding",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "moonshotai/kimi-k2.6",
+          "provider": "Baidu",
+          "choice": "knowledge_question",
+          "latency_ms": 579,
+          "usage": {
+            "prompt_tokens": 354,
+            "completion_tokens": 8,
+            "cost": 8.13645e-05
+          }
+        },
+        {
+          "id": "knowledge-recall",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "moonshotai/kimi-k2.6",
+          "provider": "Baidu",
+          "choice": "knowledge_question",
+          "latency_ms": 854,
+          "usage": {
+            "prompt_tokens": 357,
+            "completion_tokens": 9,
+            "cost": 7.7695e-05
+          }
+        },
+        {
+          "id": "knowledge-job-policy-paraphrase",
+          "rules": "job_search",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "moonshotai/kimi-k2.6",
+          "provider": "Baidu",
+          "choice": "knowledge_question",
+          "latency_ms": 716,
+          "usage": {
+            "prompt_tokens": 358,
+            "completion_tokens": 9,
+            "cost": 7.67889e-05
+          }
+        },
+        {
+          "id": "knowledge-job-process",
+          "rules": "job_search",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "moonshotai/kimi-k2.6",
+          "provider": "CoreWeave",
+          "choice": "knowledge_question",
+          "latency_ms": 611,
+          "usage": {
+            "prompt_tokens": 166,
+            "completion_tokens": 9,
+            "cost": 0.00013859
+          }
+        },
+        {
+          "id": "knowledge-job-sources",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "moonshotai/kimi-k2.6",
+          "provider": "Baidu",
+          "choice": "knowledge_question",
+          "latency_ms": 592,
+          "usage": {
+            "prompt_tokens": 358,
+            "completion_tokens": 8,
+            "cost": 7.51489e-05
+          }
+        },
+        {
+          "id": "workflow-job-task",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "accepted",
+          "model": "moonshotai/kimi-k2.6",
+          "provider": "Crusoe",
+          "choice": "workflow",
+          "latency_ms": 649,
+          "usage": {
+            "prompt_tokens": 168,
+            "completion_tokens": 7,
+            "cost": 0.0001421
+          }
+        },
+        {
+          "id": "workflow-job-mixed-write",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "accepted",
+          "model": "moonshotai/kimi-k2.6",
+          "provider": "Baidu",
+          "choice": "workflow",
+          "latency_ms": 605,
+          "usage": {
+            "prompt_tokens": 357,
+            "completion_tokens": 6,
+            "cost": 7.63379e-05
+          }
+        },
+        {
+          "id": "workflow-policy-mixed-write",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "accepted",
+          "model": "moonshotai/kimi-k2.6",
+          "provider": "Baidu",
+          "choice": "workflow",
+          "latency_ms": 709,
+          "usage": {
+            "prompt_tokens": 360,
+            "completion_tokens": 6,
+            "cost": 7.91259e-05
+          }
+        },
+        {
+          "id": "workflow-job-publish",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "accepted",
+          "model": "moonshotai/kimi-k2.6",
+          "provider": "Baidu",
+          "choice": "workflow",
+          "latency_ms": 602,
+          "usage": {
+            "prompt_tokens": 354,
+            "completion_tokens": 6,
+            "cost": 7.54933e-05
+          }
+        },
+        {
+          "id": "workflow-job-forward",
+          "rules": "workflow",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "moonshotai/kimi-k2.6",
+          "provider": "Baidu",
+          "choice": "job_search",
+          "latency_ms": 1044,
+          "usage": {
+            "prompt_tokens": 357,
+            "completion_tokens": 7,
+            "cost": 7.31194e-05
+          }
+        },
+        {
+          "id": "workflow-job-todo",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "accepted",
+          "model": "moonshotai/kimi-k2.6",
+          "provider": "Baidu",
+          "choice": "workflow",
+          "latency_ms": 511,
+          "usage": {
+            "prompt_tokens": 358,
+            "completion_tokens": 6,
+            "cost": 7.41362e-05
+          }
+        },
+        {
+          "id": "workflow-job-issue",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "accepted",
+          "model": "moonshotai/kimi-k2.6",
+          "provider": "CoreWeave",
+          "choice": "workflow",
+          "latency_ms": 409,
+          "usage": {
+            "prompt_tokens": 172,
+            "completion_tokens": 7,
+            "cost": 0.00013567
+          }
+        },
+        {
+          "id": "workflow-job-memory",
+          "rules": "workflow",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "moonshotai/kimi-k2.6",
+          "provider": "Baidu",
+          "choice": "job_search",
+          "latency_ms": 789,
+          "usage": {
+            "prompt_tokens": 358,
+            "completion_tokens": 7,
+            "cost": 7.44806e-05
+          }
+        },
+        {
+          "id": "workflow-task-question",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "accepted",
+          "model": "moonshotai/kimi-k2.6",
+          "provider": "Crusoe",
+          "choice": "workflow",
+          "latency_ms": 528,
+          "usage": {
+            "prompt_tokens": 165,
+            "completion_tokens": 7,
+            "cost": 0.00014
+          }
+        },
+        {
+          "id": "workflow-short-followup",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "deferred",
+          "model": "moonshotai/kimi-k2.6",
+          "provider": "Crusoe",
+          "choice": "abstain",
+          "latency_ms": 614,
+          "usage": {
+            "prompt_tokens": 158,
+            "completion_tokens": 9,
+            "cost": 9.17e-05
+          }
+        },
+        {
+          "id": "workflow-cancel",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "accepted",
+          "model": "moonshotai/kimi-k2.6",
+          "provider": "Baidu",
+          "choice": "workflow",
+          "latency_ms": 559,
+          "usage": {
+            "prompt_tokens": 349,
+            "completion_tokens": 7,
+            "cost": 6.83839e-05
+          }
+        },
+        {
+          "id": "workflow-loose-crm",
+          "rules": "knowledge_question",
+          "route": "workflow",
+          "outcome": "accepted",
+          "model": "moonshotai/kimi-k2.6",
+          "provider": "Baidu",
+          "choice": "workflow",
+          "latency_ms": 554,
+          "usage": {
+            "prompt_tokens": 358,
+            "completion_tokens": 6,
+            "cost": 7.64035e-05
+          }
+        }
+      ]
+    }
+  }
+}

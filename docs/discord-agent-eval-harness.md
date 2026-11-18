@@ -161,3 +161,7 @@ use the rules. The probability threshold applies to Decisions responses only.
 The benchmark measures mention routing through OpenRouter. The live planner
 suite above measures workflow drafting and can use the configured provider
 directly.
+
+See the [chat baseline comparison](../tests/evals/discord-agent/artifacts/mention-chat-baselines-2026-11-19/README.md)
+for the repeat Jev result, the Kimi K2.6 metrics, and the GPT-4.1 mini provider
+block.
