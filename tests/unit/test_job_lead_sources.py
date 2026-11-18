@@ -6,6 +6,8 @@ import json
 from datetime import datetime, timezone
 from io import BytesIO
 from types import SimpleNamespace
+from unittest.mock import Mock
+from urllib.error import HTTPError
 
 import pytest
 
@@ -24,6 +26,224 @@ from five08.job_lead_sources import (
 )
 from five08.job_channels import JobPostingType
 from five08.job_leads import JobLeadInput
+
+
+@pytest.mark.parametrize(
+    ("source", "origin", "paths"),
+    [
+        (
+            "tokyodev",
+            "https://www.tokyodev.com",
+            [
+                "/companies/acme/jobs/full",
+                "/companies/acme/jobs/contract",
+                "/companies/acme/jobs/mixed",
+            ],
+        ),
+        (
+            "japan_dev",
+            "https://japan-dev.com",
+            ["/jobs/acme/full", "/jobs/acme/contract", "/jobs/acme/mixed"],
+        ),
+    ],
+)
+def test_japan_board_scrape_persists_each_employment_type(
+    monkeypatch, source: str, origin: str, paths: list[str]
+) -> None:
+    urls = [f"{origin}{path}" for path in paths]
+    irrelevant_path = paths[0].rsplit("/", 1)[0] + "/sales"
+    irrelevant_url = f"{origin}{irrelevant_path}"
+    sitemap_urls = urls if source == "tokyodev" else urls[1:]
+    sitemap = (
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+        + "".join(
+            f"<url><loc>{url}</loc></url>"
+            for url in [*sitemap_urls, irrelevant_url, f"{origin}/jobs"]
+        )
+        + "</urlset>"
+    )
+    documents = {
+        job_lead_sources._JOB_BOARD_SITEMAPS[source]: sitemap,
+        f"{origin}/jobs": f'<a href="{paths[0]}?ref=list">New job</a>',
+    }
+    for url, label in zip(
+        urls, ["FULL_TIME", "CONTRACTOR", ["FULL_TIME", "PART_TIME"]], strict=True
+    ):
+        posting = {
+            "@type": "JobPosting",
+            "title": "Software Engineer",
+            "description": "<p>Build products and manage customer contracts.</p>",
+            "employmentType": label,
+            "hiringOrganization": {"name": "Acme"},
+        }
+        documents[url] = (
+            f'<script type="application/ld+json">{json.dumps({"@graph": [posting]})}</script>'
+        )
+    documents[irrelevant_url] = documents[urls[0]].replace(
+        "Software Engineer", "Sales Manager"
+    )
+    monkeypatch.setattr(
+        job_lead_sources.JapanJobBoardLeadSource,
+        "_fetch",
+        staticmethod(documents.__getitem__),
+    )
+    classifier = Mock()
+    monkeypatch.setattr(job_lead_sources, "JobLeadClassifier", lambda **_: classifier)
+    monkeypatch.setattr(
+        job_lead_sources,
+        "existing_job_lead_external_ids",
+        lambda *args, **kwargs: set(),
+    )
+    persist = Mock(side_effect=[("one", True), ("two", True), ("three", True)])
+    monkeypatch.setattr(job_lead_sources, "upsert_job_lead", persist)
+
+    cleanup = Mock(return_value=0)
+    monkeypatch.setattr(
+        job_lead_sources, "reject_unreviewed_irrelevant_job_leads", cleanup
+    )
+    result = job_lead_sources.scrape_job_leads(SimpleNamespace(), source=source)  # type: ignore[arg-type]
+
+    assert result["created"] == result["included"] == 3
+    assert result["potential_gigs_scraped"] == 4
+    assert result["filter_reasons"] == {"expired": 0, "irrelevant_role": 1}
+    assert cleanup.call_args.kwargs["current_irrelevant_external_ids"] == {
+        irrelevant_path
+    }
+    leads = [call.args[1] for call in persist.call_args_list]
+    assert [lead.source_url for lead in leads] == urls
+    assert [lead.posting_type for lead in leads] == [
+        JobPostingType.FULL_TIME,
+        JobPostingType.PART_TIME,
+        JobPostingType.PART_TIME_OR_FULL_TIME,
+    ]
+    assert (
+        leads[0].metadata["contractor_classification"]["is_contractor_friendly"]
+        is False
+    )
+    classifier.classify.assert_not_called()
+
+
+def test_tokyodev_blocked_details_fail_the_scrape(monkeypatch) -> None:
+    source = job_lead_sources.JapanJobBoardLeadSource("tokyodev")
+    url = "https://www.tokyodev.com/companies/acme/jobs/engineer"
+    monkeypatch.setattr(source, "_posting_urls", lambda: [url])
+    monkeypatch.setattr(
+        source, "_fetch", Mock(side_effect=HTTPError(url, 403, "Forbidden", {}, None))
+    )
+
+    with pytest.raises(RuntimeError, match="tokyodev job page returned HTTP 403"):
+        source.collect()
+
+
+def test_board_full_time_metadata_can_omit_an_explicit_contractor_option() -> None:
+    classification = job_lead_sources._board_classification(
+        "FULL_TIME",
+        "Full-time role. If preferred, you can start with reduced hours as a contractor.",
+        None,
+    )
+
+    assert classification.posting_type is JobPostingType.PART_TIME_OR_FULL_TIME
+    assert classification.tags == ["contract", "full-time"]
+
+
+@pytest.mark.parametrize(
+    ("text", "choice", "probability", "truncated", "use_decision"),
+    [
+        (
+            "Contract engineer. Apply at hiring@example.com.",
+            "part_time",
+            0.97,
+            False,
+            True,
+        ),
+        ("Full-time software engineer.", "full_time", 0.90, False, True),
+        ("Freelance engineer.", "part_time", 0.80, False, False),
+        ("Full-time or freelance.", "part_time_or_full_time", 0.97, False, False),
+        ("Software engineer.", "unknown", 0.99, False, False),
+        ("Full-time engineer.", "part_time", 0.99, False, False),
+        ("Full-time engineer.", "full_time", 0.99, True, False),
+    ],
+)
+def test_hybrid_classifier_routes_decision_to_chat_when_needed(
+    monkeypatch, text, choice, probability, truncated, use_decision
+) -> None:
+    model = "typesafe/jev-1.14-20261014"
+    settings = SimpleNamespace(
+        job_lead_decision_model=model, openrouter_api_key="test-key"
+    )
+    classifier = JobLeadClassifier(settings=settings, client=Mock())
+    chat = Mock()
+    monkeypatch.setattr(classifier, "_classify_with_llm", chat)
+    probabilities = {kind.value: (1 - probability) / 3 for kind in JobPostingType}
+    probabilities[choice] = probability
+    request = Mock(
+        return_value=BytesIO(
+            json.dumps(
+                {
+                    "answers": {
+                        "employment": {
+                            "type": "choice",
+                            "choice": choice,
+                            "probabilities": probabilities,
+                        }
+                    },
+                    "truncated": truncated,
+                }
+            ).encode()
+        )
+    )
+    monkeypatch.setattr(job_lead_sources, "urlopen", request)
+
+    result = classifier.classify(text)
+
+    sent_request = request.call_args.args[0]
+    assert json.loads(sent_request.data)["model"] == model
+    assert json.loads(sent_request.data)["state"] == text
+    if use_decision:
+        chat.assert_not_called()
+        assert result.posting_type.value == choice
+        assert result.method == "decision_model"
+        assert result.confidence == probability
+        if "hiring@example.com" in text:
+            assert result.contact_email == "hiring@example.com"
+    else:
+        chat.assert_called_once_with(text)
+        assert result is chat.return_value
+
+
+def test_hybrid_classifier_preserves_keyword_fallback_on_transport_failure(
+    monkeypatch,
+) -> None:
+    settings = SimpleNamespace(
+        job_lead_decision_model="typesafe/jev-1.14-20261014",
+        openrouter_api_key="test-key",
+    )
+    classifier = JobLeadClassifier(settings=settings, client=Mock())
+    monkeypatch.setattr(job_lead_sources, "urlopen", Mock(side_effect=TimeoutError))
+    monkeypatch.setattr(
+        classifier, "_classify_with_llm", Mock(side_effect=TimeoutError)
+    )
+
+    result = classifier.classify("Acme | Software Engineer | Freelance")
+
+    assert result.method == "heuristic"
+    assert result.posting_type is JobPostingType.PART_TIME
+
+
+def test_hybrid_classifier_routes_long_listings_directly_to_chat(monkeypatch) -> None:
+    settings = SimpleNamespace(
+        job_lead_decision_model="typesafe/jev-1.14-20261014",
+        openrouter_api_key="test-key",
+    )
+    classifier = JobLeadClassifier(settings=settings, client=Mock())
+    chat = Mock()
+    request = Mock()
+    monkeypatch.setattr(classifier, "_classify_with_llm", chat)
+    monkeypatch.setattr(job_lead_sources, "urlopen", request)
+
+    text = "募集要項" * 200
+    assert classifier.classify(text) is chat.return_value
+    request.assert_not_called()
 
 
 class _FakeHackerNewsClient:

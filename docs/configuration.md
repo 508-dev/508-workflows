@@ -268,7 +268,18 @@ intake-completed field unset, and matches resume filenames with
 - `RESUME_AI_MODEL`
 - `JOB_LEAD_CLASSIFIER_ENABLED`
 - `JOB_LEAD_CLASSIFIER_MODEL`
+- `JOB_LEAD_DECISION_MODEL`
 - `JOB_LEAD_CLASSIFIER_TIMEOUT_SECONDS`
+
+Job boards use published employment types when available. With
+`OPENROUTER_API_KEY`, the worker tries Jev 1.14 first for short listings without
+a published employment type. It accepts a single full-time or contract/part-time
+decision at probability 0.90 or above when it agrees with any keyword evidence.
+Mixed, unknown, low-confidence, and longer listings go to the configured chat
+classifier. The worker falls back to keyword matching when chat is unavailable.
+Set `JOB_LEAD_DECISION_MODEL` to an empty string to skip Jev and use chat directly.
+The [employment classification benchmark](job-lead-classification-benchmark.md)
+records the evaluation cases and the Jev-first routing results.
 
 Resume/profile LLM calls retry matching direct providers after Bifrost request
 failures when direct provider credentials are configured.

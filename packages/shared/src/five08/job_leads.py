@@ -173,8 +173,12 @@ def job_lead_classification(lead: JobLead | dict[str, Any]) -> dict[str, Any]:
 def format_job_lead_review_summary(lead: JobLead | dict[str, Any]) -> str:
     """Return a human-readable employment classification summary."""
     classification = job_lead_classification(lead)
-    method = classification.get("method")
-    method_label = "LLM" if method == "llm" else "Keyword fallback"
+    method = str(classification.get("method") or "")
+    method_label = {
+        "decision_model": "Decision model",
+        "llm": "LLM",
+        "source": "Source listing",
+    }.get(method, "Keyword fallback")
     posting_type = str(classification.get("posting_type") or "")
     posting_type_label = {
         "part_time": "Part-time / contract",
@@ -721,6 +725,7 @@ def list_job_leads(
     status: JobLeadStatus | str | None = JobLeadStatus.PENDING,
     limit: int = 10,
     source_key: str | None = None,
+    posting_type: JobPostingType | None = None,
 ) -> list[JobLead]:
     """List recent job leads for review."""
     conditions: list[str] = []
@@ -731,6 +736,9 @@ def list_job_leads(
     if source_key is not None:
         conditions.append("job_leads.source_key = %s")
         params.append(source_key)
+    if posting_type is not None:
+        conditions.append("job_leads.posting_type = %s")
+        params.append(posting_type.value)
     where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     query = f"""
         SELECT job_leads.*, linked_engagement.id::text AS engagement_id

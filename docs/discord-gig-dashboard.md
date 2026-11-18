@@ -64,12 +64,13 @@ log in and see only gigs they originally posted, based on
 Dashboard gig mutations also require `lifecycle_stage = 'pending_gig'`, so the
 gig controls cannot mutate future non-gig project engagement rows by id.
 
-## Hacker News Job Lead Review
+## Sourced Job Lead Review
 
 The Gigs page can scrape employer posts from Hacker News “Who is hiring?”
 threads into a review queue. Each lead shows an explicit employment type such
 as `Full-time`, `Part-time / contract`, or `Full-time or part-time / contract`,
-plus whether the result came from the LLM classifier or keyword fallback.
+plus whether the result came from the source listing, the LLM classifier, or
+keyword fallback.
 
 **Post to #unqualified-leads** is the default screening path: it creates a
 holding thread without matching candidates. It is optional, however; an
@@ -101,7 +102,7 @@ previously admitted by a keyword false positive, while approved or posted leads
 remain unchanged.
 
 Lead cards keep a compact excerpt by default and can expand to show the full
-normalized HN comment. Rejected leads can be restored to `pending` for another
+normalized listing or HN comment. Rejected leads can be restored to `pending` for another
 review; the restoration clears the prior review marker while the dashboard audit
 trail records the action. Posting a lead keeps the reviewer on the Leads tab,
 marks that card `Posted`, and exposes links to the resulting Discord thread and
@@ -109,8 +110,8 @@ dashboard gig when available.
 
 ## External Job Lead Sources
 
-The Leads tab also offers manual syncs for Himalayas, a16z, and a limited
-Sequoia portfolio pilot. a16z sync reads up to the first 25 public search
+The Leads tab offers manual syncs for TokyoDev, Japan Dev, Himalayas, a16z,
+and a limited Sequoia portfolio pilot. a16z sync reads up to the first 25 public search
 results for each of five gig terms, deduplicates jobs, and keeps only roles
 whose titles explicitly mention contract, contractor, freelance, fractional,
 or part-time work. It stores job metadata and the direct application link,
@@ -119,7 +120,15 @@ the board's public first page. Titles that describe a contract domain (such as
 smart contracts or contract administration) or explicitly say full-time are
 excluded from this title-only pilot.
 
-All four sources require a clear engineering, product, data, design, marketing,
+TokyoDev and Japan Dev import active co-op listings across employment types.
+They use the employment type published on the listing when available and fall
+back to the existing classifier when that field is absent or unspecified.
+The **Employment type** filter shows full-time, part-time or contract, roles
+offering both, and listings with unknown terms.
+The [employment classification benchmark](job-lead-classification-benchmark.md)
+records the evaluation cases and the Jev-first routing results.
+
+All sources require a clear engineering, product, data, design, marketing,
 or ecommerce role in the job title or HN header before admitting a lead. The
 filter excludes recruiting, sales, clinical, language, and data annotation
 roles even when their descriptions mention technical skills. A sync also marks
@@ -129,9 +138,9 @@ The source status reports role mismatches and this cleanup separately. Operators
 can restore a rejected lead if the title filter missed a suitable role; later
 syncs preserve that manual override.
 
-Operators can run all four sources together or trigger any source alone. Each
+Operators can run all sources together or trigger any source alone. Each
 source has its own latest-run status and counts, and leads show a source label.
-The source filter is applied before the 50-lead page limit.
+The source and employment-type filters apply before the 50-lead page limit.
 Himalayas leads show country and UTC-offset eligibility where supplied by the
 API. If a later Himalayas page fails, completed pages are saved and that
 source's status card labels the sync as partial so an operator can retry it.

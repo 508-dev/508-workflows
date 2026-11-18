@@ -331,6 +331,8 @@ const JOB_LEAD_SOURCES = [
   { key: "himalayas_remote_jobs", label: "Himalayas" },
   { key: "a16z_talent_network", label: "a16z" },
   { key: "sequoia_portfolio_ats", label: "Sequoia portfolio" },
+  { key: "tokyodev", label: "TokyoDev" },
+  { key: "japan_dev", label: "Japan Dev" },
 ] as const
 type JobLeadSourceKey = (typeof JOB_LEAD_SOURCES)[number]["key"]
 function jobLeadSourceLabel(source?: string) {
@@ -1042,6 +1044,7 @@ function App() {
   const [gigLimit, setGigLimit] = useState(100)
   const [activeGigTab, setActiveGigTab] = useState<GigTab>(gigTabFromHash)
   const [gigLeadStatus, setGigLeadStatus] = useState("pending")
+  const [gigLeadPostingType, setGigLeadPostingType] = useState("")
   const [gigLeadSource, setGigLeadSource] = useState<JobLeadSourceKey | "">("")
   const [projectQuery, setProjectQuery] = useState("")
   const [projectStatus, setProjectStatus] = useState(initialProjectDetailId ? "" : "Open")
@@ -1209,6 +1212,7 @@ function App() {
     const params = new URLSearchParams({ limit: "50" })
     if (gigLeadStatus) params.set("status", gigLeadStatus)
     if (gigLeadSource) params.set("source", gigLeadSource)
+    if (gigLeadPostingType) params.set("posting_type", gigLeadPostingType)
     return `/dashboard/api/gig-leads?${params.toString()}`
   }
 
@@ -2965,7 +2969,7 @@ function App() {
   // biome-ignore lint/correctness/useExhaustiveDependencies: lead reload intentionally follows lead status changes only while gigs is active.
   useEffect(() => {
     if (view === "gigs" && permissions.length > 0) void loadGigLeads()
-  }, [gigLeadStatus, gigLeadSource])
+  }, [gigLeadStatus, gigLeadSource, gigLeadPostingType])
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: projects reload intentionally follows status changes only while projects is active.
   useEffect(() => {
@@ -3315,6 +3319,7 @@ function App() {
               query={gigQuery}
               leadStatus={gigLeadStatus}
               leadSource={gigLeadSource}
+              leadPostingType={gigLeadPostingType}
               includeHistorical={gigIncludeHistorical}
               limit={gigLimit}
               staleDays={staleRecruitingDays}
@@ -3330,6 +3335,7 @@ function App() {
               setQuery={setGigQuery}
               setLeadStatus={setGigLeadStatus}
               setLeadSource={setGigLeadSource}
+              setLeadPostingType={setGigLeadPostingType}
               setIncludeHistorical={setGigIncludeHistorical}
               setLimit={setGigLimit}
               onRefresh={refreshGigsView}
@@ -5759,14 +5765,8 @@ function JobLeadScrapeStatusPanel({
   const isHimalayas = source === "himalayas_remote_jobs"
   const isA16z = source === "a16z_talent_network"
   const isSequoia = source === "sequoia_portfolio_ats"
-  const isJobBoard = isHimalayas || isA16z || isSequoia
-  const sourceTitle = isHimalayas
-    ? "Himalayas"
-    : isA16z
-      ? "a16z"
-      : isSequoia
-        ? "Sequoia portfolio ATS"
-        : "Hacker News"
+  const isJobBoard = source !== "hackernews_who_is_hiring"
+  const sourceTitle = isSequoia ? "Sequoia portfolio ATS" : jobLeadSourceLabel(source)
   const threads = Array.isArray(result?.threads) ? result.threads : []
   const firstThread = threads[0]
   const hasDiscoveryCounts = typeof result?.potential_gigs_scraped === "number"
@@ -5843,7 +5843,9 @@ function JobLeadScrapeStatusPanel({
                   ? "Recent remote contractor and part-time jobs from Himalayas."
                   : isA16z
                     ? "Recent title-matched gigs from a16z public search results."
-                    : "Title-matched gigs from selected Sequoia portfolio company career feeds (currently Reddit)."}
+                    : isSequoia
+                      ? "Title-matched gigs from selected Sequoia portfolio company career feeds (currently Reddit)."
+                      : "Active listings for co-op roles across employment types."}
               </p>
             ) : result?.thread_found && firstThread ? (
               <div className="grid gap-1">
@@ -5955,6 +5957,7 @@ function GigsView(props: {
   query: string
   leadStatus: string
   leadSource: JobLeadSourceKey | ""
+  leadPostingType: string
   includeHistorical: boolean
   limit: number
   staleDays: number
@@ -5969,6 +5972,7 @@ function GigsView(props: {
   setStatus: (value: string) => void
   setQuery: (value: string) => void
   setLeadStatus: (value: string) => void
+  setLeadPostingType: (value: string) => void
   setLeadSource: (value: JobLeadSourceKey | "") => void
   setIncludeHistorical: (value: boolean) => void
   setLimit: (value: number) => void
@@ -6048,7 +6052,7 @@ function GigsView(props: {
     <Card className="grid gap-3 p-4">
       {tabBar}
       {props.activeTab === "leads" ? (
-        <div className="grid gap-3 md:grid-cols-[minmax(160px,.6fr)_minmax(160px,.6fr)_auto_auto] md:items-end">
+        <div className="grid gap-3 md:grid-cols-[repeat(3,minmax(140px,1fr))_auto] md:items-end">
           <Label>
             Lead status
             <Select
@@ -6078,6 +6082,20 @@ function GigsView(props: {
               ))}
             </Select>
           </Label>
+          <Label>
+            Employment type
+            <Select
+              id="gigLeadPostingType"
+              value={props.leadPostingType}
+              onChange={(event) => props.setLeadPostingType(event.target.value)}
+            >
+              <option value="">All employment types</option>
+              <option value="part_time">Part-time / contract</option>
+              <option value="full_time">Full-time</option>
+              <option value="part_time_or_full_time">Both options</option>
+              <option value="unknown">Unknown</option>
+            </Select>
+          </Label>
           <Button
             id="refreshGigLeads"
             type="button"
@@ -6089,7 +6107,7 @@ function GigsView(props: {
             Refresh
           </Button>
           {props.canManageLeads ? (
-            <div className="flex flex-wrap gap-2">
+            <div className="flex flex-wrap gap-2 md:col-span-4">
               <Button
                 id="syncAllGigLeads"
                 type="button"
@@ -6130,6 +6148,16 @@ function GigsView(props: {
               >
                 <RefreshCw /> Sync Sequoia portfolio
               </Button>
+              {(["tokyodev", "japan_dev"] as const).map((source) => (
+                <Button
+                  key={source}
+                  type="button"
+                  onClick={() => props.onSyncLeads(source)}
+                  disabled={props.loading.gigLeadsSync}
+                >
+                  <RefreshCw /> Sync {jobLeadSourceLabel(source)}
+                </Button>
+              ))}
             </div>
           ) : null}
         </div>
@@ -6620,7 +6648,9 @@ function JobLeadListItem({
             aria-controls={`gigLeadComment-${lead.id}`}
             onClick={() => setShowFullComment((current) => !current)}
           >
-            {showFullComment ? "Collapse comment" : "Show full comment"}
+            {`${showFullComment ? "Collapse" : "Show full"} ${
+              lead.source_key === "hackernews_who_is_hiring" ? "comment" : "listing"
+            }`}
           </Button>
         ) : null}
         {lead.review_summary ? (
@@ -6640,7 +6670,7 @@ function JobLeadListItem({
               <ExternalLink className="size-3.5" />
             </a>
           ) : null}
-          {lead.apply_url ? (
+          {lead.apply_url && lead.apply_url !== lead.source_url ? (
             <a
               className="inline-flex items-center gap-1 font-extrabold text-primary"
               href={lead.apply_url}

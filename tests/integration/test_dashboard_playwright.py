@@ -1066,6 +1066,13 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             expect(page.locator("#gigLeadScrapeScanned")).to_have_text("108")
             expect(page.locator("#gigLeadScrapeIncluded")).to_have_text("3")
             expect(page.locator("#gigLeadScrapeFiltered")).to_have_text("105")
+            expect(page.get_by_role("button", name="Sync TokyoDev")).to_be_visible()
+            expect(page.get_by_role("button", name="Sync Japan Dev")).to_be_visible()
+            with page.expect_request(
+                re.compile(r"/gig-leads\?.*posting_type=full_time")
+            ):
+                page.get_by_label("Employment type").select_option("full_time")
+            page.get_by_label("Employment type").select_option("")
             lead_comment = page.locator(
                 "#gigLeadComment-55555555-5555-4555-8555-555555555555"
             )
