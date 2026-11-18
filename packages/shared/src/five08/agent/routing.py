@@ -33,12 +33,13 @@ ROUTES = {
 
 
 _CRM_CONTACT_SEARCH_RE = re.compile(
-    r"\b(?:search crm(?: contacts)?|find contact|lookup contact|find member)"
+    r"^\s*(?:(?:(?:can|could|would|will) you|i (?:need|want) to)\s+)?"
+    r"(?:please\s+)?(?:search crm(?: contacts)?|find contact|lookup contact|find member)"
     r"\s+(?:for\s+)?(.+)",
     re.I,
 )
 _PUBLIC_WEB_URL_RE = re.compile(r"\bhttps?://[^\s<>]+", re.I)
-_PUBLIC_WEB_READ_MARKERS = ("read", "fetch", "open", "extract", "summarize")
+_PUBLIC_WEB_READ_RE = re.compile(r"\b(?:read|fetch|open|extract|summarize)\b", re.I)
 
 
 def direct_crm_contact_query(text: str) -> str | None:
@@ -53,9 +54,8 @@ def direct_crm_contact_query(text: str) -> str | None:
 def direct_public_web_url(text: str) -> str | None:
     """Extract a URL when the request asks to read a public web page."""
     match = _PUBLIC_WEB_URL_RE.search(text)
-    lowered = text.casefold()
-    if match is None or not any(
-        marker in lowered for marker in _PUBLIC_WEB_READ_MARKERS
+    if match is None or not _PUBLIC_WEB_READ_RE.search(
+        _PUBLIC_WEB_URL_RE.sub(" ", text)
     ):
         return None
     return match.group(0).rstrip('.,;:!?)]}"')

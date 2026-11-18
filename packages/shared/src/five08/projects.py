@@ -340,6 +340,7 @@ def list_dashboard_projects(
     *,
     project_id: str | None = None,
     query: str | None = None,
+    preferred_query: str | None = None,
     status: str | None = None,
     viewer_emails: list[str] | None = None,
     include_all: bool = False,
@@ -350,7 +351,9 @@ def list_dashboard_projects(
     """Return project cache rows shaped for the operations dashboard.
 
     Set include_roster=False to skip the roster-members query — useful for
-    lightweight access checks where only project IDs are needed.
+    lightweight access checks where only project IDs are needed. Set
+    preferred_query to prioritize literal and normalized name matches before
+    limiting the results.
     """
     where = []
     params: list[Any] = []
@@ -402,6 +405,17 @@ def list_dashboard_projects(
         )
         params.extend([normalized_viewer_emails, normalized_viewer_emails])
     where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+    exact_order = ""
+    preferred = (preferred_query or "").strip()
+    if preferred and normalized_query:
+        exact_order = """
+            CASE
+                WHEN LOWER(%s) IN (LOWER(p.display_name), LOWER(pei.external_id), p.id::text) THEN 0
+                WHEN LOWER(%s) IN (LOWER(p.display_name), LOWER(pei.external_id), p.id::text) THEN 1
+                ELSE 2
+            END,
+        """
+        params.extend([preferred, normalized_query])
     params.append(max(1, min(limit, 500)))
     query = f"""
         SELECT
@@ -434,6 +448,7 @@ def list_dashboard_projects(
           ON ec.erpnext_project_id = pei.external_id
         {where_sql}
         ORDER BY
+            {exact_order}
             LOWER(COALESCE(p.source_status, '')) = 'open' DESC,
             p.source_modified_at DESC NULLS LAST,
             LOWER(p.display_name) ASC

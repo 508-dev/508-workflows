@@ -262,6 +262,7 @@ class KnowledgeSourceAdapters:
         rows = list_dashboard_projects(
             self.settings,
             query=search_query,
+            preferred_query=query,
             viewer_emails=actor_emails,
             include_all=include_all,
             limit=limit,

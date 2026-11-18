@@ -166,6 +166,13 @@ def test_direct_openai_run_rejects_openrouter_models(monkeypatch) -> None:
         ("Could you find supplier Acme?", "workflow"),
         ("Could you research the web for PostgreSQL tutorials?", "workflow"),
         ("Could you update Alex in CRM?", "workflow"),
+        ("How do I find contact information in our handbook?", "knowledge_question"),
+        (
+            "What is our policy for https://example.org/spreadsheet?",
+            "knowledge_question",
+        ),
+        ("Could you summarize this page https://example.org/guide?", "workflow"),
+        ("Can you find contact Alex?", "workflow"),
     ],
 )
 def test_mention_routing_nearby_phrasing(message: str, route: str) -> None:

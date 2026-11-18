@@ -1304,15 +1304,30 @@ def test_erp_research_disambiguates_prefixed_names(
             "display_name": "Atlas Mobile",
         },
     ]
+    projects.extend(
+        {
+            "id": f"similar-{index}",
+            "display_name": f"Atlas Variant {index}",
+            "source_status": "Open",
+        }
+        for index in range(3)
+    )
     if exact_prefixed_name_exists:
         projects.append(
             {
                 "id": "local-3",
                 "erpnext_project_id": "external-3",
                 "display_name": "Project Atlas",
+                "source_status": "Closed",
             }
         )
-    list_projects = Mock(return_value=projects)
+
+    def list_ordered_projects(_settings, *, preferred_query=None, limit, **_kwargs):
+        return sorted(projects, key=lambda row: row["display_name"] != preferred_query)[
+            :limit
+        ]
+
+    list_projects = Mock(side_effect=list_ordered_projects)
     monkeypatch.setattr(
         "five08.knowledge.sources.list_dashboard_projects", list_projects
     )
