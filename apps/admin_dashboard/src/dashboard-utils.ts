@@ -128,6 +128,7 @@ export function isTerminalJobStatus(value?: string | null) {
 export function jobLeadClassificationMethodLabel(value?: string | null) {
   if (value === "llm") return "LLM"
   if (value === "source") return "Source listing"
+  if (value === "decision_model") return "Decision model"
   if (value === "heuristic") return "Keyword fallback"
   return "Unknown"
 }

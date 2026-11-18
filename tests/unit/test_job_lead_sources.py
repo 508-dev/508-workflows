@@ -146,6 +146,106 @@ def test_board_full_time_metadata_can_omit_an_explicit_contractor_option() -> No
     assert classification.tags == ["contract", "full-time"]
 
 
+@pytest.mark.parametrize(
+    ("text", "choice", "probability", "truncated", "use_decision"),
+    [
+        (
+            "Contract engineer. Apply at hiring@example.com.",
+            "part_time",
+            0.97,
+            False,
+            True,
+        ),
+        ("Full-time software engineer.", "full_time", 0.90, False, True),
+        ("Freelance engineer.", "part_time", 0.80, False, False),
+        ("Full-time or freelance.", "part_time_or_full_time", 0.97, False, False),
+        ("Software engineer.", "unknown", 0.99, False, False),
+        ("Full-time engineer.", "part_time", 0.99, False, False),
+        ("Full-time engineer.", "full_time", 0.99, True, False),
+    ],
+)
+def test_hybrid_classifier_routes_decision_to_chat_when_needed(
+    monkeypatch, text, choice, probability, truncated, use_decision
+) -> None:
+    model = "typesafe/jev-1.14-20261014"
+    settings = SimpleNamespace(
+        job_lead_decision_model=model, openrouter_api_key="test-key"
+    )
+    classifier = JobLeadClassifier(settings=settings, client=Mock())
+    chat = Mock()
+    monkeypatch.setattr(classifier, "_classify_with_llm", chat)
+    probabilities = {kind.value: (1 - probability) / 3 for kind in JobPostingType}
+    probabilities[choice] = probability
+    request = Mock(
+        return_value=BytesIO(
+            json.dumps(
+                {
+                    "answers": {
+                        "employment": {
+                            "type": "choice",
+                            "choice": choice,
+                            "probabilities": probabilities,
+                        }
+                    },
+                    "truncated": truncated,
+                }
+            ).encode()
+        )
+    )
+    monkeypatch.setattr(job_lead_sources, "urlopen", request)
+
+    result = classifier.classify(text)
+
+    sent_request = request.call_args.args[0]
+    assert json.loads(sent_request.data)["model"] == model
+    assert json.loads(sent_request.data)["state"] == text
+    if use_decision:
+        chat.assert_not_called()
+        assert result.posting_type.value == choice
+        assert result.method == "decision_model"
+        assert result.confidence == probability
+        if "hiring@example.com" in text:
+            assert result.contact_email == "hiring@example.com"
+    else:
+        chat.assert_called_once_with(text)
+        assert result is chat.return_value
+
+
+def test_hybrid_classifier_preserves_keyword_fallback_on_transport_failure(
+    monkeypatch,
+) -> None:
+    settings = SimpleNamespace(
+        job_lead_decision_model="typesafe/jev-1.14-20261014",
+        openrouter_api_key="test-key",
+    )
+    classifier = JobLeadClassifier(settings=settings, client=Mock())
+    monkeypatch.setattr(job_lead_sources, "urlopen", Mock(side_effect=TimeoutError))
+    monkeypatch.setattr(
+        classifier, "_classify_with_llm", Mock(side_effect=TimeoutError)
+    )
+
+    result = classifier.classify("Acme | Software Engineer | Freelance")
+
+    assert result.method == "heuristic"
+    assert result.posting_type is JobPostingType.PART_TIME
+
+
+def test_hybrid_classifier_routes_long_listings_directly_to_chat(monkeypatch) -> None:
+    settings = SimpleNamespace(
+        job_lead_decision_model="typesafe/jev-1.14-20261014",
+        openrouter_api_key="test-key",
+    )
+    classifier = JobLeadClassifier(settings=settings, client=Mock())
+    chat = Mock()
+    request = Mock()
+    monkeypatch.setattr(classifier, "_classify_with_llm", chat)
+    monkeypatch.setattr(job_lead_sources, "urlopen", request)
+
+    text = "募集要項" * 200
+    assert classifier.classify(text) is chat.return_value
+    request.assert_not_called()
+
+
 class _FakeHackerNewsClient:
     def search_who_is_hiring_threads(self, *, hits_per_page: int = 12):  # noqa: ANN201
         return [

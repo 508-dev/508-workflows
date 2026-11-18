@@ -174,9 +174,11 @@ def format_job_lead_review_summary(lead: JobLead | dict[str, Any]) -> str:
     """Return a human-readable employment classification summary."""
     classification = job_lead_classification(lead)
     method = str(classification.get("method") or "")
-    method_label = {"llm": "LLM", "source": "Source listing"}.get(
-        method, "Keyword fallback"
-    )
+    method_label = {
+        "decision_model": "Decision model",
+        "llm": "LLM",
+        "source": "Source listing",
+    }.get(method, "Keyword fallback")
     posting_type = str(classification.get("posting_type") or "")
     posting_type_label = {
         "part_time": "Part-time / contract",

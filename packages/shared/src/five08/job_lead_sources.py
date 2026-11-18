@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import json
 import logging
+import math
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -199,6 +200,16 @@ def himalayas_job_is_open(source_url: str, *, timeout_seconds: float = 15.0) -> 
 
 DEFAULT_JOB_LEAD_CLASSIFIER_MODEL = "gpt-4.1-mini"
 
+_OPENROUTER_DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions"
+_DECISION_MIN_PROBABILITY = 0.90
+_DECISION_MAX_INPUT_BYTES = 2000
+_DECISION_CRITERIA = {
+    "full_time": "Regular or permanent full-time employee only, including probation or explicitly excluded contractor options.",
+    "part_time": "Freelance, fixed-term, contract-to-hire with a mandatory initial contract, or part-time only, even on a 40-hour schedule.",
+    "part_time_or_full_time": "Both regular employment and contract or part-time are available choices when joining.",
+    "unknown": "No supported arrangement is stated or only an internship is offered.",
+}
+
 _WHO_IS_HIRING_TITLE_RE = re.compile(
     r"^Ask HN: Who is hiring\? \((?P<month>[A-Za-z]+) (?P<year>20\d\d)\)$"
 )
@@ -319,7 +330,7 @@ class JobLeadClassification:
     confidence: float
     confidence_label: Literal["high", "medium", "low"]
     rationale: str
-    method: Literal["llm", "heuristic", "source"]
+    method: Literal["decision_model", "llm", "heuristic", "source"]
     apply_url: str | None = None
     contact_email: str | None = None
 
@@ -342,6 +353,17 @@ class JobLeadLLMClassificationResponse(BaseModel):
     rationale: str = ""
     apply_url: str | None = None
     contact_email: str | None = None
+
+
+class _EmploymentDecision(BaseModel):
+    type: Literal["choice"]
+    choice: JobPostingType
+    probabilities: dict[JobPostingType, float]
+
+
+class _EmploymentDecisionResponse(BaseModel):
+    answers: dict[str, _EmploymentDecision]
+    truncated: bool = False
 
 
 class _TextExtractor(HTMLParser):
@@ -735,7 +757,7 @@ def classify_contractor_lead_heuristic(comment_text: str) -> JobLeadClassificati
 
 
 class JobLeadClassifier:
-    """LLM-first classifier with deterministic keyword fallback."""
+    """Classify unstructured listings with optional decision-model triage."""
 
     def __init__(
         self,
@@ -745,16 +767,100 @@ class JobLeadClassifier:
     ) -> None:
         self.settings = settings
         self.client = client if client is not None else _build_llm_client(settings)
+        self.decision_model = _clean(getattr(settings, "job_lead_decision_model", None))
+        self.decision_api_key = _clean(getattr(settings, "openrouter_api_key", None))
 
     def classify(self, comment_text: str) -> JobLeadClassification:
         if _SEEKING_WORK_RE.search(comment_text):
             return classify_contractor_lead_heuristic(comment_text)
+        if (
+            self.decision_model
+            and self.decision_api_key
+            and getattr(self.settings, "job_lead_classifier_enabled", True)
+            and len(comment_text.encode("utf-8")) <= _DECISION_MAX_INPUT_BYTES
+        ):
+            try:
+                decision = self._classify_with_decision_model(
+                    comment_text, self.decision_model, self.decision_api_key
+                )
+                if decision is not None:
+                    return decision
+            except (OSError, KeyError, TypeError, ValueError) as exc:
+                logger.warning(
+                    "Job lead decision model %s failed (%s)",
+                    self.decision_model,
+                    type(exc).__name__,
+                )
         if self.client is not None:
             try:
                 return self._classify_with_llm(comment_text)
             except Exception as exc:
                 logger.warning("Job lead LLM classification failed: %s", exc)
         return classify_contractor_lead_heuristic(comment_text)
+
+    def _classify_with_decision_model(
+        self, text: str, model: str, api_key: str
+    ) -> JobLeadClassification | None:
+        request = Request(
+            _OPENROUTER_DECISIONS_URL,
+            data=json.dumps(
+                {
+                    "model": model,
+                    "state": text,
+                    "questions": {
+                        "employment": {
+                            "type": "choice",
+                            "criteria": _DECISION_CRITERIA,
+                            "instructions": (
+                                "Classify the employment offered when joining this role. "
+                                "Ignore contracts with customers and possible future conversion."
+                            ),
+                        }
+                    },
+                }
+            ).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+        )
+        timeout = min(
+            2.0,
+            float(getattr(self.settings, "job_lead_classifier_timeout_seconds", 8.0)),
+        )
+        with urlopen(request, timeout=timeout) as response:
+            payload = _EmploymentDecisionResponse.model_validate_json(response.read())
+        if payload.truncated:
+            return None
+        answer = payload.answers["employment"]
+        posting_type = answer.choice
+        probabilities = answer.probabilities
+        if (
+            posting_type not in {JobPostingType.PART_TIME, JobPostingType.FULL_TIME}
+            or probabilities.keys() != _DECISION_CRITERIA.keys()
+            or any(not 0 <= value <= 1 for value in probabilities.values())
+            or not math.isclose(sum(probabilities.values()), 1.0, abs_tol=0.01)
+        ):
+            return None
+        probability = probabilities[posting_type]
+        if probability < _DECISION_MIN_PROBABILITY or probability != max(
+            probabilities.values()
+        ):
+            return None
+        heuristic = classify_contractor_lead_heuristic(text)
+        if heuristic.posting_type not in {posting_type, JobPostingType.UNKNOWN}:
+            return None
+        return JobLeadClassification(
+            is_contractor_friendly=posting_type is JobPostingType.PART_TIME,
+            posting_type=posting_type,
+            tags=heuristic.tags if heuristic.posting_type is posting_type else [],
+            confidence=probability,
+            confidence_label="high",
+            rationale=f"Employment type classified by {model}.",
+            method="decision_model",
+            apply_url=heuristic.apply_url,
+            contact_email=heuristic.contact_email,
+        )
 
     @staticmethod
     def _messages(comment_text: str) -> list[dict[str, str]]:

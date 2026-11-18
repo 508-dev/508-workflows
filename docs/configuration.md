@@ -268,7 +268,16 @@ intake-completed field unset, and matches resume filenames with
 - `RESUME_AI_MODEL`
 - `JOB_LEAD_CLASSIFIER_ENABLED`
 - `JOB_LEAD_CLASSIFIER_MODEL`
+- `JOB_LEAD_DECISION_MODEL`
 - `JOB_LEAD_CLASSIFIER_TIMEOUT_SECONDS`
+
+Job boards use published employment types when available. To enable hybrid
+classification for unstructured listings, set
+`JOB_LEAD_DECISION_MODEL=typesafe/jev-1.14-20261014` with
+`OPENROUTER_API_KEY`. The worker accepts a single full-time or contract/part-time
+decision at probability 0.90 or above when it agrees with any keyword evidence.
+Mixed, unknown, low-confidence, and longer listings go to the existing chat
+classifier, which falls back to keyword matching if unavailable.
 
 Resume/profile LLM calls retry matching direct providers after Bifrost request
 failures when direct provider credentials are configured.
