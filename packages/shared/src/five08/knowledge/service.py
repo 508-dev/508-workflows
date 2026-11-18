@@ -91,12 +91,14 @@ class KnowledgeService:
         settings: SharedSettings,
         store: KnowledgeStore,
         model: KnowledgeModel | None = None,
+        research_model: KnowledgeModel | None = None,
         sources: KnowledgeSourceAdapters | None = None,
         policy: PolicyEngine | None = None,
     ) -> None:
         self.settings = settings
         self.store = store
         self.model = model
+        self.research_model = research_model
         self.sources = sources or KnowledgeSourceAdapters(settings)
         self.policy = policy or PolicyEngine()
 
@@ -391,6 +393,7 @@ class KnowledgeService:
                 ),
             )
 
+        model = self.research_model if research else self.model
         source_errors: list[str] = list(request.source_errors)
         actor_emails: list[str] = []
         accessible_project_ids: list[str] = []
@@ -399,9 +402,9 @@ class KnowledgeService:
             float(getattr(self.settings, "knowledge_source_timeout_seconds", 6.0)),
         )
         plan: KnowledgeResearchPlan | None = None
-        if research and self.model is not None:
+        if research and model is not None:
             try:
-                plan = self.model.plan_research(question=request.question)
+                plan = model.plan_research(question=request.question)
             except Exception:
                 source_errors.append("research planning failed")
 
@@ -486,7 +489,7 @@ class KnowledgeService:
         evidence.extend(self._collect_evidence(searches, deadline, source_errors))
         evidence = self._rank_evidence(evidence)
         if research:
-            if self.model is not None:
+            if model is not None:
                 evidence = self._expand_research_evidence(
                     evidence,
                     terms=_search_tokens(" ".join([request.question, *wiki_topics])),
@@ -513,9 +516,9 @@ class KnowledgeService:
             return _insufficient_response(source_errors)
 
         draft = None
-        if self.model is not None:
+        if model is not None:
             try:
-                draft = self.model.answer(
+                draft = model.answer(
                     question=request.question,
                     evidence=evidence,
                 )
@@ -525,7 +528,7 @@ class KnowledgeService:
             return _insufficient_response(source_errors)
 
         if draft is None:
-            if research and self.model is not None:
+            if research and model is not None:
                 if "answer synthesis failed" not in source_errors:
                     source_errors.append("answer synthesis unavailable")
                 return _insufficient_response(source_errors)

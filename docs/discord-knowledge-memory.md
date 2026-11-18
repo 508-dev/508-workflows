@@ -76,7 +76,7 @@ read passages from up to two matching published Outline pages, and synthesize
 an answer with citations. CRM contacts and ERPNext projects come from their
 synced records. Use specific person and project names for the best results.
 Admin research replies through `/agent` are ephemeral, and mentions receive a
-DM. The configured knowledge model receives the question and selected excerpts.
+DM. Direct OpenAI receives the question and selected excerpts for admin research.
 Supported requests to change data use the existing agent confirmation flow.
 
 Admins choose Discord sources by name under **Configuration → Knowledge

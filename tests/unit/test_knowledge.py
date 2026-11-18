@@ -257,6 +257,7 @@ def _service(
         store=store,
         sources=sources or _NoExternalSources(),  # type: ignore[arg-type]
         model=model,  # type: ignore[arg-type]
+        research_model=model,  # type: ignore[arg-type]
     )
 
 

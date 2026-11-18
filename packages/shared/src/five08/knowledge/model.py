@@ -138,6 +138,34 @@ class OpenAICompatibleKnowledgeModel:
             ),
         )
 
+    @classmethod
+    def for_admin_research(
+        cls, settings: Any
+    ) -> "OpenAICompatibleKnowledgeModel | None":
+        """Use the direct OpenAI endpoint for private admin research."""
+        if not getattr(settings, "knowledge_model_enabled", True):
+            return None
+        api_key = (getattr(settings, "openai_direct_api_key", None) or "").strip()
+        primary_url = (
+            (getattr(settings, "openai_base_url", None) or "").strip().rstrip("/")
+        )
+        if not api_key and primary_url in {"", DEFAULT_OPENAI_BASE_URL}:
+            api_key = (getattr(settings, "openai_api_key", None) or "").strip()
+        if not api_key:
+            return None
+        return cls(
+            config=AgentModelConfig(
+                openai_model=getattr(
+                    settings, "knowledge_research_model", "gpt-4.1-mini"
+                ),
+                openai_base_url=DEFAULT_OPENAI_BASE_URL,
+                openai_api_key=api_key,
+            ),
+            timeout_seconds=float(
+                getattr(settings, "knowledge_model_timeout_seconds", 6.0)
+            ),
+        )
+
     def extract_candidates(
         self,
         messages: list[KnowledgeDiscordMessage],

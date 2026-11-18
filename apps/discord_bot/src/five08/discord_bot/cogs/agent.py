@@ -17,6 +17,15 @@ from discord import app_commands
 from discord.ext import commands
 
 from five08.agent import AgentIdentityContext, PolicyEngine, ToolRuntimeConfig
+from five08.agent.memory import contains_sensitive_memory_text
+from five08.agent.privacy import contains_private_agent_identifier
+from five08.agent.routing import (
+    JEV_ROUTING_MODEL,
+    JEV_ROUTING_THRESHOLD,
+    Route,
+    RoutingAnswer,
+    request_decision,
+)
 from five08.discord_bot.config import settings
 from five08.discord_bot.utils.audit import DiscordAuditCogMixin
 from five08.discord_bot.utils.knowledge_context import (
@@ -120,6 +129,11 @@ _KNOWLEDGE_RESEARCH_RE = re.compile(
     r"(?:research|investigate|summarize|compare|explain|tell me about|"
     r"look into|check|give me (?:a summary|an overview) of|"
     r"draft (?:a|an) (?:summary|note|checklist|report) (?:of|on|about|for))\s+",
+    re.I,
+)
+_SHADOW_EXCLUDED_RE = re.compile(
+    r"https?://|www\.|<[@#]|\b(?:crm|erp(?:next)?|invoice|contact|e-?mail|"
+    r"billing|password|token|credentials?|account)\b",
     re.I,
 )
 _ORGANIZATION_AUDIENCE_ROLE_NAMES = frozenset(
@@ -661,6 +675,8 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         self.bot = bot
         self._init_audit_logger()
         self._mention_request_timestamps: dict[int, list[float]] = {}
+        self._route_shadow_task: asyncio.Task[None] | None = None
+        self._route_shadow_next_at = 0.0
 
     @app_commands.command(
         name="agent",
@@ -694,7 +710,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             await interaction.followup.send(local_response, ephemeral=True)
             return
 
-        route = self._agent_request_route(request)
+        route = self._route_agent_request(request, transport="slash")
         if route == "job_search":
             content = await self._search_jobs_for_member(
                 guild=interaction.guild,
@@ -916,7 +932,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             )
             return
 
-        route = self._agent_request_route(request)
+        route = self._route_agent_request(request, transport="mention")
         if route == "job_search":
             async with message.channel.typing():
                 content = await self._search_jobs_for_member(
@@ -1093,10 +1109,73 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         )
         return has_action and has_target
 
+    def _route_agent_request(self, request: str, *, transport: str) -> Route:
+        route = self._agent_request_route(request)
+        if not settings.agent_routing_shadow_enabled or route != "workflow":
+            return route
+        api_key = (settings.openrouter_api_key or "").strip()
+        if (
+            not api_key
+            or not 12 <= len(request) <= 500
+            or len(request.split()) < 3
+            or _AGENT_ACTION_RE.search(request)
+            or _AGENT_LIVE_WORKFLOW_RE.search(request)
+            or _EXPLICIT_AGENT_READ_RE.search(request)
+            or _CRM_CONTACT_LOOKUP_RE.match(request)
+            or _SHADOW_EXCLUDED_RE.search(request)
+            or contains_sensitive_memory_text(request)
+            or contains_private_agent_identifier(request)
+        ):
+            return route
+
+        shadow_task = getattr(self, "_route_shadow_task", None)
+        now = time.monotonic()
+        if (shadow_task is not None and not shadow_task.done()) or now < getattr(
+            self, "_route_shadow_next_at", 0.0
+        ):
+            return route
+        self._route_shadow_next_at = now + 10.0
+        self._route_shadow_task = asyncio.create_task(
+            self._observe_agent_route(
+                request, route=route, transport=transport, api_key=api_key
+            )
+        )
+        return route
+
+    @staticmethod
+    async def _observe_agent_route(
+        request: str, *, route: Route, transport: str, api_key: str
+    ) -> None:
+        started = time.monotonic()
+        try:
+            payload = await asyncio.to_thread(
+                request_decision, JEV_ROUTING_MODEL, request, api_key
+            )
+            answer = RoutingAnswer.model_validate(payload["answers"]["route"])
+            score = answer.probabilities[answer.choice]
+        except (requests.RequestException, ValueError, TypeError, LookupError) as exc:
+            logger.info(
+                "Agent routing shadow failed transport=%s rule_route=%s error=%s",
+                transport,
+                route,
+                type(exc).__name__,
+            )
+            return
+        logger.info(
+            "Agent routing shadow transport=%s rule_route=%s model_route=%s "
+            "score=%.3f accepted=%s latency_ms=%d",
+            transport,
+            route,
+            answer.choice,
+            score,
+            answer.choice != "abstain" and score >= JEV_ROUTING_THRESHOLD,
+            round((time.monotonic() - started) * 1_000),
+        )
+
     @staticmethod
     def _agent_request_route(
         request: str,
-    ) -> Literal["job_search", "knowledge_question", "workflow"]:
+    ) -> Route:
         """Choose the natural-language handler after capture and local replies."""
         if _CRM_CONTACT_LOOKUP_RE.match(request) or _EXPLICIT_AGENT_READ_RE.search(
             request

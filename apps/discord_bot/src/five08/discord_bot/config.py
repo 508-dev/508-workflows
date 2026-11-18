@@ -123,6 +123,7 @@ class Settings(SharedSettings):
     openai_direct_model: str | None = None
     fireworks_api_key: str | None = None
     openrouter_api_key: str | None = None
+    agent_routing_shadow_enabled: bool = False
     agent_fallback_model: str = "gpt-4.1-mini"
     resume_ai_api_key: str | None = None
     resume_ai_base_url: str | None = None

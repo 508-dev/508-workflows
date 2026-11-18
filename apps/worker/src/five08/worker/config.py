@@ -79,6 +79,7 @@ class WorkerSettings(SharedSettings):
     )
     openai_direct_base_url: str | None = None
     openai_direct_model: str | None = None
+    knowledge_research_model: str = Field(default="gpt-4.1-mini", min_length=1)
     fireworks_api_key: str | None = None
     openrouter_api_key: str | None = None
     # OMP authoring is intentionally remote-only. The worker must never exec
