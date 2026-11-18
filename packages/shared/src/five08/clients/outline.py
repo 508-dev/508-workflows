@@ -184,14 +184,15 @@ class OutlineClient:
             },
         )
 
-    def get_document(self, *, document_id: str) -> OutlineDocument:
-        """Return one complete document, including its Markdown text and revision."""
-        return self._response_document(
-            self.request(
-                "documents.info",
-                {"id": self._required_identifier(document_id, "document ID")},
-            )
+    def get_document(
+        self, *, document_id: str, published_only: bool = False
+    ) -> OutlineDocument:
+        """Return one document and optionally require active publication."""
+        response = self.request(
+            "documents.info",
+            {"id": self._required_identifier(document_id, "document ID")},
         )
+        return self._response_document(response, published_only=published_only)
 
     def create_document(
         self,
@@ -393,7 +394,9 @@ class OutlineClient:
             updated_at=updated_at or None,
         )
 
-    def _response_document(self, response: dict[str, Any]) -> OutlineDocument:
+    def _response_document(
+        self, response: dict[str, Any], *, published_only: bool = False
+    ) -> OutlineDocument:
         """Validate the document object returned by an Outline document endpoint."""
         raw_document = response.get("data")
         if isinstance(raw_document, dict) and isinstance(
@@ -402,6 +405,13 @@ class OutlineClient:
             raw_document = raw_document["document"]
         if not isinstance(raw_document, dict):
             raise OutlineAPIError("Outline document payload must include an object.")
+
+        if published_only and (
+            not raw_document.get("publishedAt")
+            or raw_document.get("archivedAt")
+            or raw_document.get("deletedAt")
+        ):
+            raise OutlineAPIError("Outline document is unavailable or unpublished.")
 
         document_id = self._response_identifier(raw_document, "id", "ID")
         raw_url = raw_document.get("url")

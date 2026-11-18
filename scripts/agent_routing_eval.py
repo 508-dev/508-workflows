@@ -161,7 +161,7 @@ def run_comparison(
     rows = []
     all_models = [*models, *chat_models]
     for case in cases:
-        rules = AgentCog._mention_workflow_route(case.message)
+        rules = AgentCog._agent_request_route(case.message)
         row = {**case.model_dump(), "rules": rules, "candidates": {}}
         for model in all_models:
             started = time.perf_counter()

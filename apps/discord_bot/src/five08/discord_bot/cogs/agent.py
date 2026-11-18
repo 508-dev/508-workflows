@@ -105,6 +105,23 @@ _AGENT_LIVE_WORKFLOW_RE = re.compile(
     r"onboarding\s+queue|unlinked\s+(?:discord\s+)?members?)\b",
     re.I,
 )
+_EXPLICIT_AGENT_READ_RE = re.compile(
+    r"^(?:(?:can|could|would) you (?:please )?|please )?(?:"
+    r"(?:search|look up|lookup|research)\s+(?:the\s+)?(?:web|internet|online)\b"
+    r"|(?:google|search online)\b"
+    r"|(?:read|fetch|open|extract|summarize)\s+https?://"
+    r"|(?:search|find|list|show|view|lookup|get)\s+"
+    r"(?:(?:sales|purchase)\s+invoices?|(?:erp(?:next)?\s+)?suppliers?|"
+    r"erp(?:next)?\s+projects?)\b)",
+    re.I,
+)
+_KNOWLEDGE_RESEARCH_RE = re.compile(
+    r"^(?:(?:can|could|would) you (?:please )?|please )?"
+    r"(?:research|investigate|summarize|compare|explain|tell me about|"
+    r"look into|check|give me (?:a summary|an overview) of|"
+    r"draft (?:a|an) (?:summary|note|checklist|report) (?:of|on|about|for))\s+",
+    re.I,
+)
 _ORGANIZATION_AUDIENCE_ROLE_NAMES = frozenset(
     {
         "admin",
@@ -647,9 +664,9 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
 
     @app_commands.command(
         name="agent",
-        description="Run an approved English workflow through the agent gateway",
+        description="Ask a question or request work in plain language",
     )
-    @app_commands.describe(request="The workflow to plan or execute")
+    @app_commands.describe(request="Your question or request")
     async def agent_command(
         self,
         interaction: discord.Interaction,
@@ -677,7 +694,8 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             await interaction.followup.send(local_response, ephemeral=True)
             return
 
-        if self._is_job_search_request(request):
+        route = self._agent_request_route(request)
+        if route == "job_search":
             content = await self._search_jobs_for_member(
                 guild=interaction.guild,
                 member=interaction.user,
@@ -688,6 +706,10 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                 ephemeral=True,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
+            return
+
+        if route == "knowledge_question":
+            await self._answer_knowledge_interaction(interaction, request, agent=True)
             return
 
         context = self._build_agent_context(interaction)
@@ -760,11 +782,17 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
     ) -> None:
         """Ask the backend knowledge service and keep the result private."""
         await interaction.response.defer(ephemeral=True)
+        await self._answer_knowledge_interaction(interaction, question)
+
+    async def _answer_knowledge_interaction(
+        self, interaction: discord.Interaction, question: str, *, agent: bool = False
+    ) -> None:
         context = self._build_agent_context(interaction)
         try:
             response = await self._post_knowledge_query(
                 question=question,
                 context=context,
+                agent=agent,
             )
         except Exception:
             logger.warning("Knowledge query request failed", exc_info=True)
@@ -793,6 +821,8 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         await interaction.followup.send(
             self._format_knowledge_query_response(response),
             ephemeral=True,
+            allowed_mentions=NO_MENTIONS,
+            suppress_embeds=True,
         )
 
     @app_commands.command(
@@ -886,7 +916,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             )
             return
 
-        route = self._mention_workflow_route(request)
+        route = self._agent_request_route(request)
         if route == "job_search":
             async with message.channel.typing():
                 content = await self._search_jobs_for_member(
@@ -1064,11 +1094,13 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         return has_action and has_target
 
     @staticmethod
-    def _mention_workflow_route(
+    def _agent_request_route(
         request: str,
     ) -> Literal["job_search", "knowledge_question", "workflow"]:
-        """Choose the mention handler after capture and local replies."""
-        if _CRM_CONTACT_LOOKUP_RE.match(request):
+        """Choose the natural-language handler after capture and local replies."""
+        if _CRM_CONTACT_LOOKUP_RE.match(request) or _EXPLICIT_AGENT_READ_RE.search(
+            request
+        ):
             return "workflow"
         if _JOB_POSTING_DOC_LOOKUP_RE.fullmatch(
             request
@@ -1102,6 +1134,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         return (
             normalized.endswith("?")
             or _KNOWLEDGE_QUESTION_RE.search(normalized) is not None
+            or _KNOWLEDGE_RESEARCH_RE.match(normalized) is not None
         )
 
     async def _handle_knowledge_capture_mention(
@@ -1230,6 +1263,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                 response = await self._post_knowledge_query(
                     question=question,
                     context=context,
+                    agent=True,
                 )
         except Exception:
             logger.warning("Knowledge query request failed", exc_info=True)
@@ -1269,7 +1303,9 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             )
             return
         try:
-            await message.author.send(formatted)
+            await message.author.send(
+                formatted, allowed_mentions=NO_MENTIONS, suppress_embeds=True
+            )
         except discord.HTTPException:
             logger.warning(
                 "Failed sending knowledge answer by DM user=%s",
@@ -1277,7 +1313,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                 exc_info=True,
             )
             await message.reply(
-                "I found a private result but couldn't DM you. Use `/ask` instead.",
+                "I found a private result but couldn't DM you. Use `/agent` instead.",
                 mention_author=False,
             )
             return
@@ -2295,6 +2331,7 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         *,
         question: str,
         context: dict[str, Any],
+        agent: bool = False,
     ) -> dict[str, Any]:
         sources: list[dict[str, Any]] = []
         source_errors: list[str] = []
@@ -2303,6 +2340,8 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                 self.bot, settings, context, question
             )
         payload: dict[str, Any] = {"question": question, "context": context}
+        if agent:
+            payload["mode"] = "agent"
         if sources:
             payload["discord_sources"] = sources
         if source_errors:
@@ -2313,8 +2352,11 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
             payload,
             max(
                 settings.knowledge_api_timeout_seconds,
-                settings.knowledge_source_timeout_seconds
-                + settings.knowledge_model_timeout_seconds
+                (2 if agent else 1)
+                * (
+                    settings.knowledge_source_timeout_seconds
+                    + settings.knowledge_model_timeout_seconds
+                )
                 + 1.0,
             ),
         )

@@ -68,6 +68,17 @@ such as `@bot I forgot, does our main website auto deploy?` does not require
 - ERPNext project cache rows filtered by the caller's CRM-linked project roster
 - CRM people data only when the caller has the existing CRM read scope
 
+Admins can ask a question or give a research brief through `/agent` or by
+mentioning the bot. For example, “Compare Alex’s CRM onboarding status with
+the wiki’s onboarding checklist and tell me how Project Atlas is doing.”
+The backend can split the question into up to two searches per integration,
+read passages from up to two matching published Outline pages, and synthesize
+an answer with citations. CRM contacts and ERPNext projects come from their
+synced records. Use specific person and project names for the best results.
+Admin research replies through `/agent` are ephemeral, and mentions receive a
+DM. The configured knowledge model receives the question and selected excerpts.
+Supported requests to change data use the existing agent confirmation flow.
+
 Admins choose Discord sources by name under **Configuration → Knowledge
 sources**. The picker shows only channels the bot can currently view and read,
 limits the selection to eight, and validates access again when saving. A source

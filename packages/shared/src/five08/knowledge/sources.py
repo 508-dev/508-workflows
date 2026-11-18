@@ -5,10 +5,11 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import quote
 
 from psycopg.rows import dict_row
 
-from five08.clients.outline import OutlineClient
+from five08.clients.outline import OutlineAPIError, OutlineClient
 from five08.knowledge.models import KnowledgeEvidence
 from five08.projects import list_dashboard_projects
 from five08.queue import get_postgres_connection
@@ -156,20 +157,9 @@ class KnowledgeSourceAdapters:
         *,
         limit: int = 5,
     ) -> list[KnowledgeEvidence]:
-        api_key = (self.settings.outline_contents_api_key or "").strip()
-        if not api_key:
+        client = self._outline_client()
+        if client is None:
             return []
-        client = OutlineClient(
-            api_key=api_key,
-            base_url=self.settings.outline_base_url,
-            timeout_seconds=max(
-                1.0,
-                min(
-                    float(self.settings.outline_api_timeout_seconds),
-                    float(self.settings.knowledge_source_timeout_seconds),
-                ),
-            ),
-        )
         results = client.search_documents(query=question[:200], limit=limit)
         return [
             KnowledgeEvidence(
@@ -187,6 +177,55 @@ class KnowledgeSourceAdapters:
             for result in results
         ]
 
+    def _outline_client(self) -> OutlineClient | None:
+        api_key = (self.settings.outline_contents_api_key or "").strip()
+        if not api_key:
+            return None
+        return OutlineClient(
+            api_key=api_key,
+            base_url=self.settings.outline_base_url,
+            timeout_seconds=max(
+                1.0,
+                min(
+                    float(self.settings.outline_api_timeout_seconds),
+                    float(self.settings.knowledge_source_timeout_seconds),
+                ),
+            ),
+        )
+
+    def expand_outline(
+        self, evidence: KnowledgeEvidence, *, terms: set[str]
+    ) -> KnowledgeEvidence:
+        """Expand one authorized search hit with a relevant published passage."""
+        client = self._outline_client()
+        if client is None or evidence.source_type != "outline":
+            raise OutlineAPIError("Outline search evidence is required.")
+        document = client.get_document(
+            document_id=evidence.source_ref, published_only=True
+        )
+        if document.id != evidence.source_ref:
+            raise OutlineAPIError("Outline returned a different document.")
+        # Choose a contiguous passage near the strongest matching line so the
+        # answer can use nearby steps and exceptions omitted by search snippets.
+        lines = document.text[:80_000].splitlines(keepends=True)
+        if not lines:
+            return evidence
+        index = max(
+            range(len(lines)),
+            key=lambda i: len(
+                terms.intersection(re.findall(r"\w+", lines[i].casefold()))
+            ),
+        )
+        excerpt = "".join(lines[max(0, index - 2) : index + 12]).strip()[:1600]
+        if not excerpt:
+            return evidence
+        return evidence.model_copy(
+            update={
+                "excerpt": excerpt,
+                "updated_at": _parse_datetime(document.updated_at),
+            }
+        )
+
     def search_erp_projects(
         self,
         question: str,
@@ -200,6 +239,21 @@ class KnowledgeSourceAdapters:
         query = _project_query(question)
         if query is None and re.search(r"\bproject(?:'s)?\b", question, re.I):
             return []
+        return self.search_erp_project_name(
+            query,
+            actor_emails=actor_emails,
+            include_all=include_all,
+            limit=limit,
+        )
+
+    def search_erp_project_name(
+        self,
+        query: str | None,
+        *,
+        actor_emails: list[str],
+        include_all: bool,
+        limit: int = 5,
+    ) -> list[KnowledgeEvidence]:
         rows = list_dashboard_projects(
             self.settings,
             query=query,
@@ -227,9 +281,14 @@ class KnowledgeSourceAdapters:
                 if value is not None and str(value).strip():
                     details.append(f"{label}: {value}")
             project_id = str(row.get("id") or row.get("erpnext_project_id") or "")
+            source_id = str(row.get("erpnext_project_id") or "")
+            base_url = (self.settings.erpnext_base_url or "").rstrip("/")
             evidence.append(
                 KnowledgeEvidence(
                     evidence_id=f"erpnext:{project_id}",
+                    url=f"{base_url}/app/project/{quote(source_id, safe='')}"
+                    if base_url and source_id
+                    else None,
                     source_type="erpnext",
                     source_ref=(
                         f"erpnext:project:{row.get('erpnext_project_id') or project_id}"
@@ -255,6 +314,15 @@ class KnowledgeSourceAdapters:
         query = _person_query(question)
         if not query:
             return []
+        return self.search_crm_contact(query, limit=limit)
+
+    def search_crm_contact(
+        self,
+        query: str,
+        *,
+        limit: int = 5,
+        include_contact_details: bool = True,
+    ) -> list[KnowledgeEvidence]:
         token = f"%{query}%"
         with self._connection() as conn:
             with conn.cursor(row_factory=dict_row) as cursor:
@@ -287,7 +355,16 @@ class KnowledgeSourceAdapters:
                     (token, token, token, token, token, max(2, min(limit, 10))),
                 )
                 rows = cursor.fetchall()
-        return [_crm_evidence(row) for row in _unambiguous_crm_rows(rows, query)]
+        return [
+            _crm_evidence(
+                row,
+                base_url=(getattr(self.settings, "espo_base_url", "") or "")
+                .rstrip("/")
+                .removesuffix("/api/v1"),
+                include_contact_details=include_contact_details,
+            )
+            for row in _unambiguous_crm_rows(rows, query)
+        ]
 
 
 def _project_query(question: str) -> str | None:
@@ -368,7 +445,9 @@ def _unambiguous_crm_rows(
     return rows
 
 
-def _crm_evidence(row: dict[str, Any]) -> KnowledgeEvidence:
+def _crm_evidence(
+    row: dict[str, Any], *, base_url: str, include_contact_details: bool
+) -> KnowledgeEvidence:
     name = str(row.get("name") or "CRM contact")
     fields = [f"Name: {name}"]
     for label, key in (
@@ -381,6 +460,13 @@ def _crm_evidence(row: dict[str, Any]) -> KnowledgeEvidence:
         ("Member", "is_member"),
         ("Skills", "skills"),
     ):
+        if not include_contact_details and key in {
+            "email",
+            "email_508",
+            "discord_username",
+            "github_username",
+        }:
+            continue
         value = row.get(key)
         if value is not None and value != "" and value != []:
             if isinstance(value, list):
@@ -393,6 +479,9 @@ def _crm_evidence(row: dict[str, Any]) -> KnowledgeEvidence:
         evidence_id=f"crm:{contact_id}",
         source_type="crm",
         source_ref=f"crm:contact:{contact_id}",
+        url=f"{base_url}/#Contact/view/{quote(contact_id, safe='')}"
+        if base_url and contact_id != "unknown"
+        else None,
         title=name[:300],
         excerpt="; ".join(fields)[:4000],
         visibility="private",
