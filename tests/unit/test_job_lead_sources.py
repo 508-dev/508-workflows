@@ -6,6 +6,8 @@ import json
 from datetime import datetime, timezone
 from io import BytesIO
 from types import SimpleNamespace
+from unittest.mock import Mock
+from urllib.error import HTTPError
 
 import pytest
 
@@ -24,6 +26,124 @@ from five08.job_lead_sources import (
 )
 from five08.job_channels import JobPostingType
 from five08.job_leads import JobLeadInput
+
+
+@pytest.mark.parametrize(
+    ("source", "origin", "paths"),
+    [
+        (
+            "tokyodev",
+            "https://www.tokyodev.com",
+            [
+                "/companies/acme/jobs/full",
+                "/companies/acme/jobs/contract",
+                "/companies/acme/jobs/mixed",
+            ],
+        ),
+        (
+            "japan_dev",
+            "https://japan-dev.com",
+            ["/jobs/acme/full", "/jobs/acme/contract", "/jobs/acme/mixed"],
+        ),
+    ],
+)
+def test_japan_board_scrape_persists_each_employment_type(
+    monkeypatch, source: str, origin: str, paths: list[str]
+) -> None:
+    urls = [f"{origin}{path}" for path in paths]
+    irrelevant_path = paths[0].rsplit("/", 1)[0] + "/sales"
+    irrelevant_url = f"{origin}{irrelevant_path}"
+    sitemap_urls = urls if source == "tokyodev" else urls[1:]
+    sitemap = (
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+        + "".join(
+            f"<url><loc>{url}</loc></url>"
+            for url in [*sitemap_urls, irrelevant_url, f"{origin}/jobs"]
+        )
+        + "</urlset>"
+    )
+    documents = {
+        job_lead_sources._JOB_BOARD_SITEMAPS[source]: sitemap,
+        f"{origin}/jobs": f'<a href="{paths[0]}?ref=list">New job</a>',
+    }
+    for url, label in zip(
+        urls, ["FULL_TIME", "CONTRACTOR", ["FULL_TIME", "PART_TIME"]], strict=True
+    ):
+        posting = {
+            "@type": "JobPosting",
+            "title": "Software Engineer",
+            "description": "<p>Build products and manage customer contracts.</p>",
+            "employmentType": label,
+            "hiringOrganization": {"name": "Acme"},
+        }
+        documents[url] = (
+            f'<script type="application/ld+json">{json.dumps({"@graph": [posting]})}</script>'
+        )
+    documents[irrelevant_url] = documents[urls[0]].replace(
+        "Software Engineer", "Sales Manager"
+    )
+    monkeypatch.setattr(
+        job_lead_sources.JapanJobBoardLeadSource,
+        "_fetch",
+        staticmethod(documents.__getitem__),
+    )
+    classifier = Mock()
+    monkeypatch.setattr(job_lead_sources, "JobLeadClassifier", lambda **_: classifier)
+    monkeypatch.setattr(
+        job_lead_sources,
+        "existing_job_lead_external_ids",
+        lambda *args, **kwargs: set(),
+    )
+    persist = Mock(side_effect=[("one", True), ("two", True), ("three", True)])
+    monkeypatch.setattr(job_lead_sources, "upsert_job_lead", persist)
+
+    cleanup = Mock(return_value=0)
+    monkeypatch.setattr(
+        job_lead_sources, "reject_unreviewed_irrelevant_job_leads", cleanup
+    )
+    result = job_lead_sources.scrape_job_leads(SimpleNamespace(), source=source)  # type: ignore[arg-type]
+
+    assert result["created"] == result["included"] == 3
+    assert result["potential_gigs_scraped"] == 4
+    assert result["filter_reasons"] == {"expired": 0, "irrelevant_role": 1}
+    assert cleanup.call_args.kwargs["current_irrelevant_external_ids"] == {
+        irrelevant_path
+    }
+    leads = [call.args[1] for call in persist.call_args_list]
+    assert [lead.source_url for lead in leads] == urls
+    assert [lead.posting_type for lead in leads] == [
+        JobPostingType.FULL_TIME,
+        JobPostingType.PART_TIME,
+        JobPostingType.PART_TIME_OR_FULL_TIME,
+    ]
+    assert (
+        leads[0].metadata["contractor_classification"]["is_contractor_friendly"]
+        is False
+    )
+    classifier.classify.assert_not_called()
+
+
+def test_tokyodev_blocked_details_fail_the_scrape(monkeypatch) -> None:
+    source = job_lead_sources.JapanJobBoardLeadSource("tokyodev")
+    url = "https://www.tokyodev.com/companies/acme/jobs/engineer"
+    monkeypatch.setattr(source, "_posting_urls", lambda: [url])
+    monkeypatch.setattr(
+        source, "_fetch", Mock(side_effect=HTTPError(url, 403, "Forbidden", {}, None))
+    )
+
+    with pytest.raises(RuntimeError, match="tokyodev job page returned HTTP 403"):
+        source.collect()
+
+
+def test_board_full_time_metadata_can_omit_an_explicit_contractor_option() -> None:
+    classification = job_lead_sources._board_classification(
+        "FULL_TIME",
+        "Full-time role. If preferred, you can start with reduced hours as a contractor.",
+        None,
+    )
+
+    assert classification.posting_type is JobPostingType.PART_TIME_OR_FULL_TIME
+    assert classification.tags == ["contract", "full-time"]
 
 
 class _FakeHackerNewsClient:

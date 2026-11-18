@@ -5214,10 +5214,18 @@ def test_dashboard_job_leads_all_statuses_omits_status_filter(
         ),
         patch("five08.backend.api.list_job_leads", return_value=[]) as mock_leads,
     ):
-        response = client.get("/dashboard/api/gig-leads?status=all")
+        response = client.get(
+            "/dashboard/api/gig-leads?status=all&source=japan_dev&posting_type=full_time"
+        )
 
     assert response.status_code == 200
-    mock_leads.assert_called_once_with(api.settings, status=None, limit=50)
+    mock_leads.assert_called_once_with(
+        api.settings,
+        status=None,
+        limit=50,
+        source_key="japan_dev",
+        posting_type=JobPostingType.FULL_TIME,
+    )
 
 
 def test_dashboard_job_leads_requires_steering_viewer(client: TestClient) -> None:
@@ -5575,8 +5583,14 @@ def test_dashboard_review_job_lead_requires_steering(
     mock_review.assert_not_called()
 
 
-def test_dashboard_sync_job_leads_enqueues_hacker_news_scrape(
+@pytest.mark.parametrize(
+    ("source", "story_id"),
+    [("hackernews_who_is_hiring", 48357725), ("tokyodev", None), ("japan_dev", None)],
+)
+def test_dashboard_sync_job_leads_enqueues_scrape(
     client: TestClient,
+    source: str,
+    story_id: int | None,
 ) -> None:
     session = _dashboard_write_session()
 
@@ -5594,22 +5608,22 @@ def test_dashboard_sync_job_leads_enqueues_hacker_news_scrape(
     ):
         response = client.post(
             "/dashboard/api/gig-leads/sync",
-            json={"source": "hackernews_who_is_hiring", "story_id": 48357725},
+            json={"source": source, "story_id": story_id},
         )
 
     assert response.status_code == 202
     assert response.json()["job_id"] == "job-leads-1"
-    assert response.json()["source"] == "hackernews_who_is_hiring"
-    assert response.json()["story_id"] == 48357725
+    assert response.json()["source"] == source
+    assert response.json()["story_id"] == story_id
     enqueue_kwargs = mock_enqueue.call_args.kwargs
     assert enqueue_kwargs["queue"] is client.app.state.queue
     assert enqueue_kwargs["fn"] is api.JOB_FUNCTIONS["scrape_job_leads_job"]
     assert enqueue_kwargs["kwargs"] == {
-        "source": "hackernews_who_is_hiring",
-        "story_id": 48357725,
+        "source": source,
+        "story_id": story_id,
     }
     assert enqueue_kwargs["idempotency_key"].startswith(
-        "job-leads:hackernews_who_is_hiring:48357725:"
+        f"job-leads:{source}:{story_id or 'latest'}:"
     )
     audit_payload = mock_insert.call_args.args[1]
     assert audit_payload.source == api.AuditSource.ADMIN_DASHBOARD
@@ -5618,9 +5632,9 @@ def test_dashboard_sync_job_leads_enqueues_hacker_news_scrape(
     assert audit_payload.actor_provider == api.ActorProvider.DISCORD
     assert audit_payload.actor_subject == "steering-1"
     assert audit_payload.resource_type == "job_lead_source"
-    assert audit_payload.resource_id == "hackernews_who_is_hiring"
+    assert audit_payload.resource_id == source
     assert audit_payload.metadata is not None
-    assert audit_payload.metadata["story_id"] == 48357725
+    assert audit_payload.metadata["story_id"] == story_id
     assert audit_payload.metadata["job_id"] == "job-leads-1"
 
 

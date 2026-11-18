@@ -115,6 +115,7 @@ from five08.job_leads import (
     review_job_lead,
 )
 from five08.job_channels import (
+    JobPostingType,
     list_registered_job_post_channel_configs,
     register_job_post_channel,
     unregister_job_post_channel,
@@ -361,6 +362,8 @@ _JOB_LEAD_SOURCE_ALIASES = {
     "a16z_talent_network": "a16z_talent_network",
     "sequoia": "sequoia_portfolio_ats",
     "sequoia_portfolio_ats": "sequoia_portfolio_ats",
+    "tokyodev": "tokyodev",
+    "japan_dev": "japan_dev",
 }
 
 
@@ -5220,6 +5223,7 @@ async def dashboard_job_leads_handler(
     status: str | None = Query(default="pending"),
     limit: int = Query(default=50, ge=1, le=50),
     source: str | None = Query(default=None),
+    posting_type: JobPostingType | None = Query(default=None),
 ) -> JSONResponse:
     """Return sourced job leads for dashboard review."""
     session, error_response = await _dashboard_session_or_error(
@@ -5237,12 +5241,10 @@ async def dashboard_job_leads_handler(
     normalized_source = source.strip() if source is not None else None
     if normalized_source == "":
         normalized_source = None
-    if normalized_source is not None and normalized_source not in {
-        "hackernews_who_is_hiring",
-        "himalayas_remote_jobs",
-        "a16z_talent_network",
-        "sequoia_portfolio_ats",
-    }:
+    if (
+        normalized_source is not None
+        and normalized_source not in _JOB_LEAD_SOURCE_ALIASES.values()
+    ):
         return JSONResponse({"error": "invalid_source"}, status_code=400)
     if status is None or status.strip().casefold() in {"", "all", "any"}:
         normalized_status = None
@@ -5255,6 +5257,8 @@ async def dashboard_job_leads_handler(
     list_kwargs: dict[str, Any] = {"status": normalized_status, "limit": limit}
     if normalized_source is not None:
         list_kwargs["source_key"] = normalized_source
+    if posting_type is not None:
+        list_kwargs["posting_type"] = posting_type
     leads = await asyncio.to_thread(list_job_leads, settings, **list_kwargs)
     return JSONResponse(
         jsonable_encoder([job_lead_display_payload(lead) for lead in leads])
@@ -5280,13 +5284,10 @@ async def dashboard_job_lead_scrape_status_handler(
 
     normalized_job_id = job_id.strip() if job_id is not None else ""
     normalized_source = source.strip() if source is not None else None
-    if normalized_source not in {
-        None,
-        "hackernews_who_is_hiring",
-        "himalayas_remote_jobs",
-        "a16z_talent_network",
-        "sequoia_portfolio_ats",
-    }:
+    if (
+        normalized_source is not None
+        and normalized_source not in _JOB_LEAD_SOURCE_ALIASES.values()
+    ):
         return JSONResponse({"error": "invalid_source"}, status_code=400)
     if job_id is not None and not normalized_job_id:
         return JSONResponse({"error": "job_id_required"}, status_code=400)

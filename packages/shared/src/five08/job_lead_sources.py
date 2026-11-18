@@ -11,8 +11,9 @@ from datetime import datetime, timezone
 from html.parser import HTMLParser
 from typing import Any, Literal, Protocol
 from urllib.error import HTTPError
-from urllib.parse import quote, urlencode, urlsplit
+from urllib.parse import quote, urlencode, urljoin, urlsplit
 from urllib.request import Request, urlopen
+from xml.etree import ElementTree
 
 from pydantic import BaseModel, ConfigDict, Field
 from lxml import html as lxml_html
@@ -42,6 +43,7 @@ HN_FIREBASE_BASE_URL = "https://hacker-news.firebaseio.com/v0"
 HN_ALGOLIA_BASE_URL = "https://hn.algolia.com/api/v1"
 HN_WHO_IS_HIRING_SOURCE_KEY = "hackernews_who_is_hiring"
 HN_WHO_IS_HIRING_SOURCE_TYPE = "hackernews"
+JAPAN_JOB_BOARD_SOURCES = frozenset({"tokyodev", "japan_dev"})
 HIMALAYAS_SOURCE_KEY = "himalayas_remote_jobs"
 HIMALAYAS_API_URL = "https://himalayas.app/jobs/api/search"
 HIMALAYAS_MAX_PAGES = 5
@@ -317,7 +319,7 @@ class JobLeadClassification:
     confidence: float
     confidence_label: Literal["high", "medium", "low"]
     rationale: str
-    method: Literal["llm", "heuristic"]
+    method: Literal["llm", "heuristic", "source"]
     apply_url: str | None = None
     contact_email: str | None = None
 
@@ -760,13 +762,15 @@ class JobLeadClassifier:
             {
                 "role": "system",
                 "content": (
-                    "You classify Hacker News 'Who is hiring?' employer posts for "
+                    "You classify job listings and Hacker News 'Who is hiring?' employer posts for "
                     "508.dev job-lead review. Return JSON only. A contractor-friendly "
                     "lead explicitly allows contract, contractor, 1099, freelance, "
                     "consulting, fractional, part-time, B2B contracting, or both "
                     "full-time and contract arrangements. Reject full-time employee-only "
-                    "roles, generic company B2B descriptions, replies, and SEEKING WORK "
-                    "comments. Prefer explicit evidence over inference. Tags must be "
+                    "roles as contractor leads while still labeling them full_time. "
+                    "Ignore generic company B2B descriptions, replies, and SEEKING WORK "
+                    "comments. Use unknown when employment terms are absent. Prefer "
+                    "explicit evidence over inference. Tags must be "
                     "short lowercase evidence labels such as contract, 1099, freelance, "
                     "consulting, fractional, part-time, full-time, b2b-contracting, "
                     "remote. Also return the best application URL and direct contact "
@@ -776,7 +780,7 @@ class JobLeadClassifier:
             },
             {
                 "role": "user",
-                "content": f"Classify this HN comment:\n\n{comment_text[:12000]}",
+                "content": f"Classify this job listing:\n\n{comment_text[:12000]}",
             },
         ]
 
@@ -1481,6 +1485,232 @@ class SequoiaPortfolioATSLeadSource:
         }
 
 
+_JOB_BOARD_SITEMAPS = {
+    "tokyodev": "https://www.tokyodev.com/sitemap.xml",
+    "japan_dev": "https://japan-dev.com/cdn/sitemaps/sitemap.xml",
+}
+_JOB_BOARD_PATHS = {
+    "tokyodev": re.compile(r"/companies/[^/]+/jobs/[^/]+"),
+    "japan_dev": re.compile(r"/jobs/[^/]+/[^/]+"),
+}
+_JSON_LD_RE = re.compile(
+    r"""<script\b[^>]*\btype=["']application/ld\+json["'][^>]*>(.*?)</script\s*>""",
+    re.IGNORECASE | re.DOTALL,
+)
+_BOARD_EMPLOYMENT_TAGS = {
+    "CONTRACT": "contract",
+    "CONTRACTOR": "contract",
+    "FIXED_TERM": "contract",
+    "FREELANCE": "freelance",
+    "FULL_TIME": "full-time",
+    "PART_TIME": "part-time",
+    "PER_DIEM": "contract",
+    "TEMPORARY": "temporary",
+    "正社員": "full-time",
+    "契約社員": "contract",
+    "業務委託": "contract",
+}
+_OPTIONAL_CONTRACT_START_RE = re.compile(
+    r"\b(?:if (?:you prefer|preferred)|optionally),?\s+"
+    r"(?:you (?:can|may)\s+)?(?:start|join)(?:\s+\w+){0,6}"
+    r"\s+as\s+(?:an?\s+)?(?:independent\s+)?(?:contractor|freelancer)\b",
+    re.IGNORECASE,
+)
+
+
+def _job_posting(document: str) -> dict[str, Any] | None:
+    def find(value: Any) -> dict[str, Any] | None:
+        if isinstance(value, dict):
+            schema_type = value.get("@type")
+            if schema_type == "JobPosting" or (
+                isinstance(schema_type, list) and "JobPosting" in schema_type
+            ):
+                return value
+            return find(value.get("@graph"))
+        if isinstance(value, list):
+            for item in value:
+                if posting := find(item):
+                    return posting
+        return None
+
+    for block in _JSON_LD_RE.findall(document):
+        try:
+            data = json.loads(block)
+        except ValueError:
+            continue
+        if posting := find(data):
+            return posting
+    return None
+
+
+def _board_classification(
+    employment_type: Any, body: str, classifier: JobLeadClassifier | None
+) -> JobLeadClassification:
+    values = employment_type if isinstance(employment_type, list) else [employment_type]
+    labels = [
+        re.sub(r"[\s-]+", "_", value.strip().upper())
+        for value in values
+        if isinstance(value, str) and value.strip()
+    ]
+    tags = {
+        _BOARD_EMPLOYMENT_TAGS[label]
+        for label in labels
+        if label in _BOARD_EMPLOYMENT_TAGS
+    }
+    full_time = "full-time" in tags
+    rationale = f"Source employment type: {', '.join(labels)}."
+    if full_time and _OPTIONAL_CONTRACT_START_RE.search(body):
+        tags.add("contract")
+        rationale += " The listing also explicitly offers a contractor start."
+    flexible = any(tag != "full-time" for tag in tags)
+    if flexible and full_time:
+        posting_type = JobPostingType.PART_TIME_OR_FULL_TIME
+    elif flexible:
+        posting_type = JobPostingType.PART_TIME
+    elif full_time:
+        posting_type = JobPostingType.FULL_TIME
+    elif not labels or all(label == "OTHER" for label in labels):
+        return (
+            classifier.classify(body)
+            if classifier is not None
+            else classify_contractor_lead_heuristic(body)
+        )
+    else:
+        posting_type = JobPostingType.UNKNOWN
+    return JobLeadClassification(
+        is_contractor_friendly=flexible,
+        posting_type=posting_type,
+        tags=sorted(tags),
+        confidence=1.0 if tags else 0.0,
+        confidence_label="high" if tags else "low",
+        rationale=rationale,
+        method="source",
+    )
+
+
+class JapanJobBoardLeadSource:
+    """Collect public JobPosting metadata from a Japanese job board."""
+
+    def __init__(
+        self, source_key: str, classifier: JobLeadClassifier | None = None
+    ) -> None:
+        self.source_key = source_key
+        self.classifier = classifier
+        self.discovered = 0
+        self.removed = 0
+        self.included = 0
+        self.irrelevant_external_ids: set[str] = set()
+
+    @staticmethod
+    def _fetch(url: str) -> str:
+        request = Request(url, headers={"User-Agent": "508-workflows-job-leads/1.0"})
+        with urlopen(request, timeout=15) as response:
+            return response.read().decode("utf-8")
+
+    def _posting_urls(self) -> list[str]:
+        sitemap_url = _JOB_BOARD_SITEMAPS[self.source_key]
+        sitemap = ElementTree.fromstring(self._fetch(sitemap_url))
+        urls = [entry.text or "" for entry in sitemap.findall("{*}url/{*}loc")]
+        if self.source_key == "japan_dev":
+            listing_url = "https://japan-dev.com/jobs"
+            # The board can publish new jobs before they appear in the sitemap.
+            links = re.findall(r"""\bhref=["']([^"']+)["']""", self._fetch(listing_url))
+            urls = [*(urljoin(listing_url, link) for link in links), *urls]
+        host = urlsplit(sitemap_url).netloc
+        path_pattern = _JOB_BOARD_PATHS[self.source_key]
+        paths = dict.fromkeys(
+            parsed.path.rstrip("/")
+            for url in urls
+            if (parsed := urlsplit(url)).scheme == "https"
+            and parsed.netloc == host
+            and path_pattern.fullmatch(parsed.path.rstrip("/"))
+        )
+        return [f"https://{host}{path}" for path in paths]
+
+    def collect(self) -> list[JobLeadInput]:
+        urls = self._posting_urls()
+        self.discovered = len(urls)
+        self.removed = 0
+        self.included = 0
+        self.irrelevant_external_ids.clear()
+        if not urls:
+            raise RuntimeError(f"{self.source_key} discovery returned no job URLs")
+        leads: list[JobLeadInput] = []
+        for url in urls:
+            try:
+                posting = _job_posting(self._fetch(url))
+            except HTTPError as exc:
+                if exc.code in {404, 410}:
+                    self.removed += 1
+                    continue
+                raise RuntimeError(
+                    f"{self.source_key} job page returned HTTP {exc.code}: {url}"
+                ) from exc
+            if posting is None:
+                raise RuntimeError(
+                    f"{self.source_key} job page has no JobPosting data: {url}"
+                )
+            expiry = _parse_datetime(posting.get("validThrough"))
+            if expiry and expiry.date() < datetime.now(timezone.utc).date():
+                self.removed += 1
+                continue
+            title = _clean(posting.get("title"))
+            raw_body = posting.get("description")
+            if (
+                not title
+                or not isinstance(raw_body, str)
+                or not (body := html_to_text(raw_body))
+            ):
+                raise RuntimeError(
+                    f"{self.source_key} job page is missing title or description: {url}"
+                )
+            external_id = urlsplit(url).path
+            if not _title_is_coop_role(title):
+                self.irrelevant_external_ids.add(external_id)
+                continue
+            organization = posting.get("hiringOrganization")
+            classification = _board_classification(
+                posting.get("employmentType"), f"{title}\n{body}", self.classifier
+            )
+            leads.append(
+                JobLeadInput(
+                    source_key=self.source_key,
+                    source_type=self.source_key,
+                    external_id=external_id,
+                    source_url=url,
+                    source_posted_at=_parse_datetime(posting.get("datePosted")),
+                    title=title[:240],
+                    organization=_clean(organization.get("name"))
+                    if isinstance(organization, dict)
+                    else None,
+                    body_raw=raw_body,
+                    body_normalized=body,
+                    posting_type=classification.posting_type,
+                    remote=True
+                    if posting.get("jobLocationType") == "TELECOMMUTE"
+                    else None,
+                    apply_url=url,
+                    tags=classification.tags,
+                    confidence=classification.confidence,
+                    metadata={
+                        "source_employment_type": posting.get("employmentType"),
+                        **_classification_metadata(classification),
+                    },
+                )
+            )
+        self.included = len(leads)
+        return leads
+
+    def collection_report(self) -> dict[str, Any]:
+        irrelevant = len(self.irrelevant_external_ids)
+        return {
+            "potential_gigs_scraped": self.discovered,
+            "included": self.included,
+            "filtered_out": self.removed + irrelevant,
+            "filter_reasons": {"expired": self.removed, "irrelevant_role": irrelevant},
+        }
+
+
 def build_job_lead_source(
     source: str,
     *,
@@ -1508,6 +1738,10 @@ def build_job_lead_source(
         if story_id is not None:
             raise ValueError("story_id is only supported for Hacker News")
         return SequoiaPortfolioATSLeadSource()
+    if normalized in JAPAN_JOB_BOARD_SOURCES:
+        if story_id is not None:
+            raise ValueError("story_id is only supported for Hacker News")
+        return JapanJobBoardLeadSource(normalized, classifier)
     raise ValueError(f"Unsupported job lead source: {source}")
 
 
@@ -1538,10 +1772,12 @@ def scrape_job_leads(
         for key, value in raw_collection_report.items():
             if isinstance(key, str):
                 collection_report[key] = value
+    contractor_only = adapter.source_key not in JAPAN_JOB_BOARD_SOURCES
     rejected_external_ids = [
         lead.external_id
         for lead in leads
-        if (lead.metadata or {})
+        if contractor_only
+        and (lead.metadata or {})
         .get("contractor_classification", {})
         .get("is_contractor_friendly")
         is False
@@ -1553,7 +1789,7 @@ def scrape_job_leads(
     )
     for lead in leads:
         classification = (lead.metadata or {}).get("contractor_classification", {})
-        if classification.get("is_contractor_friendly") is False:
+        if contractor_only and classification.get("is_contractor_friendly") is False:
             if lead.external_id not in existing_rejected_ids:
                 continue
             existing_id = update_existing_job_lead(settings, lead)
