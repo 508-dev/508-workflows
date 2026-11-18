@@ -156,6 +156,8 @@ def run_comparison(
     chat_models: tuple[str, ...] = (),
     direct_openai: bool = False,
 ) -> dict:
+    if direct_openai and models:
+        raise ValueError("Direct OpenAI runs cannot include OpenRouter models")
     rows = []
     all_models = [*models, *chat_models]
     for case in cases:

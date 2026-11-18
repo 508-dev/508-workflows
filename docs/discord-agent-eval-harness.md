@@ -163,5 +163,16 @@ suite above measures workflow drafting and can use the configured provider
 directly.
 
 See the [chat baseline comparison](../tests/evals/discord-agent/artifacts/mention-chat-baselines-2026-11-19/README.md)
-for the repeat Jev result, the Kimi K2.6 metrics, and the GPT-4.1 mini provider
-block.
+for the repeat Jev result and the Kimi K2.6 and direct GPT-4.1 mini metrics.
+
+To benchmark GPT-4.1 mini against the direct OpenAI endpoint, run it
+separately with `OPENAI_API_KEY` configured:
+
+```bash
+uv run --locked python scripts/agent_routing_eval.py --live \
+  --openai-chat-model gpt-4.1-mini
+```
+
+Direct OpenAI returns token usage. The comparison estimates its cost from
+the published rate card and records OpenRouter's reported cost for the other
+models.

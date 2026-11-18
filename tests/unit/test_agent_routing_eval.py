@@ -129,3 +129,19 @@ def test_direct_openai_chat_uses_its_own_endpoint(monkeypatch) -> None:
     assert post.call_args.args == (routing.OPENAI_CHAT_URL,)
     assert "provider" not in post.call_args.kwargs["json"]
     assert post.call_args.kwargs["json"]["model"] == "gpt-4.1-mini"
+
+
+def test_direct_openai_run_rejects_openrouter_models(monkeypatch) -> None:
+    post = Mock()
+    monkeypatch.setattr(routing.requests, "post", post)
+
+    with pytest.raises(ValueError, match="cannot include OpenRouter"):
+        routing.run_comparison(
+            routing.load_cases()[:1],
+            ["typesafe/jev-1.14"],
+            "fake-key",
+            0.85,
+            direct_openai=True,
+        )
+
+    post.assert_not_called()

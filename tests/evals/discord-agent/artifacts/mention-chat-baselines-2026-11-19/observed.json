@@ -1463,6 +1463,511 @@
           }
         }
       ]
+    },
+    "gpt-4.1-mini": {
+      "evaluated_revision": "fd5e6917380bbc05c467f404006ba55d41017df1",
+      "summary": {
+        "endpoint": "openai-direct",
+        "accepted": 31,
+        "correct": 26,
+        "improvements": 4,
+        "regressions": 5,
+        "workflow_sent_elsewhere": 5,
+        "deferred": 1,
+        "p50_latency_ms": 590,
+        "p95_latency_ms": 678,
+        "reported_cost_usd": null,
+        "calls_with_reported_cost": 0,
+        "estimated_cost_usd": 0.003066,
+        "cost_rates_usd_per_million": {
+          "input": "0.40",
+          "cached_input": "0.10",
+          "output": "1.60"
+        },
+        "pricing_source": "https://developers.openai.com/api/docs/models/gpt-4.1-mini"
+      },
+      "observations": [
+        {
+          "id": "job-search-technology",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "gpt-4.1-mini-2025-04-14",
+          "provider": "OpenAI",
+          "choice": "job_search",
+          "latency_ms": 882,
+          "usage": {
+            "prompt_tokens": 215,
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 6
+          }
+        },
+        {
+          "id": "job-search-polite",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "gpt-4.1-mini-2025-04-14",
+          "provider": "OpenAI",
+          "choice": "job_search",
+          "latency_ms": 673,
+          "usage": {
+            "prompt_tokens": 217,
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 6
+          }
+        },
+        {
+          "id": "job-search-location",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "gpt-4.1-mini-2025-04-14",
+          "provider": "OpenAI",
+          "choice": "job_search",
+          "latency_ms": 647,
+          "usage": {
+            "prompt_tokens": 211,
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 6
+          }
+        },
+        {
+          "id": "job-search-send-to-self",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "gpt-4.1-mini-2025-04-14",
+          "provider": "OpenAI",
+          "choice": "job_search",
+          "latency_ms": 548,
+          "usage": {
+            "prompt_tokens": 213,
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 6
+          }
+        },
+        {
+          "id": "job-search-current",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "gpt-4.1-mini-2025-04-14",
+          "provider": "OpenAI",
+          "choice": "job_search",
+          "latency_ms": 554,
+          "usage": {
+            "prompt_tokens": 214,
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 6
+          }
+        },
+        {
+          "id": "job-search-single-post",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "gpt-4.1-mini-2025-04-14",
+          "provider": "OpenAI",
+          "choice": "job_search",
+          "latency_ms": 590,
+          "usage": {
+            "prompt_tokens": 212,
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 6
+          }
+        },
+        {
+          "id": "job-search-gig",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "gpt-4.1-mini-2025-04-14",
+          "provider": "OpenAI",
+          "choice": "job_search",
+          "latency_ms": 676,
+          "usage": {
+            "prompt_tokens": 217,
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 6
+          }
+        },
+        {
+          "id": "job-search-postings",
+          "rules": "job_search",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "gpt-4.1-mini-2025-04-14",
+          "provider": "OpenAI",
+          "choice": "knowledge_question",
+          "latency_ms": 610,
+          "usage": {
+            "prompt_tokens": 217,
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 6
+          }
+        },
+        {
+          "id": "job-search-implicit",
+          "rules": "workflow",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "gpt-4.1-mini-2025-04-14",
+          "provider": "OpenAI",
+          "choice": "job_search",
+          "latency_ms": 471,
+          "usage": {
+            "prompt_tokens": 219,
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 6
+          }
+        },
+        {
+          "id": "job-search-elliptical",
+          "rules": "knowledge_question",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "gpt-4.1-mini-2025-04-14",
+          "provider": "OpenAI",
+          "choice": "job_search",
+          "latency_ms": 659,
+          "usage": {
+            "prompt_tokens": 219,
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 6
+          }
+        },
+        {
+          "id": "knowledge-job-policy",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "gpt-4.1-mini-2025-04-14",
+          "provider": "OpenAI",
+          "choice": "knowledge_question",
+          "latency_ms": 521,
+          "usage": {
+            "prompt_tokens": 217,
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 6
+          }
+        },
+        {
+          "id": "knowledge-gig-guidelines",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "gpt-4.1-mini-2025-04-14",
+          "provider": "OpenAI",
+          "choice": "knowledge_question",
+          "latency_ms": 608,
+          "usage": {
+            "prompt_tokens": 216,
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 6
+          }
+        },
+        {
+          "id": "knowledge-job-guide-command",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "gpt-4.1-mini-2025-04-14",
+          "provider": "OpenAI",
+          "choice": "knowledge_question",
+          "latency_ms": 541,
+          "usage": {
+            "prompt_tokens": 213,
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 6
+          }
+        },
+        {
+          "id": "knowledge-job-policies-recall",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "gpt-4.1-mini-2025-04-14",
+          "provider": "OpenAI",
+          "choice": "knowledge_question",
+          "latency_ms": 479,
+          "usage": {
+            "prompt_tokens": 219,
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 6
+          }
+        },
+        {
+          "id": "knowledge-job-expired-policy",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "gpt-4.1-mini-2025-04-14",
+          "provider": "OpenAI",
+          "choice": "knowledge_question",
+          "latency_ms": 605,
+          "usage": {
+            "prompt_tokens": 216,
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 6
+          }
+        },
+        {
+          "id": "knowledge-onboarding",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "gpt-4.1-mini-2025-04-14",
+          "provider": "OpenAI",
+          "choice": "knowledge_question",
+          "latency_ms": 499,
+          "usage": {
+            "prompt_tokens": 214,
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 6
+          }
+        },
+        {
+          "id": "knowledge-recall",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "gpt-4.1-mini-2025-04-14",
+          "provider": "OpenAI",
+          "choice": "knowledge_question",
+          "latency_ms": 611,
+          "usage": {
+            "prompt_tokens": 217,
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 6
+          }
+        },
+        {
+          "id": "knowledge-job-policy-paraphrase",
+          "rules": "job_search",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "gpt-4.1-mini-2025-04-14",
+          "provider": "OpenAI",
+          "choice": "knowledge_question",
+          "latency_ms": 646,
+          "usage": {
+            "prompt_tokens": 218,
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 6
+          }
+        },
+        {
+          "id": "knowledge-job-process",
+          "rules": "job_search",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "gpt-4.1-mini-2025-04-14",
+          "provider": "OpenAI",
+          "choice": "knowledge_question",
+          "latency_ms": 505,
+          "usage": {
+            "prompt_tokens": 217,
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 6
+          }
+        },
+        {
+          "id": "knowledge-job-sources",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "gpt-4.1-mini-2025-04-14",
+          "provider": "OpenAI",
+          "choice": "knowledge_question",
+          "latency_ms": 512,
+          "usage": {
+            "prompt_tokens": 218,
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 6
+          }
+        },
+        {
+          "id": "workflow-job-task",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "accepted",
+          "model": "gpt-4.1-mini-2025-04-14",
+          "provider": "OpenAI",
+          "choice": "workflow",
+          "latency_ms": 593,
+          "usage": {
+            "prompt_tokens": 219,
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 5
+          }
+        },
+        {
+          "id": "workflow-job-mixed-write",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "accepted",
+          "model": "gpt-4.1-mini-2025-04-14",
+          "provider": "OpenAI",
+          "choice": "workflow",
+          "latency_ms": 547,
+          "usage": {
+            "prompt_tokens": 217,
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 5
+          }
+        },
+        {
+          "id": "workflow-policy-mixed-write",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "accepted",
+          "model": "gpt-4.1-mini-2025-04-14",
+          "provider": "OpenAI",
+          "choice": "workflow",
+          "latency_ms": 635,
+          "usage": {
+            "prompt_tokens": 220,
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 5
+          }
+        },
+        {
+          "id": "workflow-job-publish",
+          "rules": "workflow",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "gpt-4.1-mini-2025-04-14",
+          "provider": "OpenAI",
+          "choice": "job_search",
+          "latency_ms": 563,
+          "usage": {
+            "prompt_tokens": 214,
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 6
+          }
+        },
+        {
+          "id": "workflow-job-forward",
+          "rules": "workflow",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "gpt-4.1-mini-2025-04-14",
+          "provider": "OpenAI",
+          "choice": "job_search",
+          "latency_ms": 643,
+          "usage": {
+            "prompt_tokens": 217,
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 6
+          }
+        },
+        {
+          "id": "workflow-job-todo",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "accepted",
+          "model": "gpt-4.1-mini-2025-04-14",
+          "provider": "OpenAI",
+          "choice": "workflow",
+          "latency_ms": 611,
+          "usage": {
+            "prompt_tokens": 218,
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 5
+          }
+        },
+        {
+          "id": "workflow-job-issue",
+          "rules": "workflow",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "gpt-4.1-mini-2025-04-14",
+          "provider": "OpenAI",
+          "choice": "job_search",
+          "latency_ms": 554,
+          "usage": {
+            "prompt_tokens": 223,
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 6
+          }
+        },
+        {
+          "id": "workflow-job-memory",
+          "rules": "workflow",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "gpt-4.1-mini-2025-04-14",
+          "provider": "OpenAI",
+          "choice": "job_search",
+          "latency_ms": 565,
+          "usage": {
+            "prompt_tokens": 218,
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 6
+          }
+        },
+        {
+          "id": "workflow-task-question",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "accepted",
+          "model": "gpt-4.1-mini-2025-04-14",
+          "provider": "OpenAI",
+          "choice": "workflow",
+          "latency_ms": 505,
+          "usage": {
+            "prompt_tokens": 216,
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 5
+          }
+        },
+        {
+          "id": "workflow-short-followup",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "deferred",
+          "model": "gpt-4.1-mini-2025-04-14",
+          "provider": "OpenAI",
+          "choice": "abstain",
+          "latency_ms": 678,
+          "usage": {
+            "prompt_tokens": 209,
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 7
+          }
+        },
+        {
+          "id": "workflow-cancel",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "accepted",
+          "model": "gpt-4.1-mini-2025-04-14",
+          "provider": "OpenAI",
+          "choice": "workflow",
+          "latency_ms": 545,
+          "usage": {
+            "prompt_tokens": 209,
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 5
+          }
+        },
+        {
+          "id": "workflow-loose-crm",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "gpt-4.1-mini-2025-04-14",
+          "provider": "OpenAI",
+          "choice": "knowledge_question",
+          "latency_ms": 626,
+          "usage": {
+            "prompt_tokens": 218,
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 6
+          }
+        }
+      ]
     }
   }
 }
