@@ -3026,32 +3026,46 @@ function App() {
     if (activeLeadTab === "qualification" && selectedLeadId) void loadJobPostChannels()
   }, [view, permissions, activeLeadTab, selectedLeadId])
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: load the requested lead independently of the queue.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: fetch on navigation and poll only while the server reports active staging.
   useEffect(() => {
-    if (
-      view !== "leads" ||
-      !selectedLeadId ||
-      permissions.length === 0 ||
-      leadDetail?.id === selectedLeadId
-    )
-      return
+    if (view !== "leads" || !selectedLeadId || permissions.length === 0) return
+    const cachedLead = leadDetail?.id === selectedLeadId ? leadDetail : null
+    if (cachedLead && !cachedLead.staging_in_progress) return
+
     const controller = new AbortController()
     const key = `gigLead:${selectedLeadId}:detail`
-    setBusy(key, true)
-    void requestJson<JobLead>(`/dashboard/api/gig-leads/${encodeURIComponent(selectedLeadId)}`, {
-      signal: controller.signal,
-    })
-      .then((lead) => {
-        if (!controller.signal.aborted) setLeadDetail(lead)
-      })
-      .catch((error: unknown) => {
-        if (!controller.signal.aborted) showError(error, "Unable to load lead")
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setBusy(key, false)
-      })
+    let polling = Boolean(cachedLead?.staging_in_progress)
+    let nextPoll: number | undefined
+
+    async function refreshLead() {
+      try {
+        const lead = await requestJson<JobLead>(
+          `/dashboard/api/gig-leads/${encodeURIComponent(selectedLeadId)}`,
+          { signal: controller.signal },
+        )
+        if (controller.signal.aborted) return
+        setLeadDetail(lead)
+        polling = Boolean(lead.staging_in_progress)
+      } catch (error) {
+        if (controller.signal.aborted) return
+        if (error instanceof ApiRequestError && error.status === 404) {
+          setLeadDetail(null)
+          polling = false
+        }
+        if (!polling) showError(error, "Unable to load lead")
+      } finally {
+        if (!controller.signal.aborted) {
+          setBusy(key, false)
+          if (polling) nextPoll = window.setTimeout(refreshLead, 3000)
+        }
+      }
+    }
+
+    setBusy(key, !cachedLead)
+    void refreshLead()
     return () => {
       controller.abort()
+      window.clearTimeout(nextPoll)
       setBusy(key, false)
     }
   }, [view, permissions, selectedLeadId])

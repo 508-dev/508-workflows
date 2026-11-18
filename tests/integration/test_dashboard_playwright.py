@@ -1136,6 +1136,31 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
                 page.get_by_text("small API integration", exact=False)
             ).to_be_visible()
 
+            # A cached in-progress attempt refreshes in place when its reservation ends.
+            job_leads_payload[0].update(
+                staging_in_progress=True,
+                staging_recovery={"guild_id": "guild-1", "thread_id": None},
+            )
+            page.get_by_role("button", name="Back to To post").click()
+            expect(
+                page.locator("#gigLeadsBody").get_by_text(
+                    "Posting to the holding forum…"
+                )
+            ).to_be_visible()
+            with page.expect_response(
+                re.compile(r"/api/gig-leads/55555555-5555-4555-8555-555555555555$")
+            ):
+                page.get_by_role("link", name="Contract React Build").click()
+            expect(
+                page.get_by_role("button", name="Holding thread deleted")
+            ).to_have_count(0)
+            job_leads_payload[0].pop("staging_in_progress")
+            expect(
+                page.get_by_role("button", name="Holding thread deleted")
+            ).to_be_visible()
+            expect(page).to_have_url(lead_url)
+            job_leads_payload[0].pop("staging_recovery")
+
             # A deleted, previously saved holding thread can be reset and reposted.
             job_leads_payload[0].update(
                 staged_discord_guild_id="guild-1",
