@@ -238,6 +238,41 @@ async def test_ask_command_returns_a_private_grounded_answer() -> None:
 
 
 @pytest.mark.asyncio
+async def test_agent_command_researches_an_open_ended_question_privately() -> None:
+    cog = AgentCog.__new__(AgentCog)
+    cog._post_agent_request = AsyncMock()
+    cog._post_knowledge_query = AsyncMock(
+        return_value={
+            "status": "answered",
+            "answer": "Atlas is open.",
+            "citations": [{"source_type": "erpnext", "title": "Atlas"}],
+        }
+    )
+    cog._audit_command_safe = Mock()
+    interaction = SimpleNamespace(
+        id=999,
+        user=SimpleNamespace(id=123, roles=[SimpleNamespace(name="Admin")]),
+        guild_id=456,
+        channel_id=789,
+        channel=SimpleNamespace(id=789),
+        message=None,
+        response=SimpleNamespace(defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+
+    await AgentCog.agent_command.callback(
+        cog,
+        interaction,
+        "Compare the Atlas project with the handoff guidance in the wiki",
+    )
+
+    cog._post_agent_request.assert_not_awaited()
+    assert cog._post_knowledge_query.await_args.kwargs["agent"] is True
+    assert "Atlas is open." in interaction.followup.send.await_args.args[0]
+    assert interaction.followup.send.await_args.kwargs["ephemeral"] is True
+
+
+@pytest.mark.asyncio
 async def test_disabled_knowledge_does_not_collect_discord_history(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -559,6 +594,7 @@ async def test_public_safe_knowledge_question_can_reply_in_channel() -> None:
     await cog.agent_mention(message)
 
     cog._post_knowledge_query.assert_awaited_once()
+    assert cog._post_knowledge_query.await_args.kwargs["agent"] is True
     cog._post_agent_request.assert_not_awaited()
     cog._send_mention_public_response.assert_awaited_once()
     author.send.assert_not_awaited()
@@ -684,3 +720,63 @@ async def test_knowledge_confirmation_keeps_controls_after_backend_outage() -> N
         for item in view.children
     )
     interaction.message.edit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_jev_shadow_observes_ambiguous_requests_without_selecting_handler(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(settings, "agent_routing_shadow_enabled", True)
+    monkeypatch.setattr(settings, "openrouter_api_key", "test-key")
+    decide = Mock(
+        return_value={
+            "answers": {
+                "route": {
+                    "type": "choice",
+                    "choice": "knowledge_question",
+                    "probabilities": {
+                        "knowledge_question": 0.96,
+                        "job_search": 0.01,
+                        "workflow": 0.01,
+                        "abstain": 0.02,
+                    },
+                }
+            }
+        }
+    )
+    monkeypatch.setattr("five08.discord_bot.cogs.agent.request_decision", decide)
+    cog = AgentCog.__new__(AgentCog)
+    request = "the notes from last Thursday"
+    with caplog.at_level("INFO"):
+        assert cog._route_agent_request(request, transport="mention") == "workflow"
+        task = cog._route_shadow_task
+        assert task is not None
+        assert (
+            cog._route_agent_request("about the last handoff", transport="slash")
+            == "workflow"
+        )
+        await task
+
+    decide.assert_called_once_with("typesafe/jev-1.14", request, "test-key")
+    assert "rule_route=workflow model_route=knowledge_question" in caplog.text
+    assert request not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "the notes from last Thursday for alex@example.org",
+        "the CRM onboarding notes from yesterday",
+        "update the onboarding status for Alex",
+    ],
+)
+def test_jev_shadow_skips_sensitive_and_explicit_workflow_requests(
+    monkeypatch: pytest.MonkeyPatch,
+    request_text: str,
+) -> None:
+    monkeypatch.setattr(settings, "agent_routing_shadow_enabled", True)
+    monkeypatch.setattr(settings, "openrouter_api_key", "test-key")
+    cog = AgentCog.__new__(AgentCog)
+    assert cog._route_agent_request(request_text, transport="slash") == "workflow"
+    assert getattr(cog, "_route_shadow_task", None) is None

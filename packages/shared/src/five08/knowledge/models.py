@@ -229,6 +229,7 @@ class KnowledgeQueryRequest(BaseModel):
 
     question: str = Field(min_length=1, max_length=1000)
     context: AgentIdentityContext
+    mode: Literal["standard", "agent"] = "standard"
     discord_sources: list[KnowledgeDiscordContext] = Field(
         default_factory=list, max_length=8
     )

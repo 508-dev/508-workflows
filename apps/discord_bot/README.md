@@ -114,6 +114,11 @@ confirmation. Confirmation rechecks the requester's current roles, and the
 backend atomically stores the fact together with its Discord message IDs,
 authors, timestamps, and jump link.
 
+Admins can use `/agent` or mention the bot to investigate open-ended questions
+across the wiki, CRM contacts, and ERPNext projects. Admin research replies are
+private and include citations. The same entry points support existing workflows
+such as updating a CRM contact, with confirmation before the write.
+
 `/ask` always returns a private answer. A natural-language question in a bot
 mention is routed to the same knowledge service unless it is a supported live
 agent workflow. Retrieval combines visible remembered answers with the

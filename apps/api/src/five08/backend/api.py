@@ -692,6 +692,9 @@ def _get_knowledge_service() -> KnowledgeService:
                 settings=settings,
                 store=_KNOWLEDGE_STORE,
                 model=OpenAICompatibleKnowledgeModel.from_settings(settings),
+                research_model=OpenAICompatibleKnowledgeModel.for_admin_research(
+                    settings
+                ),
                 sources=KnowledgeSourceAdapters(settings),
                 policy=PolicyEngine.from_settings(settings),
             )
@@ -14337,6 +14340,7 @@ async def knowledge_query_handler(request: Request) -> JSONResponse:
         plan=None,
         metadata={
             "status": response.status,
+            "mode": payload.mode,
             "citation_count": len(response.citations),
             "citation_source_types": sorted(
                 {citation.source_type for citation in response.citations}

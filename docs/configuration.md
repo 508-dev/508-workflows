@@ -347,6 +347,18 @@ Agent gateway:
   extraction, semantic evidence selection, and grounded synthesis. Deterministic
   extraction plus keyword and typo-tolerant recall remain available when the
   model is disabled or unavailable.
+- `KNOWLEDGE_RESEARCH_MODEL` (default `gpt-4.1-mini`) runs admin research on
+  direct OpenAI. The backend uses `OPENAI_DIRECT_API_KEY` or its alias
+  `OPENAI_API_KEY_DIRECT`. It can also use `OPENAI_API_KEY` if the primary
+  endpoint is direct OpenAI. Without a direct key, research uses deterministic
+  evidence retrieval and replies with matched excerpts.
+- `AGENT_ROUTING_SHADOW_ENABLED` (default false) lets the Discord bot compare
+  Jev with deterministic routing on ambiguous requests. Set
+  `OPENROUTER_API_KEY` on the bot service and enable this only after approving
+  OpenRouter for eligible Discord request text. Jev receives only the latest
+  request text. The bot skips obvious sensitive inputs and keeps only one
+  observation in flight. It logs the routes, score, and latency without the
+  request text. The rules select the actual handler.
 - `KNOWLEDGE_MODEL_TIMEOUT_SECONDS`
 - `KNOWLEDGE_SOURCE_TIMEOUT_SECONDS`: total concurrent retrieval window per
   question (default: 6).

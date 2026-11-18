@@ -8,9 +8,11 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
+from five08.agent.memory import contains_sensitive_memory_text
 from five08.agent.policy import PolicyEngine
+from five08.agent.privacy import contains_private_agent_identifier
 from five08.knowledge_channels import knowledge_discord_channel_ids
-from five08.knowledge.model import KnowledgeModel
+from five08.knowledge.model import KnowledgeModel, KnowledgeResearchPlan
 from five08.knowledge.models import (
     KnowledgeCaptureCandidate,
     KnowledgeCaptureDraft,
@@ -25,7 +27,7 @@ from five08.knowledge.models import (
     KnowledgeVerificationStatus,
     KnowledgeVisibility,
 )
-from five08.knowledge.sources import KnowledgeSourceAdapters
+from five08.knowledge.sources import KnowledgeSourceAdapters, _person_query
 from five08.knowledge.store import (
     KnowledgeStore,
     _dedupe_key,
@@ -89,12 +91,14 @@ class KnowledgeService:
         settings: SharedSettings,
         store: KnowledgeStore,
         model: KnowledgeModel | None = None,
+        research_model: KnowledgeModel | None = None,
         sources: KnowledgeSourceAdapters | None = None,
         policy: PolicyEngine | None = None,
     ) -> None:
         self.settings = settings
         self.store = store
         self.model = model
+        self.research_model = research_model
         self.sources = sources or KnowledgeSourceAdapters(settings)
         self.policy = policy or PolicyEngine()
 
@@ -367,6 +371,29 @@ class KnowledgeService:
                 answer="Your Discord roles cannot search organizational knowledge.",
             )
 
+        research = (
+            request.mode == "agent"
+            and "knowledge:admin" in scopes
+            and context.response_destination_visibility == "private"
+        )
+        if context.impersonation:
+            return KnowledgeQueryResponse(
+                status="denied",
+                answer="Impersonated requests cannot search organizational knowledge.",
+            )
+        if research and (
+            contains_sensitive_memory_text(request.question)
+            or contains_private_agent_identifier(request.question)
+        ):
+            return KnowledgeQueryResponse(
+                status="denied",
+                answer=(
+                    "Use a name or topic for research. For a specific record ID "
+                    "or email address, use a supported direct lookup."
+                ),
+            )
+
+        model = self.research_model if research else self.model
         source_errors: list[str] = list(request.source_errors)
         actor_emails: list[str] = []
         accessible_project_ids: list[str] = []
@@ -374,6 +401,13 @@ class KnowledgeService:
             1.0,
             float(getattr(self.settings, "knowledge_source_timeout_seconds", 6.0)),
         )
+        plan: KnowledgeResearchPlan | None = None
+        if research and model is not None:
+            try:
+                plan = model.plan_research(question=request.question)
+            except Exception:
+                source_errors.append("research planning failed")
+
         deadline = time.monotonic() + timeout_seconds
         if allow_project:
             identity_future = _SOURCE_EXECUTOR.submit(
@@ -412,38 +446,69 @@ class KnowledgeService:
                 semantic_candidate_limit=semantic_limit,
             )
         }
+        wiki_topics = _research_terms(plan.wiki_topics) if plan is not None else []
+        projects = _research_terms(plan.projects) if plan is not None else []
+        contacts = _research_terms(plan.contacts) if plan is not None else []
         if allow_org and "knowledge:read_wiki" in scopes:
-            searches["wiki"] = lambda: self.sources.search_outline(request.question)
+            for index, topic in enumerate(wiki_topics or [request.question], start=1):
+                name = f"wiki search {index}" if wiki_topics else "wiki"
+                searches[name] = lambda topic=topic: self.sources.search_outline(topic)
         if allow_project and "project:read" in scopes:
-            searches["erp"] = lambda: self.sources.search_erp_projects(
-                request.question,
-                actor_emails=actor_emails,
-                include_all="knowledge:admin" in scopes,
-            )
+            if projects:
+                for index, project in enumerate(projects, start=1):
+                    searches[f"erp project {index}"] = lambda project=project: (
+                        self.sources.search_erp_project_name(
+                            project,
+                            actor_emails=actor_emails,
+                            include_all=True,
+                        )
+                    )
+            else:
+                searches["erp"] = lambda: self.sources.search_erp_projects(
+                    request.question,
+                    actor_emails=actor_emails,
+                    include_all="knowledge:admin" in scopes,
+                )
         if allow_private and "crm:contact:read" in scopes:
-            searches["crm"] = lambda: self.sources.search_crm(request.question)
+            if research:
+                if plan is None:
+                    contacts = _research_terms([_person_query(request.question) or ""])
+                for index, contact in enumerate(contacts, start=1):
+                    searches[f"crm contact {index}"] = lambda contact=contact: (
+                        self.sources.search_crm_contact(
+                            contact,
+                            include_contact_details=False,
+                        )
+                    )
+            else:
+                searches["crm"] = lambda: self.sources.search_crm(request.question)
 
         evidence: list[KnowledgeEvidence] = (
             self._discord_evidence(request) if allow_org else []
         )
-        futures = {
-            _SOURCE_EXECUTOR.submit(search): name for name, search in searches.items()
-        }
-        completed, pending = wait(
-            futures,
-            timeout=_remaining_seconds(deadline),
-        )
-        for future in completed:
-            name = futures[future]
-            try:
-                evidence.extend(future.result())
-            except Exception:
-                source_errors.append(f"{name} search failed")
-        for future in pending:
-            source_errors.append(f"{futures[future]} search timed out")
-            future.cancel()
-
+        evidence.extend(self._collect_evidence(searches, deadline, source_errors))
         evidence = self._rank_evidence(evidence)
+        if research:
+            if model is not None:
+                evidence = self._expand_research_evidence(
+                    evidence,
+                    terms=_search_tokens(" ".join([request.question, *wiki_topics])),
+                    timeout_seconds=timeout_seconds,
+                    source_errors=source_errors,
+                )
+            evidence = [
+                item
+                for item in evidence
+                if not any(
+                    contains_sensitive_memory_text(text)
+                    for text in (
+                        item.title,
+                        item.excerpt,
+                        item.retrieval_text or "",
+                    )
+                )
+            ]
+        source_errors = source_errors[:7]
         candidate_limit = max(max_evidence, semantic_limit)
         evidence = evidence[: max(1, min(candidate_limit, 64))]
         relevant_evidence = [item for item in evidence if item.relevance > 0]
@@ -451,9 +516,9 @@ class KnowledgeService:
             return _insufficient_response(source_errors)
 
         draft = None
-        if self.model is not None:
+        if model is not None:
             try:
-                draft = self.model.answer(
+                draft = model.answer(
                     question=request.question,
                     evidence=evidence,
                 )
@@ -463,6 +528,10 @@ class KnowledgeService:
             return _insufficient_response(source_errors)
 
         if draft is None:
+            if research and model is not None:
+                if "answer synthesis failed" not in source_errors:
+                    source_errors.append("answer synthesis unavailable")
+                return _insufficient_response(source_errors)
             if not relevant_evidence:
                 return _insufficient_response(source_errors)
             selected = [relevant_evidence[0]]
@@ -471,7 +540,13 @@ class KnowledgeService:
         else:
             selected_ids = set(draft.evidence_ids)
             selected = [item for item in evidence if item.evidence_id in selected_ids]
-            if not selected:
+            if not selected_ids or not selected_ids.issubset(
+                item.evidence_id for item in selected
+            ):
+                if research:
+                    return _insufficient_response(
+                        [*source_errors, "invalid answer citations"]
+                    )
                 if not relevant_evidence:
                     return _insufficient_response(source_errors)
                 selected = [relevant_evidence[0]]
@@ -497,7 +572,8 @@ class KnowledgeService:
         # A model sees every candidate, so its citation selection cannot declassify
         # private material that may have influenced the generated answer.
         public_safe = (
-            visibility == "org"
+            not research
+            and visibility == "org"
             and all(item.visibility == "org" for item in evidence)
             and not _contains_sensitive_output(answer)
             and not any(
@@ -518,6 +594,61 @@ class KnowledgeService:
             visibility=visibility,
             source_errors=source_errors,
         )
+
+    @staticmethod
+    def _collect_evidence(
+        searches: dict[str, Callable[[], list[KnowledgeEvidence]]],
+        deadline: float,
+        source_errors: list[str],
+    ) -> list[KnowledgeEvidence]:
+        evidence: list[KnowledgeEvidence] = []
+        futures = {
+            _SOURCE_EXECUTOR.submit(search): name for name, search in searches.items()
+        }
+        completed, pending = wait(
+            futures,
+            timeout=_remaining_seconds(deadline),
+        )
+        for future, name in futures.items():
+            if future in completed:
+                try:
+                    evidence.extend(future.result())
+                except Exception:
+                    source_errors.append(f"{name} search failed")
+            elif future in pending:
+                source_errors.append(f"{name} search timed out")
+                future.cancel()
+        return evidence
+
+    def _expand_research_evidence(
+        self,
+        evidence: list[KnowledgeEvidence],
+        *,
+        terms: set[str],
+        timeout_seconds: float,
+        source_errors: list[str],
+    ) -> list[KnowledgeEvidence]:
+        hits = [item for item in evidence if item.source_type == "outline"][:2]
+        if not hits:
+            return evidence
+        expanded = self._collect_evidence(
+            {
+                f"wiki document {index}": (
+                    lambda item=item: [self.sources.expand_outline(item, terms=terms)]
+                )
+                for index, item in enumerate(hits, start=1)
+            },
+            time.monotonic() + timeout_seconds,
+            source_errors,
+        )
+        expanded_by_id = {item.evidence_id: item for item in expanded}
+        attempted_ids = {item.evidence_id for item in hits}
+        return [
+            expanded_by_id.get(item.evidence_id, item)
+            for item in evidence
+            if item.evidence_id not in attempted_ids
+            or item.evidence_id in expanded_by_id
+        ]
 
     def _capture_scope(
         self,
@@ -836,6 +967,19 @@ def _question_alias(question: str) -> str:
         flags=re.I,
     )
     return " ".join(normalized.strip(" ?!.").split())[:200]
+
+
+def _research_terms(terms: list[str]) -> list[str]:
+    return list(
+        dict.fromkeys(
+            term
+            for term in terms
+            if term
+            and not re.search(r"[%_*?]|https?://", term, re.IGNORECASE)
+            and not contains_private_agent_identifier(term)
+            and not contains_sensitive_memory_text(term)
+        )
+    )
 
 
 def _remaining_seconds(deadline: float) -> float:

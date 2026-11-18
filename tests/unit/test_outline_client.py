@@ -438,3 +438,21 @@ def test_update_document_raises_a_typed_conflict_error() -> None:
             )
 
     assert "changed elsewhere" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {},
+        {"publishedAt": "2026-10-01", "archivedAt": "2026-11-01"},
+        {"publishedAt": "2026-10-01", "deletedAt": "2026-11-01"},
+    ],
+)
+def test_get_published_document_rejects_inactive_pages(metadata) -> None:
+    client = OutlineClient(api_key="read-key")
+    response = {
+        "data": {"id": "doc-1", "url": "/doc/page", "text": "Archived text", **metadata}
+    }
+    with patch.object(client, "request", return_value=response):
+        with pytest.raises(OutlineAPIError, match="unpublished"):
+            client.get_document(document_id="doc-1", published_only=True)

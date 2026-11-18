@@ -14,7 +14,7 @@ from scripts import agent_routing_eval as routing
     ids=lambda case: case.id,
 )
 def test_mention_routing_regressions(case: routing.RoutingCase) -> None:
-    assert routing.AgentCog._mention_workflow_route(case.message) == case.route
+    assert routing.AgentCog._agent_request_route(case.message) == case.route
 
 
 def test_live_routing_eval_scores_acceptance_and_falls_back(monkeypatch) -> None:
@@ -159,7 +159,14 @@ def test_direct_openai_run_rejects_openrouter_models(monkeypatch) -> None:
         ("How can we search for gigs through our co-op?", "knowledge_question"),
         ("Could you find the CRM contact named Morgan?", "workflow"),
         ("Where can I learn about the CRM contact policy?", "knowledge_question"),
+        (
+            "Compare CRM onboarding for Alex against the wiki checklist",
+            "knowledge_question",
+        ),
+        ("Could you find supplier Acme?", "workflow"),
+        ("Could you research the web for PostgreSQL tutorials?", "workflow"),
+        ("Could you update Alex in CRM?", "workflow"),
     ],
 )
 def test_mention_routing_nearby_phrasing(message: str, route: str) -> None:
-    assert routing.AgentCog._mention_workflow_route(message) == route
+    assert routing.AgentCog._agent_request_route(message) == route

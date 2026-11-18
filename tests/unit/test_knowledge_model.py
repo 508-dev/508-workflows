@@ -96,3 +96,39 @@ def test_response_format_retry_shares_one_model_deadline(
     assert post.call_count == 2
     assert post.call_args_list[0].kwargs["timeout"] == pytest.approx(2.75)
     assert post.call_args_list[1].kwargs["timeout"] == pytest.approx(2.0)
+
+
+@pytest.mark.parametrize(
+    ("direct_key", "primary_url", "enabled", "expected_key"),
+    [
+        ("direct-test-key", "https://openrouter.ai/api/v1", True, "direct-test-key"),
+        (None, "https://openrouter.ai/api/v1", True, None),
+        (None, "http://bifrost:8080/openai", True, None),
+        (None, "https://api.openai.com/v1/", True, "primary-test-key"),
+        (None, None, True, "primary-test-key"),
+        ("direct-test-key", None, False, None),
+    ],
+)
+def test_admin_research_uses_only_a_direct_openai_credential(
+    direct_key,
+    primary_url,
+    enabled,
+    expected_key,
+):
+    model = OpenAICompatibleKnowledgeModel.for_admin_research(
+        SimpleNamespace(
+            knowledge_model_enabled=enabled,
+            openai_direct_api_key=direct_key,
+            openai_api_key="primary-test-key",
+            openai_base_url=primary_url,
+            knowledge_research_model="gpt-4.1-mini",
+            knowledge_model_timeout_seconds=6.0,
+        )
+    )
+    if expected_key is None:
+        assert model is None
+        return
+    assert model is not None
+    assert model.config.openai_api_key == expected_key
+    assert model.config.resolve("strong").base_url == "https://api.openai.com/v1"
+    assert model.config.resolve("strong").model == "gpt-4.1-mini"
