@@ -116,3 +116,16 @@ def test_chat_baseline_matches_route_contract_and_handles_abstention(
     schema = request["response_format"]["json_schema"]["schema"]
     assert set(schema["properties"]["choice"]["enum"]) == set(routing.ROUTES)
     assert selected[0].message in request["messages"][1]["content"]
+
+
+def test_direct_openai_chat_uses_its_own_endpoint(monkeypatch) -> None:
+    post = Mock(return_value=Mock(json=Mock(return_value={})))
+    monkeypatch.setattr(routing.requests, "post", post)
+
+    routing.request_chat(
+        "gpt-4.1-mini", "Find React jobs", "fake-key", direct_openai=True
+    )
+
+    assert post.call_args.args == (routing.OPENAI_CHAT_URL,)
+    assert "provider" not in post.call_args.kwargs["json"]
+    assert post.call_args.kwargs["json"]["model"] == "gpt-4.1-mini"
