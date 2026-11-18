@@ -68,7 +68,7 @@ def load_cases() -> list[RoutingCase]:
     return cases
 
 
-def decide(model: str, message: str, api_key: str) -> tuple[RoutingAnswer, dict]:
+def request_decision(model: str, message: str, api_key: str) -> dict:
     response = requests.post(
         DECISIONS_URL,
         headers={"Authorization": f"Bearer {api_key}"},
@@ -90,8 +90,9 @@ def decide(model: str, message: str, api_key: str) -> tuple[RoutingAnswer, dict]
     )
     response.raise_for_status()
     payload = response.json()
-    answer = RoutingAnswer.model_validate(payload["answers"]["route"])
-    return answer, {key: payload.get(key) for key in ("model", "provider", "usage")}
+    if not isinstance(payload, dict):
+        raise ValueError("Expected a decision response object")
+    return payload
 
 
 def run_comparison(
@@ -105,13 +106,16 @@ def run_comparison(
             started = time.perf_counter()
             candidate = {"route": rules, "outcome": "error"}
             try:
-                answer, metadata = decide(model, case.message, api_key)
+                payload = request_decision(model, case.message, api_key)
+                candidate.update(
+                    {key: payload.get(key) for key in ("model", "provider", "usage")}
+                )
+                answer = RoutingAnswer.model_validate(payload["answers"]["route"])
             except requests.HTTPError as exc:
                 candidate["error"] = f"HTTP {exc.response.status_code}"
             except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
                 candidate["error"] = type(exc).__name__
             else:
-                candidate.update(metadata)
                 candidate["probabilities"] = answer.probabilities
                 candidate["choice"] = answer.choice
                 candidate["outcome"] = "deferred"

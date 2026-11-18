@@ -54,7 +54,8 @@ jobs:
         fail_ci_if_error: false
 
   playwright-dashboard:
-    runs-on: ubuntu-latest
+    # The locked Playwright release supports Chromium on Ubuntu 24.04.
+    runs-on: ubuntu-24.04
     environment: test
 
     steps:

@@ -141,3 +141,6 @@ structured planner drafts action arguments when needed. Cloudflare's Clairic
 uses the [Extractions API](https://openrouter.ai/cloudflare/clairic) and would
 need a separate field-level eval for a bounded workflow, including missing
 values and spans grounded in the request.
+
+See the [November 19, 2026 live comparison](../tests/evals/discord-agent/artifacts/mention-routing-2026-11-19/README.md)
+for the first run, including per-case probabilities and the tested revision.

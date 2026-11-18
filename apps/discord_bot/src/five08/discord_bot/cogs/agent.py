@@ -65,7 +65,8 @@ _JOB_POSTING_DOC_LOOKUP_RE = re.compile(
     r"remind me where (?:to|(?:i|we) can))\s+)?"
     r"(?:find|locate|look up|show me|search for)\s+"
     r"(?:our|the|508(?:\.dev)?)\s+(?:job|gig)\s+(?:posting\s+)?"
-    r"(?:policy|policies|guide|guidelines|handbook|process|docs|documentation)[.!?]*",
+    r"(?:policy|policies|guide|guidelines|handbook|process|docs|documentation)"
+    r"(?:(?:,)?\s+please)?[.!?]*",
     re.I,
 )
 _AGENT_ACTION_RE = re.compile(

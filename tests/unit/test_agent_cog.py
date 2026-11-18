@@ -1670,14 +1670,15 @@ async def test_agent_mention_dms_sensitive_crm_clarification() -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_mention_routes_job_policy_lookup_to_knowledge() -> None:
+@pytest.mark.parametrize("suffix", ["?", ", please?"])
+async def test_agent_mention_routes_job_policy_lookup_to_knowledge(suffix: str) -> None:
     cog = AgentCog.__new__(AgentCog)
     bot_user = SimpleNamespace(id=999)
     cog.bot = SimpleNamespace(user=bot_user)
     cog._search_jobs_for_member = AsyncMock()
     cog._handle_knowledge_question_mention = AsyncMock()
     cog._post_agent_request = AsyncMock()
-    question = "Where can I find our job posting policy?"
+    question = f"Where can I find our job posting policy{suffix}"
     message = SimpleNamespace(
         id=555,
         content=f"<@999> {question}",

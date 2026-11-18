@@ -67,7 +67,8 @@ def test_live_routing_eval_scores_acceptance_and_falls_back(monkeypatch) -> None
     assert metrics["regressions"] == metrics["workflow_sent_elsewhere"] == 0
     assert metrics["accepted"] == metrics["deferred"] == 1
     assert metrics["error"] == 2
-    assert metrics["reported_cost_usd"] == 0.000002
+    assert metrics["calls_with_reported_cost"] == 3
+    assert metrics["reported_cost_usd"] == pytest.approx(0.000003)
     assert post.call_count == len(selected)
     assert post.call_args_list[0].args == (routing.DECISIONS_URL,)
     assert post.call_args_list[0].kwargs["json"]["state"] == {
