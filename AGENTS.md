@@ -41,6 +41,7 @@ This repo contains multiple services:
 - Worker consumer: `apps/worker/src/five08/worker/consumer.py`
 - Shared settings: `packages/shared/src/five08/settings.py`
 - Shared queue helpers: `packages/shared/src/five08/queue.py`
+- Discord routing and planner benchmarks: [eval harness and archived evidence](docs/discord-agent-eval-harness.md#benchmark-results-and-routing-decision)
 
 ## Development Commands
 

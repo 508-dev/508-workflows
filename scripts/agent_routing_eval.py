@@ -294,10 +294,7 @@ def main() -> int:
     print(json.dumps(report, indent=2))
     return int(
         any(model.get("error", 0) for model in report["models"].values())
-        or any(
-            row["rules"] != row["route"] and not row["challenge"]
-            for row in report["observations"]
-        )
+        or any(row["rules"] != row["route"] for row in report["observations"])
     )
 
 

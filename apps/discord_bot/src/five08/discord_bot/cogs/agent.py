@@ -60,14 +60,40 @@ _KNOWLEDGE_RECALL_PREFIX_RE = re.compile(
     r"(?:who|what|where|when|why|how|does|do|did|is|are|can|could|has|have)\b",
     re.I,
 )
+_JOB_POSTING_DOC_TYPES = (
+    r"(?:policy|policies|guide|guidelines|handbook|process|docs|documentation)"
+)
 _JOB_POSTING_DOC_LOOKUP_RE = re.compile(
     r"^(?:(?:where (?:can|do|should) (?:i|we)|(?:can|could) you(?: please)?|"
     r"remind me where (?:to|(?:i|we) can))\s+)?"
     r"(?:find|locate|look up|show me|search for)\s+"
-    r"(?:our|the|508(?:\.dev)?)\s+(?:job|gig)\s+(?:posting\s+)?"
-    r"(?:policy|policies|guide|guidelines|handbook|process|docs|documentation)"
+    r"(?:our|the|508(?:\.dev)?)\s+"
+    rf"(?:(?:job|gig)\s+(?:posting\s+)?{_JOB_POSTING_DOC_TYPES}"
+    rf"|{_JOB_POSTING_DOC_TYPES}\s+(?:for|on|to)\s+"
+    r"(?:listing|posting|sharing)\s+(?:jobs|gigs))"
     r"(?:(?:,)?\s+please)?[.!?]*",
     re.I,
+)
+_JOB_DISCOVERY_PROCESS_RE = re.compile(
+    r"how (?:can|do|should) (?:members|we) (?:find|search for) (?:jobs|gigs|roles)"
+    r" (?:through|in) (?:the |our )?(?:cooperative|co-op|508(?:\.dev)?)[.!?]*",
+    re.I,
+)
+_CRM_CONTACT_LOOKUP_RE = re.compile(
+    r"^(?:(?:can|could|would) you (?:please )?|please )?"
+    r"(?:find|look up|lookup|search for|show me) (?:the )?crm contacts? "
+    r"(?:for|named|matching)\s+\S",
+    re.I,
+)
+_JOB_SEARCH_INTEREST_RE = re.compile(
+    r"^i(?:['’]d| would) (?:love|like) (?:an?|some)\s+"
+)
+_JOB_SEARCH_OPENING_RE = re.compile(
+    r"^(?:anything|what(?:['’]s| is)) open for (?:an? )?"
+    r"(?:remote|part[ -]time|full[ -]time|contract|freelance)\s+"
+    r"(?:[\w+#.-]+\s+){0,4}"
+    r"(?:engineers?|developers?|designers?|analysts?|writers?|managers?|consultants?"
+    r"|contractors?|roles?|jobs?|gigs?|positions?)\b"
 )
 _AGENT_ACTION_RE = re.compile(
     r"\b(?:add|approve|assign|cancel|create|delete|forget|invite|post|reject|"
@@ -1042,7 +1068,11 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
         request: str,
     ) -> Literal["job_search", "knowledge_question", "workflow"]:
         """Choose the mention handler after capture and local replies."""
-        if _JOB_POSTING_DOC_LOOKUP_RE.fullmatch(request):
+        if _CRM_CONTACT_LOOKUP_RE.match(request):
+            return "workflow"
+        if _JOB_POSTING_DOC_LOOKUP_RE.fullmatch(
+            request
+        ) or _JOB_DISCOVERY_PROCESS_RE.fullmatch(request):
             return "knowledge_question"
         if AgentCog._is_job_search_request(request):
             return "job_search"
@@ -1505,15 +1535,22 @@ class AgentCog(DiscordAuditCogMixin, commands.Cog):
                 r"crm\s+contacts?|contacts?)\b",
                 text,
             )
-            and re.search(
-                r"\b(?:jobs?|gigs?|roles?|positions?|openings?|opportunities)\b", text
-            )
             and (
-                re.search(
-                    r"\b(?:find|search|looking|show|any|recommend|match|suitable|fit)\b",
-                    text,
+                _JOB_SEARCH_OPENING_RE.match(text)
+                or (
+                    re.search(
+                        r"\b(?:jobs?|gigs?|roles?|positions?|openings?|opportunities)\b",
+                        text,
+                    )
+                    and (
+                        re.search(
+                            r"\b(?:find|search|looking|show|any|recommend|match|suitable|fit)\b",
+                            text,
+                        )
+                        or _JOB_SEARCH_INTEREST_RE.match(text)
+                        or parse_proximity_location(request)[0]
+                    )
                 )
-                or parse_proximity_location(request)[0]
             )
         )
 

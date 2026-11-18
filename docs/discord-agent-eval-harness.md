@@ -108,10 +108,10 @@ Mention routing has its own eval because the planner suite starts after Discord
 has selected a handler. The [mention corpus](../tests/evals/discord-agent/routing/mentions.v1.json)
 uses synthetic latest-turn messages after the mention eligibility, capture, and
 local-reply checks. Its labels identify the intended handler for job matching,
-knowledge questions, and backend workflows. The challenge cases preserve
-examples of fuzzy phrasing for which rules or candidates can miss the intent.
-The regular unit suite enforces the other route labels and checks that an
-actual mention about job-posting policy reaches the knowledge handler.
+knowledge questions, and backend workflows. The original challenge labels
+identify cases the rules missed during the historical benchmark. All 32 cases
+now gate the deterministic replay. The unit suite also checks which handler
+receives actual Discord mentions.
 
 ```bash
 uv run --locked python scripts/agent_routing_eval.py
@@ -158,9 +158,8 @@ uv run --locked python scripts/agent_routing_eval.py --live \
 Chat baselines receive the same routing criteria and return one label in a
 strict JSON object. Their explicit abstentions and request or validation errors
 use the rules. The probability threshold applies to Decisions responses only.
-The benchmark measures mention routing through OpenRouter. The live planner
-suite above measures workflow drafting and can use the configured provider
-directly.
+These OpenRouter runs measure mention routing. The live planner suite above
+measures workflow drafting and can use the configured provider directly.
 
 See the [chat baseline comparison](../tests/evals/discord-agent/artifacts/mention-chat-baselines-2026-11-19/README.md)
 for the repeat Jev result and the Kimi K2.6 and direct GPT-4.1 mini metrics.
@@ -176,3 +175,33 @@ uv run --locked python scripts/agent_routing_eval.py --live \
 Direct OpenAI returns token usage. The comparison estimates its cost from
 the published rate card and records OpenRouter's reported cost for the other
 models.
+
+## Benchmark results and routing decision
+
+The November 2026 benchmark tested one sweep per model on the same 32
+synthetic mention inputs. Jev and Kimi ran through OpenRouter, and the
+completed GPT-4.1 mini sweep used direct OpenAI.
+
+| Candidate | Correct | Workflow requests misrouted | p95 API latency | Total USD |
+| --- | ---: | ---: | ---: | ---: |
+| Rules at benchmark time | 27/32 | 1 | — | $0 |
+| Jev 1.14 | 32/32 | 0 | 432 ms | $0.000593 |
+| Kimi K2.6 | 29/32 | 2 | 1,128 ms | $0.002854 |
+| GPT-4.1 mini, direct | 26/32 | 5 | 678 ms | $0.003066 estimated |
+| Rules after the fixes | 32/32 | 0 | — | $0 |
+
+The rules now recognize explicit job-posting guidance and cooperative job-search
+process questions, requests for open roles with an employment qualifier, and
+explicit CRM contact lookups. The job-matching shortcut retains its checks for
+workflow and write requests before recognizing either form of job search. The
+backend still applies tool policy and confirmation for workflow requests.
+
+The improved rules were developed against this corpus. Their 32/32 score
+measures regression coverage. Jev remains the strongest candidate for a
+held-out replay of sanitized Discord turns, with a focus on mixed requests and
+workflow diversions. Measure added response time before considering live
+routing. The benchmark covers mention dispatch. Use the planner suite to
+evaluate workflow drafting through the backend's configured provider.
+
+Archived evidence includes model revisions, providers, per-case outcomes,
+cost provenance, and checksums. [Jev, Kimi, and GPT-4.1 mini](../tests/evals/discord-agent/artifacts/mention-chat-baselines-2026-11-19/README.md) · [Jev and Clef variants](../tests/evals/discord-agent/artifacts/mention-routing-2026-11-19/README.md)

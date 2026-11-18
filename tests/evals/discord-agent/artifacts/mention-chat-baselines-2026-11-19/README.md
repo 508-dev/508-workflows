@@ -13,7 +13,7 @@ The earlier Clef results are in the
 
 | Candidate | Successful calls | Correct routes | New regressions | Workflow diversions | p50 / p95 API latency | Total USD |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Current rules | — | 27/32 | — | 1 | — | — |
+| Rules at benchmark time | — | 27/32 | — | 1 | — | — |
 | Jev 1.14 | 32/32 | 32/32 | 0 | 0 | 348 / 432 ms | $0.000593334 |
 | Kimi K2.6, non-thinking | 32/32 | 29/32 | 3 | 2 | 605 / 1,128 ms | $0.002853894 |
 | GPT-4.1 mini, direct | 32/32 | 26/32 | 5 | 5 | 590 / 678 ms | $0.003066 estimated |

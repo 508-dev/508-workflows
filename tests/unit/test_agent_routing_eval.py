@@ -10,7 +10,7 @@ from scripts import agent_routing_eval as routing
 
 @pytest.mark.parametrize(
     "case",
-    [case for case in routing.load_cases() if not case.challenge],
+    routing.load_cases(),
     ids=lambda case: case.id,
 )
 def test_mention_routing_regressions(case: routing.RoutingCase) -> None:
@@ -60,10 +60,10 @@ def test_live_routing_eval_scores_acceptance_and_falls_back(monkeypatch) -> None
     model = "typesafe/jev-1.14"
     report = routing.run_comparison(selected, [model], "fake-key", 0.85)
 
-    assert report["rules_correct"] == 3
+    assert report["rules_correct"] == 4
     metrics = report["models"][model]
     assert metrics["correct"] == 4
-    assert metrics["improvements"] == 1
+    assert metrics["improvements"] == 0
     assert metrics["regressions"] == metrics["workflow_sent_elsewhere"] == 0
     assert metrics["accepted"] == metrics["deferred"] == 1
     assert metrics["error"] == 2
@@ -106,7 +106,7 @@ def test_chat_baseline_matches_route_contract_and_handles_abstention(
     metrics = report["models"][model]
     assert metrics["endpoint"] == "chat"
     assert metrics["correct"] == 3
-    assert metrics["improvements"] == 1
+    assert metrics["improvements"] == 0
     assert metrics["accepted"] == metrics["deferred"] == metrics["error"] == 1
     assert metrics["calls_with_reported_cost"] == 3
     assert metrics["reported_cost_usd"] == pytest.approx(0.003)
@@ -145,3 +145,21 @@ def test_direct_openai_run_rejects_openrouter_models(monkeypatch) -> None:
         )
 
     post.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("message", "route"),
+    [
+        ("What’s open for a freelance backend developer?", "job_search"),
+        ("I'd like a part-time design gig", "job_search"),
+        ("Anything open for a remote onboarding session?", "knowledge_question"),
+        ("Anything open for a contract engineer and create a task?", "workflow"),
+        ("Find our guidelines for posting gigs, please?", "knowledge_question"),
+        ("Find our guide to listing jobs and create a task", "workflow"),
+        ("How can we search for gigs through our co-op?", "knowledge_question"),
+        ("Could you find the CRM contact named Morgan?", "workflow"),
+        ("Where can I learn about the CRM contact policy?", "knowledge_question"),
+    ],
+)
+def test_mention_routing_nearby_phrasing(message: str, route: str) -> None:
+    assert routing.AgentCog._mention_workflow_route(message) == route
