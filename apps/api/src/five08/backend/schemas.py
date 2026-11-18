@@ -173,9 +173,10 @@ class DashboardJobLeadReviewRequest(BaseModel):
 
 
 class DashboardJobLeadStagingRecoveryClearRequest(BaseModel):
-    """Operator confirmation that an orphaned holding thread was removed."""
+    """Operator confirmation that a previous holding thread was removed."""
 
     orphan_deleted: Literal[True]
+    thread_id: str | None = None
 
 
 class DashboardJobLeadPostRequest(BaseModel):

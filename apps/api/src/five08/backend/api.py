@@ -109,6 +109,7 @@ from five08.clients.espo import EspoAPIError, EspoClient
 from five08.logging import configure_observability
 from five08.job_leads import (
     clear_job_lead_staging_cleanup_required,
+    get_job_lead,
     job_lead_display_payload,
     JobLeadStatus,
     list_job_leads,
@@ -5224,6 +5225,7 @@ async def dashboard_job_leads_handler(
     limit: int = Query(default=50, ge=1, le=50),
     source: str | None = Query(default=None),
     posting_type: JobPostingType | None = Query(default=None),
+    staged: bool | None = Query(default=None),
 ) -> JSONResponse:
     """Return sourced job leads for dashboard review."""
     session, error_response = await _dashboard_session_or_error(
@@ -5259,10 +5261,34 @@ async def dashboard_job_leads_handler(
         list_kwargs["source_key"] = normalized_source
     if posting_type is not None:
         list_kwargs["posting_type"] = posting_type
+    if staged is not None:
+        list_kwargs["staged"] = staged
     leads = await asyncio.to_thread(list_job_leads, settings, **list_kwargs)
     return JSONResponse(
         jsonable_encoder([job_lead_display_payload(lead) for lead in leads])
     )
+
+
+async def dashboard_job_lead_detail_handler(
+    request: Request,
+    lead_id: str,
+) -> JSONResponse:
+    """Load one sourced lead independently of queue filters."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_GIGS_READ,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+    steering_error = _dashboard_steering_or_error(session)
+    if steering_error is not None:
+        return steering_error
+
+    lead = await asyncio.to_thread(get_job_lead, settings, lead_id)
+    if lead is None:
+        return JSONResponse({"error": "job_lead_not_found"}, status_code=404)
+    return JSONResponse(jsonable_encoder(job_lead_display_payload(lead)))
 
 
 async def dashboard_job_lead_scrape_status_handler(
@@ -5387,7 +5413,7 @@ async def dashboard_clear_job_lead_staging_recovery_handler(
     request: Request,
     lead_id: str,
 ) -> JSONResponse:
-    """Clear a holding-thread recovery block after an operator removes the orphan."""
+    """Clear a holding thread after an operator confirms its removal."""
     session, error_response = await _dashboard_session_or_error(
         request,
         required_permission=DASHBOARD_PERMISSION_GIGS_WRITE,
@@ -5414,10 +5440,30 @@ async def dashboard_clear_job_lead_staging_recovery_handler(
         clear_job_lead_staging_cleanup_required,
         settings,
         lead_id=lead_id,
+        thread_id=payload.thread_id,
     )
     if cleared is None:
+        lead = await asyncio.to_thread(get_job_lead, settings, lead_id)
+        if lead is None:
+            return JSONResponse({"error": "job_lead_not_found"}, status_code=404)
+        current = job_lead_display_payload(lead)
+        if not (
+            current.get("staged_discord_thread_id") or current.get("staging_recovery")
+        ):
+            return JSONResponse(jsonable_encoder(current))
+        detail = (
+            "Posting to the holding forum is still in progress."
+            if current.get("staging_in_progress")
+            else "The saved holding thread changed. Check the current thread before clearing it."
+        )
         return JSONResponse(
-            {"error": "job_lead_staging_recovery_not_found"},
+            jsonable_encoder(
+                {
+                    "error": "job_lead_staging_conflict",
+                    "detail": detail,
+                    "lead": current,
+                }
+            ),
             status_code=409,
         )
 

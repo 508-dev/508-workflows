@@ -671,11 +671,22 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             )
 
         def gig_leads_route(route: Any) -> None:
-            route.fulfill(
-                status=200,
-                content_type="application/json",
-                body=json.dumps(job_leads_payload),
-            )
+            params = parse_qs(urlparse(route.request.url).query)
+            status = params.get("status", ["pending"])[0]
+            staged = params.get("staged", [None])[0]
+            leads = [
+                lead
+                for lead in job_leads_payload
+                if lead["status"] == status
+                and (
+                    staged is None
+                    or bool(lead.get("staged_discord_thread_id")) == (staged == "true")
+                )
+            ]
+            route.fulfill(json=leads)
+
+        def gig_lead_detail_route(route: Any) -> None:
+            route.fulfill(json=job_leads_payload[0])
 
         def gig_lead_scrape_status_route(route: Any) -> None:
             route.fulfill(
@@ -725,6 +736,12 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             gig_lead_recovery_clear_requested.set()
             gig_lead_recovery_clear_body.update(route.request.post_data_json)
             job_leads_payload[0].pop("staging_recovery", None)
+            job_leads_payload[0].update(
+                staged_discord_guild_id=None,
+                staged_discord_channel_id=None,
+                staged_discord_thread_id=None,
+                staged_at=None,
+            )
             route.fulfill(
                 status=200,
                 content_type="application/json",
@@ -925,6 +942,10 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
         )
         page.route("**/dashboard/api/gig-leads?*", gig_leads_route)
         page.route(
+            "**/dashboard/api/gig-leads/55555555-5555-4555-8555-555555555555",
+            gig_lead_detail_route,
+        )
+        page.route(
             re.compile(".*/dashboard/api/gigs/11111111-1111-4111-8111-111111111111$"),
             gig_detail_route,
         )
@@ -1043,16 +1064,40 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             assert any(
                 "status=" not in urlparse(url).query for url in gig_list_requests
             )
-            page.locator("#gigLeadsTab").click()
-            expect(page).to_have_url(f"{dashboard_server}/dashboard/gigs#leads")
+            # The old tab URL still opens the new queue.
+            page.goto(f"{dashboard_server}/dashboard/gigs#leads")
             page.reload()
-            page.get_by_text("Contract React Build").wait_for()
-            page.get_by_role("link", name="People").click()
-            expect(page).to_have_url(f"{dashboard_server}/dashboard/people")
-            page.get_by_role("link", name="Gigs").click()
-            expect(page).to_have_url(f"{dashboard_server}/dashboard/gigs")
-            expect(page.locator("#gigsTab")).to_have_attribute("aria-pressed", "true")
-            page.locator("#gigLeadsTab").click()
+            expect(page).to_have_url(f"{dashboard_server}/dashboard/leads")
+            expect(
+                page.get_by_role("link", name="Contract React Build")
+            ).to_be_visible()
+            page.get_by_role("link", name="Gigs", exact=True).click()
+            page.get_by_role("link", name="Leads", exact=True).click()
+            expect(page).to_have_url(f"{dashboard_server}/dashboard/leads")
+            expect(
+                page.get_by_role("heading", name="Post to the holding forum")
+            ).to_be_visible()
+            expect(
+                page.get_by_role("button", name="Qualify lead", exact=True)
+            ).to_have_count(0)
+            expect(page.locator("#gigLeadScrapeComments")).to_have_count(0)
+            page.get_by_role("button", name="Sources", exact=True).click()
+            expect(page.locator("#gigLeadScrapeComments")).to_have_text("140")
+            expect(page.locator("#gigLeadScrapeScanned")).to_have_text("108")
+            expect(page.locator("#gigLeadScrapeIncluded")).to_have_text("3")
+            expect(page.locator("#gigLeadScrapeFiltered")).to_have_text("105")
+            expect(page.get_by_role("button", name="Sync TokyoDev")).to_be_visible()
+            expect(page.get_by_role("button", name="Sync Japan Dev")).to_be_visible()
+            page.get_by_role("button", name="To post", exact=True).click()
+            with page.expect_request(
+                re.compile(r"/gig-leads\?.*staged=false.*posting_type=full_time")
+            ):
+                page.get_by_label("Employment type").select_option("full_time")
+            page.get_by_label("Employment type").select_option("")
+            lead_url = f"{dashboard_server}/dashboard/leads/55555555-5555-4555-8555-555555555555"
+            page.get_by_role("link", name="Contract React Build").click()
+            expect(page).to_have_url(lead_url)
+            page.reload()
             expect(
                 page.get_by_text("Full-time or part-time / contract · LLM")
             ).to_be_visible()
@@ -1062,30 +1107,25 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             expect(
                 page.get_by_role("link", name="Email hiring@example.com")
             ).to_have_attribute("href", "mailto:hiring@example.com")
-            expect(page.locator("#gigLeadScrapeComments")).to_have_text("140")
-            expect(page.locator("#gigLeadScrapeScanned")).to_have_text("108")
-            expect(page.locator("#gigLeadScrapeIncluded")).to_have_text("3")
-            expect(page.locator("#gigLeadScrapeFiltered")).to_have_text("105")
-            expect(page.get_by_role("button", name="Sync TokyoDev")).to_be_visible()
-            expect(page.get_by_role("button", name="Sync Japan Dev")).to_be_visible()
-            with page.expect_request(
-                re.compile(r"/gig-leads\?.*posting_type=full_time")
-            ):
-                page.get_by_label("Employment type").select_option("full_time")
-            page.get_by_label("Employment type").select_option("")
-            lead_comment = page.locator(
-                "#gigLeadComment-55555555-5555-4555-8555-555555555555"
-            )
-            expect(lead_comment).to_have_class(re.compile("max-h-20"))
-            page.get_by_role("button", name="Show full comment").click()
             expect(
-                page.get_by_role("button", name="Collapse comment")
-            ).to_have_attribute("aria-expanded", "true")
-            expect(lead_comment).not_to_have_class(re.compile("max-h-20"))
-            expect(lead_comment).to_contain_text("small API integration")
-            expect(
-                page.get_by_role("button", name="Post to holding forum")
+                page.get_by_text("small API integration", exact=False)
             ).to_be_visible()
+
+            # A deleted, previously saved holding thread can be reset and reposted.
+            job_leads_payload[0].update(
+                staged_discord_guild_id="guild-1",
+                staged_discord_channel_id="holding-channel-1",
+                staged_discord_thread_id="deleted-thread",
+            )
+            page.reload()
+            page.once("dialog", lambda dialog: dialog.accept())
+            page.get_by_role("button", name="Holding thread deleted").click()
+            assert gig_lead_recovery_clear_requested.wait(timeout=5)
+            assert gig_lead_recovery_clear_body == {
+                "orphan_deleted": True,
+                "thread_id": "deleted-thread",
+            }
+            page.get_by_text("Holding thread cleared").wait_for()
             page.get_by_role("button", name="Post to holding forum").click()
             assert gig_lead_stage_requested.wait(timeout=5)
             page.get_by_text(
@@ -1094,7 +1134,21 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             expect(page.get_by_role("link", name="Holding thread")).to_have_attribute(
                 "href", "https://discord.com/channels/guild-1/holding-thread-1"
             )
-            page.get_by_role("button", name="Qualify lead").click()
+            expect(
+                page.get_by_role("button", name="Qualify lead", exact=True)
+            ).to_have_count(0)
+            page.get_by_role("button", name="Back to To post").click()
+            expect(
+                page.get_by_text("No leads waiting to be posted to the holding forum.")
+            ).to_be_visible()
+            with page.expect_request(re.compile(r"/gig-leads\?.*staged=true")):
+                page.get_by_role("button", name="Qualification", exact=True).click()
+            page.get_by_role("link", name="Contract React Build").click()
+            expect(page).to_have_url(f"{lead_url}#qualification")
+            expect(
+                page.get_by_role("button", name="Post to holding forum")
+            ).to_have_count(0)
+            page.get_by_role("button", name="Qualify lead", exact=True).click()
             assert gig_lead_review_requested.wait(timeout=5)
             assert gig_lead_review_body["status"] == "approved"
             page.get_by_text("Qualified lead").wait_for()
@@ -1104,16 +1158,9 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             assert gig_lead_post_requested.wait(timeout=5)
             assert gig_lead_post_body["engagement_status"] == "recruiting"
             assert gig_lead_post_body["tags"] == "Contract,Remote"
-            page.get_by_text(
-                "Promoted qualified lead to Discord; staying on Leads"
-            ).wait_for()
-            expect(page).to_have_url(f"{dashboard_server}/dashboard/gigs#leads")
-            expect(page.locator("#gigLeadsTab")).to_have_attribute(
-                "aria-pressed", "true"
-            )
-            expect(
-                page.locator("#gigLeadsBody").get_by_text("Posted", exact=True)
-            ).to_be_visible()
+            page.get_by_text("Promoted lead to Discord").wait_for()
+            expect(page).to_have_url(f"{lead_url}#qualification")
+            expect(page.get_by_text("Posted", exact=True)).to_be_visible()
             expect(page.get_by_role("link", name="View posted gig")).to_have_attribute(
                 "href", "/dashboard/gigs/66666666-6666-4666-8666-666666666666"
             )
@@ -1124,13 +1171,12 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
             )
 
             page.reload()
-            page.get_by_text("Contract React Build").wait_for()
             expect(page.get_by_role("link", name="View posted gig")).to_have_attribute(
                 "href", "/dashboard/gigs/66666666-6666-4666-8666-666666666666"
             )
 
             job_leads_payload[0]["status"] = "rejected"
-            page.locator("#refreshGigLeads").click()
+            page.reload()
             gig_lead_review_requested.clear()
             gig_lead_review_body.clear()
             page.get_by_role("button", name="Restore to pending").click()
@@ -1151,28 +1197,28 @@ def test_dashboard_interactivity_with_playwright(dashboard_server: str) -> None:
                     },
                 }
             )
-            page.locator("#refreshGigLeads").click()
+            page.goto(lead_url)
             recovery_warning = page.get_by_text(
-                re.compile(
-                    "Staging blocked until the orphaned holding thread orphaned-thread-1"
-                )
+                "Confirm holding thread orphaned-thread-1 was removed to post again."
             )
-            recovery_warning.wait_for()
+            expect(recovery_warning).to_be_visible()
             expect(
                 page.get_by_role("button", name="Post to holding forum")
-            ).not_to_be_visible()
+            ).to_have_count(0)
+            gig_lead_recovery_clear_requested.clear()
             page.once("dialog", lambda dialog: dialog.accept())
-            page.get_by_role("button", name="Clear holding recovery block").click()
+            page.get_by_role("button", name="Holding thread deleted").click()
             assert gig_lead_recovery_clear_requested.wait(timeout=5)
-            assert gig_lead_recovery_clear_body == {"orphan_deleted": True}
-            page.get_by_text("Cleared the holding-thread recovery block").wait_for()
-            expect(recovery_warning).not_to_be_visible()
+            assert gig_lead_recovery_clear_body == {
+                "orphan_deleted": True,
+                "thread_id": "orphaned-thread-1",
+            }
+            expect(recovery_warning).to_have_count(0)
             expect(
                 page.get_by_role("button", name="Post to holding forum")
             ).to_be_visible()
 
-            page.locator("#gigsTab").click()
-            expect(page.locator("#gigsTab")).to_have_attribute("aria-pressed", "true")
+            page.get_by_role("link", name="Gigs", exact=True).click()
             expect(page.locator("#gigStatus")).to_have_value("")
             expect(page.get_by_label("Include historical")).not_to_be_checked()
             page.get_by_text("Contract React Build").wait_for()

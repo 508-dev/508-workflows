@@ -56,6 +56,7 @@ class BackendRouteSurface(Protocol):
     dashboard_gigs_handler: RouteHandler
     dashboard_handler: RouteHandler
     dashboard_job_lead_scrape_status_handler: RouteHandler
+    dashboard_job_lead_detail_handler: RouteHandler
     dashboard_job_leads_handler: RouteHandler
     dashboard_post_job_lead_handler: RouteHandler
     dashboard_review_job_lead_handler: RouteHandler
@@ -349,6 +350,11 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
         methods=["GET"],
     )
     app.add_api_route(
+        "/dashboard/api/gig-leads/{lead_id}",
+        api.dashboard_job_lead_detail_handler,
+        methods=["GET"],
+    )
+    app.add_api_route(
         "/dashboard/api/job-channels",
         dashboard_job_channels_handler,
         methods=["GET"],
@@ -582,6 +588,12 @@ def register_routes(app: FastAPI, api: BackendRouteSurface) -> None:
         "/dashboard/api/sync/newsletters",
         dashboard_sync_newsletters_handler,
         methods=["POST"],
+    )
+    app.add_api_route(
+        "/dashboard/leads/{item_id}",
+        dashboard_handler,
+        methods=["GET"],
+        response_model=None,
     )
     app.add_api_route(
         "/dashboard/gigs/{item_id}",

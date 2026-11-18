@@ -5179,7 +5179,9 @@ def test_dashboard_job_leads_returns_pending_leads(client: TestClient) -> None:
         ),
         patch("five08.backend.api.list_job_leads", return_value=leads) as mock_leads,
     ):
-        response = client.get("/dashboard/api/gig-leads?status=pending&limit=10")
+        response = client.get(
+            "/dashboard/api/gig-leads?status=pending&limit=10&staged=false"
+        )
 
     assert response.status_code == 200
     payload = response.json()
@@ -5198,6 +5200,7 @@ def test_dashboard_job_leads_returns_pending_leads(client: TestClient) -> None:
         api.settings,
         status=api.JobLeadStatus.PENDING,
         limit=10,
+        staged=False,
     )
 
 
@@ -5809,18 +5812,67 @@ def test_dashboard_clear_job_lead_staging_recovery_requires_manual_reconciliatio
         )
         response = client.post(
             "/dashboard/api/gig-leads/lead-1/staging-recovery/clear",
-            json={"orphan_deleted": True},
+            json={"orphan_deleted": True, "thread_id": "thread-1"},
         )
 
     assert rejected.status_code == 400
     assert rejected.json() == {"error": "invalid_payload"}
     assert response.status_code == 200
     assert response.json() == {"id": "lead-1", "status": "pending"}
-    clear_recovery.assert_called_once_with(api.settings, lead_id="lead-1")
+    clear_recovery.assert_called_once_with(
+        api.settings, lead_id="lead-1", thread_id="thread-1"
+    )
     audit_payload = mock_insert.call_args.args[1]
     assert audit_payload.action == "job_leads.staging_recovery.clear"
     assert audit_payload.resource_id == "lead-1"
     assert audit_payload.metadata == {"lead_id": "lead-1", "orphan_deleted": True}
+
+
+@pytest.mark.parametrize(
+    ("state", "status_code"),
+    [
+        ({}, 200),
+        ({"staged_discord_thread_id": "replacement"}, 409),
+        (
+            {
+                "metadata": {"_staging_cleanup_required": {"thread_id": None}},
+                "staging_in_progress": True,
+            },
+            409,
+        ),
+    ],
+)
+def test_dashboard_recovery_returns_the_current_lead_on_stale_confirmation(
+    client: TestClient,
+    state: dict[str, Any],
+    status_code: int,
+) -> None:
+    session = _dashboard_write_session()
+    lead = {"id": "lead-1", "status": "pending", **state}
+
+    with (
+        patch(
+            "five08.backend.api._current_session",
+            new_callable=AsyncMock,
+            return_value=("session-1", session),
+        ),
+        patch(
+            "five08.backend.api.clear_job_lead_staging_cleanup_required",
+            return_value=None,
+        ),
+        patch("five08.backend.api.get_job_lead", return_value=lead),
+        patch("five08.backend.api.insert_audit_event") as audit,
+    ):
+        response = client.post(
+            "/dashboard/api/gig-leads/lead-1/staging-recovery/clear",
+            json={"orphan_deleted": True, "thread_id": "deleted-thread"},
+        )
+
+    assert response.status_code == status_code
+    current = response.json() if status_code == 200 else response.json()["lead"]
+    assert current["id"] == "lead-1"
+    assert all(current[key] == value for key, value in state.items())
+    audit.assert_not_called()
 
 
 def test_dashboard_post_job_lead_posts_approved_lead_to_discord(
