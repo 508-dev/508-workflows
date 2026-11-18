@@ -101,3 +101,46 @@ uv run python scripts/agent_eval.py --suite canonical --live-planner --profile a
 ```
 
 These runs require the relevant provider keys in the environment or `.env`.
+
+## Discord mention routing
+
+Mention routing has its own eval because the planner suite starts after Discord
+has selected a handler. The [mention corpus](../tests/evals/discord-agent/routing/mentions.v1.json)
+uses synthetic latest-turn messages after the mention eligibility, capture, and
+local-reply checks. Its labels identify the intended handler for job matching,
+knowledge questions, and backend workflows. The challenge cases preserve
+examples of fuzzy phrasing for which rules or candidates can miss the intent.
+The regular unit suite enforces the other route labels and checks that an
+actual mention about job-posting policy reaches the knowledge handler.
+
+```bash
+uv run --locked python scripts/agent_routing_eval.py
+uv run --locked python scripts/agent_routing_eval.py --live --threshold 0.85
+```
+
+The first command replays the production routing function locally. The second
+compares it against Jev 1.14, Clef, and Clef Flash through the
+[OpenRouter Decisions API](https://openrouter.ai/docs/guides/features/decisions)
+and requires `OPENROUTER_API_KEY`. Repeat `--model` to choose different model
+IDs. Only the checked-in synthetic message text goes to the provider. The
+runner never invokes a Discord handler or executes a tool.
+
+The JSON report includes each route and probability distribution, corrections
+and regressions relative to the rules, workflow requests diverted to a read
+handler, deferrals, request errors, p50/p95 request latency, and cost where the
+provider supplies it. A low probability, explicit abstention, or provider
+failure replays the current rule decision. Errors still make a live run exit
+nonzero. The default threshold is an experiment setting. Before adopting a
+candidate, compare it on a held-out set of sanitized Discord turns, confirm it
+improves coverage with no workflow diversions, and measure the latency it adds
+to end-to-end replies.
+
+Jev and Clef can propose a route from these three labels. The backend owns
+schema validation, permission checks, confirmation and execution, and the
+structured planner drafts action arguments when needed. Cloudflare's Clairic
+uses the [Extractions API](https://openrouter.ai/cloudflare/clairic) and would
+need a separate field-level eval for a bounded workflow, including missing
+values and spans grounded in the request.
+
+See the [November 19, 2026 live comparison](../tests/evals/discord-agent/artifacts/mention-routing-2026-11-19/README.md)
+for the first run, including per-case probabilities and the tested revision.

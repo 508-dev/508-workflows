@@ -1,0 +1,2074 @@
+{
+  "version": "discord-agent-mention-routing-audit.v1",
+  "evaluated_revision": "ef34f73e21f1f9dbe1d05f1d0273065f49231b09",
+  "corpus": "routing/mentions.v1.json",
+  "threshold": 0.85,
+  "cases": 32,
+  "rules_correct": 27,
+  "models": {
+    "typesafe/jev-1.14": {
+      "summary": {
+        "accepted": 23,
+        "correct": 32,
+        "improvements": 5,
+        "regressions": 0,
+        "workflow_sent_elsewhere": 0,
+        "deferred": 9,
+        "p50_latency_ms": 358,
+        "p95_latency_ms": 442,
+        "reported_cost_usd": 0.000593334,
+        "calls_with_reported_cost": 32
+      },
+      "observations": [
+        {
+          "id": "job-search-technology",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.99,
+            "knowledge_question": 0.0,
+            "workflow": 0.0,
+            "abstain": 0.01
+          },
+          "latency_ms": 427,
+          "usage": {
+            "input_tokens": 440,
+            "output_tokens": 50,
+            "cost": 1.848e-05
+          }
+        },
+        {
+          "id": "job-search-polite",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 1.0,
+            "knowledge_question": 0.0,
+            "workflow": 0.0,
+            "abstain": 0.0
+          },
+          "latency_ms": 381,
+          "usage": {
+            "input_tokens": 442,
+            "output_tokens": 50,
+            "cost": 1.8564e-05
+          }
+        },
+        {
+          "id": "job-search-location",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.99,
+            "knowledge_question": 0.0,
+            "workflow": 0.0,
+            "abstain": 0.01
+          },
+          "latency_ms": 328,
+          "usage": {
+            "input_tokens": 436,
+            "output_tokens": 50,
+            "cost": 1.8312e-05
+          }
+        },
+        {
+          "id": "job-search-send-to-self",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.99,
+            "knowledge_question": 0.0,
+            "workflow": 0.0,
+            "abstain": 0.01
+          },
+          "latency_ms": 390,
+          "usage": {
+            "input_tokens": 438,
+            "output_tokens": 50,
+            "cost": 1.8396e-05
+          }
+        },
+        {
+          "id": "job-search-current",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.98,
+            "knowledge_question": 0.0,
+            "workflow": 0.02,
+            "abstain": 0.0
+          },
+          "latency_ms": 330,
+          "usage": {
+            "input_tokens": 439,
+            "output_tokens": 50,
+            "cost": 1.8438e-05
+          }
+        },
+        {
+          "id": "job-search-single-post",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.92,
+            "knowledge_question": 0.0,
+            "workflow": 0.03,
+            "abstain": 0.05
+          },
+          "latency_ms": 365,
+          "usage": {
+            "input_tokens": 437,
+            "output_tokens": 50,
+            "cost": 1.8354e-05
+          }
+        },
+        {
+          "id": "job-search-gig",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 1.0,
+            "knowledge_question": 0.0,
+            "workflow": 0.0,
+            "abstain": 0.0
+          },
+          "latency_ms": 331,
+          "usage": {
+            "input_tokens": 442,
+            "output_tokens": 50,
+            "cost": 1.8564e-05
+          }
+        },
+        {
+          "id": "job-search-postings",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "deferred",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.8,
+            "knowledge_question": 0.19,
+            "workflow": 0.0,
+            "abstain": 0.01
+          },
+          "latency_ms": 408,
+          "usage": {
+            "input_tokens": 442,
+            "output_tokens": 50,
+            "cost": 1.8564e-05
+          }
+        },
+        {
+          "id": "job-search-implicit",
+          "rules": "workflow",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.97,
+            "knowledge_question": 0.0,
+            "workflow": 0.0,
+            "abstain": 0.03
+          },
+          "latency_ms": 356,
+          "usage": {
+            "input_tokens": 445,
+            "output_tokens": 50,
+            "cost": 1.869e-05
+          }
+        },
+        {
+          "id": "job-search-elliptical",
+          "rules": "knowledge_question",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.99,
+            "knowledge_question": 0.0,
+            "workflow": 0.0,
+            "abstain": 0.01
+          },
+          "latency_ms": 373,
+          "usage": {
+            "input_tokens": 444,
+            "output_tokens": 50,
+            "cost": 1.8648e-05
+          }
+        },
+        {
+          "id": "knowledge-job-policy",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.0,
+            "knowledge_question": 1.0,
+            "workflow": 0.0,
+            "abstain": 0.0
+          },
+          "latency_ms": 338,
+          "usage": {
+            "input_tokens": 442,
+            "output_tokens": 50,
+            "cost": 1.8564e-05
+          }
+        },
+        {
+          "id": "knowledge-gig-guidelines",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.0,
+            "knowledge_question": 1.0,
+            "workflow": 0.0,
+            "abstain": 0.0
+          },
+          "latency_ms": 366,
+          "usage": {
+            "input_tokens": 441,
+            "output_tokens": 50,
+            "cost": 1.8522e-05
+          }
+        },
+        {
+          "id": "knowledge-job-guide-command",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.03,
+            "knowledge_question": 0.96,
+            "workflow": 0.0,
+            "abstain": 0.01
+          },
+          "latency_ms": 411,
+          "usage": {
+            "input_tokens": 438,
+            "output_tokens": 50,
+            "cost": 1.8396e-05
+          }
+        },
+        {
+          "id": "knowledge-job-policies-recall",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.0,
+            "knowledge_question": 1.0,
+            "workflow": 0.0,
+            "abstain": 0.0
+          },
+          "latency_ms": 350,
+          "usage": {
+            "input_tokens": 444,
+            "output_tokens": 50,
+            "cost": 1.8648e-05
+          }
+        },
+        {
+          "id": "knowledge-job-expired-policy",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "deferred",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.0,
+            "knowledge_question": 0.77,
+            "workflow": 0.08,
+            "abstain": 0.15
+          },
+          "latency_ms": 368,
+          "usage": {
+            "input_tokens": 441,
+            "output_tokens": 50,
+            "cost": 1.8522e-05
+          }
+        },
+        {
+          "id": "knowledge-onboarding",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.0,
+            "knowledge_question": 1.0,
+            "workflow": 0.0,
+            "abstain": 0.0
+          },
+          "latency_ms": 333,
+          "usage": {
+            "input_tokens": 442,
+            "output_tokens": 50,
+            "cost": 1.8564e-05
+          }
+        },
+        {
+          "id": "knowledge-recall",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.0,
+            "knowledge_question": 0.98,
+            "workflow": 0.01,
+            "abstain": 0.01
+          },
+          "latency_ms": 382,
+          "usage": {
+            "input_tokens": 442,
+            "output_tokens": 50,
+            "cost": 1.8564e-05
+          }
+        },
+        {
+          "id": "knowledge-job-policy-paraphrase",
+          "rules": "job_search",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.0,
+            "knowledge_question": 1.0,
+            "workflow": 0.0,
+            "abstain": 0.0
+          },
+          "latency_ms": 332,
+          "usage": {
+            "input_tokens": 443,
+            "output_tokens": 50,
+            "cost": 1.8606e-05
+          }
+        },
+        {
+          "id": "knowledge-job-process",
+          "rules": "job_search",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.01,
+            "knowledge_question": 0.99,
+            "workflow": 0.0,
+            "abstain": 0.0
+          },
+          "latency_ms": 489,
+          "usage": {
+            "input_tokens": 442,
+            "output_tokens": 50,
+            "cost": 1.8564e-05
+          }
+        },
+        {
+          "id": "knowledge-job-sources",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.01,
+            "knowledge_question": 0.99,
+            "workflow": 0.0,
+            "abstain": 0.0
+          },
+          "latency_ms": 333,
+          "usage": {
+            "input_tokens": 443,
+            "output_tokens": 50,
+            "cost": 1.8606e-05
+          }
+        },
+        {
+          "id": "workflow-job-task",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "deferred",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "workflow",
+          "probabilities": {
+            "job_search": 0.34,
+            "knowledge_question": 0.0,
+            "workflow": 0.64,
+            "abstain": 0.02
+          },
+          "latency_ms": 334,
+          "usage": {
+            "input_tokens": 444,
+            "output_tokens": 49,
+            "cost": 1.8648e-05
+          }
+        },
+        {
+          "id": "workflow-job-mixed-write",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "workflow",
+          "probabilities": {
+            "job_search": 0.09,
+            "knowledge_question": 0.0,
+            "workflow": 0.9,
+            "abstain": 0.01
+          },
+          "latency_ms": 358,
+          "usage": {
+            "input_tokens": 442,
+            "output_tokens": 49,
+            "cost": 1.8564e-05
+          }
+        },
+        {
+          "id": "workflow-policy-mixed-write",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "workflow",
+          "probabilities": {
+            "job_search": 0.0,
+            "knowledge_question": 0.02,
+            "workflow": 0.98,
+            "abstain": 0.0
+          },
+          "latency_ms": 407,
+          "usage": {
+            "input_tokens": 445,
+            "output_tokens": 49,
+            "cost": 1.869e-05
+          }
+        },
+        {
+          "id": "workflow-job-publish",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "deferred",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "workflow",
+          "probabilities": {
+            "job_search": 0.17,
+            "knowledge_question": 0.01,
+            "workflow": 0.66,
+            "abstain": 0.16
+          },
+          "latency_ms": 339,
+          "usage": {
+            "input_tokens": 439,
+            "output_tokens": 49,
+            "cost": 1.8438e-05
+          }
+        },
+        {
+          "id": "workflow-job-forward",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "deferred",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "workflow",
+          "probabilities": {
+            "job_search": 0.33,
+            "knowledge_question": 0.02,
+            "workflow": 0.51,
+            "abstain": 0.14
+          },
+          "latency_ms": 336,
+          "usage": {
+            "input_tokens": 442,
+            "output_tokens": 49,
+            "cost": 1.8564e-05
+          }
+        },
+        {
+          "id": "workflow-job-todo",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "workflow",
+          "probabilities": {
+            "job_search": 0.04,
+            "knowledge_question": 0.0,
+            "workflow": 0.93,
+            "abstain": 0.03
+          },
+          "latency_ms": 349,
+          "usage": {
+            "input_tokens": 443,
+            "output_tokens": 49,
+            "cost": 1.8606e-05
+          }
+        },
+        {
+          "id": "workflow-job-issue",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "deferred",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "workflow",
+          "probabilities": {
+            "job_search": 0.22,
+            "knowledge_question": 0.09,
+            "workflow": 0.5,
+            "abstain": 0.19
+          },
+          "latency_ms": 352,
+          "usage": {
+            "input_tokens": 453,
+            "output_tokens": 49,
+            "cost": 1.9026e-05
+          }
+        },
+        {
+          "id": "workflow-job-memory",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "deferred",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.69,
+            "knowledge_question": 0.0,
+            "workflow": 0.03,
+            "abstain": 0.28
+          },
+          "latency_ms": 333,
+          "usage": {
+            "input_tokens": 444,
+            "output_tokens": 50,
+            "cost": 1.8648e-05
+          }
+        },
+        {
+          "id": "workflow-task-question",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "workflow",
+          "probabilities": {
+            "job_search": 0.0,
+            "knowledge_question": 0.01,
+            "workflow": 0.98,
+            "abstain": 0.01
+          },
+          "latency_ms": 442,
+          "usage": {
+            "input_tokens": 441,
+            "output_tokens": 49,
+            "cost": 1.8522e-05
+          }
+        },
+        {
+          "id": "workflow-short-followup",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "deferred",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "abstain",
+          "probabilities": {
+            "job_search": 0.0,
+            "knowledge_question": 0.04,
+            "workflow": 0.01,
+            "abstain": 0.95
+          },
+          "latency_ms": 411,
+          "usage": {
+            "input_tokens": 434,
+            "output_tokens": 51,
+            "cost": 1.8228e-05
+          }
+        },
+        {
+          "id": "workflow-cancel",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "deferred",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "workflow",
+          "probabilities": {
+            "job_search": 0.0,
+            "knowledge_question": 0.0,
+            "workflow": 0.56,
+            "abstain": 0.44
+          },
+          "latency_ms": 386,
+          "usage": {
+            "input_tokens": 434,
+            "output_tokens": 49,
+            "cost": 1.8228e-05
+          }
+        },
+        {
+          "id": "workflow-loose-crm",
+          "rules": "knowledge_question",
+          "route": "workflow",
+          "outcome": "accepted",
+          "model": "typesafe/jev-1.14-20261014",
+          "provider": "TypeSafe",
+          "choice": "workflow",
+          "probabilities": {
+            "job_search": 0.0,
+            "knowledge_question": 0.12,
+            "workflow": 0.86,
+            "abstain": 0.02
+          },
+          "latency_ms": 431,
+          "usage": {
+            "input_tokens": 443,
+            "output_tokens": 49,
+            "cost": 1.8606e-05
+          }
+        }
+      ]
+    },
+    "cloudflare/clef": {
+      "summary": {
+        "accepted": 20,
+        "correct": 30,
+        "improvements": 4,
+        "regressions": 1,
+        "workflow_sent_elsewhere": 2,
+        "deferred": 12,
+        "p50_latency_ms": 638,
+        "p95_latency_ms": 1270,
+        "reported_cost_usd": 0.001818912,
+        "calls_with_reported_cost": 32
+      },
+      "observations": [
+        {
+          "id": "job-search-technology",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "cloudflare/clef",
+          "provider": "Cloudflare",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.9579,
+            "knowledge_question": 0.0079,
+            "workflow": 0.0107,
+            "abstain": 0.0235
+          },
+          "latency_ms": 1010,
+          "usage": {
+            "input_tokens": 260,
+            "output_tokens": 0,
+            "cost": 6.24e-05
+          }
+        },
+        {
+          "id": "job-search-polite",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "cloudflare/clef",
+          "provider": "DeepInfra",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.9748,
+            "knowledge_question": 0.0082,
+            "workflow": 0.0062,
+            "abstain": 0.0107
+          },
+          "latency_ms": 1205,
+          "usage": {
+            "input_tokens": 262,
+            "output_tokens": 0,
+            "cost": 5.0304e-05
+          }
+        },
+        {
+          "id": "job-search-location",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "cloudflare/clef",
+          "provider": "DeepInfra",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.9706,
+            "knowledge_question": 0.0045,
+            "workflow": 0.0048,
+            "abstain": 0.0201
+          },
+          "latency_ms": 742,
+          "usage": {
+            "input_tokens": 256,
+            "output_tokens": 0,
+            "cost": 4.9152e-05
+          }
+        },
+        {
+          "id": "job-search-send-to-self",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "cloudflare/clef",
+          "provider": "Cloudflare",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.951,
+            "knowledge_question": 0.007,
+            "workflow": 0.0166,
+            "abstain": 0.0254
+          },
+          "latency_ms": 410,
+          "usage": {
+            "input_tokens": 258,
+            "output_tokens": 0,
+            "cost": 6.192e-05
+          }
+        },
+        {
+          "id": "job-search-current",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "cloudflare/clef",
+          "provider": "DeepInfra",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.8599,
+            "knowledge_question": 0.0231,
+            "workflow": 0.0845,
+            "abstain": 0.0326
+          },
+          "latency_ms": 715,
+          "usage": {
+            "input_tokens": 259,
+            "output_tokens": 0,
+            "cost": 4.9728e-05
+          }
+        },
+        {
+          "id": "job-search-single-post",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "cloudflare/clef",
+          "provider": "DeepInfra",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.93,
+            "knowledge_question": 0.0299,
+            "workflow": 0.0176,
+            "abstain": 0.0226
+          },
+          "latency_ms": 1674,
+          "usage": {
+            "input_tokens": 257,
+            "output_tokens": 0,
+            "cost": 4.9344e-05
+          }
+        },
+        {
+          "id": "job-search-gig",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "cloudflare/clef",
+          "provider": "DeepInfra",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.9708,
+            "knowledge_question": 0.0064,
+            "workflow": 0.0055,
+            "abstain": 0.0172
+          },
+          "latency_ms": 638,
+          "usage": {
+            "input_tokens": 262,
+            "output_tokens": 0,
+            "cost": 5.0304e-05
+          }
+        },
+        {
+          "id": "job-search-postings",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "cloudflare/clef",
+          "provider": "Cloudflare",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.9032,
+            "knowledge_question": 0.0534,
+            "workflow": 0.0126,
+            "abstain": 0.0308
+          },
+          "latency_ms": 342,
+          "usage": {
+            "input_tokens": 262,
+            "output_tokens": 0,
+            "cost": 6.288e-05
+          }
+        },
+        {
+          "id": "job-search-implicit",
+          "rules": "workflow",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "cloudflare/clef",
+          "provider": "DeepInfra",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.9773,
+            "knowledge_question": 0.0054,
+            "workflow": 0.0054,
+            "abstain": 0.0118
+          },
+          "latency_ms": 723,
+          "usage": {
+            "input_tokens": 265,
+            "output_tokens": 0,
+            "cost": 5.088e-05
+          }
+        },
+        {
+          "id": "job-search-elliptical",
+          "rules": "knowledge_question",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "cloudflare/clef",
+          "provider": "DeepInfra",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.9691,
+            "knowledge_question": 0.0107,
+            "workflow": 0.0077,
+            "abstain": 0.0125
+          },
+          "latency_ms": 637,
+          "usage": {
+            "input_tokens": 264,
+            "output_tokens": 0,
+            "cost": 5.0688e-05
+          }
+        },
+        {
+          "id": "knowledge-job-policy",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "cloudflare/clef",
+          "provider": "Cloudflare",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.0092,
+            "knowledge_question": 0.9812,
+            "workflow": 0.0034,
+            "abstain": 0.0062
+          },
+          "latency_ms": 592,
+          "usage": {
+            "input_tokens": 262,
+            "output_tokens": 0,
+            "cost": 6.288e-05
+          }
+        },
+        {
+          "id": "knowledge-gig-guidelines",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "cloudflare/clef",
+          "provider": "DeepInfra",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.0246,
+            "knowledge_question": 0.9603,
+            "workflow": 0.0045,
+            "abstain": 0.0106
+          },
+          "latency_ms": 719,
+          "usage": {
+            "input_tokens": 261,
+            "output_tokens": 0,
+            "cost": 5.0112e-05
+          }
+        },
+        {
+          "id": "knowledge-job-guide-command",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "cloudflare/clef",
+          "provider": "PrimeIntellect",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.0482,
+            "knowledge_question": 0.9305,
+            "workflow": 0.0055,
+            "abstain": 0.0158
+          },
+          "latency_ms": 817,
+          "usage": {
+            "input_tokens": 258,
+            "output_tokens": 0,
+            "cost": 6.192e-05
+          }
+        },
+        {
+          "id": "knowledge-job-policies-recall",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "cloudflare/clef",
+          "provider": "Cloudflare",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.0079,
+            "knowledge_question": 0.9812,
+            "workflow": 0.004,
+            "abstain": 0.0069
+          },
+          "latency_ms": 616,
+          "usage": {
+            "input_tokens": 264,
+            "output_tokens": 0,
+            "cost": 6.336e-05
+          }
+        },
+        {
+          "id": "knowledge-job-expired-policy",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "deferred",
+          "model": "cloudflare/clef",
+          "provider": "DeepInfra",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.1204,
+            "knowledge_question": 0.4026,
+            "workflow": 0.328,
+            "abstain": 0.149
+          },
+          "latency_ms": 665,
+          "usage": {
+            "input_tokens": 261,
+            "output_tokens": 0,
+            "cost": 5.0112e-05
+          }
+        },
+        {
+          "id": "knowledge-onboarding",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "cloudflare/clef",
+          "provider": "DeepInfra",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.0053,
+            "knowledge_question": 0.9638,
+            "workflow": 0.0071,
+            "abstain": 0.0238
+          },
+          "latency_ms": 663,
+          "usage": {
+            "input_tokens": 260,
+            "output_tokens": 0,
+            "cost": 4.992e-05
+          }
+        },
+        {
+          "id": "knowledge-recall",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "cloudflare/clef",
+          "provider": "DeepInfra",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.0037,
+            "knowledge_question": 0.9527,
+            "workflow": 0.0125,
+            "abstain": 0.0311
+          },
+          "latency_ms": 907,
+          "usage": {
+            "input_tokens": 262,
+            "output_tokens": 0,
+            "cost": 5.0304e-05
+          }
+        },
+        {
+          "id": "knowledge-job-policy-paraphrase",
+          "rules": "job_search",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "cloudflare/clef",
+          "provider": "DeepInfra",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.0186,
+            "knowledge_question": 0.9689,
+            "workflow": 0.0041,
+            "abstain": 0.0084
+          },
+          "latency_ms": 429,
+          "usage": {
+            "input_tokens": 263,
+            "output_tokens": 0,
+            "cost": 5.0496e-05
+          }
+        },
+        {
+          "id": "knowledge-job-process",
+          "rules": "job_search",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "cloudflare/clef",
+          "provider": "DeepInfra",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.0392,
+            "knowledge_question": 0.9347,
+            "workflow": 0.0067,
+            "abstain": 0.0194
+          },
+          "latency_ms": 649,
+          "usage": {
+            "input_tokens": 262,
+            "output_tokens": 0,
+            "cost": 5.0304e-05
+          }
+        },
+        {
+          "id": "knowledge-job-sources",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "cloudflare/clef",
+          "provider": "DeepInfra",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.02,
+            "knowledge_question": 0.8941,
+            "workflow": 0.0253,
+            "abstain": 0.0606
+          },
+          "latency_ms": 665,
+          "usage": {
+            "input_tokens": 263,
+            "output_tokens": 0,
+            "cost": 5.0496e-05
+          }
+        },
+        {
+          "id": "workflow-job-task",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "deferred",
+          "model": "cloudflare/clef",
+          "provider": "DeepInfra",
+          "choice": "workflow",
+          "probabilities": {
+            "job_search": 0.1883,
+            "knowledge_question": 0.0128,
+            "workflow": 0.7743,
+            "abstain": 0.0246
+          },
+          "latency_ms": 1040,
+          "usage": {
+            "input_tokens": 264,
+            "output_tokens": 0,
+            "cost": 5.0688e-05
+          }
+        },
+        {
+          "id": "workflow-job-mixed-write",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "deferred",
+          "model": "cloudflare/clef",
+          "provider": "PrimeIntellect",
+          "choice": "workflow",
+          "probabilities": {
+            "job_search": 0.1688,
+            "knowledge_question": 0.014,
+            "workflow": 0.7566,
+            "abstain": 0.0607
+          },
+          "latency_ms": 508,
+          "usage": {
+            "input_tokens": 262,
+            "output_tokens": 0,
+            "cost": 6.288e-05
+          }
+        },
+        {
+          "id": "workflow-policy-mixed-write",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "deferred",
+          "model": "cloudflare/clef",
+          "provider": "Cloudflare",
+          "choice": "workflow",
+          "probabilities": {
+            "job_search": 0.0182,
+            "knowledge_question": 0.2794,
+            "workflow": 0.6478,
+            "abstain": 0.0546
+          },
+          "latency_ms": 633,
+          "usage": {
+            "input_tokens": 265,
+            "output_tokens": 0,
+            "cost": 6.36e-05
+          }
+        },
+        {
+          "id": "workflow-job-publish",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "deferred",
+          "model": "cloudflare/clef",
+          "provider": "PrimeIntellect",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.5249,
+            "knowledge_question": 0.0363,
+            "workflow": 0.3608,
+            "abstain": 0.078
+          },
+          "latency_ms": 525,
+          "usage": {
+            "input_tokens": 259,
+            "output_tokens": 0,
+            "cost": 6.216e-05
+          }
+        },
+        {
+          "id": "workflow-job-forward",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "deferred",
+          "model": "cloudflare/clef",
+          "provider": "PrimeIntellect",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.5646,
+            "knowledge_question": 0.0801,
+            "workflow": 0.2667,
+            "abstain": 0.0886
+          },
+          "latency_ms": 503,
+          "usage": {
+            "input_tokens": 262,
+            "output_tokens": 0,
+            "cost": 6.288e-05
+          }
+        },
+        {
+          "id": "workflow-job-todo",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "deferred",
+          "model": "cloudflare/clef",
+          "provider": "Cloudflare",
+          "choice": "workflow",
+          "probabilities": {
+            "job_search": 0.0869,
+            "knowledge_question": 0.0375,
+            "workflow": 0.7863,
+            "abstain": 0.0893
+          },
+          "latency_ms": 387,
+          "usage": {
+            "input_tokens": 263,
+            "output_tokens": 0,
+            "cost": 6.312e-05
+          }
+        },
+        {
+          "id": "workflow-job-issue",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "deferred",
+          "model": "cloudflare/clef",
+          "provider": "PrimeIntellect",
+          "choice": "workflow",
+          "probabilities": {
+            "job_search": 0.1373,
+            "knowledge_question": 0.0527,
+            "workflow": 0.7395,
+            "abstain": 0.0704
+          },
+          "latency_ms": 482,
+          "usage": {
+            "input_tokens": 271,
+            "output_tokens": 0,
+            "cost": 6.504e-05
+          }
+        },
+        {
+          "id": "workflow-job-memory",
+          "rules": "workflow",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "cloudflare/clef",
+          "provider": "Cloudflare",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.94,
+            "knowledge_question": 0.01,
+            "workflow": 0.0195,
+            "abstain": 0.0305
+          },
+          "latency_ms": 345,
+          "usage": {
+            "input_tokens": 264,
+            "output_tokens": 0,
+            "cost": 6.336e-05
+          }
+        },
+        {
+          "id": "workflow-task-question",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "deferred",
+          "model": "cloudflare/clef",
+          "provider": "Cloudflare",
+          "choice": "workflow",
+          "probabilities": {
+            "job_search": 0.0219,
+            "knowledge_question": 0.0408,
+            "workflow": 0.7744,
+            "abstain": 0.1629
+          },
+          "latency_ms": 1270,
+          "usage": {
+            "input_tokens": 261,
+            "output_tokens": 0,
+            "cost": 6.264e-05
+          }
+        },
+        {
+          "id": "workflow-short-followup",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "deferred",
+          "model": "cloudflare/clef",
+          "provider": "Cloudflare",
+          "choice": "abstain",
+          "probabilities": {
+            "job_search": 0.0196,
+            "knowledge_question": 0.069,
+            "workflow": 0.0597,
+            "abstain": 0.8517
+          },
+          "latency_ms": 626,
+          "usage": {
+            "input_tokens": 254,
+            "output_tokens": 0,
+            "cost": 6.096e-05
+          }
+        },
+        {
+          "id": "workflow-cancel",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "deferred",
+          "model": "cloudflare/clef",
+          "provider": "Cloudflare",
+          "choice": "abstain",
+          "probabilities": {
+            "job_search": 0.0226,
+            "knowledge_question": 0.0198,
+            "workflow": 0.373,
+            "abstain": 0.5846
+          },
+          "latency_ms": 494,
+          "usage": {
+            "input_tokens": 254,
+            "output_tokens": 0,
+            "cost": 6.096e-05
+          }
+        },
+        {
+          "id": "workflow-loose-crm",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "deferred",
+          "model": "cloudflare/clef",
+          "provider": "Cloudflare",
+          "choice": "workflow",
+          "probabilities": {
+            "job_search": 0.0151,
+            "knowledge_question": 0.0732,
+            "workflow": 0.4764,
+            "abstain": 0.4353
+          },
+          "latency_ms": 1149,
+          "usage": {
+            "input_tokens": 263,
+            "output_tokens": 0,
+            "cost": 6.312e-05
+          }
+        }
+      ]
+    },
+    "cloudflare/clef-flash": {
+      "summary": {
+        "accepted": 23,
+        "correct": 28,
+        "improvements": 4,
+        "regressions": 3,
+        "workflow_sent_elsewhere": 4,
+        "deferred": 9,
+        "p50_latency_ms": 640,
+        "p95_latency_ms": 941,
+        "reported_cost_usd": 0.000228285,
+        "calls_with_reported_cost": 32
+      },
+      "observations": [
+        {
+          "id": "job-search-technology",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "cloudflare/clef-flash",
+          "provider": "DeepInfra",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.9556,
+            "knowledge_question": 0.0111,
+            "workflow": 0.0111,
+            "abstain": 0.0221
+          },
+          "latency_ms": 967,
+          "usage": {
+            "input_tokens": 260,
+            "output_tokens": 0,
+            "cost": 4.94e-06
+          }
+        },
+        {
+          "id": "job-search-polite",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "cloudflare/clef-flash",
+          "provider": "DeepInfra",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.9397,
+            "knowledge_question": 0.0279,
+            "workflow": 0.0113,
+            "abstain": 0.0211
+          },
+          "latency_ms": 640,
+          "usage": {
+            "input_tokens": 262,
+            "output_tokens": 0,
+            "cost": 4.978e-06
+          }
+        },
+        {
+          "id": "job-search-location",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "cloudflare/clef-flash",
+          "provider": "Cloudflare",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.9488,
+            "knowledge_question": 0.0122,
+            "workflow": 0.0127,
+            "abstain": 0.0263
+          },
+          "latency_ms": 554,
+          "usage": {
+            "input_tokens": 256,
+            "output_tokens": 0,
+            "cost": 9.728e-06
+          }
+        },
+        {
+          "id": "job-search-send-to-self",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "cloudflare/clef-flash",
+          "provider": "DeepInfra",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.9777,
+            "knowledge_question": 0.0055,
+            "workflow": 0.006,
+            "abstain": 0.0108
+          },
+          "latency_ms": 693,
+          "usage": {
+            "input_tokens": 258,
+            "output_tokens": 0,
+            "cost": 4.902e-06
+          }
+        },
+        {
+          "id": "job-search-current",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "cloudflare/clef-flash",
+          "provider": "PrimeIntellect",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.974,
+            "knowledge_question": 0.009,
+            "workflow": 0.0087,
+            "abstain": 0.0083
+          },
+          "latency_ms": 527,
+          "usage": {
+            "input_tokens": 259,
+            "output_tokens": 0,
+            "cost": 9.842e-06
+          }
+        },
+        {
+          "id": "job-search-single-post",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "cloudflare/clef-flash",
+          "provider": "Cloudflare",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.936,
+            "knowledge_question": 0.0204,
+            "workflow": 0.0168,
+            "abstain": 0.0268
+          },
+          "latency_ms": 394,
+          "usage": {
+            "input_tokens": 257,
+            "output_tokens": 0,
+            "cost": 9.766e-06
+          }
+        },
+        {
+          "id": "job-search-gig",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "cloudflare/clef-flash",
+          "provider": "DeepInfra",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.9734,
+            "knowledge_question": 0.0087,
+            "workflow": 0.0053,
+            "abstain": 0.0126
+          },
+          "latency_ms": 671,
+          "usage": {
+            "input_tokens": 262,
+            "output_tokens": 0,
+            "cost": 4.978e-06
+          }
+        },
+        {
+          "id": "job-search-postings",
+          "rules": "job_search",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "cloudflare/clef-flash",
+          "provider": "PrimeIntellect",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.9669,
+            "knowledge_question": 0.0187,
+            "workflow": 0.0055,
+            "abstain": 0.0088
+          },
+          "latency_ms": 484,
+          "usage": {
+            "input_tokens": 262,
+            "output_tokens": 0,
+            "cost": 9.956e-06
+          }
+        },
+        {
+          "id": "job-search-implicit",
+          "rules": "workflow",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "cloudflare/clef-flash",
+          "provider": "DeepInfra",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.9529,
+            "knowledge_question": 0.0111,
+            "workflow": 0.0118,
+            "abstain": 0.0242
+          },
+          "latency_ms": 680,
+          "usage": {
+            "input_tokens": 265,
+            "output_tokens": 0,
+            "cost": 5.035e-06
+          }
+        },
+        {
+          "id": "job-search-elliptical",
+          "rules": "knowledge_question",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "cloudflare/clef-flash",
+          "provider": "PrimeIntellect",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.9774,
+            "knowledge_question": 0.0083,
+            "workflow": 0.0053,
+            "abstain": 0.009
+          },
+          "latency_ms": 432,
+          "usage": {
+            "input_tokens": 264,
+            "output_tokens": 0,
+            "cost": 1.0032e-05
+          }
+        },
+        {
+          "id": "knowledge-job-policy",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "cloudflare/clef-flash",
+          "provider": "DeepInfra",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.002,
+            "knowledge_question": 0.9946,
+            "workflow": 0.0017,
+            "abstain": 0.0017
+          },
+          "latency_ms": 690,
+          "usage": {
+            "input_tokens": 262,
+            "output_tokens": 0,
+            "cost": 4.978e-06
+          }
+        },
+        {
+          "id": "knowledge-gig-guidelines",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "cloudflare/clef-flash",
+          "provider": "DeepInfra",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.0076,
+            "knowledge_question": 0.9863,
+            "workflow": 0.0034,
+            "abstain": 0.0027
+          },
+          "latency_ms": 670,
+          "usage": {
+            "input_tokens": 261,
+            "output_tokens": 0,
+            "cost": 4.959e-06
+          }
+        },
+        {
+          "id": "knowledge-job-guide-command",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "cloudflare/clef-flash",
+          "provider": "DeepInfra",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.0292,
+            "knowledge_question": 0.9506,
+            "workflow": 0.0112,
+            "abstain": 0.009
+          },
+          "latency_ms": 941,
+          "usage": {
+            "input_tokens": 258,
+            "output_tokens": 0,
+            "cost": 4.902e-06
+          }
+        },
+        {
+          "id": "knowledge-job-policies-recall",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "cloudflare/clef-flash",
+          "provider": "DeepInfra",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.0028,
+            "knowledge_question": 0.9914,
+            "workflow": 0.0032,
+            "abstain": 0.0027
+          },
+          "latency_ms": 710,
+          "usage": {
+            "input_tokens": 264,
+            "output_tokens": 0,
+            "cost": 5.016e-06
+          }
+        },
+        {
+          "id": "knowledge-job-expired-policy",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "cloudflare/clef-flash",
+          "provider": "DeepInfra",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.0241,
+            "knowledge_question": 0.8783,
+            "workflow": 0.0495,
+            "abstain": 0.048
+          },
+          "latency_ms": 650,
+          "usage": {
+            "input_tokens": 261,
+            "output_tokens": 0,
+            "cost": 4.959e-06
+          }
+        },
+        {
+          "id": "knowledge-onboarding",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "cloudflare/clef-flash",
+          "provider": "PrimeIntellect",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.0036,
+            "knowledge_question": 0.9878,
+            "workflow": 0.004,
+            "abstain": 0.0046
+          },
+          "latency_ms": 540,
+          "usage": {
+            "input_tokens": 260,
+            "output_tokens": 0,
+            "cost": 9.88e-06
+          }
+        },
+        {
+          "id": "knowledge-recall",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "cloudflare/clef-flash",
+          "provider": "DeepInfra",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.0022,
+            "knowledge_question": 0.9725,
+            "workflow": 0.0134,
+            "abstain": 0.0119
+          },
+          "latency_ms": 722,
+          "usage": {
+            "input_tokens": 262,
+            "output_tokens": 0,
+            "cost": 4.978e-06
+          }
+        },
+        {
+          "id": "knowledge-job-policy-paraphrase",
+          "rules": "job_search",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "cloudflare/clef-flash",
+          "provider": "Cloudflare",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.0062,
+            "knowledge_question": 0.9871,
+            "workflow": 0.0035,
+            "abstain": 0.0032
+          },
+          "latency_ms": 451,
+          "usage": {
+            "input_tokens": 263,
+            "output_tokens": 0,
+            "cost": 9.994e-06
+          }
+        },
+        {
+          "id": "knowledge-job-process",
+          "rules": "job_search",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "cloudflare/clef-flash",
+          "provider": "Cloudflare",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.0164,
+            "knowledge_question": 0.9663,
+            "workflow": 0.0088,
+            "abstain": 0.0085
+          },
+          "latency_ms": 434,
+          "usage": {
+            "input_tokens": 262,
+            "output_tokens": 0,
+            "cost": 9.956e-06
+          }
+        },
+        {
+          "id": "knowledge-job-sources",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "accepted",
+          "model": "cloudflare/clef-flash",
+          "provider": "DeepInfra",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.0118,
+            "knowledge_question": 0.9714,
+            "workflow": 0.0072,
+            "abstain": 0.0096
+          },
+          "latency_ms": 707,
+          "usage": {
+            "input_tokens": 263,
+            "output_tokens": 0,
+            "cost": 4.997e-06
+          }
+        },
+        {
+          "id": "workflow-job-task",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "deferred",
+          "model": "cloudflare/clef-flash",
+          "provider": "Cloudflare",
+          "choice": "workflow",
+          "probabilities": {
+            "job_search": 0.3731,
+            "knowledge_question": 0.0576,
+            "workflow": 0.4596,
+            "abstain": 0.1097
+          },
+          "latency_ms": 347,
+          "usage": {
+            "input_tokens": 264,
+            "output_tokens": 0,
+            "cost": 1.0032e-05
+          }
+        },
+        {
+          "id": "workflow-job-mixed-write",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "deferred",
+          "model": "cloudflare/clef-flash",
+          "provider": "DeepInfra",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.6679,
+            "knowledge_question": 0.0469,
+            "workflow": 0.199,
+            "abstain": 0.0862
+          },
+          "latency_ms": 681,
+          "usage": {
+            "input_tokens": 262,
+            "output_tokens": 0,
+            "cost": 4.978e-06
+          }
+        },
+        {
+          "id": "workflow-policy-mixed-write",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "deferred",
+          "model": "cloudflare/clef-flash",
+          "provider": "PrimeIntellect",
+          "choice": "knowledge_question",
+          "probabilities": {
+            "job_search": 0.0203,
+            "knowledge_question": 0.7599,
+            "workflow": 0.1395,
+            "abstain": 0.0804
+          },
+          "latency_ms": 535,
+          "usage": {
+            "input_tokens": 265,
+            "output_tokens": 0,
+            "cost": 1.007e-05
+          }
+        },
+        {
+          "id": "workflow-job-publish",
+          "rules": "workflow",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "cloudflare/clef-flash",
+          "provider": "Cloudflare",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.8807,
+            "knowledge_question": 0.0276,
+            "workflow": 0.0287,
+            "abstain": 0.063
+          },
+          "latency_ms": 368,
+          "usage": {
+            "input_tokens": 259,
+            "output_tokens": 0,
+            "cost": 9.842e-06
+          }
+        },
+        {
+          "id": "workflow-job-forward",
+          "rules": "workflow",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "cloudflare/clef-flash",
+          "provider": "DeepInfra",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.876,
+            "knowledge_question": 0.0329,
+            "workflow": 0.035,
+            "abstain": 0.056
+          },
+          "latency_ms": 729,
+          "usage": {
+            "input_tokens": 262,
+            "output_tokens": 0,
+            "cost": 4.978e-06
+          }
+        },
+        {
+          "id": "workflow-job-todo",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "deferred",
+          "model": "cloudflare/clef-flash",
+          "provider": "PrimeIntellect",
+          "choice": "workflow",
+          "probabilities": {
+            "job_search": 0.0936,
+            "knowledge_question": 0.0326,
+            "workflow": 0.6974,
+            "abstain": 0.1763
+          },
+          "latency_ms": 540,
+          "usage": {
+            "input_tokens": 263,
+            "output_tokens": 0,
+            "cost": 9.994e-06
+          }
+        },
+        {
+          "id": "workflow-job-issue",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "deferred",
+          "model": "cloudflare/clef-flash",
+          "provider": "DeepInfra",
+          "choice": "workflow",
+          "probabilities": {
+            "job_search": 0.1268,
+            "knowledge_question": 0.0995,
+            "workflow": 0.5053,
+            "abstain": 0.2684
+          },
+          "latency_ms": 768,
+          "usage": {
+            "input_tokens": 271,
+            "output_tokens": 0,
+            "cost": 5.149e-06
+          }
+        },
+        {
+          "id": "workflow-job-memory",
+          "rules": "workflow",
+          "route": "job_search",
+          "outcome": "accepted",
+          "model": "cloudflare/clef-flash",
+          "provider": "PrimeIntellect",
+          "choice": "job_search",
+          "probabilities": {
+            "job_search": 0.9014,
+            "knowledge_question": 0.0214,
+            "workflow": 0.0283,
+            "abstain": 0.0489
+          },
+          "latency_ms": 515,
+          "usage": {
+            "input_tokens": 264,
+            "output_tokens": 0,
+            "cost": 1.0032e-05
+          }
+        },
+        {
+          "id": "workflow-task-question",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "deferred",
+          "model": "cloudflare/clef-flash",
+          "provider": "DeepInfra",
+          "choice": "workflow",
+          "probabilities": {
+            "job_search": 0.0245,
+            "knowledge_question": 0.2471,
+            "workflow": 0.6022,
+            "abstain": 0.1262
+          },
+          "latency_ms": 647,
+          "usage": {
+            "input_tokens": 261,
+            "output_tokens": 0,
+            "cost": 4.959e-06
+          }
+        },
+        {
+          "id": "workflow-short-followup",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "deferred",
+          "model": "cloudflare/clef-flash",
+          "provider": "DeepInfra",
+          "choice": "abstain",
+          "probabilities": {
+            "job_search": 0.0225,
+            "knowledge_question": 0.0491,
+            "workflow": 0.0574,
+            "abstain": 0.8709
+          },
+          "latency_ms": 633,
+          "usage": {
+            "input_tokens": 254,
+            "output_tokens": 0,
+            "cost": 4.826e-06
+          }
+        },
+        {
+          "id": "workflow-cancel",
+          "rules": "workflow",
+          "route": "workflow",
+          "outcome": "deferred",
+          "model": "cloudflare/clef-flash",
+          "provider": "PrimeIntellect",
+          "choice": "abstain",
+          "probabilities": {
+            "job_search": 0.0043,
+            "knowledge_question": 0.0073,
+            "workflow": 0.1066,
+            "abstain": 0.8818
+          },
+          "latency_ms": 562,
+          "usage": {
+            "input_tokens": 254,
+            "output_tokens": 0,
+            "cost": 9.652e-06
+          }
+        },
+        {
+          "id": "workflow-loose-crm",
+          "rules": "knowledge_question",
+          "route": "knowledge_question",
+          "outcome": "deferred",
+          "model": "cloudflare/clef-flash",
+          "provider": "DeepInfra",
+          "choice": "workflow",
+          "probabilities": {
+            "job_search": 0.0083,
+            "knowledge_question": 0.2208,
+            "workflow": 0.5908,
+            "abstain": 0.1802
+          },
+          "latency_ms": 770,
+          "usage": {
+            "input_tokens": 263,
+            "output_tokens": 0,
+            "cost": 4.997e-06
+          }
+        }
+      ]
+    }
+  }
+}

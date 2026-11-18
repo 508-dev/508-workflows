@@ -1670,6 +1670,35 @@ async def test_agent_mention_dms_sensitive_crm_clarification() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("suffix", ["?", ", please?"])
+async def test_agent_mention_routes_job_policy_lookup_to_knowledge(suffix: str) -> None:
+    cog = AgentCog.__new__(AgentCog)
+    bot_user = SimpleNamespace(id=999)
+    cog.bot = SimpleNamespace(user=bot_user)
+    cog._search_jobs_for_member = AsyncMock()
+    cog._handle_knowledge_question_mention = AsyncMock()
+    cog._post_agent_request = AsyncMock()
+    question = f"Where can I find our job posting policy{suffix}"
+    message = SimpleNamespace(
+        id=555,
+        content=f"<@999> {question}",
+        author=SimpleNamespace(id=123, bot=False, roles=[]),
+        mentions=[bot_user],
+        guild=SimpleNamespace(id=456),
+        channel=SimpleNamespace(id=789),
+    )
+
+    await cog.agent_mention(message)
+
+    cog._handle_knowledge_question_mention.assert_awaited_once()
+    assert (
+        cog._handle_knowledge_question_mention.await_args.kwargs["question"] == question
+    )
+    cog._search_jobs_for_member.assert_not_awaited()
+    cog._post_agent_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_agent_mention_answers_help_without_backend() -> None:
     cog = AgentCog.__new__(AgentCog)
     cog.bot = SimpleNamespace(user=SimpleNamespace(id=999))
