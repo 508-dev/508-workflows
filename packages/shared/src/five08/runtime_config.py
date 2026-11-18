@@ -492,7 +492,7 @@ _DEFINITIONS: tuple[RuntimeConfigDefinition, ...] = (
         attr="job_lead_decision_model",
         label="Job lead decision model",
         category="AI",
-        description="Optional OpenRouter Decisions model for high-confidence employment classification.",
+        description="OpenRouter Decisions model for clear employment classifications. Defaults to Jev 1.14.",
         env_names=("JOB_LEAD_DECISION_MODEL",),
     ),
     RuntimeConfigDefinition(

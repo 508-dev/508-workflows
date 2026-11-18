@@ -3,6 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
+from five08.job_lead_sources import JobLeadClassifier
 from five08.worker.config import WorkerSettings
 
 
@@ -37,6 +38,22 @@ def test_structured_planner_timeout_leaves_gateway_fallback_headroom() -> None:
     settings = WorkerSettings()
 
     assert settings.agent_structured_planner_timeout_seconds == 6.0
+
+
+def test_worker_defaults_to_jev_with_openrouter_credentials(monkeypatch) -> None:
+    monkeypatch.delenv("JOB_LEAD_DECISION_MODEL", raising=False)
+    settings = WorkerSettings(_env_file=None, openrouter_api_key="test-key")
+    classifier = JobLeadClassifier(settings=settings, client=object())
+
+    assert classifier.decision_model == "typesafe/jev-1.14-20261014"
+
+
+def test_empty_decision_model_env_skips_jev(monkeypatch) -> None:
+    monkeypatch.setenv("JOB_LEAD_DECISION_MODEL", "")
+    settings = WorkerSettings(_env_file=None, openrouter_api_key="test-key")
+    classifier = JobLeadClassifier(settings=settings, client=object())
+
+    assert classifier.decision_model is None
 
 
 def test_agent_schedule_api_timeout_covers_the_entire_schedule_request() -> None:

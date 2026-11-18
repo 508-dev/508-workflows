@@ -125,6 +125,8 @@ They use the employment type published on the listing when available and fall
 back to the existing classifier when that field is absent or unspecified.
 The **Employment type** filter shows full-time, part-time or contract, roles
 offering both, and listings with unknown terms.
+The [employment classification benchmark](job-lead-classification-benchmark.md)
+records the evaluation cases and the Jev-first routing results.
 
 All sources require a clear engineering, product, data, design, marketing,
 or ecommerce role in the job title or HN header before admitting a lead. The
