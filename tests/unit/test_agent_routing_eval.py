@@ -74,3 +74,45 @@ def test_live_routing_eval_scores_acceptance_and_falls_back(monkeypatch) -> None
     assert post.call_args_list[0].kwargs["json"]["state"] == {
         "discord_message": selected[0].message
     }
+
+
+def test_chat_baseline_matches_route_contract_and_handles_abstention(
+    monkeypatch,
+) -> None:
+    cases = {case.id: case for case in routing.load_cases()}
+    selected = [
+        cases["job-search-implicit"],
+        cases["knowledge-job-policy"],
+        cases["workflow-job-task"],
+    ]
+    payloads = [
+        {"choices": [{"message": {"content": '{"choice":"job_search"}'}}]},
+        {"choices": [{"message": {"content": '{"choice":"abstain"}'}}]},
+        {"choices": [{"message": {"content": '{"choice":"unknown"}'}}]},
+    ]
+    post = Mock(
+        side_effect=[
+            Mock(json=Mock(return_value={**payload, "usage": {"cost": 0.001}}))
+            for payload in payloads
+        ]
+    )
+    monkeypatch.setattr(routing.requests, "post", post)
+    model = "openai/gpt-4.1-mini"
+
+    report = routing.run_comparison(
+        selected, [], "fake-key", 0.85, chat_models=(model,)
+    )
+
+    metrics = report["models"][model]
+    assert metrics["endpoint"] == "chat"
+    assert metrics["correct"] == 3
+    assert metrics["improvements"] == 1
+    assert metrics["accepted"] == metrics["deferred"] == metrics["error"] == 1
+    assert metrics["calls_with_reported_cost"] == 3
+    assert metrics["reported_cost_usd"] == pytest.approx(0.003)
+    assert post.call_args_list[0].args == (routing.CHAT_URL,)
+    request = post.call_args_list[0].kwargs["json"]
+    assert request["model"] == model
+    schema = request["response_format"]["json_schema"]["schema"]
+    assert set(schema["properties"]["choice"]["enum"]) == set(routing.ROUTES)
+    assert selected[0].message in request["messages"][1]["content"]

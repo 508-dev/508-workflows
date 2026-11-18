@@ -144,3 +144,20 @@ values and spans grounded in the request.
 
 See the [November 19, 2026 live comparison](../tests/evals/discord-agent/artifacts/mention-routing-2026-11-19/README.md)
 for the first run, including per-case probabilities and the tested revision.
+
+To compare a chat classifier with a decision model on the same corpus, repeat
+`--chat-model` for the chat baselines and use `--model` for decision models.
+
+```bash
+uv run --locked python scripts/agent_routing_eval.py --live \
+  --model typesafe/jev-1.14 \
+  --chat-model openai/gpt-4.1-mini \
+  --chat-model moonshotai/kimi-k2.6
+```
+
+Chat baselines receive the same routing criteria and return one label in a
+strict JSON object. Their explicit abstentions and request or validation errors
+use the rules. The probability threshold applies to Decisions responses only.
+The benchmark measures mention routing through OpenRouter. The live planner
+suite above measures workflow drafting and can use the configured provider
+directly.
