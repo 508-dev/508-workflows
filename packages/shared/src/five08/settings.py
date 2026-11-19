@@ -316,6 +316,7 @@ class SharedSettings(BaseSettings):
         ),
     )
     keila_api_timeout_seconds: float = 20.0
+    job_lead_daily_scrape_enabled: bool = True
     newsletter_sync_enabled: bool = False
     newsletter_sync_interval_seconds: int = Field(default=604800, ge=60)
     newsletter_sync_excluded_mailboxes: str = ""

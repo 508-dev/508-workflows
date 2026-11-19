@@ -109,6 +109,7 @@ from five08.clients.espo import EspoAPIError, EspoClient
 from five08.logging import configure_observability
 from five08.job_leads import (
     clear_job_lead_staging_cleanup_required,
+    get_job_lead,
     job_lead_display_payload,
     JobLeadStatus,
     list_job_leads,
@@ -352,6 +353,7 @@ _PROJECT_ROSTER_USER_CANDIDATE_CACHE_LOCK = threading.RLock()
 _PROJECT_ROSTER_USER_CANDIDATE_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _JOB_LEAD_SCRAPE_JOB_TYPE = "scrape_job_leads_job"
 _JOB_LEAD_SCRAPE_STATUS_LOOKBACK_DAYS = 366
+_JOB_LEAD_SCRAPE_RETRY_SECONDS = 300
 _JOB_LEAD_SOURCE_ALIASES = {
     "hn": "hackernews_who_is_hiring",
     "hackernews": "hackernews_who_is_hiring",
@@ -365,6 +367,9 @@ _JOB_LEAD_SOURCE_ALIASES = {
     "tokyodev": "tokyodev",
     "japan_dev": "japan_dev",
 }
+
+
+_JOB_LEAD_SOURCES = tuple(dict.fromkeys(_JOB_LEAD_SOURCE_ALIASES.values()))
 
 
 @dataclass(frozen=True)
@@ -1201,6 +1206,24 @@ async def _enqueue_newsletter_sync_job(
     return job
 
 
+async def _enqueue_job_lead_scrape(
+    queue: QueueClient,
+    *,
+    source: str,
+    idempotency_key: str,
+    story_id: int | None = None,
+) -> EnqueuedJob:
+    return await asyncio.to_thread(
+        enqueue_job,
+        queue=queue,
+        fn=JOB_FUNCTIONS[_JOB_LEAD_SCRAPE_JOB_TYPE],
+        args=(),
+        settings=settings,
+        kwargs={"source": source, "story_id": story_id},
+        idempotency_key=idempotency_key,
+    )
+
+
 async def _enqueue_agent_memory_cleanup_job(queue: QueueClient) -> EnqueuedJob:
     """Enqueue a globally idempotent, worker-owned memory expiry sweep."""
 
@@ -1253,6 +1276,51 @@ async def _newsletter_sync_scheduler(app: FastAPI) -> None:
         except Exception:
             logger.exception("Failed scheduling 508 members newsletter sync job")
         await asyncio.sleep(interval_seconds)
+
+
+async def _job_lead_scrape_scheduler(app: FastAPI) -> None:
+    """Queue each lead source once per UTC date, including after API restarts."""
+    queue = app.state.queue
+    scheduled_day = None
+    enqueued_sources: set[str] = set()
+    while True:
+        now = datetime.now(tz=timezone.utc)
+        today = now.date()
+        if scheduled_day != today:
+            scheduled_day = today
+            enqueued_sources.clear()
+
+        for source in _JOB_LEAD_SOURCES:
+            if source in enqueued_sources:
+                continue
+            try:
+                job = await _enqueue_job_lead_scrape(
+                    queue,
+                    source=source,
+                    idempotency_key=f"job-leads:daily:{source}:{today.isoformat()}",
+                )
+            except Exception:
+                logger.exception(
+                    "Failed scheduling daily job lead scrape source=%s", source
+                )
+                continue
+            enqueued_sources.add(source)
+            if job.created:
+                logger.info(
+                    "Scheduled daily job lead scrape source=%s job_id=%s",
+                    source,
+                    job.id,
+                )
+
+        next_midnight = now.replace(
+            hour=0, minute=0, second=0, microsecond=0
+        ) + timedelta(days=1)
+        delay = max(
+            0.0, (next_midnight - datetime.now(tz=timezone.utc)).total_seconds()
+        )
+        if len(enqueued_sources) < len(_JOB_LEAD_SOURCES):
+            delay = min(delay, _JOB_LEAD_SCRAPE_RETRY_SECONDS)
+        await asyncio.sleep(delay)
 
 
 async def _agent_memory_cleanup_scheduler(app: FastAPI) -> None:
@@ -5227,6 +5295,7 @@ async def dashboard_job_leads_handler(
     limit: int = Query(default=50, ge=1, le=50),
     source: str | None = Query(default=None),
     posting_type: JobPostingType | None = Query(default=None),
+    staged: bool | None = Query(default=None),
 ) -> JSONResponse:
     """Return sourced job leads for dashboard review."""
     session, error_response = await _dashboard_session_or_error(
@@ -5262,10 +5331,34 @@ async def dashboard_job_leads_handler(
         list_kwargs["source_key"] = normalized_source
     if posting_type is not None:
         list_kwargs["posting_type"] = posting_type
+    if staged is not None:
+        list_kwargs["staged"] = staged
     leads = await asyncio.to_thread(list_job_leads, settings, **list_kwargs)
     return JSONResponse(
         jsonable_encoder([job_lead_display_payload(lead) for lead in leads])
     )
+
+
+async def dashboard_job_lead_detail_handler(
+    request: Request,
+    lead_id: str,
+) -> JSONResponse:
+    """Load one sourced lead independently of queue filters."""
+    session, error_response = await _dashboard_session_or_error(
+        request,
+        required_permission=DASHBOARD_PERMISSION_GIGS_READ,
+    )
+    if error_response is not None:
+        return error_response
+    assert session is not None
+    steering_error = _dashboard_steering_or_error(session)
+    if steering_error is not None:
+        return steering_error
+
+    lead = await asyncio.to_thread(get_job_lead, settings, lead_id)
+    if lead is None:
+        return JSONResponse({"error": "job_lead_not_found"}, status_code=404)
+    return JSONResponse(jsonable_encoder(job_lead_display_payload(lead)))
 
 
 async def dashboard_job_lead_scrape_status_handler(
@@ -5390,7 +5483,7 @@ async def dashboard_clear_job_lead_staging_recovery_handler(
     request: Request,
     lead_id: str,
 ) -> JSONResponse:
-    """Clear a holding-thread recovery block after an operator removes the orphan."""
+    """Clear a holding thread after an operator confirms its removal."""
     session, error_response = await _dashboard_session_or_error(
         request,
         required_permission=DASHBOARD_PERMISSION_GIGS_WRITE,
@@ -5417,10 +5510,30 @@ async def dashboard_clear_job_lead_staging_recovery_handler(
         clear_job_lead_staging_cleanup_required,
         settings,
         lead_id=lead_id,
+        thread_id=payload.thread_id,
     )
     if cleared is None:
+        lead = await asyncio.to_thread(get_job_lead, settings, lead_id)
+        if lead is None:
+            return JSONResponse({"error": "job_lead_not_found"}, status_code=404)
+        current = job_lead_display_payload(lead)
+        if not (
+            current.get("staged_discord_thread_id") or current.get("staging_recovery")
+        ):
+            return JSONResponse(jsonable_encoder(current))
+        detail = (
+            "Posting to the holding forum is still in progress."
+            if current.get("staging_in_progress")
+            else "The saved holding thread changed. Check the current thread before clearing it."
+        )
         return JSONResponse(
-            {"error": "job_lead_staging_recovery_not_found"},
+            jsonable_encoder(
+                {
+                    "error": "job_lead_staging_conflict",
+                    "detail": detail,
+                    "lead": current,
+                }
+            ),
             status_code=409,
         )
 
@@ -5583,13 +5696,10 @@ async def dashboard_sync_job_leads_handler(request: Request) -> JSONResponse:
             {"error": "story_id_only_supported_for_hackernews"}, status_code=400
         )
     now = datetime.now(tz=timezone.utc)
-    job = await asyncio.to_thread(
-        enqueue_job,
-        queue=request.app.state.queue,
-        fn=JOB_FUNCTIONS["scrape_job_leads_job"],
-        args=(),
-        settings=settings,
-        kwargs={"source": normalized_source, "story_id": payload.story_id},
+    job = await _enqueue_job_lead_scrape(
+        request.app.state.queue,
+        source=normalized_source,
+        story_id=payload.story_id,
         idempotency_key=(
             f"job-leads:{normalized_source}:{payload.story_id or 'latest'}:"
             f"{now.strftime('%Y%m%d%H%M')}"
@@ -15622,6 +15732,16 @@ async def _lifespan(app: FastAPI) -> Any:
     else:
         logger.info("508 members newsletter sync scheduler disabled by config")
 
+    if settings.job_lead_daily_scrape_enabled:
+        if app.state.postgres_migrations_ok:
+            app.state.job_lead_scrape_task = asyncio.create_task(
+                _job_lead_scrape_scheduler(app)
+            )
+        else:
+            logger.warning(
+                "Daily job lead scrapes disabled because Postgres migrations failed"
+            )
+
     if settings.email_resume_intake_enabled:
         app.state.email_resume_task = asyncio.create_task(_email_resume_scheduler())
     else:
@@ -15689,6 +15809,12 @@ async def _lifespan(app: FastAPI) -> Any:
 
         if hasattr(app.state, "email_resume_task"):
             task = app.state.email_resume_task
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        if hasattr(app.state, "job_lead_scrape_task"):
+            task = app.state.job_lead_scrape_task
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task

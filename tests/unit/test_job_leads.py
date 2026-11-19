@@ -510,6 +510,7 @@ def test_list_job_leads_filters_source_before_limit(monkeypatch) -> None:
         job_leads.SharedSettings(),
         status=JobLeadStatus.PENDING,
         source_key="a16z_talent_network",
+        staged=False,
         limit=5,
     )
 
@@ -517,6 +518,7 @@ def test_list_job_leads_filters_source_before_limit(monkeypatch) -> None:
     query, params = cursor.executed[0]
     assert "job_leads.source_key = %s" in query
     assert query.index("job_leads.source_key = %s") < query.index("LIMIT %s")
+    assert query.index("staged_discord_thread_id IS NULL") < query.index("LIMIT %s")
     assert params == ("pending", "a16z_talent_network", 5)
 
 
@@ -807,24 +809,17 @@ def test_clear_job_lead_staging_cleanup_required_allows_approved_lead(
     assert cleared is not None
     assert cleared.id == "11111111-1111-1111-1111-111111111111"
     query, params = cursor.executed[0]
-    assert "metadata = metadata - %s::text" in query
+    assert (
+        "metadata = metadata - %(cleanup_key)s::text - %(fingerprint_key)s::text"
+        in query
+    )
     assert "staging_reservation_token = NULL" in query
     assert "staging_reserved_at = NULL" in query
-    assert "metadata ? %s::text" in query
     assert "status IN" not in query
-    assert params == (
-        job_leads._STAGING_CLEANUP_REQUIRED_METADATA_KEY,
-        "11111111-1111-1111-1111-111111111111",
-        job_leads._STAGING_CLEANUP_REQUIRED_METADATA_KEY,
-        job_leads._STAGING_CLEANUP_REQUIRED_METADATA_KEY,
-        job_leads._STAGING_CLEANUP_RESERVATION_STATE,
-        job_leads._STAGING_CLEANUP_REQUIRED_METADATA_KEY,
-        job_leads._STAGING_CLEANUP_RESERVATION_STATE,
-        job_leads.JOB_LEAD_STAGING_RESERVATION_TTL_SECONDS,
-    )
+    assert params["thread_id"] is None
 
 
-def test_clear_job_lead_staging_cleanup_required_only_clears_stale_attempts(
+def test_clear_job_lead_staging_matches_thread_and_protects_current_attempt(
     monkeypatch,
 ) -> None:
     cursor = _CursorStub(rows=[_lead_row()])
@@ -833,17 +828,18 @@ def test_clear_job_lead_staging_cleanup_required_only_clears_stale_attempts(
     cleared = job_leads.clear_job_lead_staging_cleanup_required(
         job_leads.SharedSettings(),
         lead_id="11111111-1111-1111-1111-111111111111",
+        thread_id="789",
     )
 
     assert cleared is not None
     query, params = cursor.executed[0]
-    assert "IS DISTINCT FROM %s" in query
-    assert "staging_reserved_at < NOW() - (%s * INTERVAL '1 second')" in query
-    assert params[-3:] == (
-        job_leads._STAGING_CLEANUP_REQUIRED_METADATA_KEY,
-        job_leads._STAGING_CLEANUP_RESERVATION_STATE,
-        job_leads.JOB_LEAD_STAGING_RESERVATION_TTL_SECONDS,
-    )
+    assert "staged_discord_thread_id = NULL" in query
+    assert "staged_discord_thread_id = %(thread_id)s::text" in query
+    assert "IS NOT DISTINCT FROM %(thread_id)s::text" in query
+    assert "IS DISTINCT FROM %(reservation_state)s" in query
+    assert "staging_reserved_at < NOW() - (%(ttl)s * INTERVAL '1 second')" in query
+    assert params["thread_id"] == "789"
+    assert params["ttl"] == job_leads.JOB_LEAD_STAGING_RESERVATION_TTL_SECONDS
 
 
 def test_mark_job_lead_posted_allows_direct_qualified_promotion(monkeypatch) -> None:

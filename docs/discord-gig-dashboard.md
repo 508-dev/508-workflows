@@ -66,51 +66,40 @@ gig controls cannot mutate future non-gig project engagement rows by id.
 
 ## Sourced Job Lead Review
 
-The Gigs page can scrape employer posts from Hacker News “Who is hiring?”
-threads into a review queue. Each lead shows an explicit employment type such
-as `Full-time`, `Part-time / contract`, or `Full-time or part-time / contract`,
-plus whether the result came from the source listing, the LLM classifier, or
-keyword fallback.
+Open **Leads** from the dashboard sidebar. Each lead title opens a detail page
+you can bookmark or share with another Steering operator.
 
-**Post to #unqualified-leads** is the default screening path: it creates a
-holding thread without matching candidates. It is optional, however; an
-operator may **Qualify lead** directly from the dashboard and then **Promote to
-Discord**. Promotion always creates a fresh thread in a registered gigs forum.
-Discord forum threads cannot be moved between forums, so a staged lead is
-reposted from its source content; only the promoted thread becomes a dashboard
-gig and is eligible for automatic matching.
+- **To post** shows pending leads without a saved holding thread. Post straight
+  from a row or open the title to read the full listing, see application links,
+  and reject the lead if it does not belong in the holding forum.
+- **Qualification** defaults to pending leads in the holding forum. Open a lead
+  to qualify or reject it. The status filter also offers **Unstaged** for direct
+  qualification, **Qualified** for promotion, **Rejected** for restoration,
+  and **Posted** for the resulting Discord and dashboard gig links.
+- **Sources** holds the manual sync controls and the latest results by source.
+  For Hacker News, this includes the monthly thread link and counts for
+  comments, posts scanned, included leads, and filtered posts.
 
-If Discord creates a holding thread but its database marker cannot be saved and
-the bot cannot delete that orphaned thread, the lead is intentionally blocked
-from restaging. Delete the orphaned thread in Discord, then use **Clear holding
-recovery block** on the lead in the dashboard. This Steering-only action clears
-only the recovery block and is audited; it does not qualify or promote the lead.
+Posting to the holding forum creates a Discord thread for review. Promoting a
+qualified lead creates a fresh thread in a registered gigs forum, creates the
+dashboard gig, and makes it eligible for automatic matching.
 
-The Leads tab retains the latest scrape result so operators can confirm that a
-monthly thread was found. It links to the discovered HN thread and reports HN's
-comment count, direct top-level posts scanned as potential gigs, included leads,
-filtered posts (with reasons), and records created or refreshed. A found thread
-with zero top-level posts is reported separately from a missing thread; re-run
-the scrape as new employers add comments.
+If a holding thread was deleted, open the affected lead, choose **Holding
+thread deleted**, and confirm the thread is gone in Discord. This works for
+both a saved holding post and a post left behind by an interrupted attempt.
+The reset is audited and returns a pending lead to **To post**. For an
+interrupted attempt without a saved thread ID, check the forum for the lead
+before confirming.
 
-When a post contains them, the review card exposes the role-specific
-application page and a direct contact email as separate actions. Model-proposed
-links and email addresses are accepted only when they appear verbatim in the
-source post; deterministic scoring prefers application pages over company
-homepages. Re-scraping can correct pending or rejected leads that were
-previously admitted by a keyword false positive, while approved or posted leads
-remain unchanged.
-
-Lead cards keep a compact excerpt by default and can expand to show the full
-normalized listing or HN comment. Rejected leads can be restored to `pending` for another
-review; the restoration clears the prior review marker while the dashboard audit
-trail records the action. Posting a lead keeps the reviewer on the Leads tab,
-marks that card `Posted`, and exposes links to the resulting Discord thread and
-dashboard gig when available.
+A lead detail includes the employment type and classification method, the full
+normalized listing, and application links and contact email when available.
+Model-proposed links and email addresses must appear verbatim in the source
+post. Re-scraping can correct pending or rejected leads while preserving
+approved and posted leads.
 
 ## External Job Lead Sources
 
-The Leads tab offers manual syncs for TokyoDev, Japan Dev, Himalayas, a16z,
+The **Sources** tab offers manual syncs for TokyoDev, Japan Dev, Himalayas, a16z,
 and a limited Sequoia portfolio pilot. a16z sync reads up to the first 25 public search
 results for each of five gig terms, deduplicates jobs, and keeps only roles
 whose titles explicitly mention contract, contractor, freelance, fractional,
@@ -138,7 +127,14 @@ The source status reports role mismatches and this cleanup separately. Operators
 can restore a rejected lead if the title filter missed a suitable role; later
 syncs preserve that manual override.
 
-Operators can run all sources together or trigger any source alone. Each
+The API queues one scrape per source each UTC day. It catches up for the
+current day on startup, and retries a failed queue handoff within five minutes.
+Scrapes add or refresh dashboard leads. Posting to Discord remains a separate
+operator action. To disable the daily schedule, set
+`JOB_LEAD_DAILY_SCRAPE_ENABLED=false`.
+
+Use **Scrape now** in **To post** to run all sources on demand, or run a
+single source under **Sources**. Each
 source has its own latest-run status and counts, and leads show a source label.
 The source and employment-type filters apply before the 50-lead page limit.
 Himalayas leads show country and UTC-offset eligibility where supplied by the

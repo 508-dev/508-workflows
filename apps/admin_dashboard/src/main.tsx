@@ -3,6 +3,7 @@ import {
   ArrowLeft,
   Bell,
   BriefcaseBusiness,
+  Building2,
   CalendarClock,
   ClipboardList,
   ExternalLink,
@@ -12,6 +13,7 @@ import {
   Mail,
   Plus,
   RefreshCw,
+  Rss,
   Search,
   Send,
   Server,
@@ -95,6 +97,7 @@ import "./index.css"
 type View =
   | "people"
   | "gigs"
+  | "leads"
   | "projects"
   | "onboarding"
   | "newsletter"
@@ -105,7 +108,8 @@ type View =
   | "diagnostics"
   | "configuration"
 type SortDirection = "asc" | "desc"
-type GigTab = "gigs" | "leads"
+type SortableView = Exclude<View, "leads">
+type LeadTab = "holding" | "qualification" | "sources"
 
 type User = {
   subject: string
@@ -317,6 +321,7 @@ type JobLead = {
   staged_discord_channel_id?: string
   staged_discord_thread_id?: string
   staged_at?: string
+  staging_in_progress?: boolean
   staging_recovery?: {
     guild_id?: string | null
     channel_id?: string | null
@@ -600,6 +605,7 @@ type DashboardDevError = {
 const routes: Record<View, string> = {
   people: "/dashboard/people",
   gigs: "/dashboard/gigs",
+  leads: "/dashboard/leads",
   projects: "/dashboard/projects",
   onboarding: "/dashboard/onboarding",
   newsletter: "/dashboard/newsletter",
@@ -614,6 +620,7 @@ const routes: Record<View, string> = {
 const routePermissions: Record<View, string> = {
   people: "people:read",
   gigs: "gigs:read",
+  leads: "gigs:read",
   projects: "projects:read",
   onboarding: "onboarding:read",
   newsletter: "people:sync",
@@ -753,10 +760,11 @@ function rawViewFromPath() {
 
 function viewFromPath(): View {
   const view = rawViewFromPath()
+  if (view === "gigs" && window.location.hash === "#leads") return "leads"
   return Object.hasOwn(routes, view) ? (view as View) : "people"
 }
 
-function detailIdFromPath(expectedView: "gigs" | "projects" = "gigs") {
+function detailIdFromPath(expectedView: "gigs" | "leads" | "projects" = "gigs") {
   const [, view, detailId] = window.location.pathname.split("/").filter(Boolean)
   if (view !== expectedView || !detailId) return ""
   try {
@@ -766,17 +774,14 @@ function detailIdFromPath(expectedView: "gigs" | "projects" = "gigs") {
   }
 }
 
-function gigTabFromHash(hash = window.location.hash): GigTab {
-  return hash.replace(/^#/, "") === "leads" ? "leads" : "gigs"
+function leadTabFromHash(): LeadTab {
+  const tab = window.location.hash.slice(1)
+  return tab === "qualification" || tab === "sources" ? tab : "holding"
 }
 
-function updateGigTabHash(tab: GigTab) {
-  const hash = tab === "leads" ? "#leads" : "#gigs"
-  window.history.replaceState(
-    window.history.state,
-    "",
-    `${window.location.pathname}${window.location.search}${hash}`,
-  )
+function leadUrl(tab: LeadTab, leadId?: string) {
+  const path = leadId ? `${routes.leads}/${encodeURIComponent(leadId)}` : routes.leads
+  return tab === "holding" ? path : `${path}#${tab}`
 }
 
 async function requestJson<T>(url: string, options: RequestInit = {}): Promise<T> {
@@ -987,6 +992,10 @@ function App() {
   const [wikiMatches, setWikiMatches] = useState<WikiMatchPreview | null>(null)
   const [gigDetail, setGigDetail] = useState<Gig | null>(null)
   const [selectedGigId, setSelectedGigId] = useState(detailIdFromPath())
+  const [selectedLeadId, setSelectedLeadId] = useState(detailIdFromPath("leads"))
+  const [leadDetail, setLeadDetail] = useState<JobLead | null>(null)
+  const gigLeadsRequest = useRef(0)
+  const [gigLeadsRevision, setGigLeadsRevision] = useState(0)
   const [selectedProjectId, setSelectedProjectId] = useState(initialProjectDetailId)
   const [notifications, setNotifications] = useState<DashboardNotification[]>([])
   const [notificationsOpen, setNotificationsOpen] = useState(false)
@@ -1021,7 +1030,9 @@ function App() {
     person: string
     candidates: HistoricalPersonCandidate[]
   } | null>(null)
-  const [sort, setSortState] = useState<Record<View, { key: string; direction: SortDirection }>>({
+  const [sort, setSortState] = useState<
+    Record<SortableView, { key: string; direction: SortDirection }>
+  >({
     onboarding: { key: "onboarding_state", direction: "asc" },
     gigs: { key: "activity", direction: "desc" },
     projects: { key: "display_name", direction: "asc" },
@@ -1042,7 +1053,7 @@ function App() {
   const [gigQuery, setGigQuery] = useState("")
   const [gigIncludeHistorical, setGigIncludeHistorical] = useState(false)
   const [gigLimit, setGigLimit] = useState(100)
-  const [activeGigTab, setActiveGigTab] = useState<GigTab>(gigTabFromHash)
+  const [activeLeadTab, setActiveLeadTab] = useState<LeadTab>(leadTabFromHash)
   const [gigLeadStatus, setGigLeadStatus] = useState("pending")
   const [gigLeadPostingType, setGigLeadPostingType] = useState("")
   const [gigLeadSource, setGigLeadSource] = useState<JobLeadSourceKey | "">("")
@@ -1077,7 +1088,9 @@ function App() {
   }
 
   function canView(nextView: View) {
-    return can(routePermissions[nextView])
+    return (
+      can(routePermissions[nextView]) && (nextView !== "leads" || Boolean(user?.can_manage_leads))
+    )
   }
 
   function firstAllowedView() {
@@ -1112,19 +1125,32 @@ function App() {
     if (normalized !== "projects") setSelectedProjectId("")
     if (normalized === "gigs" && push) setSelectedGigId("")
     if (normalized === "projects" && push) setSelectedProjectId("")
-    if (normalized === "gigs") setActiveGigTab(push ? "gigs" : gigTabFromHash())
+    if (normalized !== "leads" || push) setSelectedLeadId("")
+    if (normalized === "leads") setActiveLeadTab(push ? "holding" : leadTabFromHash())
     setViewState(normalized)
     if (push) {
       window.history.pushState({ view: normalized }, "", routes[normalized])
-    } else if (!Object.hasOwn(routes, rawViewFromPath()) || normalized !== nextView) {
+    } else if (normalized !== rawViewFromPath()) {
       window.history.replaceState({ view: normalized }, "", routes[normalized])
     }
   }
   navigateRef.current = navigate
 
-  function selectGigTab(tab: GigTab) {
-    setActiveGigTab(tab)
-    updateGigTabHash(tab)
+  function selectLeadTab(tab: LeadTab) {
+    setActiveLeadTab(tab)
+    setSelectedLeadId("")
+    window.history.pushState({ view: "leads" }, "", leadUrl(tab))
+  }
+
+  function openLead(lead: JobLead) {
+    setSelectedLeadId(lead.id)
+    setLeadDetail(lead)
+    window.history.pushState({ view: "leads" }, "", leadUrl(activeLeadTab, lead.id))
+  }
+
+  function updateGigLead(leadId: string, update: (lead: JobLead) => JobLead) {
+    setGigLeads((current) => current.map((lead) => (lead.id === leadId ? update(lead) : lead)))
+    setLeadDetail((current) => (current?.id === leadId ? update(current) : current))
   }
 
   function crmContactUrl(contactId?: string) {
@@ -1137,7 +1163,7 @@ function App() {
     return `${crmBaseUrl}/api/v1/Attachment/file/${encodeURIComponent(attachmentId)}`
   }
 
-  function handleSort(scope: View, key: string) {
+  function handleSort(scope: SortableView, key: string) {
     setSortState((current) => {
       const existing = current[scope]
       return {
@@ -1188,7 +1214,10 @@ function App() {
     const nextPermissions = Array.isArray(payload.permissions) ? payload.permissions : []
     setPermissions(nextPermissions)
     setCrmBaseUrl((payload.crm_base_url || "").replace(/\/+$/, ""))
-    return nextPermissions
+    return {
+      nextPermissions,
+      canManageLeads: Boolean(payload.can_manage_leads),
+    }
   }
 
   function jobsUrl() {
@@ -1210,7 +1239,15 @@ function App() {
 
   function gigLeadsUrl() {
     const params = new URLSearchParams({ limit: "50" })
-    if (gigLeadStatus) params.set("status", gigLeadStatus)
+    if (activeLeadTab === "holding") {
+      params.set("status", "pending")
+      params.set("staged", "false")
+    } else if (gigLeadStatus === "pending" || gigLeadStatus === "unstaged") {
+      params.set("status", "pending")
+      params.set("staged", String(gigLeadStatus === "pending"))
+    } else {
+      params.set("status", gigLeadStatus)
+    }
     if (gigLeadSource) params.set("source", gigLeadSource)
     if (gigLeadPostingType) params.set("posting_type", gigLeadPostingType)
     return `/dashboard/api/gig-leads?${params.toString()}`
@@ -1266,15 +1303,15 @@ function App() {
   }
 
   async function loadGigLeads() {
+    const request = ++gigLeadsRequest.current
     setBusy("gigLeads", true)
     try {
       const payload = await requestJson<JobLead[]>(gigLeadsUrl())
-      setGigLeads(payload)
-      showToast(`Loaded ${payload.length} lead${payload.length === 1 ? "" : "s"}`, "ok")
+      if (request === gigLeadsRequest.current) setGigLeads(payload)
     } catch (error) {
-      showError(error, "Unable to load job leads")
+      if (request === gigLeadsRequest.current) showError(error, "Unable to load job leads")
     } finally {
-      setBusy("gigLeads", false)
+      if (request === gigLeadsRequest.current) setBusy("gigLeads", false)
     }
   }
 
@@ -1382,8 +1419,7 @@ function App() {
           Number.isFinite(included) && Number.isFinite(filteredOut)
             ? `: ${included} included, ${filteredOut} filtered out`
             : ""
-        showToast(`${jobLeadSourceLabel(source)} sync finished${summary}; refreshing leads`, "ok")
-        await loadGigLeads()
+        showToast(`${jobLeadSourceLabel(source)} sync finished${summary}`, "ok")
         if (view === "jobs") await loadJobs()
         return
       }
@@ -1828,10 +1864,12 @@ function App() {
   }
 
   async function refreshGigsView() {
+    if (view === "leads") {
+      if (activeLeadTab === "sources") await loadGigLeadScrapeStatus()
+      else await loadGigLeads()
+      return
+    }
     await loadGigs()
-    await loadGigLeads()
-    await loadGigLeadScrapeStatus()
-    await loadJobPostChannels()
     if (selectedGigId) await loadGigDetail(selectedGigId)
   }
 
@@ -1895,10 +1933,10 @@ function App() {
             )
           }
         })
+        setGigLeadsRevision((current) => current + 1)
       } else {
         await loadGigLeadScrapeStatus()
       }
-      await loadGigLeads()
     } catch (error) {
       showError(error, "Unable to queue job lead sync")
     } finally {
@@ -1921,13 +1959,7 @@ function App() {
         nextStatus === "pending"
           ? "Restored lead to pending"
           : `${nextStatus === "approved" ? "Qualified" : "Rejected"} lead`
-      if (nextStatus === "approved") {
-        setGigLeads((current) =>
-          current.map((lead) => (lead.id === leadId ? { ...lead, ...reviewedLead } : lead)),
-        )
-      } else {
-        await loadGigLeads()
-      }
+      updateGigLead(leadId, (lead) => ({ ...lead, ...reviewedLead }))
       showToast(message, "ok")
     } catch (error) {
       showError(error, "Unable to review lead")
@@ -1949,19 +1981,15 @@ function App() {
       }>(`/dashboard/api/gig-leads/${encodeURIComponent(leadId)}/stage`, {
         method: "POST",
       })
-      setGigLeads((current) =>
-        current.map((lead) =>
-          lead.id === leadId
-            ? {
-                ...lead,
-                staged_discord_guild_id: result.guild_id || lead.staged_discord_guild_id,
-                staged_discord_channel_id: result.channel_id || lead.staged_discord_channel_id,
-                staged_discord_thread_id: result.thread_id || lead.staged_discord_thread_id,
-                staged_at: result.staged_at || lead.staged_at,
-              }
-            : lead,
-        ),
-      )
+      updateGigLead(leadId, (lead) => ({
+        ...lead,
+        staged_discord_guild_id: result.guild_id,
+        staged_discord_channel_id: result.channel_id,
+        staged_discord_thread_id: result.thread_id,
+        staged_at: result.staged_at,
+        staging_recovery: undefined,
+        staging_in_progress: false,
+      }))
       const holdingForum = String(result.channel_name || "")
         .replace(/^#/, "")
         .trim()
@@ -1978,9 +2006,12 @@ function App() {
     }
   }
 
-  async function clearGigLeadStagingRecovery(leadId: string) {
+  async function clearGigLeadStagingRecovery(previousLead: JobLead) {
+    const leadId = previousLead.id
+    const threadId =
+      previousLead.staged_discord_thread_id || previousLead.staging_recovery?.thread_id
     const confirmed = window.confirm(
-      "Only continue after deleting the orphaned holding thread in Discord. Clear its recovery block?",
+      "Have you confirmed the previous holding thread is gone from Discord?",
     )
     if (!confirmed) return
 
@@ -1991,15 +2022,25 @@ function App() {
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ orphan_deleted: true }),
+          body: JSON.stringify({
+            orphan_deleted: true,
+            thread_id: threadId || null,
+          }),
         },
       )
-      setGigLeads((current) =>
-        current.map((currentLead) => (currentLead.id === leadId ? lead : currentLead)),
-      )
-      showToast("Cleared the holding-thread recovery block", "ok")
+      updateGigLead(leadId, (current) => ({
+        ...current,
+        ...lead,
+        staging_recovery: lead.staging_recovery,
+        staging_in_progress: lead.staging_in_progress,
+      }))
+      showToast("Holding thread cleared", "ok")
     } catch (error) {
-      showError(error, "Unable to clear the staging recovery block")
+      if (error instanceof ApiRequestError && error.status === 409) {
+        const lead = (error.payload as { lead?: JobLead } | null)?.lead
+        if (lead) updateGigLead(leadId, () => lead)
+      }
+      showError(error, "Unable to clear the holding thread")
     } finally {
       setBusy(`gigLead:${leadId}:stagingRecovery`, false)
     }
@@ -2028,21 +2069,15 @@ function App() {
         },
       )
       const engagementId = String(result.engagement_id || "").trim()
-      setGigLeads((current) =>
-        current.map((lead) =>
-          lead.id === leadId
-            ? {
-                ...lead,
-                status: "posted",
-                discord_guild_id: result.guild_id || lead.discord_guild_id,
-                discord_channel_id: result.channel_id || lead.discord_channel_id,
-                discord_thread_id: result.thread_id || lead.discord_thread_id,
-                engagement_id: engagementId || lead.engagement_id,
-              }
-            : lead,
-        ),
-      )
-      showToast("Promoted qualified lead to Discord; staying on Leads", "ok")
+      updateGigLead(leadId, (lead) => ({
+        ...lead,
+        status: "posted",
+        discord_guild_id: result.guild_id || lead.discord_guild_id,
+        discord_channel_id: result.channel_id || lead.discord_channel_id,
+        discord_thread_id: result.thread_id || lead.discord_thread_id,
+        engagement_id: engagementId || lead.engagement_id,
+      }))
+      showToast("Promoted lead to Discord", "ok")
     } catch (error) {
       showError(error, "Unable to post lead")
     } finally {
@@ -2839,18 +2874,23 @@ function App() {
   // biome-ignore lint/correctness/useExhaustiveDependencies: dashboard bootstrap should run once; popstate uses a ref for live navigation state.
   useEffect(() => {
     loadUser()
-      .then((nextPermissions) => {
+      .then(({ nextPermissions, canManageLeads }) => {
         const currentView = viewFromPath()
-        const allowed = nextPermissions.includes(routePermissions[currentView])
+        const allowed =
+          nextPermissions.includes(routePermissions[currentView]) &&
+          (currentView !== "leads" || canManageLeads)
         const nextView = allowed
           ? currentView
-          : (Object.keys(routes) as View[]).find((candidate) =>
-              nextPermissions.includes(routePermissions[candidate]),
+          : (Object.keys(routes) as View[]).find(
+              (candidate) =>
+                nextPermissions.includes(routePermissions[candidate]) &&
+                (candidate !== "leads" || canManageLeads),
             ) || "people"
         setSelectedGigId(nextView === "gigs" ? detailIdFromPath() : "")
         setSelectedProjectId(nextView === "projects" ? detailIdFromPath("projects") : "")
+        setSelectedLeadId(nextView === "leads" ? detailIdFromPath("leads") : "")
         setViewState(nextView)
-        if (!Object.hasOwn(routes, rawViewFromPath()) || nextView !== currentView) {
+        if (nextView !== rawViewFromPath()) {
           window.history.replaceState({ view: nextView }, "", routes[nextView])
         }
       })
@@ -2863,6 +2903,7 @@ function App() {
     const onPopState = () => {
       setSelectedGigId(detailIdFromPath())
       setSelectedProjectId(detailIdFromPath("projects"))
+      setSelectedLeadId(detailIdFromPath("leads"))
       navigateRef.current(viewFromPath(), false)
     }
     window.addEventListener("popstate", onPopState)
@@ -2870,7 +2911,7 @@ function App() {
   }, [])
 
   useEffect(() => {
-    const onHashChange = () => setActiveGigTab(gigTabFromHash())
+    const onHashChange = () => setActiveLeadTab(leadTabFromHash())
     window.addEventListener("hashchange", onHashChange)
     return () => window.removeEventListener("hashchange", onHashChange)
   }, [])
@@ -2903,12 +2944,7 @@ function App() {
     if (permissions.length === 0) return
     if (can("gigs:read")) void loadNotifications()
     if (view === "people") void loadPeople()
-    if (view === "gigs") {
-      void loadGigs()
-      void loadGigLeads()
-      void loadGigLeadScrapeStatus()
-      void loadJobPostChannels()
-    }
+    if (view === "gigs") void loadGigs()
     if (view === "projects") void loadProjects()
     if (view === "onboarding") {
       void loadOnboarding()
@@ -2932,12 +2968,7 @@ function App() {
     if (permissions.length === 0) return
     if (can("gigs:read")) void loadNotifications()
     if (view === "people") void loadPeople()
-    if (view === "gigs") {
-      void loadGigs()
-      void loadGigLeads()
-      void loadGigLeadScrapeStatus()
-      void loadJobPostChannels()
-    }
+    if (view === "gigs") void loadGigs()
     if (view === "projects") void loadProjects()
     if (view === "onboarding") {
       void loadOnboarding()
@@ -2966,10 +2997,78 @@ function App() {
     if (view === "gigs" && permissions.length > 0) void loadGigs()
   }, [gigStatus, gigIncludeHistorical, gigLimit])
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: lead reload intentionally follows lead status changes only while gigs is active.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: queue requests follow navigation and filters.
   useEffect(() => {
-    if (view === "gigs" && permissions.length > 0) void loadGigLeads()
-  }, [gigLeadStatus, gigLeadSource, gigLeadPostingType])
+    if (
+      view !== "leads" ||
+      permissions.length === 0 ||
+      activeLeadTab === "sources" ||
+      selectedLeadId
+    )
+      return
+    setGigLeads([])
+    void loadGigLeads()
+  }, [
+    view,
+    permissions,
+    activeLeadTab,
+    selectedLeadId,
+    gigLeadStatus,
+    gigLeadSource,
+    gigLeadPostingType,
+    gigLeadsRevision,
+  ])
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: source status and forum setup follow their respective views.
+  useEffect(() => {
+    if (view !== "leads" || permissions.length === 0) return
+    if (activeLeadTab === "sources") void loadGigLeadScrapeStatus()
+    if (activeLeadTab === "qualification" && selectedLeadId) void loadJobPostChannels()
+  }, [view, permissions, activeLeadTab, selectedLeadId])
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: fetch on navigation and poll only while the server reports active staging.
+  useEffect(() => {
+    if (view !== "leads" || !selectedLeadId || permissions.length === 0) return
+    const cachedLead = leadDetail?.id === selectedLeadId ? leadDetail : null
+    if (cachedLead && !cachedLead.staging_in_progress) return
+
+    const controller = new AbortController()
+    const key = `gigLead:${selectedLeadId}:detail`
+    let polling = Boolean(cachedLead?.staging_in_progress)
+    let nextPoll: number | undefined
+
+    async function refreshLead() {
+      try {
+        const lead = await requestJson<JobLead>(
+          `/dashboard/api/gig-leads/${encodeURIComponent(selectedLeadId)}`,
+          { signal: controller.signal },
+        )
+        if (controller.signal.aborted) return
+        setLeadDetail(lead)
+        polling = Boolean(lead.staging_in_progress)
+      } catch (error) {
+        if (controller.signal.aborted) return
+        if (error instanceof ApiRequestError && error.status === 404) {
+          setLeadDetail(null)
+          polling = false
+        }
+        if (!polling) showError(error, "Unable to load lead")
+      } finally {
+        if (!controller.signal.aborted) {
+          setBusy(key, false)
+          if (polling) nextPoll = window.setTimeout(refreshLead, 3000)
+        }
+      }
+    }
+
+    setBusy(key, !cachedLead)
+    void refreshLead()
+    return () => {
+      controller.abort()
+      window.clearTimeout(nextPoll)
+      setBusy(key, false)
+    }
+  }, [view, permissions, selectedLeadId])
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: projects reload intentionally follows status changes only while projects is active.
   useEffect(() => {
@@ -3213,6 +3312,7 @@ function App() {
             [
               ["people", "People", Users],
               ["gigs", "Gigs", BriefcaseBusiness],
+              ["leads", "Leads", ClipboardList],
               ["projects", "Projects", FolderKanban],
               ["onboarding", "Onboarding", ClipboardList],
               ["newsletter", "Newsletter", Mail],
@@ -3304,7 +3404,7 @@ function App() {
             />
           ) : null}
 
-          {view === "gigs" ? (
+          {view === "gigs" || view === "leads" ? (
             <GigsView
               gigs={sortedGigs}
               leads={gigLeads}
@@ -3314,7 +3414,10 @@ function App() {
               selectedGigId={selectedGigId}
               sort={sort.gigs}
               loading={loading}
-              activeTab={activeGigTab}
+              activeTab={view === "gigs" ? "gigs" : activeLeadTab}
+              selectedLeadId={selectedLeadId}
+              selectedLead={leadDetail?.id === selectedLeadId ? leadDetail : null}
+              onOpenLead={openLead}
               status={gigStatus}
               query={gigQuery}
               leadStatus={gigLeadStatus}
@@ -3326,11 +3429,11 @@ function App() {
               contactedReminderDays={contactedReminderDays}
               canWrite={can("gigs:write")}
               canSearchCandidates={can("people:read")}
-              canManageLeads={Boolean(user?.can_manage_leads)}
+              canManageLeads={can("gigs:write") && Boolean(user?.can_manage_leads)}
               canIncludeHistorical={can("people:read")}
               crmContactUrl={crmContactUrl}
               crmAttachmentUrl={crmAttachmentUrl}
-              setActiveTab={selectGigTab}
+              setActiveTab={selectLeadTab}
               setStatus={setGigStatus}
               setQuery={setGigQuery}
               setLeadStatus={setGigLeadStatus}
@@ -5952,7 +6055,10 @@ function GigsView(props: {
   selectedGigId: string
   sort: { key: string; direction: SortDirection }
   loading: Record<string, boolean>
-  activeTab: "gigs" | "leads"
+  activeTab: "gigs" | LeadTab
+  selectedLeadId: string
+  selectedLead: JobLead | null
+  onOpenLead: (lead: JobLead) => void
   status: string
   query: string
   leadStatus: string
@@ -5968,7 +6074,7 @@ function GigsView(props: {
   canIncludeHistorical: boolean
   crmContactUrl: (contactId?: string) => string
   crmAttachmentUrl: (attachmentId?: string) => string
-  setActiveTab: (value: "gigs" | "leads") => void
+  setActiveTab: (value: LeadTab) => void
   setStatus: (value: string) => void
   setQuery: (value: string) => void
   setLeadStatus: (value: string) => void
@@ -5986,7 +6092,7 @@ function GigsView(props: {
   onSyncLeads: (source: JobLeadSourceKey | "all") => void
   onReviewLead: (leadId: string, status: JobLeadReviewStatus) => void
   onStageLead: (leadId: string) => void
-  onClearStagingRecovery: (leadId: string) => void
+  onClearStagingRecovery: (lead: JobLead) => void
   onPostLead: (
     leadId: string,
     options?: {
@@ -6008,65 +6114,48 @@ function GigsView(props: {
     },
     { total: 0, applications: 0, interested: 0, stale: 0 },
   )
-  const leadCounts = props.leads.reduce(
-    (acc, lead) => {
-      acc.total += 1
-      if (lead.status === "pending") acc.pending += 1
-      if (lead.status === "approved") acc.approved += 1
-      if (lead.status === "posted") acc.posted += 1
-      return acc
-    },
-    { total: 0, pending: 0, approved: 0, posted: 0 },
-  )
   const tabBar = (
-    <div
-      className="inline-flex w-fit rounded-md border bg-background p-1"
-      role="tablist"
-      aria-label="Gig views"
-    >
-      <Button
-        id="gigsTab"
-        type="button"
-        size="sm"
-        variant={props.activeTab === "gigs" ? "default" : "ghost"}
-        aria-pressed={props.activeTab === "gigs"}
-        onClick={() => props.setActiveTab("gigs")}
-      >
-        <BriefcaseBusiness />
-        Gigs
-      </Button>
-      <Button
-        id="gigLeadsTab"
-        type="button"
-        size="sm"
-        variant={props.activeTab === "leads" ? "default" : "ghost"}
-        aria-pressed={props.activeTab === "leads"}
-        onClick={() => props.setActiveTab("leads")}
-      >
-        <ClipboardList />
-        Leads
-      </Button>
-    </div>
+    <nav className="flex flex-wrap gap-1" aria-label="Lead views">
+      {(
+        [
+          ["holding", "To post"],
+          ["qualification", "Qualification"],
+          ["sources", "Sources"],
+        ] as const
+      ).map(([tab, label]) => (
+        <Button
+          key={tab}
+          type="button"
+          size="sm"
+          variant={props.activeTab === tab ? "default" : "ghost"}
+          aria-pressed={props.activeTab === tab}
+          onClick={() => props.setActiveTab(tab)}
+        >
+          {label}
+        </Button>
+      ))}
+    </nav>
   )
   const filterBar = (
     <Card className="grid gap-3 p-4">
-      {tabBar}
-      {props.activeTab === "leads" ? (
-        <div className="grid gap-3 md:grid-cols-[repeat(3,minmax(140px,1fr))_auto] md:items-end">
-          <Label>
-            Lead status
-            <Select
-              id="gigLeadStatus"
-              value={props.leadStatus}
-              onChange={(event) => props.setLeadStatus(event.target.value)}
-            >
-              <option value="pending">Pending</option>
-              <option value="approved">Qualified</option>
-              <option value="rejected">Rejected</option>
-              <option value="posted">Posted</option>
-              <option value="all">All statuses</option>
-            </Select>
-          </Label>
+      {props.activeTab !== "gigs" ? (
+        <div className="flex flex-wrap items-end gap-3 [&>label]:min-w-40">
+          {props.activeTab === "qualification" ? (
+            <Label>
+              Qualification status
+              <Select
+                id="gigLeadStatus"
+                value={props.leadStatus}
+                onChange={(event) => props.setLeadStatus(event.target.value)}
+              >
+                <option value="pending">In holding forum</option>
+                <option value="unstaged">Unstaged</option>
+                <option value="approved">Qualified</option>
+                <option value="rejected">Rejected</option>
+                <option value="posted">Posted</option>
+              </Select>
+            </Label>
+          ) : null}
           <Label>
             Source
             <Select
@@ -6106,59 +6195,16 @@ function GigsView(props: {
             <RefreshCw />
             Refresh
           </Button>
-          {props.canManageLeads ? (
-            <div className="flex flex-wrap gap-2 md:col-span-4">
-              <Button
-                id="syncAllGigLeads"
-                type="button"
-                onClick={() => props.onSyncLeads("all")}
-                disabled={props.loading.gigLeadsSync}
-              >
-                <RefreshCw /> Sync all
-              </Button>
-              <Button
-                id="syncGigLeads"
-                type="button"
-                onClick={() => props.onSyncLeads("hackernews_who_is_hiring")}
-                disabled={props.loading.gigLeadsSync}
-              >
-                <RefreshCw />
-                Scrape HN
-              </Button>
-              <Button
-                id="syncHimalayasLeads"
-                type="button"
-                onClick={() => props.onSyncLeads("himalayas_remote_jobs")}
-                disabled={props.loading.gigLeadsSync}
-              >
-                <RefreshCw />
-                Sync Himalayas
-              </Button>
-              <Button
-                type="button"
-                onClick={() => props.onSyncLeads("a16z_talent_network")}
-                disabled={props.loading.gigLeadsSync}
-              >
-                <RefreshCw /> Sync a16z
-              </Button>
-              <Button
-                type="button"
-                onClick={() => props.onSyncLeads("sequoia_portfolio_ats")}
-                disabled={props.loading.gigLeadsSync}
-              >
-                <RefreshCw /> Sync Sequoia portfolio
-              </Button>
-              {(["tokyodev", "japan_dev"] as const).map((source) => (
-                <Button
-                  key={source}
-                  type="button"
-                  onClick={() => props.onSyncLeads(source)}
-                  disabled={props.loading.gigLeadsSync}
-                >
-                  <RefreshCw /> Sync {jobLeadSourceLabel(source)}
-                </Button>
-              ))}
-            </div>
+          {props.activeTab === "holding" && props.canManageLeads ? (
+            <Button
+              type="button"
+              variant="secondary"
+              disabled={props.loading.gigLeadsSync}
+              onClick={() => props.onSyncLeads("all")}
+            >
+              <RefreshCw />
+              {props.loading.gigLeadsSync ? "Scraping sources…" : "Scrape now"}
+            </Button>
           ) : null}
         </div>
       ) : (
@@ -6233,11 +6279,77 @@ function GigsView(props: {
     </Card>
   )
 
-  if (props.activeTab === "leads") {
+  if (props.activeTab === "sources") {
     return (
       <>
-        {filterBar}
-
+        {tabBar}
+        <Card className="grid gap-3 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h1 className="text-lg font-bold">Lead sources</h1>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={props.onRefresh}
+              disabled={props.loading.gigLeadScrapeStatus}
+            >
+              <RefreshCw /> Refresh
+            </Button>
+          </div>
+          {props.canManageLeads ? (
+            <div className="flex flex-wrap gap-2">
+              <Button
+                id="syncAllGigLeads"
+                type="button"
+                onClick={() => props.onSyncLeads("all")}
+                disabled={props.loading.gigLeadsSync}
+              >
+                <RefreshCw /> Sync all
+              </Button>
+              <Button
+                id="syncGigLeads"
+                type="button"
+                onClick={() => props.onSyncLeads("hackernews_who_is_hiring")}
+                disabled={props.loading.gigLeadsSync}
+              >
+                <RefreshCw />
+                Scrape HN
+              </Button>
+              <Button
+                id="syncHimalayasLeads"
+                type="button"
+                onClick={() => props.onSyncLeads("himalayas_remote_jobs")}
+                disabled={props.loading.gigLeadsSync}
+              >
+                <RefreshCw />
+                Sync Himalayas
+              </Button>
+              <Button
+                type="button"
+                onClick={() => props.onSyncLeads("a16z_talent_network")}
+                disabled={props.loading.gigLeadsSync}
+              >
+                <RefreshCw /> Sync a16z
+              </Button>
+              <Button
+                type="button"
+                onClick={() => props.onSyncLeads("sequoia_portfolio_ats")}
+                disabled={props.loading.gigLeadsSync}
+              >
+                <RefreshCw /> Sync Sequoia portfolio
+              </Button>
+              {(["tokyodev", "japan_dev"] as const).map((source) => (
+                <Button
+                  key={source}
+                  type="button"
+                  onClick={() => props.onSyncLeads(source)}
+                  disabled={props.loading.gigLeadsSync}
+                >
+                  <RefreshCw /> Sync {jobLeadSourceLabel(source)}
+                </Button>
+              ))}
+            </div>
+          ) : null}
+        </Card>
         <div className="grid gap-3 md:grid-cols-2">
           {JOB_LEAD_SOURCES.map(({ key }) => (
             <JobLeadScrapeStatusPanel
@@ -6248,40 +6360,117 @@ function GigsView(props: {
             />
           ))}
         </div>
+      </>
+    )
+  }
 
-        <section className="grid gap-3 md:grid-cols-4" aria-label="Lead summary">
-          <Metric id="gigLeadMetricTotal" label="Leads" value={leadCounts.total} />
-          <Metric id="gigLeadMetricPending" label="Pending" value={leadCounts.pending} />
-          <Metric id="gigLeadMetricApproved" label="Qualified" value={leadCounts.approved} />
-          <Metric id="gigLeadMetricPosted" label="Posted" value={leadCounts.posted} />
-        </section>
+  if (props.activeTab !== "gigs") {
+    const tab = props.activeTab
+    const inHoldingQueue = tab === "holding"
+    const title = inHoldingQueue ? "Post to the holding forum" : "Qualify leads"
+    const lead = props.selectedLead
+    if (props.selectedLeadId) {
+      return (
+        <>
+          {tabBar}
+          <Button
+            className="w-fit"
+            type="button"
+            variant="outline"
+            onClick={() => props.setActiveTab(tab)}
+          >
+            Back to {inHoldingQueue ? "To post" : "Qualification"}
+          </Button>
+          {lead ? (
+            <JobLeadDetail
+              key={lead.id}
+              lead={lead}
+              tab={tab}
+              loading={props.loading}
+              canWrite={props.canManageLeads}
+              jobPostChannels={props.jobPostChannels}
+              onReviewLead={props.onReviewLead}
+              onStageLead={props.onStageLead}
+              onClearStagingRecovery={props.onClearStagingRecovery}
+              onPostLead={props.onPostLead}
+            />
+          ) : (
+            <Empty hidden={false}>
+              {props.loading[`gigLead:${props.selectedLeadId}:detail`]
+                ? "Loading lead…"
+                : "Lead unavailable."}
+            </Empty>
+          )}
+        </>
+      )
+    }
 
+    const leads = props.leads.filter((lead) =>
+      inHoldingQueue
+        ? lead.status === "pending" && !lead.staged_discord_thread_id
+        : props.leadStatus === "pending"
+          ? lead.status === "pending" && Boolean(lead.staged_discord_thread_id)
+          : props.leadStatus === "unstaged"
+            ? lead.status === "pending" && !lead.staged_discord_thread_id
+            : lead.status === props.leadStatus,
+    )
+    return (
+      <>
+        {tabBar}
+        {filterBar}
         <Card>
           <CardHeader>
-            <CardTitle>Sourced leads</CardTitle>
-            <span id="gigLeadsStatus" className="text-sm text-muted-foreground">
-              {props.loading.gigLeads ? "Loading" : `${props.leads.length} shown`}
+            <h1 className="text-base font-bold">{title}</h1>
+            <span id="gigLeadsStatus" className="text-sm text-muted-foreground" aria-live="polite">
+              {props.loading.gigLeads ? "Loading leads…" : `${leads.length} shown`}
             </span>
           </CardHeader>
-          <Empty hidden={props.leads.length !== 0}>No sourced leads match this view.</Empty>
-          <div
-            id="gigLeadsBody"
-            className={cn("grid gap-3 p-4", props.leads.length === 0 && "hidden")}
-          >
-            {props.leads.map((lead) => (
-              <JobLeadListItem
-                key={lead.id}
-                lead={lead}
-                loading={props.loading}
-                canWrite={props.canManageLeads}
-                jobPostChannels={props.jobPostChannels}
-                onReviewLead={props.onReviewLead}
-                onStageLead={props.onStageLead}
-                onClearStagingRecovery={props.onClearStagingRecovery}
-                onPostLead={props.onPostLead}
-              />
+          <Empty hidden={props.loading.gigLeads || leads.length !== 0}>
+            {inHoldingQueue
+              ? "No leads waiting to be posted to the holding forum."
+              : "No leads match this qualification status."}
+          </Empty>
+          <ul id="gigLeadsBody" className="divide-y px-4">
+            {leads.map((lead) => (
+              <li key={lead.id} className="flex flex-wrap items-start justify-between gap-3 py-4">
+                <div className="grid min-w-0 flex-1 gap-1">
+                  <a
+                    className="w-fit max-w-full break-words font-bold text-primary hover:underline"
+                    href={leadUrl(tab, lead.id)}
+                    onClick={(event) => {
+                      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+                      event.preventDefault()
+                      props.onOpenLead(lead)
+                    }}
+                  >
+                    {lead.title || "Untitled lead"}
+                  </a>
+                  <JobLeadMetadata lead={lead} />
+                  {lead.body_normalized ? (
+                    <p className="line-clamp-2 break-words text-sm">{lead.body_normalized}</p>
+                  ) : null}
+                  {inHoldingQueue && lead.staging_recovery ? (
+                    <p className="text-sm text-muted-foreground">
+                      {lead.staging_in_progress
+                        ? "Posting to the holding forum…"
+                        : "Open the lead to recover its previous holding post."}
+                    </p>
+                  ) : null}
+                </div>
+                {inHoldingQueue && props.canManageLeads && !lead.staging_recovery ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={props.loading[`gigLead:${lead.id}:stage`]}
+                    onClick={() => props.onStageLead(lead.id)}
+                  >
+                    <Send />
+                    Post to holding forum
+                  </Button>
+                ) : null}
+              </li>
             ))}
-          </div>
+          </ul>
         </Card>
       </>
     )
@@ -6525,14 +6714,38 @@ function jobLeadClassificationLabel(lead: JobLead) {
   return postingType ? postingTypeLabel : lead.review_summary || "Classification unavailable"
 }
 
+function JobLeadMetadata({ lead }: { lead: JobLead }) {
+  const pillClass = "gap-1.5 text-xs font-semibold normal-case"
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {lead.organization ? (
+        <Badge className={cn(pillClass, "text-foreground")}>
+          <Building2 className="size-3 shrink-0" aria-hidden="true" />
+          {lead.organization}
+        </Badge>
+      ) : null}
+      <Badge className={cn(pillClass, "border-violet-400/40 bg-violet-500/15 text-violet-200")}>
+        <Rss className="size-3 shrink-0" aria-hidden="true" />
+        {jobLeadSourceLabel(lead.source_key)}
+      </Badge>
+      <Badge className={cn(pillClass, "border-sky-400/40 bg-sky-500/15 text-sky-200")}>
+        <BriefcaseBusiness className="size-3 shrink-0" aria-hidden="true" />
+        {jobLeadClassificationLabel(lead)}
+      </Badge>
+    </div>
+  )
+}
+
 function jobLeadWorkflowStatusLabel(lead: JobLead) {
-  if (lead.status === "pending" && lead.staged_discord_thread_id) return "Staged"
+  if (lead.staging_in_progress) return "Posting"
+  if (lead.status === "pending" && lead.staged_discord_thread_id) return "In holding forum"
   if (lead.status === "approved") return "Qualified"
   return titleCase(lead.status)
 }
 
-function JobLeadListItem({
+function JobLeadDetail({
   lead,
+  tab,
   loading,
   canWrite,
   jobPostChannels,
@@ -6542,12 +6755,13 @@ function JobLeadListItem({
   onPostLead,
 }: {
   lead: JobLead
+  tab: "holding" | "qualification"
   loading: Record<string, boolean>
   canWrite: boolean
   jobPostChannels: JobPostChannel[]
   onReviewLead: (leadId: string, status: JobLeadReviewStatus) => void
   onStageLead: (leadId: string) => void
-  onClearStagingRecovery: (leadId: string) => void
+  onClearStagingRecovery: (lead: JobLead) => void
   onPostLead: (
     leadId: string,
     options?: {
@@ -6560,11 +6774,20 @@ function JobLeadListItem({
   const isStaged = Boolean(lead.staged_discord_thread_id)
   const stagingRecovery = lead.staging_recovery
   const hasStagingRecovery = Boolean(stagingRecovery)
-  const canStage = canWrite && lead.status === "pending" && !isStaged && !hasStagingRecovery
-  const canQualify = canWrite && lead.status === "pending"
-  const canPromote = canWrite && lead.status === "approved"
-  const canReject = canWrite && (lead.status === "pending" || lead.status === "approved")
-  const canRestore = canWrite && lead.status === "rejected"
+  const canStage =
+    tab === "holding" && canWrite && lead.status === "pending" && !isStaged && !hasStagingRecovery
+  const canQualify =
+    tab === "qualification" && canWrite && lead.status === "pending" && !lead.staging_in_progress
+  const canPromote = tab === "qualification" && canWrite && lead.status === "approved"
+  const canReject =
+    canWrite &&
+    !lead.staging_in_progress &&
+    (lead.status === "pending" || (tab === "qualification" && lead.status === "approved"))
+  const canRestore = tab === "qualification" && canWrite && lead.status === "rejected"
+  const canClearHolding =
+    canWrite &&
+    !lead.staging_in_progress &&
+    (hasStagingRecovery || (isStaged && lead.status === "pending"))
   const reviewing = loading[`gigLead:${lead.id}:review`]
   const staging = loading[`gigLead:${lead.id}:stage`]
   const clearingStagingRecovery = loading[`gigLead:${lead.id}:stagingRecovery`]
@@ -6577,7 +6800,6 @@ function JobLeadListItem({
   const [selectedTags, setSelectedTags] = useState<string[]>(() =>
     defaultJobPostTagNames(lead, selectedChannel),
   )
-  const [showFullComment, setShowFullComment] = useState(false)
   useEffect(() => {
     setChannelId(defaultChannelId)
   }, [defaultChannelId])
@@ -6611,17 +6833,24 @@ function JobLeadListItem({
   const contactEmail = lead.contractor_classification?.contact_email
   const commentText = lead.body_normalized || "No lead text captured."
   return (
-    <article className="grid gap-4 rounded-md border bg-background p-4 lg:grid-cols-[minmax(0,1fr)_220px_190px] lg:items-start">
+    <article
+      className={cn(
+        "grid gap-4 rounded-md border bg-background p-4 lg:items-start",
+        tab === "qualification" && canWrite && "lg:grid-cols-[minmax(0,1fr)_170px_210px]",
+        tab === "qualification" && !canWrite && "lg:grid-cols-[minmax(0,1fr)_170px]",
+        tab === "holding" && canWrite && "lg:grid-cols-[minmax(0,1fr)_210px]",
+      )}
+    >
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2">
-          <strong className="text-base">{lead.title || "Untitled lead"}</strong>
+          <h1 className="text-lg font-bold">{lead.title || "Untitled lead"}</h1>
           <Badge variant={jobLeadStatusTone(lead.status)}>{jobLeadWorkflowStatusLabel(lead)}</Badge>
-          <Badge variant="neutral">{jobLeadSourceLabel(lead.source_key)}</Badge>
           {lead.remote ? <Badge variant="queued">Remote</Badge> : null}
-          <Badge variant="neutral">{jobLeadClassificationLabel(lead)}</Badge>
+        </div>
+        <div className="mt-2">
+          <JobLeadMetadata lead={lead} />
         </div>
         <div className="mt-2 flex flex-wrap gap-1.5">
-          {lead.organization ? <Badge variant="neutral">{lead.organization}</Badge> : null}
           {lead.location ? <Badge variant="neutral">{lead.location}</Badge> : null}
           {(lead.tags || []).slice(0, 6).map((tag) => (
             <Badge key={tag} variant="queued">
@@ -6629,30 +6858,9 @@ function JobLeadListItem({
             </Badge>
           ))}
         </div>
-        <p
-          id={`gigLeadComment-${lead.id}`}
-          className={cn(
-            "mt-3 whitespace-pre-wrap break-words text-sm text-muted-foreground",
-            !showFullComment && "max-h-20 overflow-hidden",
-          )}
-        >
+        <p className="mt-3 whitespace-pre-wrap break-words text-sm text-muted-foreground">
           {commentText}
         </p>
-        {lead.body_normalized ? (
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            className="mt-1"
-            aria-expanded={showFullComment}
-            aria-controls={`gigLeadComment-${lead.id}`}
-            onClick={() => setShowFullComment((current) => !current)}
-          >
-            {`${showFullComment ? "Collapse" : "Show full"} ${
-              lead.source_key === "hackernews_who_is_hiring" ? "comment" : "listing"
-            }`}
-          </Button>
-        ) : null}
         {lead.review_summary ? (
           <p className="mt-2 text-sm font-semibold text-foreground">{lead.review_summary}</p>
         ) : null}
@@ -6711,10 +6919,18 @@ function JobLeadListItem({
               <ExternalLink className="size-3.5" />
             </a>
           ) : null}
-          {hasStagingRecovery ? (
+          {lead.staging_in_progress ? (
+            <span>Posting to the holding forum…</span>
+          ) : hasStagingRecovery ? (
             <span className="font-semibold text-destructive">
-              Staging blocked until the orphaned holding thread
-              {stagingRecovery?.thread_id ? ` ${stagingRecovery.thread_id}` : ""} is removed.
+              {stagingRecovery?.thread_id ? (
+                <>Confirm holding thread {stagingRecovery.thread_id} was removed to post again.</>
+              ) : (
+                <>
+                  Check the holding forum for a post from the interrupted attempt before posting
+                  again.
+                </>
+              )}
             </span>
           ) : null}
           {postedGigUrl ? (
@@ -6728,16 +6944,18 @@ function JobLeadListItem({
           ) : null}
         </div>
       </div>
-      <div className="grid gap-1 text-sm">
-        <span className="text-xs font-bold text-muted-foreground">Review</span>
-        <span>{lead.reviewed_at ? formatDate(lead.reviewed_at) : "Not reviewed"}</span>
-        <span className="text-muted-foreground">
-          {lead.reviewed_by_discord_user_id
-            ? `By ${lead.reviewed_by_discord_user_id}`
-            : "No reviewer recorded"}
-        </span>
-        <span className="font-mono text-xs text-muted-foreground">{lead.id.slice(0, 8)}</span>
-      </div>
+      {tab === "qualification" ? (
+        <div className="grid gap-1 text-sm">
+          <span className="text-xs font-bold text-muted-foreground">Review</span>
+          <span>{lead.reviewed_at ? formatDate(lead.reviewed_at) : "Not reviewed"}</span>
+          <span className="text-muted-foreground">
+            {lead.reviewed_by_discord_user_id
+              ? `By ${lead.reviewed_by_discord_user_id}`
+              : "No reviewer recorded"}
+          </span>
+          <span className="font-mono text-xs text-muted-foreground">{lead.id.slice(0, 8)}</span>
+        </div>
+      ) : null}
       {canWrite ? (
         <div className="grid gap-2">
           {canPromote ? (
@@ -6825,16 +7043,32 @@ function JobLeadListItem({
               Post to holding forum
             </Button>
           ) : null}
-          {hasStagingRecovery ? (
+          {canClearHolding ? (
             <Button
               type="button"
               variant="outline"
               disabled={clearingStagingRecovery || reviewing || staging || posting}
-              onClick={() => onClearStagingRecovery(lead.id)}
+              onClick={() => onClearStagingRecovery(lead)}
             >
               <RefreshCw />
-              Clear holding recovery block
+              Holding thread deleted
             </Button>
+          ) : null}
+          {tab === "holding" && isStaged && lead.status === "pending" ? (
+            <a
+              className="text-sm font-bold text-primary hover:underline"
+              href={leadUrl("qualification", lead.id)}
+            >
+              Open in Qualification
+            </a>
+          ) : null}
+          {tab === "qualification" && lead.status === "pending" && !isStaged ? (
+            <a
+              className="text-sm font-bold text-primary hover:underline"
+              href={leadUrl("holding", lead.id)}
+            >
+              Open in To post
+            </a>
           ) : null}
           {canQualify ? (
             <Button

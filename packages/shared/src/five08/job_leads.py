@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from typing import Any, Callable
 from uuid import uuid4
@@ -124,6 +124,7 @@ class JobLead:
     staged_discord_channel_id: str | None = None
     staged_discord_thread_id: str | None = None
     staged_at: datetime | None = None
+    staging_reservation_expires_at: datetime | None = None
 
 
 def job_lead_classification(lead: JobLead | dict[str, Any]) -> dict[str, Any]:
@@ -247,6 +248,15 @@ def job_lead_display_payload(lead: JobLead | dict[str, Any]) -> dict[str, Any]:
         payload["staging_recovery"] = staging_recovery
     else:
         payload.pop("staging_recovery", None)
+    if (
+        isinstance(lead, JobLead)
+        and lead.staging_reservation_expires_at is not None
+        and lead.staging_reservation_expires_at >= datetime.now(tz=timezone.utc)
+        and staging_recovery is not None
+        and lead.metadata[_STAGING_CLEANUP_REQUIRED_METADATA_KEY].get("state")
+        == _STAGING_CLEANUP_RESERVATION_STATE
+    ):
+        payload["staging_in_progress"] = True
     payload["contractor_classification"] = job_lead_classification(lead)
     payload["review_summary"] = format_job_lead_review_summary(lead)
     return payload
@@ -360,6 +370,7 @@ def _seed_job_lead_staging_source_fingerprint(cursor: Any, lead: JobLead) -> Non
 def _as_lead(row: dict[str, Any]) -> JobLead:
     tags = row.get("tags") or []
     metadata = row.get("metadata") or {}
+    reserved_at = _as_utc(row.get("staging_reserved_at"))
     return JobLead(
         id=str(row["id"]),
         status=_normalize_status(row.get("status")),
@@ -399,6 +410,11 @@ def _as_lead(row: dict[str, Any]) -> JobLead:
             str(row.get("staged_discord_thread_id") or "").strip() or None
         ),
         staged_at=row.get("staged_at"),
+        staging_reservation_expires_at=(
+            reserved_at + timedelta(seconds=JOB_LEAD_STAGING_RESERVATION_TTL_SECONDS)
+            if reserved_at is not None and row.get("staging_reservation_token")
+            else None
+        ),
     )
 
 
@@ -726,6 +742,7 @@ def list_job_leads(
     limit: int = 10,
     source_key: str | None = None,
     posting_type: JobPostingType | None = None,
+    staged: bool | None = None,
 ) -> list[JobLead]:
     """List recent job leads for review."""
     conditions: list[str] = []
@@ -739,6 +756,10 @@ def list_job_leads(
     if posting_type is not None:
         conditions.append("job_leads.posting_type = %s")
         params.append(posting_type.value)
+    if staged is True:
+        conditions.append("job_leads.staged_discord_thread_id IS NOT NULL")
+    elif staged is False:
+        conditions.append("job_leads.staged_discord_thread_id IS NULL")
     where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     query = f"""
         SELECT job_leads.*, linked_engagement.id::text AS engagement_id
@@ -768,10 +789,17 @@ def get_job_lead(settings: SharedSettings, lead_id: str) -> JobLead | None:
     if not raw:
         return None
     query = """
-        SELECT *
+        SELECT job_leads.*, linked_engagement.id::text AS engagement_id
         FROM job_leads
-        WHERE id::text = %s OR id::text LIKE %s
-        ORDER BY created_at DESC
+        LEFT JOIN LATERAL (
+            SELECT id
+            FROM engagements
+            WHERE discord_thread_id = job_leads.discord_thread_id
+            ORDER BY created_at DESC
+            LIMIT 1
+        ) AS linked_engagement ON TRUE
+        WHERE job_leads.id::text = %s OR job_leads.id::text LIKE %s
+        ORDER BY job_leads.created_at DESC
         LIMIT 2
     """
     with get_postgres_connection(settings) as conn:
@@ -1054,27 +1082,40 @@ def clear_job_lead_staging_cleanup_required(
     settings: SharedSettings,
     *,
     lead_id: str,
+    thread_id: str | None = None,
 ) -> JobLead | None:
-    """Clear an operator-reconciled holding-thread cleanup block."""
+    """Clear the confirmed deleted holding thread or orphan recovery block."""
     query = """
         UPDATE job_leads
         SET
-            metadata = metadata - %s::text,
+            metadata = metadata - %(cleanup_key)s::text - %(fingerprint_key)s::text,
+            staged_discord_guild_id = NULL,
+            staged_discord_channel_id = NULL,
+            staged_discord_thread_id = NULL,
+            staged_at = NULL,
             staging_reservation_token = NULL,
             staging_reserved_at = NULL,
             updated_at = NOW()
-        WHERE id = %s
-          AND metadata ? %s::text
+        WHERE id::text = %(lead_id)s
           AND (
-              (metadata -> %s::text) ->> 'state' IS DISTINCT FROM %s
-              OR (
-                  (metadata -> %s::text) ->> 'state' = %s
-                  AND (
-                      staging_reservation_token IS NULL
-                      OR staging_reserved_at IS NULL
-                      OR staging_reserved_at < NOW() - (%s * INTERVAL '1 second')
-                  )
-              )
+              staged_discord_thread_id IS NOT NULL
+              OR metadata ? %(cleanup_key)s::text
+          )
+          AND (
+              staged_discord_thread_id IS NULL
+              OR staged_discord_thread_id = %(thread_id)s::text
+          )
+          AND (
+              NOT (metadata ? %(cleanup_key)s::text)
+              OR (metadata -> %(cleanup_key)s::text) ->> 'thread_id'
+                    IS NOT DISTINCT FROM %(thread_id)s::text
+          )
+          AND (
+              (metadata -> %(cleanup_key)s::text) ->> 'state'
+                  IS DISTINCT FROM %(reservation_state)s
+              OR staging_reservation_token IS NULL
+              OR staging_reserved_at IS NULL
+              OR staging_reserved_at < NOW() - (%(ttl)s * INTERVAL '1 second')
           )
         RETURNING *
     """
@@ -1082,16 +1123,14 @@ def clear_job_lead_staging_cleanup_required(
         with conn.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
                 query,
-                (
-                    _STAGING_CLEANUP_REQUIRED_METADATA_KEY,
-                    lead_id,
-                    _STAGING_CLEANUP_REQUIRED_METADATA_KEY,
-                    _STAGING_CLEANUP_REQUIRED_METADATA_KEY,
-                    _STAGING_CLEANUP_RESERVATION_STATE,
-                    _STAGING_CLEANUP_REQUIRED_METADATA_KEY,
-                    _STAGING_CLEANUP_RESERVATION_STATE,
-                    JOB_LEAD_STAGING_RESERVATION_TTL_SECONDS,
-                ),
+                {
+                    "cleanup_key": _STAGING_CLEANUP_REQUIRED_METADATA_KEY,
+                    "fingerprint_key": _STAGING_SOURCE_FINGERPRINT_METADATA_KEY,
+                    "lead_id": lead_id,
+                    "thread_id": thread_id,
+                    "reservation_state": _STAGING_CLEANUP_RESERVATION_STATE,
+                    "ttl": JOB_LEAD_STAGING_RESERVATION_TTL_SECONDS,
+                },
             )
             row = cursor.fetchone()
     return _as_lead(row) if row is not None else None
