@@ -189,7 +189,7 @@ Pydantic import errors.
 
 ## Migadu Mailbox Automation
 
-- `Required for /create-mailbox and /create-user-accounts`: `MIGADU_API_USER`, `MIGADU_API_KEY`
+- `/onboard-create-mailbox` and `/onboard-create-user-accounts` require `MIGADU_API_USER` and `MIGADU_API_KEY`.
 - `Optional`: `MIGADU_MAILBOX_DOMAIN` (default: `508.dev`)
 - Newsletter sync settings are normally set from the admin dashboard configuration page. A non-empty env or `.env` value locks the matching dashboard field.
 - `Optional for Brevo newsletter sync`: `BREVO_API_KEY`
@@ -208,16 +208,16 @@ Pydantic import errors.
 
 ## Authentik SSO Provisioning
 
-- `Required for /create-sso-user and /create-user-accounts`: `AUTHENTIK_API_BASE_URL`, `AUTHENTIK_API_TOKEN`
+- `/onboard-create-sso-user` and `/onboard-create-user-accounts` require `AUTHENTIK_API_BASE_URL` and `AUTHENTIK_API_TOKEN`.
 - `Optional`: `AUTHENTIK_API_TIMEOUT_SECONDS` (default: `20.0`)
 - `Optional`: `AUTHENTIK_RECOVERY_EMAIL_STAGE_ID` (when unset, the bot resolves by name)
 - `Optional`: `AUTHENTIK_RECOVERY_EMAIL_STAGE_NAME` (default: `default-recovery-email`)
 
 ## Privileged Outline Integration
 
-- `Required for /create-user-accounts and /invite-outline-user`:
-  `OUTLINE_ADMIN_API_KEY`
-- Note: `/create-user-accounts` also requires the Migadu and Authentik settings above.
+- `/onboard-create-user-accounts` and `/onboard-invite-outline-user` require
+  `OUTLINE_ADMIN_API_KEY`.
+- `/onboard-create-user-accounts` also requires the Migadu and Authentik settings above.
 - `Optional`: `OUTLINE_BASE_URL` (default: `https://app.getoutline.com`; root and `/api` URLs are both accepted)
 - `Optional`: `OUTLINE_API_TIMEOUT_SECONDS` (default: `20.0`)
 - `OUTLINE_API_KEY` remains a compatibility fallback. A non-empty

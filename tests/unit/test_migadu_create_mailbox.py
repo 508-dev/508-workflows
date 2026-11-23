@@ -1,4 +1,4 @@
-"""Focused unit tests for Migadu `/create-mailbox` command behavior."""
+"""Focused unit tests for Migadu `/onboard-create-mailbox` command behavior."""
 
 from __future__ import annotations
 

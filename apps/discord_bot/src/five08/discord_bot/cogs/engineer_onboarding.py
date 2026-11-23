@@ -113,7 +113,7 @@ class EngineerOnboardingCog(DiscordAuditCogMixin, commands.Cog):
         )
 
     @app_commands.command(
-        name="setup-engineer",
+        name="onboard-setup-engineer",
         description="Create or link ERPNext User, Employee, and Supplier for an engineer.",
     )
     @app_commands.describe(

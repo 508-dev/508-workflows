@@ -560,7 +560,7 @@ or HTTP operation fails to stop promptly.
 
 ## Migadu Mailbox And Newsletter Sync
 
-- `MIGADU_API_USER`, `MIGADU_API_KEY`: required for `/create-mailbox` and `/create-user-accounts`.
+- `MIGADU_API_USER` and `MIGADU_API_KEY` are required for `/onboard-create-mailbox` and `/onboard-create-user-accounts`.
 - `MIGADU_MAILBOX_DOMAIN`: optional, defaults to `508.dev`.
 - `BREVO_API_KEY`: optional for Brevo newsletter sync.
 - `BREVO_API_BASE_URL`: optional, defaults to `https://api.brevo.com/v3`.
