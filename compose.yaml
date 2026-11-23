@@ -10,9 +10,9 @@ services:
     logging: *default-logging
     image: redis:7-alpine
     environment:
-      # Coolify injects .env into every service and can replace literal empty values.
-      # The Compose expression always resolves to an empty string.
-      WIKI_EDITING_ASSERTION_SECRET: ${WIKI_EDITING_ASSERTION_SECRET:+}
+      # Coolify injects .env into every service and can replace empty values.
+      # A space overrides .env and is treated as blank by the app.
+      WIKI_EDITING_ASSERTION_SECRET: " "
     command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
     restart: unless-stopped
     volumes:
@@ -27,7 +27,7 @@ services:
     logging: *default-logging
     image: postgres:17-alpine
     environment:
-      WIKI_EDITING_ASSERTION_SECRET: ${WIKI_EDITING_ASSERTION_SECRET:+}
+      WIKI_EDITING_ASSERTION_SECRET: " "
       POSTGRES_DB: ${POSTGRES_DB:-workflows}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
@@ -49,7 +49,7 @@ services:
     image: cgr.dev/chainguard/minio
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
-      WIKI_EDITING_ASSERTION_SECRET: ${WIKI_EDITING_ASSERTION_SECRET:+}
+      WIKI_EDITING_ASSERTION_SECRET: " "
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-internal}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change-me}
       MC_HOST_local: "http://${MINIO_ROOT_USER:-internal}:${MINIO_ROOT_PASSWORD:-change-me}@127.0.0.1:9000"
@@ -66,7 +66,7 @@ services:
     logging: *default-logging
     image: cgr.dev/chainguard/minio-client
     environment:
-      WIKI_EDITING_ASSERTION_SECRET: ${WIKI_EDITING_ASSERTION_SECRET:+}
+      WIKI_EDITING_ASSERTION_SECRET: " "
       MC_HOST_local: "http://${MINIO_ROOT_USER:-internal}:${MINIO_ROOT_PASSWORD:-change-me}@minio:9000"
     command:
       - mb
@@ -81,7 +81,7 @@ services:
     logging: *default-logging
     image: clamav/clamav:1.4
     environment:
-      WIKI_EDITING_ASSERTION_SECRET: ${WIKI_EDITING_ASSERTION_SECRET:+}
+      WIKI_EDITING_ASSERTION_SECRET: " "
     platform: ${CLAMAV_PLATFORM:-linux/amd64}
     restart: unless-stopped
     volumes:
@@ -221,7 +221,7 @@ services:
       AGENT_SCHEDULE_API_BASE_URL: http://web:8090
       # The worker alone owns authoring and document-write credentials.
       WIKI_OMP_SANDBOX_URL: ${WIKI_OMP_SANDBOX_URL:-http://wiki_omp_sandbox:8080}
-      WIKI_EDITING_ASSERTION_SECRET: ${WIKI_EDITING_ASSERTION_SECRET:+}
+      WIKI_EDITING_ASSERTION_SECRET: " "
       OUTLINE_ADMIN_API_KEY: ${OUTLINE_ADMIN_API_KEY:-}
       OUTLINE_API_KEY: ${OUTLINE_API_KEY:-}
       WIKI_OMP_SANDBOX_TOKEN: ${WIKI_OMP_SANDBOX_TOKEN:-}
