@@ -41,7 +41,7 @@ CRM_CONTACT_SELECT_FIELDS = (
 
 @dataclass(frozen=True, slots=True)
 class MailboxCommandContext:
-    """Normalized `/create-mailbox` inputs used across follow-up UI callbacks."""
+    """Normalized `/onboard-create-mailbox` inputs used across follow-up UI callbacks."""
 
     mailbox_username: str
     mailbox_email: str
@@ -843,7 +843,7 @@ class MigaduCog(DiscordAuditCogMixin, commands.Cog):
         )
 
     @app_commands.command(
-        name="create-mailbox",
+        name="onboard-create-mailbox",
         description="Create a Migadu mailbox for a 508 username (Admin only).",
     )
     @app_commands.describe(

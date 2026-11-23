@@ -101,6 +101,26 @@ class TestBot508:
                 assert "broken_feature" in caplog.text
 
     @pytest.mark.asyncio
+    async def test_onboarding_account_command_names(self):
+        from five08.discord_bot.cogs import crm, engineer_onboarding, migadu
+
+        async with Bot508() as bot:
+            await crm.setup(bot)
+            await engineer_onboarding.setup(bot)
+            await migadu.setup(bot)
+
+            names = {command.name for command in bot.tree.get_commands()}
+            account_commands = {
+                "create-mailbox",
+                "create-sso-user",
+                "create-user-accounts",
+                "invite-outline-user",
+                "setup-engineer",
+            }
+            assert {f"onboard-{name}" for name in account_commands} <= names
+            assert account_commands.isdisjoint(names)
+
+    @pytest.mark.asyncio
     async def test_on_ready_sends_activation_message(self):
         """Test that on_ready sends activation message to webhook."""
         bot = Bot508()

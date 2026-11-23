@@ -325,7 +325,26 @@ the dashboard. Search queries and result snippets are not audit logged.
     - Sends all responses ephemerally.
     - Does not accept a user/contact/supplier argument or provide an admin override path.
 
-- `/create-mailbox`
+- `/mark-id-verified`
+  - Description: Mark a contact as ID verified.
+  - Required role: Admin
+  - Args:
+    - `search_term` (required): Email, 508 username, or name.
+    - `verified_by` (required): Verifier 508 username or Discord mention.
+    - `id_type` (optional): ID type used (example: `passport`, `driver's license`).
+    - `verified_at` (optional): Date verified (defaults to today).
+  - CRM fields updated:
+    - `cIdVerifiedAt` ← `verified_at`
+    - `cIdVerifiedBy` ← `verified_by`
+    - `cVerifiedIdType` ← `id_type`
+
+Type `/onboard-` in Discord to find the account provisioning commands.
+
+- `/onboard-create-user-accounts`
+  - Creates a 508 mailbox, an Authentik SSO account, and an Outline wiki invite for a CRM contact.
+  - Requires Admin, a contact search term, and the requested mailbox username.
+
+- `/onboard-create-mailbox`
   - Description: Create a Migadu mailbox for a 508 user, optionally link it to a CRM contact, and sync `c508Email`.
   - Prerequisites: `MIGADU_API_USER` and `MIGADU_API_KEY` must be configured (configured in env; command will fail if missing).
   - Newsletter sync: if Brevo and/or Keila are configured, the new 508 mailbox and backup email are added to the configured 508 members audience. Brevo uses `BREVO_508_MEMBERS_NEWSLETTER_LIST_ID`, or the list named by `BREVO_508_MEMBERS_NEWSLETTER_LIST_NAME` (default `508 members`) when the explicit ID is unset. Newsletter failures are shown as warnings and do not block mailbox creation.
@@ -341,20 +360,7 @@ the dashboard. Search queries and result snippets are not audit logged.
     - Prompts for contact selection when multiple eligible CRM matches are found.
     - Updates the linked CRM contact `c508Email` after mailbox creation and reports partial failure if that sync fails.
 
-- `/mark-id-verified`
-  - Description: Mark a contact as ID verified.
-  - Required role: Admin
-  - Args:
-    - `search_term` (required): Email, 508 username, or name.
-    - `verified_by` (required): Verifier 508 username or Discord mention.
-    - `id_type` (optional): ID type used (example: `passport`, `driver's license`).
-    - `verified_at` (optional): Date verified (defaults to today).
-  - CRM fields updated:
-    - `cIdVerifiedAt` ← `verified_at`
-    - `cIdVerifiedBy` ← `verified_by`
-    - `cVerifiedIdType` ← `id_type`
-
-- `/create-sso-user`
+- `/onboard-create-sso-user`
   - Description: Create or link an Authentik SSO user for a CRM contact.
   - Required role: Admin
   - Prerequisites: `AUTHENTIK_API_BASE_URL` and `AUTHENTIK_API_TOKEN` must be configured. Recovery emails resolve the Authentik Email Stage by `AUTHENTIK_RECOVERY_EMAIL_STAGE_NAME` (defaults to `default-recovery-email`), with `AUTHENTIK_RECOVERY_EMAIL_STAGE_ID` available as an override.
@@ -367,6 +373,14 @@ the dashboard. Search queries and result snippets are not audit logged.
     - If `cSsoID` is blank, searches Authentik by exact username and exact `@508.dev` email before creating anything.
     - Updates CRM `cSsoID` with the Authentik numeric user id (`pk`).
     - Sends the Authentik recovery email only when the user was newly created, auto-resolving the Email Stage by name unless a UUID override is configured.
+
+- `/onboard-invite-outline-user`
+  - Invites a CRM contact or direct email address to the Outline wiki.
+  - Requires Admin and a contact search term or email address.
+
+- `/onboard-setup-engineer`
+  - Creates or links an ERPNext User, Employee, and Supplier for an engineer.
+  - Requires Steering Committee or above, the engineer’s 508.dev email address, and their full name.
 
 - `/send-member-agreement`
   - Description: Send the member agreement for signature through DocuSeal.

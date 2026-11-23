@@ -9254,7 +9254,7 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             )
 
     @app_commands.command(
-        name="create-sso-user",
+        name="onboard-create-sso-user",
         description="Create or link an Authentik SSO user for a CRM contact.",
     )
     @app_commands.describe(
@@ -9311,8 +9311,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             )
 
     @app_commands.command(
-        name="create-user-accounts",
-        description="Create 508 email, Authentik SSO, and Outline invite.",
+        name="onboard-create-user-accounts",
+        description="Create a 508 mailbox, Authentik SSO account, and Outline wiki invite.",
     )
     @app_commands.describe(
         search_term="Discord mention, email, 508 username, or contact ID.",
@@ -9378,8 +9378,8 @@ class CRMCog(DiscordAuditCogMixin, commands.Cog):
             )
 
     @app_commands.command(
-        name="invite-outline-user",
-        description="Invite a CRM contact or direct email address to Outline.",
+        name="onboard-invite-outline-user",
+        description="Invite a CRM contact or direct email address to the Outline wiki.",
     )
     @app_commands.describe(
         search_term="Discord mention, email, 508 username, contact ID, or direct email."
