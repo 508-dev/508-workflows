@@ -429,10 +429,10 @@ def test_archiving_schedule_releases_its_creation_operation_key(
     assert params == ("archived", "00000000-0000-4000-8000-000000000010", "1000")
 
 
-def test_pausing_schedule_cancels_undelivered_queued_and_running_runs(
+def test_pausing_schedule_fences_undelivered_runs_without_overwriting_terminal_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A later resume cannot revive work that an intervening pause fenced."""
+    """A pause fences retryable work while preserving terminal failure history."""
 
     now = datetime(2026, 7, 28, 9, 0, tzinfo=timezone.utc)
     schedule_id = "00000000-0000-4000-8000-000000000010"
@@ -480,8 +480,13 @@ def test_pausing_schedule_cancels_undelivered_queued_and_running_runs(
     assert "UPDATE agent_schedules" in lifecycle_query
     assert lifecycle_params == ("paused", schedule_id, "1000")
     assert "UPDATE agent_schedule_runs" in cancellation_query
-    assert "status IN ('queued', 'running')" in cancellation_query
-    assert "delivery_status = %s" in cancellation_query
+    assert "runs.status IN ('queued', 'running')" in cancellation_query
+    assert "runs.status = 'failed'" in cancellation_query
+    assert "jobs.id = runs.job_id" in cancellation_query
+    assert "jobs.status = 'failed'" in cancellation_query
+    assert "jobs.attempts < jobs.max_attempts" in cancellation_query
+    assert "jobs.run_after IS NOT NULL" in cancellation_query
+    assert "runs.delivery_status = %s" in cancellation_query
     assert cancellation_params == (
         "skipped",
         "schedule_paused",
