@@ -148,6 +148,20 @@ def _provider_suppression_sources(
     return {suppression.source_provider for suppression in suppressions}
 
 
+def _can_sync_brevo_without_keila(
+    failed_provider_names: set[str],
+    checked_provider_names: set[str],
+    *,
+    registry_lookup_failed: bool,
+) -> bool:
+    """Allow the primary to continue when only its backup is unavailable."""
+    return (
+        failed_provider_names == {"keila"}
+        and "brevo" in checked_provider_names
+        and not registry_lookup_failed
+    )
+
+
 def _reconcile_registry_suppressions(
     settings: Any,
     *,
@@ -486,6 +500,7 @@ class NewsletterSyncProcessor:
             return result
 
         registry_suppressions = self._load_registry_suppressions(sync_contacts, result)
+        registry_lookup_failed = "suppression_registry_warning" in result
         for contact in sync_contacts:
             active_suppressions = list(
                 registry_suppressions.get(contact.email.strip().lower(), [])
@@ -500,11 +515,18 @@ class NewsletterSyncProcessor:
                 result,
                 synced_key,
             )
-            if failed_provider_names:
+            available_providers = [
+                provider
+                for provider in providers
+                if provider.name in checked_provider_names
+            ]
+            if failed_provider_names and not _can_sync_brevo_without_keila(
+                failed_provider_names,
+                checked_provider_names,
+                registry_lookup_failed=registry_lookup_failed,
+            ):
                 result["suppression_lookup_failed_skipped"] += 1
-                for provider in providers:
-                    if provider.name in failed_provider_names:
-                        continue
+                for provider in available_providers:
                     self._apply_provider_status(
                         result,
                         provider.name,
@@ -529,7 +551,7 @@ class NewsletterSyncProcessor:
                     if provider_suppressions
                     else "skipped_internal_suppression"
                 )
-                for provider in providers:
+                for provider in available_providers:
                     self._apply_provider_status(
                         result,
                         provider.name,
@@ -538,7 +560,7 @@ class NewsletterSyncProcessor:
                         status=status,
                     )
                 continue
-            for provider in providers:
+            for provider in available_providers:
                 try:
                     status = provider.ensure_contact(contact)
                 except Exception as exc:
@@ -926,6 +948,7 @@ def sync_newsletter_contacts(
             )
         except Exception as exc:
             result["suppression_registry_warning"] = redact_email_addresses(str(exc))
+    registry_lookup_failed = "suppression_registry_warning" in result
 
     for contact in contacts:
         provider_suppressions: list[NewsletterSuppressionSignal] = []
@@ -945,13 +968,20 @@ def sync_newsletter_contacts(
             checked_provider_names.add(provider.name)
             if suppression is not None:
                 provider_suppressions.append(suppression)
-        if failed_provider_names:
+        available_providers = [
+            provider
+            for provider in providers
+            if provider.name in checked_provider_names
+        ]
+        if failed_provider_names and not _can_sync_brevo_without_keila(
+            failed_provider_names,
+            checked_provider_names,
+            registry_lookup_failed=registry_lookup_failed,
+        ):
             result["suppression_lookup_failed_skipped"] = (
                 int(result.get("suppression_lookup_failed_skipped") or 0) + 1
             )
-            for provider in providers:
-                if provider.name in failed_provider_names:
-                    continue
+            for provider in available_providers:
                 _apply_direct_provider_status(
                     result,
                     provider.name,
@@ -995,7 +1025,7 @@ def sync_newsletter_contacts(
                 if provider_suppressions
                 else "skipped_internal_suppression"
             )
-            for provider in providers:
+            for provider in available_providers:
                 _apply_direct_provider_status(
                     result,
                     provider.name,
@@ -1004,7 +1034,7 @@ def sync_newsletter_contacts(
                 )
             continue
 
-        for provider in providers:
+        for provider in available_providers:
             try:
                 status = provider.ensure_contact(contact)
             except Exception as exc:
