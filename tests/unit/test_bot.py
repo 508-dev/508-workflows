@@ -101,8 +101,13 @@ class TestBot508:
                 assert "broken_feature" in caplog.text
 
     @pytest.mark.asyncio
-    async def test_onboarding_account_command_names(self):
+    async def test_onboarding_account_command_names(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
         from five08.discord_bot.cogs import crm, engineer_onboarding, migadu
+
+        monkeypatch.setattr(settings, "espo_base_url", "https://crm.example.invalid")
+        monkeypatch.setattr(settings, "espo_api_key", "test-api-key")
 
         async with Bot508() as bot:
             await crm.setup(bot)
