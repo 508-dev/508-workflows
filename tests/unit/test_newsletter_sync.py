@@ -254,7 +254,6 @@ def test_sync_508_members_skips_provider_suppressed_contacts() -> None:
             password_recovery_email="jane@example.com",
         )
     ]
-    FakeBrevoClient.contacts = {"jane@example.com": {"emailBlacklisted": True}}
     FakeKeilaClient.contacts = {"jane@example.com": {"status": "unsubscribed"}}
 
     result = NewsletterSyncProcessor(_settings()).sync_508_members()
@@ -753,6 +752,74 @@ def test_sync_newsletter_contacts_fails_closed_when_suppression_lookup_fails() -
     assert result["providers"]["keila"]["statuses"] == {
         "skipped_suppression_lookup_failed": 1
     }
+
+
+@pytest.mark.parametrize("scheduled", [False, True], ids=["provisioning", "scheduled"])
+@pytest.mark.parametrize(
+    ("registry_available", "subscribed_emails", "brevo_statuses", "lookup_skips"),
+    [
+        (True, ["jane@508.dev"], {"synced": 1, "skipped_internal_suppression": 1}, 0),
+        (False, [], {"skipped_suppression_lookup_failed": 2}, 2),
+    ],
+    ids=["registry-available", "registry-unavailable"],
+)
+def test_keila_lookup_failure_allows_brevo_to_sync_with_saved_opt_outs(
+    monkeypatch: pytest.MonkeyPatch,
+    scheduled: bool,
+    registry_available: bool,
+    subscribed_emails: list[str],
+    brevo_statuses: dict[str, int],
+    lookup_skips: int,
+) -> None:
+    emails = ["jane@508.dev", "jane@example.com"]
+    FakeMigaduClient.mailboxes = [
+        MigaduMailbox(
+            address=emails[0],
+            name="Jane Doe",
+            password_recovery_email=emails[1],
+        )
+    ]
+    FakeKeilaClient.lookup_errors = set(emails)
+    now = datetime(2026, 6, 26, tzinfo=timezone.utc)
+    saved_opt_out = NewsletterSuppressionRecord(
+        email=emails[1],
+        source_provider="keila",
+        reason="status_unsubscribed",
+        active=True,
+        metadata={},
+        first_seen_at=now,
+        last_seen_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+
+    def fake_load_suppressions(
+        settings: Any, addresses: list[str]
+    ) -> dict[str, list[NewsletterSuppressionRecord]]:
+        assert addresses == emails
+        if not registry_available:
+            raise RuntimeError("Suppression registry unavailable")
+        return {saved_opt_out.email: [saved_opt_out]}
+
+    monkeypatch.setattr(
+        "five08.newsletter_sync.load_active_newsletter_suppressions_by_email",
+        fake_load_suppressions,
+    )
+    settings = _settings(postgres_url="postgresql://example/db")
+    if scheduled:
+        result = NewsletterSyncProcessor(settings).sync_508_members()
+    else:
+        result = sync_newsletter_contacts(settings, emails)
+
+    assert FakeBrevoClient.subscriptions == [
+        {"email": email, "list_id": 4} for email in subscribed_emails
+    ]
+    assert FakeKeilaClient.lookups == emails
+    assert FakeKeilaClient.upserts == []
+    assert result["providers"]["brevo"]["statuses"] == brevo_statuses
+    assert result["providers"]["keila"]["failed"] == 2
+    assert result["providers"]["keila"]["skipped"] == 0
+    assert result["suppression_lookup_failed_skipped"] == lookup_skips
 
 
 def test_sync_508_members_skips_mailbox_when_crm_lookup_fails() -> None:

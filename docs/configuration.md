@@ -568,11 +568,18 @@ or HTTP operation fails to stop promptly.
 - `BREVO_508_MEMBERS_NEWSLETTER_LIST_ID`: optional explicit Brevo list ID override; use `4` for the 508 members list when setting it directly.
 - `BREVO_508_MEMBERS_NEWSLETTER_LIST_NAME`: optional, defaults to `508 members` and is used to look up the list ID when the explicit ID is unset.
 - `KEILA_API_KEY`: optional for Keila contact sync.
-- `KEILA_API_BASE_URL`: optional, defaults to `https://app.keila.io`.
+- `KEILA_API_BASE_URL`: optional, defaults to `https://app.keila.io`. Set it to your Keila instance's base URL for self-hosted deployments.
 - `KEILA_API_TIMEOUT_SECONDS`: optional, defaults to `20.0`.
 - `NEWSLETTER_SYNC_ENABLED`: optional, defaults to `false`; dashboard changes require an API restart because the scheduler starts at startup.
 - `NEWSLETTER_SYNC_INTERVAL_SECONDS`: optional, defaults to `604800`; dashboard changes require an API restart because the scheduler sleep interval is startup-bound.
 - `NEWSLETTER_SYNC_EXCLUDED_MAILBOXES`: optional comma-separated mailbox local-parts or full addresses to skip during Migadu resync.
+
+With both providers configured, Brevo is the primary and Keila is the backup
+mirror. If Keila's opt-out lookup fails, Brevo can still subscribe eligible
+contacts after checking Brevo and any configured suppression registry. Known
+opt-outs still apply across providers. Opt-outs recorded only in Keila become
+visible to sync when Keila recovers. If Brevo's lookup fails, both providers
+pause for that address.
 
 Mailbox and backup email subscription to configured newsletter tools is best
 effort. Failures are reported as warnings and do not block mailbox or account
